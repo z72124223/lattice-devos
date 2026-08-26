@@ -1,10 +1,10 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 1.8
+version: 2.0
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -40,6 +40,11 @@ Version 1.8 exposes one read-only, Writer-owned closed bootstrap profile. It
 fully verifies v2 predecessor, v3 bridge, v6 bridge-pending, or v6 current
 state plus the fixed rebind boundary and replay-safe history before composition
 may stop Runtime admission. It adds no durable state or Writer semantics.
+Version 2.0 preserves the deployed/frozen v3 schema-v6 bytes and adds the
+append-only v4 successor for exact Store schema v7. It exposes the closed
+`V6V4Bridge` / `V7V4Current` bootstrap states, the fixed
+`writer_lease_rebind_v4` boundary, and a version-closed `new_v4_v7` runtime
+constructor without relabelling v3 or changing Writer Lease 1.1 semantics.
 
 ## Non-Goals
 
@@ -57,8 +62,10 @@ may stop Runtime admission. It adds no durable state or Writer semantics.
 ## Owned Data
 
 - The exact `db/extensions/writer-lease/v1.sql` and append-only
-  `db/extensions/writer-lease/v2.sql` bytes, extension identities, checksums,
-  explicit administrative state transitions, and read-only verifiers.
+  `db/extensions/writer-lease/v2.sql`, `v3.sql`, `v4.sql`, and corresponding
+  fixed rebind bytes, extension identities, checksums, explicit administrative
+  state transitions, and read-only verifiers. Every predecessor file is
+  immutable once the successor is introduced.
 - Physical PostgreSQL tables, indexes, constraints, fixed functions, roles,
   ownership, ACLs, transactions, and bounded retry/poison state used only for
   Writer Lease persistence.
@@ -94,19 +101,27 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   receipt.
 - Install or verify only the exact extension manifest through explicit
   administrative entrypoints. Normal runtime never auto-installs or repairs it.
-- Expose the typed v3 bridge/apply and rebind administrative operations only to
-  the Writer-owned adapter. The Store's one fixed SQL invocation is not a
-  Writer repository API and grants no generic Writer mutation authority.
+- Expose the typed v3 and v4 bridge/apply/rebind administrative operations only
+  to the Writer-owned adapter. Store may invoke only the exact fixed rebind
+  procedure selected by the governed migration generation inside the same
+  transaction; that call is not a Writer repository API and grants no generic
+  Writer mutation authority.
 - Expose the strict existing-v3 rebind/verify operation used by product
   bootstrap. It cannot take the fresh-install branch; absence is a typed
   fail-closed result and leaves the schema-v6 database fingerprint unchanged.
 - Expose one repeatable-read, read-only bootstrap profile that returns only
   `V5FallbackRequired`, `V5Bridge`, `V6BridgePending`, or `V6Current` after
-  exact Writer-owned verification. Partial/corrupt Writer evidence never maps
-  to fallback, and the session apply gate creates no durable row or ACL change.
+  exact Writer-owned verification, plus `V6V4Bridge` and `V7V4Current` for the
+  append-only v4 successor. Partial/corrupt Writer evidence never maps to
+  fallback, and the session apply gate creates no durable row or ACL change.
 - Construct schema-v6 runtime repositories only through the explicit v3
   constructor and exact `bind_runtime_v3`/`load_for_update_v3` procedures.
   The v2 constructor remains version-closed to its historical profile.
+- Construct schema-v7 runtime repositories only through the explicit
+  `new_v4_v7` constructor and exact `bind_runtime_v4`/
+  `load_for_update_v4` procedures. The frozen v3 constructor remains
+  version-closed to schema v6, so neither generation can be silently
+  relabelled as the other.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -145,14 +160,16 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 13. Released history and absent history are not interchangeable. Terminal task
     acceptance may require an existing replayed project with no current
     authority and exact bounded high-water values.
-14. A v3 bridge or pending state has zero runtime execute authority. Only the
-    verified exact schema-v6/current profile restores the seven runtime Writer
-    functions; rebind is idempotent for that exact identity and fails closed on
-    substituted profile, lease, fence, manifest, or catalog state.
-15. Product bootstrap on Store schema v6 never installs a missing Writer
-    profile. It may only rebind an exact pending v3 profile or verify an exact
-    current v3 profile; absence, partial state, or collision fails before
-    durable Writer mutation.
+14. A v3 or v4 bridge/pending state has zero runtime execute authority. Only the
+    verified exact schema-v6/v3-current or schema-v7/v4-current profile restores
+    its generation's runtime Writer functions; rebind is idempotent for that
+    exact identity and fails closed on substituted profile, lease, fence,
+    manifest, or catalog state.
+15. The strict existing-v3 bootstrap entrypoint on Store schema v6 never
+    installs a missing v3 profile. It may only rebind an exact pending v3
+    profile or verify an exact current v3 profile; absence, partial state, or
+    collision fails before durable Writer mutation. The separately typed v4
+    apply is the only path that may append the schema-v7 successor.
 16. A current schema-v6 runtime never falls back to a Writer-v2 procedure or
     ACL. Constructor choice fixes the v2/v3 bind and load-for-update pair for
     the repository lifetime; retained v1 semantic procedures remain shared.
@@ -165,6 +182,14 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     bootstrap states. A preflight or executor cannot substitute one for the
     other, and an already-installed Writer-v3 bridge verifies rather than
     recreates its fixed rebind procedure on retry.
+19. Writer v4 apply accepts only the exact replay-verified schema-v6/v3-current
+    predecessor and appends one matching v4 `UPGRADED` row. Its fixed rebind
+    accepts only that exact `V6V4Bridge` after Store has staged exact schema v7,
+    then appends the matching `REBOUND` row and yields `V7V4Current`.
+20. The v4 ledger admits only exact ordinal pairs `2/3`, `4/5`, or `6/7` for the
+    three retained predecessor histories. Skipped generations, schema v8+,
+    arbitrary future manifests, and any edit to frozen v3 SQL/rebind bytes fail
+    closed.
 
 ## Allowed Dependencies
 
@@ -245,6 +270,15 @@ Version 1.8 adds only the read-only closed bootstrap classifier described
 above. Rebind and apply still reclassify under their own Writer locks, so the
 inspection result is not mutation authority and cannot bypass TOCTOU checks.
 
+Version 2.0 supersedes the unreleased 1.9 proposal that would have widened v3
+to schema v7. V3 SQL, rebind, identity, checksum, and schema-v6 runtime profile
+remain immutable. The Writer-owned v4 apply appends an exact schema-v6 bridge;
+the Store-owned v6-to-v7 transaction then calls only
+`writer_lease_rebind_v4()`, which verifies the staged exact v7 target, updates
+Writer identity, and appends the matching `REBOUND` row atomically. Runtime
+construction uses only `new_v4_v7`. The classifier enumerates exact versions
+5, 6, and 7 rather than accepting a future range.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -258,6 +292,8 @@ inspection result is not mutation authority and cannot bypass TOCTOU checks.
 | Runtime isolation | fixed runtime functions only, direct table denial, no dynamic SQL/credential/environment input | Architecture review | yes |
 | Fresh replay | new client/process reconstructs exact current authority and checkpoint after PostgreSQL restart | Integration review | yes |
 | Strict v6 bootstrap | absent Writer v3 fingerprint is unchanged; bridge-pending rebinds; current retry is read-only | Integration review | yes |
+| Append-only v4 successor | frozen v3 byte/hash equality; exact v4 apply and `V6V4Bridge`; same-transaction v7 rebind; ordinal 2/3, 4/5, 6/7 histories; partial/substituted/future rejection | Compatibility and security review | yes |
+| Strict v7 runtime | exact `V7V4Current` plus Store-v7/Memory-v3 manifest binding; only `new_v4_v7` and v4 runtime procedures are reachable | Architecture and integration review | yes |
 | Full verification | format, strict lint, focused/workspace Rust tests, repository checks, and diff check | Engineering | yes |
 
 ## Change Policy
@@ -282,3 +318,5 @@ synthetic evidence as production authority.
 | 1.5 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 | Add explicit version-closed Writer-v3 runtime construction for schema-v6 composition while preserving the historical v2 adapter path | TASK-105 bounded implementation authority |
 | 1.6 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed Writer rebind boundary to Store 1.17 after closing the foreman event finalizer allowlist | TASK-105 bounded implementation authority |
 | 1.7 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed rebind boundary to Store 1.18's PostgreSQL-valid equivalent foreman scalar bounds | TASK-105 bounded implementation authority |
+| 1.9 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial proposal to extend Writer v3 through Store v7; superseded before release because deployed predecessor bytes must remain immutable | User Phase 3 authorization |
+| 2.0 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Freeze v3 at schema v6 and add append-only Writer v4, exact `V6V4Bridge`/`V7V4Current`, fixed v4 rebind, and `new_v4_v7` runtime construction | User Phase 3 authorization |

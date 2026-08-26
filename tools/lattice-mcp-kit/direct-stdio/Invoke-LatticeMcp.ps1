@@ -12,10 +12,22 @@ param(
 
     [string]$ArgumentsJson = '{}',
 
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$')]
     [string]$ClientRequestId = ('direct-stdio-' + [Guid]::NewGuid().ToString('N').Substring(0, 16)),
 
-    [ValidatePattern('^[0-9a-f]{64}$')]
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Objective,
+
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ProjectId,
+
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ProjectName,
+
+    [AllowNull()]
+    [AllowEmptyString()]
     [string]$TaskRef,
 
     [string]$EnvironmentFile,
@@ -34,8 +46,10 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $script:ExpectedTools = @(
+    'lattice_delivery_reconcile',
     'lattice_delivery_run',
     'lattice_delivery_status',
+    'lattice_foreman_checkpoint',
     'lattice_runtime_status',
     'lattice_task_status',
     'lattice_task_submit'
@@ -71,6 +85,96 @@ function Test-SecretEnvironmentName {
     param([Parameter(Mandatory = $true)][string]$Name)
 
     return $Name -match '(?i)(^|_)(API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?|CONNECTION_STRING|DSN)($|_)'
+}
+
+function ConvertTo-AsciiLower {
+    param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Value)
+
+    $builder = [Text.StringBuilder]::new($Value.Length)
+    foreach ($character in $Value.ToCharArray()) {
+        $codePoint = [int]$character
+        if ($codePoint -ge [int][char]'A' -and $codePoint -le [int][char]'Z') {
+            $null = $builder.Append([char]($codePoint + 32))
+        }
+        else {
+            $null = $builder.Append($character)
+        }
+    }
+    return $builder.ToString()
+}
+
+function Test-RecognizedSecretMaterial {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    # Keep this byte-for-byte aligned with Rust `to_ascii_lowercase`: Unicode
+    # case folding must not turn a non-ASCII boundary into an ASCII letter.
+    $lower = ConvertTo-AsciiLower -Value $Value
+    if ($lower.Contains('bearer ') -or
+        ($lower.Contains('-----begin ') -and $lower.Contains('private key-----'))) {
+        return $true
+    }
+    foreach ($marker in @(
+        'ghp_', 'gho_', 'ghu_', 'ghs_', 'ghr_', 'github_pat_', 'glpat-',
+        'npm_', 'pypi-', 'xoxa-', 'xoxb-', 'xoxp-', 'xoxr-', 'xoxs-'
+    )) {
+        if ($lower.Contains($marker)) { return $true }
+    }
+    if ($lower -cmatch '(^|[^a-z0-9])sk-') { return $true }
+    if ($Value -cmatch '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)') {
+        return $true
+    }
+    if ($lower -cmatch '(^|[^a-z0-9_-])(password|passphrase|passwd|pwd|token|access[_-]token|refresh[_-]token|id[_-]token|session[_-]token|api[_-]key|apikey|client[_-]secret|secret|credentials?|cookie|set-cookie|authorization)\s*["'']?\s*[:=]') {
+        return $true
+    }
+    return $false
+}
+
+function Test-CanonicalTaskText {
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Value,
+        [Parameter(Mandatory = $true)][int]$MaxCharacters,
+        [Parameter(Mandatory = $true)][int]$MaxUtf8Bytes
+    )
+
+    if ([string]::IsNullOrEmpty($Value)) {
+        return $false
+    }
+
+    $scalarCount = 0
+    for ($index = 0; $index -lt $Value.Length; $index++) {
+        $character = $Value[$index]
+        if ([char]::IsHighSurrogate($character)) {
+            if (($index + 1) -ge $Value.Length -or -not [char]::IsLowSurrogate($Value[$index + 1])) {
+                return $false
+            }
+            $index++
+        }
+        elseif ([char]::IsLowSurrogate($character)) {
+            return $false
+        }
+        elseif ([char]::IsControl($character)) {
+            return $false
+        }
+        $scalarCount++
+    }
+
+    if ($scalarCount -gt $MaxCharacters -or
+        $script:Utf8.GetByteCount($Value) -gt $MaxUtf8Bytes -or
+        $Value.Trim() -cne $Value -or
+        $Value.Normalize([Text.NormalizationForm]::FormC) -cne $Value -or
+        (Test-RecognizedSecretMaterial -Value $Value)) {
+        return $false
+    }
+    return $true
+}
+
+function Test-CanonicalClientRequestId {
+    param([Parameter(Mandatory = $true)][string]$Value)
+
+    return (
+        $Value -cmatch '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$' -and
+        -not (Test-RecognizedSecretMaterial -Value $Value)
+    )
 }
 
 function Protect-Text {
@@ -291,7 +395,7 @@ $initializeResponse = $null
 $toolsResponse = $null
 $callResponse = $null
 $observedTools = @()
-$exactFour = $false
+$exactSeven = $false
 $environmentValues = [ordered]@{}
 $binary = $null
 $binarySha256 = $null
@@ -311,17 +415,53 @@ try {
         }
         'TaskSubmit' {
             $ToolName = 'lattice_task_submit'
+            if (-not (Test-CanonicalClientRequestId -Value $ClientRequestId)) {
+                throw 'CLIENT_REQUEST_ID_REJECTED'
+            }
+            $hasObjective = $PSBoundParameters.ContainsKey('Objective')
+            $hasProjectId = $PSBoundParameters.ContainsKey('ProjectId')
+            $hasProjectName = $PSBoundParameters.ContainsKey('ProjectName')
+            if ($hasProjectId -and $hasProjectName) { throw 'PROJECT_SELECTOR_CONFLICT' }
+            if (-not $hasObjective) {
+                if ($hasProjectId -or $hasProjectName) { throw 'PROJECT_SELECTOR_REQUIRES_OBJECTIVE' }
+                $callArguments = [ordered]@{
+                    client_request_id = $ClientRequestId
+                    intent = 'CONTROLLED_CODEX_CANARY'
+                }
+                break
+            }
+            if (-not (Test-CanonicalTaskText -Value $Objective -MaxCharacters 512 -MaxUtf8Bytes 2048)) {
+                throw 'TASK_OBJECTIVE_REJECTED'
+            }
+            if ($hasProjectId -and (
+                $ProjectId -cnotmatch '^[a-z0-9][a-z0-9._-]{1,63}$' -or
+                (Test-RecognizedSecretMaterial -Value $ProjectId)
+            )) {
+                throw 'PROJECT_ID_REJECTED'
+            }
+            if ($hasProjectName -and -not (Test-CanonicalTaskText -Value $ProjectName -MaxCharacters 64 -MaxUtf8Bytes 256)) {
+                throw 'PROJECT_NAME_REJECTED'
+            }
             $callArguments = [ordered]@{
                 client_request_id = $ClientRequestId
-                intent = 'CONTROLLED_CODEX_CANARY'
+                objective = $Objective
             }
+            if ($hasProjectId) { $callArguments.project_id = $ProjectId }
+            if ($hasProjectName) { $callArguments.project_name = $ProjectName }
         }
         'TaskStatus' {
             if ([string]::IsNullOrWhiteSpace($TaskRef)) { throw 'TASK_REF_REQUIRED' }
+            if ($TaskRef -cnotmatch '^[0-9a-f]{64}$') { throw 'TASK_REF_REJECTED' }
+            if ($PSBoundParameters.ContainsKey('ClientRequestId') -and
+                -not (Test-CanonicalClientRequestId -Value $ClientRequestId)) {
+                throw 'CLIENT_REQUEST_ID_REJECTED'
+            }
             $ToolName = 'lattice_task_status'
             $callArguments = [ordered]@{
-                client_request_id = $ClientRequestId
                 task_ref = $TaskRef
+            }
+            if ($PSBoundParameters.ContainsKey('ClientRequestId')) {
+                $callArguments.client_request_id = $ClientRequestId
             }
         }
         default { $callArguments = $null }
@@ -396,10 +536,10 @@ try {
     if ($null -eq $toolsResponse.result.tools) { throw 'MCP_TOOL_LIST_INVALID' }
     $observedTools = @($toolsResponse.result.tools | ForEach-Object { [string]$_.name })
     $sortedObserved = @($observedTools | Sort-Object -CaseSensitive)
-    $exactFour = ($sortedObserved.Count -eq $script:ExpectedTools.Count) -and (($sortedObserved -join "`n") -ceq ($script:ExpectedTools -join "`n"))
-    if (-not $exactFour) {
+    $exactSeven = ($sortedObserved.Count -eq $script:ExpectedTools.Count) -and (($sortedObserved -join "`n") -ceq ($script:ExpectedTools -join "`n"))
+    if (-not $exactSeven) {
         $classification = 'TOOL_SET_MISMATCH'
-        throw 'MCP_EXACT_FOUR_TOOLS_REJECTED'
+        throw 'MCP_EXACT_SEVEN_TOOLS_REJECTED'
     }
 
     if ($Action -eq 'Discovery') {
@@ -476,7 +616,7 @@ $safeInitialize = ConvertTo-SafeObject -Value $initializeResponse
 $safeTools = ConvertTo-SafeObject -Value $toolsResponse
 $safeCall = ConvertTo-SafeObject -Value $callResponse
 $summary = [ordered]@{
-    schema = 'lattice.direct-stdio-client.v1'
+    schema = 'lattice.direct-stdio-client.v2'
     session_id = $sessionId
     started_at_utc = $startedAt.ToString('o')
     duration_ms = $stopwatch.ElapsedMilliseconds
@@ -502,7 +642,7 @@ $summary = [ordered]@{
         negotiated_protocol = $(if ($null -ne $safeInitialize) { [string]$safeInitialize.result.protocolVersion } else { $null })
         tools_list_received = ($null -ne $toolsResponse)
         tool_names = @($observedTools)
-        exact_four = $exactFour
+        exact_seven = $exactSeven
     }
     call = $(if ($null -eq $callResponse) { $null } else {
         [ordered]@{

@@ -76,6 +76,12 @@ npm.cmd run control:project -- read --project-name "My Project"
 `registry_authority: NONE`，不是 Rust Project Registry 身分，不能供 Policy、approval、
 lease 或 Runtime authority 使用，也不會產生 `ProjectAuthorityReceipt` 或 PostgreSQL
 persistence receipt。
+Catalog 可保留舊式顯示名稱，但只有 NFC、最多 64 個 Unicode 字元／256 UTF-8 bytes、
+且不含可辨識秘密形狀的名稱能成為正式 task data；不相容的被選專案會回傳
+`REGISTERED_PROJECT_NAME_UNSUPPORTED`。秘密形狀的 project ID 也不能進入 Registry／Task Ledger
+綁定，會回傳 `REGISTERED_PROJECT_ID_UNSUPPORTED` 或在 MCP 邊界直接拒絕。這些舊資料
+不是正式綁定候選，因此不會毒化已登記候選的精確 ID、唯一名稱或無 selector
+唯一性判定；若明確用 ID 選到 legacy row，則會回傳可修復的未登記錯誤。
 
 Git branch、HEAD、dirty、remote、upstream/ahead/behind 和規則文件 SHA-256 都是帶觀察
 時間、可重跑且只保留最新一次已完成檢查（可能是 partial）的 observation；Control 不保存規則文件全文，
@@ -85,9 +91,12 @@ junction、`.git` metadata redirect 或 repository-local config include，並有
 而不是跨出登記路徑讀取外部 metadata。加上 `--json` 可取得帶固定 schema version 的
 機器可讀輸出。
 
-這個流程使用 Control loopback HTTP/CLI，不代表 Runtime MCP 已有通用 project/task
-submit；目前 MCP task submit 仍只接受 `CONTROLLED_CODEX_CANARY`。Control schema 會在
-任何寫入前拒絕較新或漂移的資料庫。舊 binary 不支援直接開啟 v1 資料庫；若要
+Runtime MCP 的 `lattice_task_submit` 現在可把自然語言 objective 綁到這個 Catalog 中
+唯一、可重讀的已登記 locator，再由既有 PostgreSQL Project Registry 取得正式權威並
+在 Task Ledger 建立 `GENERAL_TASK_INTAKE`／`DRAFT` 任務；`CONTROLLED_CODEX_CANARY`
+仍保留相容。一般任務提交只建檔，不會啟動 Agent、建立規格／tickets，或繞過付款、
+外部動作、merge、deploy 等授權。Control schema 會在任何寫入前拒絕較新或漂移的
+資料庫。舊 binary 不支援直接開啟 v1 資料庫；若要
 downgrade，應還原 migration 前備份。舊程式留下的半登記 row 會顯示為
 `LEGACY_CONTROL_PROJECT`，重新登記同一路徑後才會被採用為 catalog locator。
 

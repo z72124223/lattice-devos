@@ -19,6 +19,9 @@ const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
 const BOOTSTRAP_V6_GLOBAL_SCHEMA_VERSION: u16 = 6;
 const BOOTSTRAP_V6_GLOBAL_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
+const BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION: u16 = 7;
+const BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256: &str =
+    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
 const HISTORICAL_V2_GLOBAL_SCHEMA_VERSION: u16 = 3;
 const HISTORICAL_V2_GLOBAL_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
@@ -572,6 +575,7 @@ pub enum ExtensionApplyOutcome {
 pub enum ExtensionBootstrapGlobalProfile {
     V5,
     V6,
+    V7,
 }
 
 /// Closed Memory-owned state returned to the product bootstrap coordinator.
@@ -867,6 +871,7 @@ pub fn inspect_bootstrap_profile(
     let schema_comment = match global {
         ExtensionBootstrapGlobalProfile::V5 => "LATTICE_DEVOS_MEMORY_SCHEMA_V5",
         ExtensionBootstrapGlobalProfile::V6 => "LATTICE_DEVOS_MEMORY_SCHEMA_V6",
+        ExtensionBootstrapGlobalProfile::V7 => "LATTICE_DEVOS_MEMORY_SCHEMA_V7",
     };
     verify_global_default_acl_closure(&mut transaction)?;
     let profile = match classify_pre_state(&mut transaction)? {
@@ -1024,6 +1029,10 @@ fn preflight_bootstrap(
         ExtensionBootstrapGlobalProfile::V6 => (
             BOOTSTRAP_V6_GLOBAL_SCHEMA_VERSION,
             BOOTSTRAP_V6_GLOBAL_MANIFEST_SHA256,
+        ),
+        ExtensionBootstrapGlobalProfile::V7 => (
+            BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION,
+            BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256,
         ),
     };
     preflight_for_global(

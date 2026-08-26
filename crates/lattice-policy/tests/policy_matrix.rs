@@ -3119,7 +3119,12 @@ fn resource_receipt_identity_and_runtime_substitution_matrix_fails_closed() {
     let spec = task_spec();
     let baseline = resource_fact(&spec, safe_usage()).receipt;
     let identity = baseline.stream_head().identity();
-    let currency = identity.accounting_currency();
+    let currency = identity
+        .accounting_currency()
+        .expect("Task Spec resource identity has accounting currency");
+    let task_spec_digest = identity
+        .task_spec_digest()
+        .expect("Task Spec resource identity has Task Spec digest");
     let identity_cases = [
         (
             "project_id",
@@ -3128,7 +3133,7 @@ fn resource_receipt_identity_and_runtime_substitution_matrix_fails_closed() {
                 identity.project_snapshot_id().clone(),
                 identity.task_id().clone(),
                 identity.task_revision(),
-                identity.task_spec_digest().clone(),
+                task_spec_digest.clone(),
                 currency,
             )
             .expect("identity"),
@@ -3141,7 +3146,7 @@ fn resource_receipt_identity_and_runtime_substitution_matrix_fails_closed() {
                 ProjectSnapshotId::new("other-snapshot").expect("snapshot"),
                 identity.task_id().clone(),
                 identity.task_revision(),
-                identity.task_spec_digest().clone(),
+                task_spec_digest.clone(),
                 currency,
             )
             .expect("identity"),
@@ -3154,7 +3159,7 @@ fn resource_receipt_identity_and_runtime_substitution_matrix_fails_closed() {
                 identity.project_snapshot_id().clone(),
                 TaskId::new("TASK-OTHER").expect("task"),
                 identity.task_revision(),
-                identity.task_spec_digest().clone(),
+                task_spec_digest.clone(),
                 currency,
             )
             .expect("identity"),
@@ -3167,7 +3172,7 @@ fn resource_receipt_identity_and_runtime_substitution_matrix_fails_closed() {
                 identity.project_snapshot_id().clone(),
                 identity.task_id().clone(),
                 "2",
-                identity.task_spec_digest().clone(),
+                task_spec_digest.clone(),
                 currency,
             )
             .expect("identity"),
@@ -3240,8 +3245,15 @@ fn independent_resource_head_rejects_every_security_field_substitution() {
         changed.identity.project_snapshot_id().clone(),
         changed.identity.task_id().clone(),
         changed.identity.task_revision(),
-        changed.identity.task_spec_digest().clone(),
-        changed.identity.accounting_currency(),
+        changed
+            .identity
+            .task_spec_digest()
+            .expect("Task Spec resource identity has Task Spec digest")
+            .clone(),
+        changed
+            .identity
+            .accounting_currency()
+            .expect("Task Spec resource identity has accounting currency"),
     )
     .expect("identity");
     let mut receipt = ResourceReceiptFixture::from_receipt(&baseline_receipt);
@@ -3317,7 +3329,11 @@ fn independent_resource_head_rejects_every_security_field_substitution() {
         changed.identity.project_snapshot_id().clone(),
         changed.identity.task_id().clone(),
         changed.identity.task_revision(),
-        changed.identity.task_spec_digest().clone(),
+        changed
+            .identity
+            .task_spec_digest()
+            .expect("Task Spec resource identity has Task Spec digest")
+            .clone(),
         "TWD",
     )
     .expect("identity");

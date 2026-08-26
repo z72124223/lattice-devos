@@ -117,6 +117,23 @@ fn completed_task_status() -> Value {
     })
 }
 
+fn submitted_general_task_status() -> Value {
+    json!({
+        "schema_version": "lattice.task.status.v3",
+        "status": "SUBMITTED",
+        "task_state": "DRAFT",
+        "task_ref": TASK_REF,
+        "ledger_head_digest": LEDGER_HEAD_DIGEST,
+        "result_digest": null,
+        "failure_stage": null,
+        "failure_code": null,
+        "objective": "完成角色系統",
+        "project_id": "legacy-project-id",
+        "project_name": "AI 劇本",
+        "project_snapshot_id": "legacy-project-id:snapshot:1"
+    })
+}
+
 fn valid_foreman_checkpoint_arguments() -> Value {
     json!({
         "checkpoint_id": "checkpoint-1",
@@ -178,89 +195,143 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
 
 fn task_public_output_schema() -> Value {
     json!({
-        "type": "object",
-        "properties": {
-            "schema_version": {
-                "type": "string",
-                "enum": ["lattice.task.status.v2"]
-            },
-            "status": {
-                "type": "string",
-                "enum": [
-                    "NOT_SUBMITTED",
-                    "RECONCILIATION_REQUIRED",
-                    "FAILED",
-                    "COMPLETED"
-                ]
-            },
-            "task_state": {
-                "type": "string",
-                "enum": [
-                    "NOT_SUBMITTED",
-                    "DRAFT",
-                    "AWAITING_EXECUTION_APPROVAL",
-                    "PREPARING",
-                    "EXECUTING",
-                    "VERIFYING",
-                    "REVIEWING",
-                    "AWAITING_MERGE_APPROVAL",
-                    "MERGING",
-                    "COMPLETED",
-                    "REJECTED",
-                    "BLOCKED",
-                    "FAILED",
-                    "STOPPING",
-                    "CANCELLED"
-                ]
-            },
-            "task_ref": {
-                "type": "string",
-                "minLength": 64,
-                "maxLength": 64,
-                "pattern": "^[0-9a-f]{64}$"
-            },
-            "ledger_head_digest": {
-                "type": "string",
-                "minLength": 64,
-                "maxLength": 64,
-                "pattern": "^[0-9a-f]{64}$"
-            },
-            "result_digest": {
-                "anyOf": [
-                    {
-                        "type": "string",
-                        "minLength": 64,
-                        "maxLength": 64,
-                        "pattern": "^[0-9a-f]{64}$"
-                    },
-                    {"type": "null"}
-                ]
-            },
-            "failure_stage": {
-                "anyOf": [
-                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
-                    {"type": "null"}
-                ]
-            },
-            "failure_code": {
-                "anyOf": [
-                    {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
-                    {"type": "null"}
-                ]
+        "oneOf": [task_public_output_variant(false), task_public_output_variant(true)]
+    })
+}
+
+fn task_public_output_variant(general: bool) -> Value {
+    let sha = || {
+        json!({
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+        })
+    };
+    let mut properties = json!({
+        "schema_version": {
+            "type": "string",
+            "enum": [if general { "lattice.task.status.v3" } else { "lattice.task.status.v2" }]
+        },
+        "status": {
+            "type": "string",
+            "enum": if general {
+                json!(["NOT_SUBMITTED", "SUBMITTED", "RECONCILIATION_REQUIRED", "FAILED", "COMPLETED"])
+            } else {
+                json!(["NOT_SUBMITTED", "RECONCILIATION_REQUIRED", "FAILED", "COMPLETED"])
             }
         },
-        "required": [
-            "schema_version",
-            "status",
-            "task_state",
-            "task_ref",
-            "ledger_head_digest",
-            "result_digest",
-            "failure_stage",
-            "failure_code"
-        ],
+        "task_state": {
+            "type": "string",
+            "enum": [
+                "NOT_SUBMITTED", "DRAFT", "AWAITING_EXECUTION_APPROVAL", "PREPARING",
+                "EXECUTING", "VERIFYING", "REVIEWING", "AWAITING_MERGE_APPROVAL",
+                "MERGING", "COMPLETED", "REJECTED", "BLOCKED", "FAILED", "STOPPING",
+                "CANCELLED"
+            ]
+        },
+        "task_ref": sha(),
+        "ledger_head_digest": sha(),
+        "result_digest": {"anyOf": [sha(), {"type": "null"}]},
+        "failure_stage": {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                {"type": "null"}
+            ]
+        },
+        "failure_code": {
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                {"type": "null"}
+            ]
+        }
+    });
+    if general {
+        properties["status"] = json!({"type": "string", "enum": ["SUBMITTED"]});
+        properties["task_state"] = json!({"type": "string", "enum": ["DRAFT"]});
+        properties["result_digest"] = json!({"type": "null"});
+        properties["failure_stage"] = json!({"type": "null"});
+        properties["failure_code"] = json!({"type": "null"});
+    }
+    let mut required = vec![
+        "schema_version",
+        "status",
+        "task_state",
+        "task_ref",
+        "ledger_head_digest",
+        "result_digest",
+        "failure_stage",
+        "failure_code",
+    ];
+    if general {
+        let object = properties.as_object_mut().expect("properties");
+        object.insert(
+            "objective".to_owned(),
+            json!({"type":"string","minLength":1,"maxLength":512}),
+        );
+        object.insert("project_id".to_owned(), json!({"type":"string","minLength":2,"maxLength":64,"pattern":"^[a-z0-9][a-z0-9._-]{1,63}$"}));
+        object.insert(
+            "project_name".to_owned(),
+            json!({"type":"string","minLength":1,"maxLength":64}),
+        );
+        object.insert("project_snapshot_id".to_owned(), json!({"type":"string","minLength":1,"maxLength":159,"pattern":"^[A-Za-z0-9][A-Za-z0-9._:-]{0,158}$"}));
+        required.extend([
+            "objective",
+            "project_id",
+            "project_name",
+            "project_snapshot_id",
+        ]);
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
         "additionalProperties": false
     })
+}
+
+fn client_request_id_input_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+        "description": "Bounded ASCII idempotency key without recognized secret material."
+    })
+}
+
+fn general_task_input_variant(field: &str, excludes_canary: bool) -> Value {
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "client_request_id": client_request_id_input_schema(),
+            (field): {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512,
+                "description": "NFC text without leading/trailing whitespace, control characters, or secret material."
+            },
+            "project_id": {
+                "type": "string",
+                "minLength": 2,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "project_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "description": "Exact NFC Control catalog display name."
+            }
+        },
+        "required": ["client_request_id", field],
+        "not": {"required": ["project_id", "project_name"]},
+        "additionalProperties": false
+    });
+    if excludes_canary {
+        schema["properties"][field]["not"] = json!({"enum": [CONTROLLED_CODEX_CANARY]});
+    }
+    schema
 }
 
 #[derive(Clone)]
@@ -949,21 +1020,22 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
     assert_eq!(
         tools[2]["inputSchema"],
         json!({
-            "type": "object",
-            "properties": {
-                "client_request_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "client_request_id": client_request_id_input_schema(),
+                        "intent": {
+                            "type": "string",
+                            "enum": [CONTROLLED_CODEX_CANARY]
+                        }
+                    },
+                    "required": ["client_request_id", "intent"],
+                    "additionalProperties": false
                 },
-                "intent": {
-                    "type": "string",
-                    "enum": ["CONTROLLED_CODEX_CANARY"]
-                }
-            },
-            "required": ["client_request_id", "intent"],
-            "additionalProperties": false
+                general_task_input_variant("objective", false),
+                general_task_input_variant("intent", true)
+            ]
         })
     );
     assert_eq!(
@@ -971,12 +1043,7 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
         json!({
             "type": "object",
             "properties": {
-                "client_request_id": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 64,
-                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-                },
+                "client_request_id": client_request_id_input_schema(),
                 "task_ref": {
                     "type": "string",
                     "minLength": 64,
@@ -984,7 +1051,7 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
                     "pattern": "^[0-9a-f]{64}$"
                 }
             },
-            "required": ["client_request_id", "task_ref"],
+            "required": ["task_ref"],
             "additionalProperties": false
         })
     );
@@ -1570,9 +1637,143 @@ fn bounded_task_tools_dispatch_only_typed_arguments() {
 }
 
 #[test]
+fn general_task_submit_accepts_a_bounded_objective_without_a_path_or_authority_input() {
+    let (mut server, submits, statuses) = task_server();
+    initialize(&mut server);
+
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "general-submit",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": "general-task-001",
+                    "objective": "完成角色系統",
+                    "project_name": "AI 劇本"
+                }
+            }
+        }))
+        .expect("general task submit response");
+
+    assert_eq!(response["result"]["isError"], false);
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    assert!(!submits[0].is_controlled_canary());
+    assert_eq!(submits[0].objective(), Some("完成角色系統"));
+    assert_eq!(submits[0].project_id(), None);
+    assert_eq!(submits[0].project_name(), Some("AI 劇本"));
+    assert!(statuses.borrow().is_empty());
+}
+
+#[test]
+fn shell_sql_and_path_looking_objective_remains_inert_task_data() {
+    let (mut server, submits, statuses) = task_server();
+    initialize(&mut server);
+    let objective = r"Review $(whoami); DROP TABLE tasks; C:\literal\objective";
+
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "inert-general-objective",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": "general-inert-data-001",
+                    "objective": objective,
+                    "project_name": "AI 劇本"
+                }
+            }
+        }))
+        .expect("inert general objective response");
+
+    assert_eq!(response["result"]["isError"], false);
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(submits[0].objective(), Some(objective));
+    assert_eq!(submits[0].project_name(), Some("AI 劇本"));
+    assert!(statuses.borrow().is_empty());
+}
+
+#[test]
+fn general_task_submit_normalizes_the_natural_intent_alias_to_the_same_typed_objective() {
+    let (mut server, submits, _) = task_server();
+    initialize(&mut server);
+
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "general-intent-submit",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": "general-task-002",
+                    "intent": "完成角色系統",
+                    "project_id": "legacy-project-id"
+                }
+            }
+        }))
+        .expect("general intent submit response");
+
+    assert_eq!(response["result"]["isError"], false);
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(submits[0].objective(), Some("完成角色系統"));
+    assert_eq!(submits[0].project_id(), Some("legacy-project-id"));
+    assert_eq!(submits[0].project_name(), None);
+}
+
+#[test]
+fn general_task_submit_uses_the_same_unicode_character_bounds_as_its_json_schema() {
+    let (mut server, submits, _) = task_server();
+    initialize(&mut server);
+    let objective = "😀".repeat(512);
+    let project_name = "界".repeat(64);
+
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "general-unicode-boundary",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": "general-unicode-001",
+                    "objective": objective,
+                    "project_name": project_name
+                }
+            }
+        }))
+        .expect("general unicode submit response");
+
+    assert_eq!(response["result"]["isError"], false);
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    assert_eq!(
+        submits[0].objective().expect("objective").chars().count(),
+        512
+    );
+    assert_eq!(
+        submits[0]
+            .project_name()
+            .expect("project name")
+            .chars()
+            .count(),
+        64
+    );
+}
+
+#[test]
 fn task_tools_emit_only_closed_public_status_shapes() {
+    let mut maximum_snapshot = submitted_general_task_status();
+    maximum_snapshot["project_snapshot_id"] = json!("a".repeat(159));
     let accepted = [
         completed_task_status(),
+        submitted_general_task_status(),
+        maximum_snapshot,
         json!({
             "schema_version": "lattice.task.status.v2",
             "status": "FAILED",
@@ -1608,8 +1809,59 @@ fn task_tools_emit_only_closed_public_status_shapes() {
 }
 
 #[test]
+fn task_status_accepts_task_ref_only_for_durable_general_lookup() {
+    let (mut server, _, statuses) = task_server();
+    initialize(&mut server);
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "status-by-ref",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_status",
+                "arguments": {"task_ref": TASK_REF}
+            }
+        }))
+        .expect("task status by ref");
+    assert_eq!(response["result"]["isError"], false);
+    let statuses = statuses.borrow();
+    assert_eq!(statuses.len(), 1);
+    assert_eq!(statuses[0].task_ref(), TASK_REF);
+    assert_eq!(statuses[0].client_request_id(), None);
+}
+
+#[test]
 fn task_tools_fail_closed_before_serializing_invalid_public_status() {
     let mut invalid = vec![Value::Null, json!([]), json!({})];
+
+    let mut transitioned_intake = submitted_general_task_status();
+    transitioned_intake["status"] = json!("COMPLETED");
+    transitioned_intake["task_state"] = json!("COMPLETED");
+    transitioned_intake["result_digest"] = json!(RESULT_DIGEST);
+    invalid.push(transitioned_intake);
+
+    let mut failed_intake = submitted_general_task_status();
+    failed_intake["status"] = json!("FAILED");
+    failed_intake["task_state"] = json!("FAILED");
+    failed_intake["failure_stage"] = json!("CODEX");
+    failed_intake["failure_code"] = json!("FORBIDDEN_EXECUTION");
+    invalid.push(failed_intake);
+
+    let mut oversized_snapshot = submitted_general_task_status();
+    oversized_snapshot["project_snapshot_id"] = json!("a".repeat(160));
+    invalid.push(oversized_snapshot);
+
+    let mut invalid_project_id = submitted_general_task_status();
+    invalid_project_id["project_id"] = json!("x");
+    invalid.push(invalid_project_id);
+
+    let mut secret_project_id = submitted_general_task_status();
+    secret_project_id["project_id"] = json!("github_pat_do-not-echo");
+    invalid.push(secret_project_id);
+
+    let mut secret_project_snapshot = submitted_general_task_status();
+    secret_project_snapshot["project_snapshot_id"] = json!("AKIAIOSFODNN7EXAMPLE");
+    invalid.push(secret_project_snapshot);
 
     for field in [
         "schema_version",
@@ -1772,9 +2024,40 @@ fn task_submit_rejects_invalid_or_dangerous_arguments_before_dispatch() {
         json!({"client_request_id": "a".repeat(65), "intent": CONTROLLED_CODEX_CANARY}),
         json!({"client_request_id": "not ascii", "intent": CONTROLLED_CODEX_CANARY}),
         json!({"client_request_id": "非ASCII", "intent": CONTROLLED_CODEX_CANARY}),
-        json!({"client_request_id": CLIENT_REQUEST_ID, "intent": "ARBITRARY_TASK"}),
+        json!({"client_request_id": "sk-do-not-use", "intent": CONTROLLED_CODEX_CANARY}),
+        json!({"client_request_id": "xghp_do-not-use", "objective": "valid"}),
+        json!({"client_request_id": "token:do-not-use", "objective": "valid"}),
         json!({"client_request_id": 7, "intent": CONTROLLED_CODEX_CANARY}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "intent": false}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": ""}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "   "}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": " leading"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "trailing "}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "line\nbreak"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "nul\0byte"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "cafe\u{301}"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "x".repeat(513)}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "😀".repeat(513)}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "use bearer secret-value"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "password=do-not-store"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "完成設定 secret=hunter2"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "credential: do-not-store"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "Cookie = session-value"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": r#"{"password":"hunter2"}"#}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": r#"{"api_key":"do-not-store"}"#}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "password\u{2003}=hunter2"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "api_key\u{a0}:do-not-store"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "Kpassword=do-not-store"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "Ksk-do-not-store"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "private key----- marker before -----begin marker"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "access_key=AKIAIOSFODNN7EXAMPLE"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "使用 AKIAIOSFODNN7EXAMPLE 完成設定"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_id": "not/a/project"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_id": "sk-do-not-use"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_name": " AI 劇本"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_name": "界".repeat(65)}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_id": "5fbaf1af-dcf8-42fb-8327-ea3bcd7c580f", "project_name": "AI 劇本"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "intent": "also-valid"}),
         Value::Null,
         json!([]),
     ];
@@ -1793,6 +2076,49 @@ fn task_submit_rejects_invalid_or_dangerous_arguments_before_dispatch() {
         assert_eq!(response["error"]["code"], -32602);
         assert!(submits.borrow().is_empty());
         assert!(statuses.borrow().is_empty());
+    }
+
+    for property in [
+        "actor_id",
+        "session_id",
+        "command_id",
+        "approval",
+        "shell",
+        "sql",
+        "path",
+        "filesystem_write",
+        "git",
+        "git_command",
+        "credential",
+        "secret",
+        "provider",
+        "lease",
+        "writer_lease",
+        "thread_id",
+        "codex_thread",
+        "task",
+        "extra",
+    ] {
+        let (mut server, submits, _) = task_server();
+        initialize(&mut server);
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": format!("general-{property}"),
+                "method": "tools/call",
+                "params": {
+                    "name": "lattice_task_submit",
+                    "arguments": {
+                        "client_request_id": CLIENT_REQUEST_ID,
+                        "objective": "完成角色系統",
+                        "project_name": "AI 劇本",
+                        (property): "forbidden"
+                    }
+                }
+            }))
+            .expect("dangerous general submit response");
+        assert_eq!(response["error"]["code"], -32602, "{property}");
+        assert!(submits.borrow().is_empty(), "{property}");
     }
 
     for property in [
@@ -1857,6 +2183,9 @@ fn task_status_requires_one_lowercase_sha256_reference_before_dispatch() {
         json!({"task_ref": TASK_REF.to_uppercase()}),
         json!({"task_ref": format!("{}g", "a".repeat(63))}),
         json!({"task_ref": 7}),
+        json!({"task_ref": TASK_REF, "client_request_id": "sk-do-not-use"}),
+        json!({"task_ref": TASK_REF, "client_request_id": "xghp_do-not-use"}),
+        json!({"task_ref": TASK_REF, "client_request_id": "token:do-not-use"}),
         json!({"task_ref": TASK_REF, "extra": "forbidden"}),
         json!({"task_ref": TASK_REF, "shell": "forbidden"}),
         Value::Null,

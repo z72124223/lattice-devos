@@ -13,7 +13,8 @@ use lattice_contracts::{
     StoreReceiptDisposition, StoreRepositoryOwner, StoreRevision, StoreScope, StoreTransactionId,
     StoreTransactionReceipt, StoreTransactionRequest, TASK_LEDGER_PRODUCER_ID,
     TASK_LEDGER_PRODUCER_VERSION, TaskId, TaskLedgerStreamHead, TaskLedgerStreamIdentity,
-    WriterLeaseAuthorityHead, WriterLeaseStatus,
+    TaskLedgerSubjectKind, WriterLeaseAuthorityHead, WriterLeaseStatus,
+    valid_task_ingress_client_request_id,
 };
 use lattice_foreman_state::{
     Confidence, EpistemicReferences, ForemanSnapshot, ForemanState, RefreshTrigger,
@@ -22,13 +23,16 @@ use lattice_task_ledger::{
     AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, Diagnostic,
     FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan, LEDGER_CHECKPOINT_SCHEMA_VERSION,
     LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint, LedgerError, LedgerEventKind,
-    OutboxAdmission, TaskCreatedProfile, UntrustedAppendRequest, UntrustedAutonomyReceiptRow,
+    OutboxAdmission, TaskCreatedProfile, TaskIngressClaim, TaskIngressRequestKind,
+    TaskSubmissionEnvelope, UntrustedAppendRequest, UntrustedAutonomyReceiptRow,
     UntrustedCommandReceipt, UntrustedCommandRecord, UntrustedForemanSnapshotRow,
     UntrustedLedgerEvent, UntrustedLedgerSnapshot, UntrustedOutboxAdmission,
-    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedForemanSnapshotRecord,
-    VerifiedStream, apply_append_plan, classify_task_created_profile,
-    foreman_coordination_identity, plan_append, verify_untrusted_autonomy_receipt_rows,
-    verify_untrusted_foreman_snapshot_rows, verify_untrusted_snapshot_against_checkpoint,
+    UntrustedTaskIngressClaim, UntrustedTaskSubmissionEnvelope, VerifiedAutonomyReceipt,
+    VerifiedAutonomyReceiptState, VerifiedForemanSnapshotRecord, VerifiedStream, apply_append_plan,
+    classify_task_created_profile, foreman_coordination_identity, plan_append,
+    verify_untrusted_autonomy_receipt_rows, verify_untrusted_foreman_snapshot_rows,
+    verify_untrusted_snapshot_against_checkpoint, verify_untrusted_task_ingress_claim,
+    verify_untrusted_task_ingress_claim_structure, verify_untrusted_task_submission,
 };
 use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
@@ -52,6 +56,7 @@ const LEGACY_GLOBAL_LEDGER_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
 const CURRENT_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 5;
 const FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 6;
+const SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 7;
 const MAX_LIVE_SERIALIZATION_RETRIES: u8 = 3;
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 const ZERO_DIGEST_TEXT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -79,6 +84,21 @@ const LEDGER_HEAD_V5_SQL: &str = "\
            physical_state_digest, physical_head_digest, global_schema_version, \
            global_manifest_sha256 \
       FROM control.task_ledger_read_head_v3(\
+           $1::smallint, $2::text, $3::bytea, $4::text, $5::text)";
+
+const LEDGER_HEAD_V7_SQL: &str = "\
+    SELECT stream_id, ledger_schema_version, head_contract_version, producer_id, \
+           producer_version, runtime, project_id, project_snapshot_id, task_id, \
+           task_revision, task_subject_kind, task_subject_digest, task_spec_digest, \
+           accounting_currency, sequence, last_event_digest, resource_revision, \
+           resource_projection_digest, head_digest, active_agents, active_implementers, \
+           elapsed_seconds, attempt_number, used_model_calls, used_external_cost, \
+           retained_event_count, retained_command_count, retained_outbox_count, \
+           checkpoint_schema_version, checkpoint_digest, actual_event_count, \
+           actual_command_count, actual_outbox_count, physical_head_found, \
+           physical_revision, physical_state_digest, physical_head_digest, \
+           global_schema_version, global_manifest_sha256 \
+      FROM control.task_ledger_read_head_v4(\
            $1::smallint, $2::text, $3::bytea, $4::text, $5::text)";
 
 const LEDGER_EVENTS_V5_SQL: &str = "\
@@ -166,6 +186,18 @@ const LEDGER_FINALIZE_V5_SQL: &str = "\
            $55::bytea, $56::text, $57::bytea, $58::bytea, $59::text, $60::text, \
            $61::bytea, $62::bytea, $63::bytea, $64::text, $65::boolean, $66::text, \
            $67::bytea, $68::text, $69::bytea, $70::boolean, $71::bytea, $72::bytea)";
+
+const LEDGER_FINALIZE_GENERAL_V7_SQL: &str = "\
+    SELECT control.task_ledger_finalize_general_intake_v1(\
+           $1::smallint,$2::text,$3::bytea,$4::text,$5::text,$6::text,\
+           $7::text,$8::text,$9::bytea,$10::text,$11::bytea,$12::text,\
+           $13::bytea,$14::bytea,$15::text,$16::text,$17::text,$18::text,\
+           $19::text,$20::text,$21::text,$22::text,$23::text,$24::bytea,\
+           $25::bytea,$26::text,$27::bytea,$28::text,$29::bytea,$30::text,\
+           $31::bytea,$32::bytea,$33::text,$34::text,$35::text,$36::bytea,\
+           $37::text,$38::bytea,$39::text,$40::bytea,$41::bytea,$42::text,\
+           $43::bytea,$44::text,$45::bytea,$46::bytea,$47::bytea,$48::bytea,\
+           $49::bytea,$50::text,$51::text,$52::bytea,$53::text,$54::bytea)";
 
 const LEDGER_PREPARE_V3_SQL: &str = "\
     SELECT stream_found, command_found, retained_request_digest, \
@@ -264,6 +296,50 @@ const LEDGER_RECORD_FOREMAN_SNAPSHOT_SQL: &str = "\
         $37::text[],$38::text[],$39::text,$40::text[],$41::text[],$42::text[],\
         $43::text,$44::text,$45::text,$46::text,$47::text,$48::text)";
 
+const TASK_INGRESS_PREPARE_SQL: &str = "\
+    SELECT found,schema_version,ingress_id,client_request_id,request_kind,\
+           ingress_request_digest,stream_id,event_sequence,event_digest,command_id,\
+           command_request_digest,event_kind,event_action,event_audit_outcome \
+      FROM control.task_ingress_prepare_v1($1::text,$2::text,$3::text,$4::bytea,$5::bytea)";
+
+const TASK_INGRESS_RECORD_SQL: &str = "\
+    SELECT control.task_ingress_record_v1(\
+        $1::text,$2::text,$3::text,$4::text,$5::bytea,$6::bytea,$7::text,\
+        $8::bytea,$9::text,$10::bytea)";
+
+const TASK_INGRESS_READ_BY_REQUEST_SQL: &str = "\
+    SELECT schema_version,ingress_id,client_request_id,request_kind,\
+           ingress_request_digest,stream_id,event_sequence,event_digest,command_id,\
+           command_request_digest,event_kind,event_action,event_audit_outcome \
+      FROM control.task_ingress_read_by_request_v1($1::text,$2::text)";
+
+const TASK_SUBMISSION_PREPARE_SQL: &str = "\
+    SELECT found,schema_version,ingress_id,client_request_id,objective,project_display_name,\
+           project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
+           task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
+           event_sequence,event_digest,command_id,request_digest \
+      FROM control.task_submission_prepare_v1($1::text,$2::text,$3::bytea)";
+
+const TASK_SUBMISSION_RECORD_SQL: &str = "\
+    SELECT control.task_submission_record_v1(\
+        $1::text,$2::text,$3::text,$4::text,$5::text,$6::bytea,$7::text,$8::text,\
+        $9::text,$10::text,$11::text,$12::bytea,$13::bytea,$14::text,$15::text,\
+        $16::bytea,$17::text,$18::bytea,$19::text,$20::bytea)";
+
+const TASK_SUBMISSION_READ_BY_REF_SQL: &str = "\
+    SELECT schema_version,ingress_id,client_request_id,objective,project_display_name,\
+           project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
+           task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
+           event_sequence,event_digest,command_id,request_digest \
+      FROM control.task_submission_read_by_task_ref_v1($1::text)";
+
+const TASK_SUBMISSION_READ_BY_REQUEST_SQL: &str = "\
+    SELECT schema_version,ingress_id,client_request_id,objective,project_display_name,\
+           project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
+           task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
+           event_sequence,event_digest,command_id,request_digest \
+      FROM control.task_submission_read_by_request_v1($1::text,$2::text)";
+
 const STORE_PREPARE_V3_SQL: &str = "\
     SELECT prepare_status, database_uuid::text, database_identity_digest, schema_version, \
            manifest_sha256, head_found, before_revision, before_state_digest, \
@@ -329,6 +405,8 @@ pub type PostgresTaskLedgerResult<T> = Result<T, PostgresTaskLedgerError>;
 pub enum PostgresTaskLedgerErrorKind {
     Malformed,
     CommandSubstitution,
+    ProjectRegistryCurrentnessConflict,
+    ProjectRegistryInactive,
     AdmissionDenied,
     AuthorityMismatch,
     PhysicalStateMismatch,
@@ -344,9 +422,11 @@ pub enum PostgresTaskLedgerErrorKind {
 
 impl PostgresTaskLedgerErrorKind {
     /// Complete closed error set.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::Malformed,
         Self::CommandSubstitution,
+        Self::ProjectRegistryCurrentnessConflict,
+        Self::ProjectRegistryInactive,
         Self::AdmissionDenied,
         Self::AuthorityMismatch,
         Self::PhysicalStateMismatch,
@@ -366,6 +446,10 @@ impl PostgresTaskLedgerErrorKind {
         match self {
             Self::Malformed => "POSTGRES_TASK_LEDGER_MALFORMED",
             Self::CommandSubstitution => "POSTGRES_TASK_LEDGER_COMMAND_SUBSTITUTED",
+            Self::ProjectRegistryCurrentnessConflict => {
+                "POSTGRES_TASK_LEDGER_PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+            }
+            Self::ProjectRegistryInactive => "POSTGRES_TASK_LEDGER_PROJECT_REGISTRY_INACTIVE",
             Self::AdmissionDenied => "POSTGRES_TASK_LEDGER_ADMISSION_DENIED",
             Self::AuthorityMismatch => "POSTGRES_TASK_LEDGER_AUTHORITY_MISMATCH",
             Self::PhysicalStateMismatch => "POSTGRES_TASK_LEDGER_PHYSICAL_STATE_MISMATCH",
@@ -554,6 +638,48 @@ impl PostgresTaskLedgerExecution {
     }
 }
 
+/// Atomic result of one authoritative general-task submission append.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PostgresTaskSubmissionExecution {
+    ledger_execution: PostgresTaskLedgerExecution,
+    submission: TaskSubmissionEnvelope,
+}
+
+impl PostgresTaskSubmissionExecution {
+    /// Returns the durable Ledger/Store execution evidence.
+    #[must_use]
+    pub const fn ledger_execution(&self) -> &PostgresTaskLedgerExecution {
+        &self.ledger_execution
+    }
+
+    /// Returns the replay-verified authoritative submission envelope.
+    #[must_use]
+    pub const fn submission(&self) -> &TaskSubmissionEnvelope {
+        &self.submission
+    }
+}
+
+/// Fresh-process load of an authoritative submission plus its verified stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PostgresTaskSubmissionLoad {
+    submission: TaskSubmissionEnvelope,
+    ledger: PostgresTaskLedgerLoad,
+}
+
+impl PostgresTaskSubmissionLoad {
+    /// Returns the replay-verified authoritative submission envelope.
+    #[must_use]
+    pub const fn submission(&self) -> &TaskSubmissionEnvelope {
+        &self.submission
+    }
+
+    /// Returns the complete replay-verified Task Ledger stream.
+    #[must_use]
+    pub const fn ledger(&self) -> &PostgresTaskLedgerLoad {
+        &self.ledger
+    }
+}
+
 /// Synchronous live Task Ledger adapter over one authenticated runtime client.
 pub struct PostgresTaskLedger {
     client: Client,
@@ -565,8 +691,8 @@ pub struct PostgresTaskLedger {
 }
 
 impl PostgresTaskLedger {
-    /// Verifies an exact frozen schema-v3, schema-v5, or foreman schema-v6 runtime surface
-    /// before accepting the client.
+    /// Verifies an exact frozen schema-v3, schema-v5, foreman schema-v6, or
+    /// general-submission schema-v7 runtime surface before accepting the client.
     ///
     /// # Errors
     ///
@@ -672,7 +798,143 @@ impl PostgresTaskLedger {
         command: AppendCommand,
         expected_authority: StoreAuthorityHead,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
-        self.execute_with_writer_authority(&command, &expected_authority, None, None, None)
+        self.execute_with_writer_authority(
+            &command,
+            &expected_authority,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Appends one controlled-canary `TASK_CREATED` event under the shared,
+    /// Task-Ledger-owned task-ingress idempotency keyspace.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on an invalid claim/command binding or any conflicting
+    /// canary/general claim for the same ingress client request.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn execute_task_ingress(
+        &mut self,
+        command: AppendCommand,
+        expected_authority: StoreAuthorityHead,
+        ingress_claim: TaskIngressClaim,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        self.execute_with_writer_authority(
+            &command,
+            &expected_authority,
+            None,
+            None,
+            None,
+            None,
+            Some(&ingress_claim),
+        )
+    }
+
+    /// Appends one general `TASK_CREATED` event and its authoritative intake
+    /// envelope in the same serializable Store/Ledger transaction.
+    ///
+    /// # Errors
+    ///
+    /// Exact retry returns the retained envelope; changed reuse of the same
+    /// ingress/client request key returns `CommandSubstitution`. Every malformed
+    /// or non-general binding fails before persistence.
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn execute_submission(
+        &mut self,
+        command: AppendCommand,
+        expected_authority: StoreAuthorityHead,
+        submission: TaskSubmissionEnvelope,
+    ) -> PostgresTaskLedgerResult<PostgresTaskSubmissionExecution> {
+        let ingress_claim = TaskIngressClaim::general_submission(&submission)
+            .map_err(|ledger| map_ledger_error(&ledger))?;
+        let ledger_execution = self.execute_with_writer_authority(
+            &command,
+            &expected_authority,
+            None,
+            None,
+            None,
+            Some(&submission),
+            Some(&ingress_claim),
+        )?;
+        Ok(PostgresTaskSubmissionExecution {
+            ledger_execution,
+            submission,
+        })
+    }
+
+    /// Loads the structurally verified ingress claim that already owns one
+    /// scoped client request key, without resolving a new task project.
+    ///
+    /// This is a preflight identity lookup only. For a general-task claim the
+    /// request digest remains opaque until the authoritative submission
+    /// envelope is loaded and verified. Callers may use the returned closed
+    /// request kind to reject a cross-kind retry, but must not infer an exact
+    /// general-task replay from this result alone.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on malformed lookup keys, unsupported schema, a missing or
+    /// mismatched linked `TASK_CREATED` event, an invalid command/digest, or
+    /// retained request-kind/action disagreement.
+    pub fn load_ingress_claim_by_request(
+        &mut self,
+        ingress_id: &str,
+        client_request_id: &str,
+    ) -> PostgresTaskLedgerResult<Option<TaskIngressClaim>> {
+        if !valid_submission_lookup_id(ingress_id)
+            || !valid_task_ingress_client_request_id(client_request_id)
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+        self.ensure_reconcilable()?;
+        if !self.sql_profile.supports_submission() {
+            return Err(error(
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+            ));
+        }
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|database| map_database_error(&database))?;
+        if let Err(database) = transaction.batch_execute(READ_TRANSACTION_SETTINGS) {
+            return rollback_load(transaction, map_database_error(&database));
+        }
+        let row = match transaction.query_opt(
+            TASK_INGRESS_READ_BY_REQUEST_SQL,
+            &[&ingress_id, &client_request_id],
+        ) {
+            Ok(row) => row,
+            Err(database) => return rollback_load(transaction, map_database_error(&database)),
+        };
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .map_err(|database| map_database_error(&database))?;
+            return Ok(None);
+        };
+        let retained = match parse_task_ingress_claim_row(&row, 0, None) {
+            Ok(retained) => retained,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        if retained.claim.ingress_id() != ingress_id
+            || retained.claim.client_request_id() != client_request_id
+        {
+            return rollback_load(
+                transaction,
+                error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt),
+            );
+        }
+        transaction
+            .commit()
+            .map_err(|database| map_database_error(&database))?;
+        Ok(Some(retained.claim))
     }
 
     /// Executes one append while asserting an exact current live Writer Lease
@@ -695,6 +957,8 @@ impl PostgresTaskLedger {
             &command,
             &expected_authority,
             Some(&writer_authority),
+            None,
+            None,
             None,
             None,
         )
@@ -726,7 +990,137 @@ impl PostgresTaskLedger {
             autonomy_plan.writer_authority(),
             Some(&autonomy_plan),
             None,
+            None,
+            None,
         )
+    }
+
+    /// Loads one authoritative submission by durable public task reference.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on unsupported schema, malformed retained envelope fields,
+    /// or disagreement with the replay-verified Task Ledger stream.
+    pub fn load_submission_by_task_ref(
+        &mut self,
+        task_ref: &ContentDigest,
+    ) -> PostgresTaskLedgerResult<Option<PostgresTaskSubmissionLoad>> {
+        if is_zero_content_digest(task_ref) {
+            return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+        let task_ref_text = task_ref.as_str();
+        self.load_submission_with_query(TASK_SUBMISSION_READ_BY_REF_SQL, &[&task_ref_text])
+    }
+
+    /// Loads one authoritative submission by its scoped client idempotency key.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on malformed lookup values, unsupported schema, retained
+    /// corruption, or disagreement with the verified Ledger stream.
+    pub fn load_submission_by_request(
+        &mut self,
+        ingress_id: &str,
+        client_request_id: &str,
+    ) -> PostgresTaskLedgerResult<Option<PostgresTaskSubmissionLoad>> {
+        if !valid_submission_lookup_id(ingress_id)
+            || !valid_task_ingress_client_request_id(client_request_id)
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+        self.load_submission_with_query(
+            TASK_SUBMISSION_READ_BY_REQUEST_SQL,
+            &[&ingress_id, &client_request_id],
+        )
+    }
+
+    fn load_submission_with_query(
+        &mut self,
+        sql: &str,
+        params: &[&(dyn ToSql + Sync)],
+    ) -> PostgresTaskLedgerResult<Option<PostgresTaskSubmissionLoad>> {
+        self.ensure_reconcilable()?;
+        if !self.sql_profile.supports_submission() {
+            return Err(error(
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+            ));
+        }
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|database| map_database_error(&database))?;
+        if let Err(database) = transaction.batch_execute(READ_TRANSACTION_SETTINGS) {
+            return rollback_load(transaction, map_database_error(&database));
+        }
+        let row = match transaction.query_opt(sql, params) {
+            Ok(row) => row,
+            Err(database) => return rollback_load(transaction, map_database_error(&database)),
+        };
+        let Some(row) = row else {
+            transaction
+                .commit()
+                .map_err(|database| map_database_error(&database))?;
+            return Ok(None);
+        };
+        let retained = match parse_submission_row(&row, 0) {
+            Ok(retained) => retained,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        let expected_claim = match TaskIngressClaim::general_submission(&retained.submission) {
+            Ok(claim) => claim,
+            Err(ledger) => return rollback_load(transaction, map_ledger_error(&ledger)),
+        };
+        let retained_claim =
+            match load_task_ingress_claim_by_request(&mut transaction, &expected_claim) {
+                Ok(Some(claim)) => claim,
+                Ok(None) => {
+                    return rollback_load(
+                        transaction,
+                        error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt),
+                    );
+                }
+                Err(load_error) => return rollback_load(transaction, load_error),
+            };
+        let stream_id_bytes = match digest_bytes(retained.submission.stream_id()) {
+            Ok(bytes) => bytes,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        let loaded = match load_verified_stream(
+            &mut transaction,
+            retained.submission.identity(),
+            &stream_id_bytes,
+            &self.database_uuid,
+            &self.store_receipt_persistence,
+            &self.global_persistence,
+            self.sql_profile,
+        ) {
+            Ok(loaded) => loaded,
+            Err(load_error) => return rollback_load(transaction, load_error),
+        };
+        if !submission_matches_loaded_stream(&retained, &loaded.stream)
+            || !ingress_claim_matches_loaded_stream(&retained_claim, &loaded.stream)
+        {
+            return rollback_load(
+                transaction,
+                error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt),
+            );
+        }
+        transaction
+            .commit()
+            .map_err(|database| map_database_error(&database))?;
+        Ok(Some(PostgresTaskSubmissionLoad {
+            submission: retained.submission,
+            ledger: PostgresTaskLedgerLoad {
+                stream: loaded.stream,
+                retained_checkpoint: loaded.retained_checkpoint,
+                physical_head: loaded.physical_head,
+                persistence: self.global_persistence.clone(),
+                autonomy_state: loaded.autonomy_state,
+            },
+        }))
     }
 
     /// Loads the fixed foreman stream and verifies every child row against the
@@ -829,9 +1223,12 @@ impl PostgresTaskLedger {
             Some(writer_authority),
             None,
             Some(foreman_plan),
+            None,
+            None,
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn execute_with_writer_authority(
         &mut self,
         command: &AppendCommand,
@@ -839,6 +1236,8 @@ impl PostgresTaskLedger {
         writer_authority: Option<&WriterLeaseAuthorityHead>,
         autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
         foreman_plan: Option<&ForemanSnapshotAppendPlan>,
+        submission: Option<&TaskSubmissionEnvelope>,
+        ingress_claim: Option<&TaskIngressClaim>,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
         if command.expected_head().runtime() != RuntimeKind::Live
@@ -847,6 +1246,22 @@ impl PostgresTaskLedger {
             || (foreman_plan.is_none()
                 && command.kind() == lattice_task_ledger::LedgerEventKind::ForemanSnapshotRecorded)
             || (autonomy_plan.is_some() && foreman_plan.is_some())
+            || submission.is_some_and(|envelope| !submission_matches_command(envelope, command))
+            || (submission.is_none() && command_is_general_submission(command))
+            || submission.is_some() && (autonomy_plan.is_some() || foreman_plan.is_some())
+            || ingress_claim.is_some_and(|claim| !ingress_claim_matches_command(claim, command))
+            || submission.is_some_and(|envelope| {
+                ingress_claim.is_none_or(|claim| {
+                    claim.request_kind() != TaskIngressRequestKind::GeneralTask
+                        || claim.ingress_id() != envelope.ingress_id()
+                        || claim.client_request_id() != envelope.client_request_id()
+                        || claim.stream_id() != envelope.stream_id()
+                })
+            })
+            || ingress_claim.is_some_and(|claim| {
+                claim.request_kind() == TaskIngressRequestKind::GeneralTask && submission.is_none()
+            })
+            || ingress_claim.is_some() && (autonomy_plan.is_some() || foreman_plan.is_some())
         {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
         }
@@ -879,6 +1294,8 @@ impl PostgresTaskLedger {
                 writer_authority,
                 autonomy_plan,
                 foreman_plan,
+                submission,
+                ingress_claim,
             ) {
                 Ok(execution) => return Ok(execution),
                 Err(AttemptFailure::Retryable) if retry_count < MAX_LIVE_SERIALIZATION_RETRIES => {}
@@ -909,13 +1326,14 @@ enum TaskLedgerSqlProfile {
     V3,
     V5,
     V6,
+    V7,
 }
 
 impl TaskLedgerSqlProfile {
     const fn ledger_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_PREPARE_V3_SQL,
-            Self::V5 | Self::V6 => LEDGER_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => LEDGER_PREPARE_V5_SQL,
         }
     }
 
@@ -923,75 +1341,87 @@ impl TaskLedgerSqlProfile {
         match self {
             Self::V3 => LEDGER_HEAD_V3_SQL,
             Self::V5 | Self::V6 => LEDGER_HEAD_V5_SQL,
+            Self::V7 => LEDGER_HEAD_V7_SQL,
         }
     }
 
     const fn ledger_events_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_EVENTS_V3_SQL,
-            Self::V5 | Self::V6 => LEDGER_EVENTS_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => LEDGER_EVENTS_V5_SQL,
         }
     }
 
     const fn ledger_commands_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_COMMANDS_V3_SQL,
-            Self::V5 | Self::V6 => LEDGER_COMMANDS_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => LEDGER_COMMANDS_V5_SQL,
         }
     }
 
     const fn ledger_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_FINALIZE_V3_SQL,
-            Self::V5 | Self::V6 => LEDGER_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => LEDGER_FINALIZE_V5_SQL,
+        }
+    }
+
+    const fn general_ledger_finalize_sql(self) -> Option<&'static str> {
+        match self {
+            Self::V7 => Some(LEDGER_FINALIZE_GENERAL_V7_SQL),
+            Self::V3 | Self::V5 | Self::V6 => None,
         }
     }
 
     const fn store_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_PREPARE_V3_SQL,
-            Self::V5 | Self::V6 => STORE_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => STORE_PREPARE_V5_SQL,
         }
     }
 
     const fn store_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_FINALIZE_V3_SQL,
-            Self::V5 | Self::V6 => STORE_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => STORE_FINALIZE_V5_SQL,
         }
     }
 
     const fn store_current_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_CURRENT_V3_SQL,
-            Self::V5 | Self::V6 => STORE_CURRENT_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 => STORE_CURRENT_V5_SQL,
         }
     }
 
     const fn supports_autonomy(self) -> bool {
-        matches!(self, Self::V5 | Self::V6)
+        matches!(self, Self::V5 | Self::V6 | Self::V7)
     }
 
     const fn autonomy_receipts_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 | Self::V6 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
+            Self::V5 | Self::V6 | Self::V7 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
         }
     }
 
     const fn autonomy_record_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 | Self::V6 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
+            Self::V5 | Self::V6 | Self::V7 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
         }
     }
 
     const fn supports_foreman(self) -> bool {
-        matches!(self, Self::V6)
+        matches!(self, Self::V6 | Self::V7)
+    }
+
+    const fn supports_submission(self) -> bool {
+        matches!(self, Self::V7)
     }
 
     const fn has_global_profile_parameters(self) -> bool {
-        matches!(self, Self::V5 | Self::V6)
+        matches!(self, Self::V5 | Self::V6 | Self::V7)
     }
 }
 
@@ -1002,6 +1432,8 @@ fn global_ledger_sql_profile(schema_version: u16) -> Option<TaskLedgerSqlProfile
         Some(TaskLedgerSqlProfile::V5)
     } else if schema_version == FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION {
         Some(TaskLedgerSqlProfile::V6)
+    } else if schema_version == SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION {
+        Some(TaskLedgerSqlProfile::V7)
     } else {
         None
     }
@@ -1014,6 +1446,24 @@ struct LoadedStream {
     store_receipts: BTreeMap<String, StoreTransactionReceipt>,
     record_set_digests: BTreeMap<String, ContentDigest>,
     autonomy_state: VerifiedAutonomyReceiptState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetainedTaskSubmission {
+    submission: TaskSubmissionEnvelope,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    command_id: String,
+    request_digest: ContentDigest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetainedTaskIngressClaim {
+    claim: TaskIngressClaim,
+    event_sequence: u64,
+    event_digest: ContentDigest,
+    command_id: String,
+    command_request_digest: ContentDigest,
 }
 
 struct LedgerPrepareRow {
@@ -1127,7 +1577,12 @@ fn load_verified_stream<C: GenericClient>(
         });
     };
 
-    if head_row.len() != 37 {
+    let subject_offset = if sql_profile == TaskLedgerSqlProfile::V7 {
+        2
+    } else {
+        0
+    };
+    if head_row.len() != 37 + subject_offset {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
     let retained_stream_id = row_digest(&head_row, 0)?;
@@ -1145,17 +1600,57 @@ fn load_verified_stream<C: GenericClient>(
     {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
-    let identity = TaskLedgerStreamIdentity::new(
-        ProjectId::new(row_value::<String>(&head_row, 6)?)
-            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
-        ProjectSnapshotId::new(row_value::<String>(&head_row, 7)?)
-            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
-        TaskId::new(row_value::<String>(&head_row, 8)?)
-            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
-        row_value::<String>(&head_row, 9)?,
-        row_digest(&head_row, 10)?,
-        row_value::<String>(&head_row, 11)?,
-    )
+    let project_id = ProjectId::new(row_value::<String>(&head_row, 6)?)
+        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    let project_snapshot_id = ProjectSnapshotId::new(row_value::<String>(&head_row, 7)?)
+        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    let task_id = TaskId::new(row_value::<String>(&head_row, 8)?)
+        .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    let task_revision = row_value::<String>(&head_row, 9)?;
+    let identity = if sql_profile == TaskLedgerSqlProfile::V7 {
+        let subject_kind: String = row_value(&head_row, 10)?;
+        let subject_digest = row_digest(&head_row, 11)?;
+        let task_spec_digest = row_optional_digest(&head_row, 12)?;
+        let accounting_currency: Option<String> = row_value(&head_row, 13)?;
+        match subject_kind.as_str() {
+            "TASK_SPEC"
+                if task_spec_digest.as_ref() == Some(&subject_digest)
+                    && accounting_currency.is_some() =>
+            {
+                TaskLedgerStreamIdentity::new(
+                    project_id,
+                    project_snapshot_id,
+                    task_id,
+                    task_revision,
+                    task_spec_digest
+                        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+                    accounting_currency
+                        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+                )
+            }
+            "GENERAL_TASK_INTAKE"
+                if task_spec_digest.is_none() && accounting_currency.is_none() =>
+            {
+                TaskLedgerStreamIdentity::new_general_task_intake(
+                    project_id,
+                    project_snapshot_id,
+                    task_id,
+                    task_revision,
+                    subject_digest,
+                )
+            }
+            _ => return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+        }
+    } else {
+        TaskLedgerStreamIdentity::new(
+            project_id,
+            project_snapshot_id,
+            task_id,
+            task_revision,
+            row_digest(&head_row, 10)?,
+            row_value::<String>(&head_row, 11)?,
+        )
+    }
     .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
     if &identity != expected_identity {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
@@ -1163,48 +1658,48 @@ fn load_verified_stream<C: GenericClient>(
     let claimed_head = task_head(
         identity.clone(),
         stream_id.clone(),
-        parse_u64_text(&row_value::<String>(&head_row, 12)?)?,
-        row_digest(&head_row, 13)?,
-        parse_u64_text(&row_value::<String>(&head_row, 14)?)?,
-        row_digest(&head_row, 15)?,
-        row_digest(&head_row, 16)?,
+        parse_u64_text(&row_value::<String>(&head_row, 12 + subject_offset)?)?,
+        row_digest(&head_row, 13 + subject_offset)?,
+        parse_u64_text(&row_value::<String>(&head_row, 14 + subject_offset)?)?,
+        row_digest(&head_row, 15 + subject_offset)?,
+        row_digest(&head_row, 16 + subject_offset)?,
     )?;
     let counters = resource_counters(
-        &row_value::<String>(&head_row, 17)?,
-        &row_value::<String>(&head_row, 18)?,
-        &row_value::<String>(&head_row, 19)?,
-        &row_value::<String>(&head_row, 20)?,
-        &row_value::<String>(&head_row, 21)?,
-        row_value::<String>(&head_row, 22)?,
+        &row_value::<String>(&head_row, 17 + subject_offset)?,
+        &row_value::<String>(&head_row, 18 + subject_offset)?,
+        &row_value::<String>(&head_row, 19 + subject_offset)?,
+        &row_value::<String>(&head_row, 20 + subject_offset)?,
+        &row_value::<String>(&head_row, 21 + subject_offset)?,
+        row_value::<String>(&head_row, 22 + subject_offset)?,
     )?;
     let retained_counts = [
-        parse_u64_text(&row_value::<String>(&head_row, 23)?)?,
-        parse_u64_text(&row_value::<String>(&head_row, 24)?)?,
-        parse_u64_text(&row_value::<String>(&head_row, 25)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 23 + subject_offset)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 24 + subject_offset)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 25 + subject_offset)?)?,
     ];
-    let checkpoint_schema: String = row_value(&head_row, 26)?;
+    let checkpoint_schema: String = row_value(&head_row, 26 + subject_offset)?;
     if checkpoint_schema != LEDGER_CHECKPOINT_SCHEMA_VERSION {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
     let retained_checkpoint = LedgerCheckpoint::from_retained(
         stream_id.clone(),
         RuntimeKind::Live,
-        row_digest(&head_row, 27)?,
+        row_digest(&head_row, 27 + subject_offset)?,
     );
     let actual_counts = [
-        parse_u64_text(&row_value::<String>(&head_row, 28)?)?,
-        parse_u64_text(&row_value::<String>(&head_row, 29)?)?,
-        parse_u64_text(&row_value::<String>(&head_row, 30)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 28 + subject_offset)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 29 + subject_offset)?)?,
+        parse_u64_text(&row_value::<String>(&head_row, 30 + subject_offset)?)?,
     ];
     if retained_counts != actual_counts {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
-    let physical_found: bool = row_value(&head_row, 31)?;
-    let physical_revision: Option<i64> = row_value(&head_row, 32)?;
-    let physical_state: Option<Vec<u8>> = row_value(&head_row, 33)?;
-    let physical_head_digest: Option<Vec<u8>> = row_value(&head_row, 34)?;
-    let global_schema_version: i16 = row_value(&head_row, 35)?;
-    let global_manifest_sha256: String = row_value(&head_row, 36)?;
+    let physical_found: bool = row_value(&head_row, 31 + subject_offset)?;
+    let physical_revision: Option<i64> = row_value(&head_row, 32 + subject_offset)?;
+    let physical_state: Option<Vec<u8>> = row_value(&head_row, 33 + subject_offset)?;
+    let physical_head_digest: Option<Vec<u8>> = row_value(&head_row, 34 + subject_offset)?;
+    let global_schema_version: i16 = row_value(&head_row, 35 + subject_offset)?;
+    let global_manifest_sha256: String = row_value(&head_row, 36 + subject_offset)?;
     if !global_persistence_matches(
         global_schema_version,
         &global_manifest_sha256,
@@ -1326,6 +1821,394 @@ fn row_digest(row: &Row, index: usize) -> PostgresTaskLedgerResult<ContentDigest
     bytes_digest(&row_value::<Vec<u8>>(row, index)?)
 }
 
+fn row_optional_digest(row: &Row, index: usize) -> PostgresTaskLedgerResult<Option<ContentDigest>> {
+    row_value::<Option<Vec<u8>>>(row, index)?
+        .as_deref()
+        .map(bytes_digest)
+        .transpose()
+}
+
+fn ingress_claim_event_action_matches(
+    request_kind: TaskIngressRequestKind,
+    event_action: Option<&str>,
+) -> bool {
+    match request_kind {
+        TaskIngressRequestKind::ControlledCodexCanary => matches!(
+            event_action,
+            Some("CONTROLLED_CODEX_CANARY" | "CONTROLLED_CODEX_CANARY_AUTONOMY_V1")
+        ),
+        TaskIngressRequestKind::GeneralTask => {
+            event_action == Some(TaskCreatedProfile::GeneralTaskIntakeV1.action())
+        }
+    }
+}
+
+fn ingress_claim_command_matches(claim: &TaskIngressClaim, command_id: &str) -> bool {
+    command_id
+        .strip_prefix("mcp-submit:")
+        .is_some_and(|client_request_id| client_request_id == claim.client_request_id())
+}
+
+fn parse_task_ingress_claim_row(
+    row: &Row,
+    offset: usize,
+    expected: Option<&TaskIngressClaim>,
+) -> PostgresTaskLedgerResult<RetainedTaskIngressClaim> {
+    if row.len() != offset + 13 {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    let raw = UntrustedTaskIngressClaim {
+        schema_version: row_value(row, offset)?,
+        ingress_id: row_value(row, offset + 1)?,
+        client_request_id: row_value(row, offset + 2)?,
+        request_kind: row_value(row, offset + 3)?,
+        request_digest: row_digest(row, offset + 4)?,
+        stream_id: row_digest(row, offset + 5)?,
+    };
+    let claim = match expected {
+        Some(expected) => verify_untrusted_task_ingress_claim(&raw, expected),
+        None => verify_untrusted_task_ingress_claim_structure(&raw),
+    }
+    .map_err(|ledger| map_ledger_error(&ledger))?;
+    let event_sequence = parse_u64_text(&row_value::<String>(row, offset + 6)?)?;
+    let command_id: String = row_value(row, offset + 8)?;
+    let event_kind: Option<String> = row_value(row, offset + 10)?;
+    let event_action: Option<String> = row_value(row, offset + 11)?;
+    let event_outcome: Option<String> = row_value(row, offset + 12)?;
+    if event_sequence != 1
+        || CommandId::new(command_id.clone()).is_err()
+        || !ingress_claim_command_matches(&claim, &command_id)
+        || event_kind.as_deref() != Some("TASK_CREATED")
+        || !ingress_claim_event_action_matches(claim.request_kind(), event_action.as_deref())
+        || event_outcome.as_deref() != Some("RECORDED")
+    {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    Ok(RetainedTaskIngressClaim {
+        claim,
+        event_sequence,
+        event_digest: row_digest(row, offset + 7)?,
+        command_id,
+        command_request_digest: row_digest(row, offset + 9)?,
+    })
+}
+
+fn prepare_task_ingress_claim<C: GenericClient>(
+    client: &mut C,
+    claim: &TaskIngressClaim,
+) -> PostgresTaskLedgerResult<Option<RetainedTaskIngressClaim>> {
+    let ingress_request_digest = digest_bytes(claim.request_digest())?;
+    let stream_id = digest_bytes(claim.stream_id())?;
+    let row = client
+        .query_one(
+            TASK_INGRESS_PREPARE_SQL,
+            &[
+                &claim.ingress_id(),
+                &claim.client_request_id(),
+                &claim.request_kind().as_str(),
+                &ingress_request_digest,
+                &stream_id,
+            ],
+        )
+        .map_err(|database| map_database_error(&database))?;
+    if row.len() != 14 {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    if !row_value::<bool>(&row, 0)? {
+        return Ok(None);
+    }
+    parse_task_ingress_claim_row(&row, 1, Some(claim)).map(Some)
+}
+
+fn load_task_ingress_claim_by_request<C: GenericClient>(
+    client: &mut C,
+    expected: &TaskIngressClaim,
+) -> PostgresTaskLedgerResult<Option<RetainedTaskIngressClaim>> {
+    client
+        .query_opt(
+            TASK_INGRESS_READ_BY_REQUEST_SQL,
+            &[&expected.ingress_id(), &expected.client_request_id()],
+        )
+        .map_err(|database| map_database_error(&database))?
+        .as_ref()
+        .map(|row| parse_task_ingress_claim_row(row, 0, Some(expected)))
+        .transpose()
+}
+
+fn record_task_ingress_claim(
+    client: &mut Transaction<'_>,
+    claim: &TaskIngressClaim,
+    event: &lattice_task_ledger::LedgerEvent,
+) -> Result<(), AttemptFailure> {
+    let ingress_request_digest =
+        digest_bytes(claim.request_digest()).map_err(AttemptFailure::Terminal)?;
+    let stream_id = digest_bytes(claim.stream_id()).map_err(AttemptFailure::Terminal)?;
+    let event_digest = digest_bytes(event.event_digest()).map_err(AttemptFailure::Terminal)?;
+    let command_request_digest =
+        digest_bytes(event.request_digest()).map_err(AttemptFailure::Terminal)?;
+    let event_sequence = event.sequence().to_string();
+    let params: [&(dyn ToSql + Sync); 10] = [
+        &claim.schema_version(),
+        &claim.ingress_id(),
+        &claim.client_request_id(),
+        &claim.request_kind().as_str(),
+        &ingress_request_digest,
+        &stream_id,
+        &event_sequence,
+        &event_digest,
+        &event.command_id().as_str(),
+        &command_request_digest,
+    ];
+    let row = client
+        .query_one(TASK_INGRESS_RECORD_SQL, &params)
+        .map_err(|database| classify_query_error(&database))?;
+    if row.len() != 1
+        || row_value::<String>(&row, 0).map_err(AttemptFailure::Terminal)? != "RECORDED"
+    {
+        return Err(AttemptFailure::Terminal(error(
+            PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
+        )));
+    }
+    Ok(())
+}
+
+fn parse_submission_row(
+    row: &Row,
+    offset: usize,
+) -> PostgresTaskLedgerResult<RetainedTaskSubmission> {
+    if row.len() != offset + 20 {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    let task_subject_kind: String = row_value(row, offset + 10)?;
+    if task_subject_kind != TaskLedgerSubjectKind::GeneralTaskIntake.as_str() {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    let identity = TaskLedgerStreamIdentity::new_general_task_intake(
+        ProjectId::new(row_value::<String>(row, offset + 6)?)
+            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+        ProjectSnapshotId::new(row_value::<String>(row, offset + 7)?)
+            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+        TaskId::new(row_value::<String>(row, offset + 8)?)
+            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+        row_value::<String>(row, offset + 9)?,
+        row_digest(row, offset + 11)?,
+    )
+    .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    let raw = UntrustedTaskSubmissionEnvelope {
+        schema_version: row_value(row, offset)?,
+        ingress_id: row_value(row, offset + 1)?,
+        client_request_id: row_value(row, offset + 2)?,
+        objective: row_value(row, offset + 3)?,
+        project_display_name: row_value(row, offset + 4)?,
+        project_authority_receipt_digest: row_digest(row, offset + 5)?,
+        identity,
+        stream_id: row_digest(row, offset + 12)?,
+        task_ref: digest(&row_value::<String>(row, offset + 13)?)?,
+        admission_action: row_value(row, offset + 14)?,
+        envelope_digest: row_digest(row, offset + 15)?,
+    };
+    let submission =
+        verify_untrusted_task_submission(&raw).map_err(|ledger| map_ledger_error(&ledger))?;
+    Ok(RetainedTaskSubmission {
+        submission,
+        event_sequence: parse_u64_text(&row_value::<String>(row, offset + 16)?)?,
+        event_digest: row_digest(row, offset + 17)?,
+        command_id: row_value(row, offset + 18)?,
+        request_digest: row_digest(row, offset + 19)?,
+    })
+}
+
+fn prepare_task_submission<C: GenericClient>(
+    client: &mut C,
+    submission: &TaskSubmissionEnvelope,
+) -> PostgresTaskLedgerResult<Option<RetainedTaskSubmission>> {
+    let envelope_digest = digest_bytes(submission.envelope_digest())?;
+    let row = client
+        .query_one(
+            TASK_SUBMISSION_PREPARE_SQL,
+            &[
+                &submission.ingress_id(),
+                &submission.client_request_id(),
+                &envelope_digest,
+            ],
+        )
+        .map_err(|database| map_database_error(&database))?;
+    if row.len() != 21 {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    let found: bool = row_value(&row, 0)?;
+    if !found {
+        return Ok(None);
+    }
+    let retained = parse_submission_row(&row, 1)?;
+    if retained.submission != *submission {
+        return Err(error(PostgresTaskLedgerErrorKind::CommandSubstitution));
+    }
+    Ok(Some(retained))
+}
+
+fn load_task_submission_by_ref<C: GenericClient>(
+    client: &mut C,
+    task_ref: &ContentDigest,
+) -> PostgresTaskLedgerResult<Option<RetainedTaskSubmission>> {
+    let task_ref = task_ref.as_str();
+    client
+        .query_opt(TASK_SUBMISSION_READ_BY_REF_SQL, &[&task_ref])
+        .map_err(|database| map_database_error(&database))?
+        .as_ref()
+        .map(|row| parse_submission_row(row, 0))
+        .transpose()
+}
+
+fn record_task_submission<C: GenericClient>(
+    client: &mut C,
+    submission: &TaskSubmissionEnvelope,
+    event: &lattice_task_ledger::LedgerEvent,
+) -> PostgresTaskLedgerResult<()> {
+    let authority_digest = digest_bytes(submission.project_authority_receipt_digest())?;
+    let intake_digest = submission
+        .identity()
+        .general_task_intake_digest()
+        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::Malformed))?;
+    let intake_digest = digest_bytes(intake_digest)?;
+    let stream_id = digest_bytes(submission.stream_id())?;
+    let envelope_digest = digest_bytes(submission.envelope_digest())?;
+    let event_digest = digest_bytes(event.event_digest())?;
+    let request_digest = digest_bytes(event.request_digest())?;
+    let event_sequence = event.sequence().to_string();
+    let params: [&(dyn ToSql + Sync); 20] = [
+        &submission.schema_version(),
+        &submission.ingress_id(),
+        &submission.client_request_id(),
+        &submission.objective(),
+        &submission.project_display_name(),
+        &authority_digest,
+        &submission.identity().project_id().as_str(),
+        &submission.identity().project_snapshot_id().as_str(),
+        &submission.identity().task_id().as_str(),
+        &submission.identity().task_revision(),
+        &submission.identity().subject_kind().as_str(),
+        &intake_digest,
+        &stream_id,
+        &submission.task_ref().as_str(),
+        &submission.admission_action(),
+        &envelope_digest,
+        &event_sequence,
+        &event_digest,
+        &event.command_id().as_str(),
+        &request_digest,
+    ];
+    let row = client
+        .query_one(TASK_SUBMISSION_RECORD_SQL, &params)
+        .map_err(|database| map_database_error(&database))?;
+    if row.len() != 1 || row_value::<String>(&row, 0)? != "RECORDED" {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    Ok(())
+}
+
+fn ingress_claim_matches_command(claim: &TaskIngressClaim, command: &AppendCommand) -> bool {
+    command.kind() == LedgerEventKind::TaskCreated
+        && command.expected_head().sequence() == 0
+        && command.expected_head().stream_id() == claim.stream_id()
+        && command.outcome() == lattice_task_ledger::LedgerOutcome::Recorded
+        && match claim.request_kind() {
+            TaskIngressRequestKind::ControlledCodexCanary => {
+                command.action().as_str() == TaskCreatedProfile::AutonomyReceiptRequiredV1.action()
+            }
+            TaskIngressRequestKind::GeneralTask => command_is_general_submission(command),
+        }
+}
+
+fn ingress_claim_matches_loaded_stream(
+    retained: &RetainedTaskIngressClaim,
+    stream: &VerifiedStream,
+) -> bool {
+    let Some(event) = stream
+        .events()
+        .iter()
+        .find(|event| event.sequence() == retained.event_sequence)
+    else {
+        return false;
+    };
+    let Some(command) = stream
+        .commands()
+        .iter()
+        .find(|record| record.request().command_id().as_str() == retained.command_id)
+    else {
+        return false;
+    };
+    let action_matches = match retained.claim.request_kind() {
+        TaskIngressRequestKind::ControlledCodexCanary => matches!(
+            event.action().as_str(),
+            "CONTROLLED_CODEX_CANARY" | "CONTROLLED_CODEX_CANARY_AUTONOMY_V1"
+        ),
+        TaskIngressRequestKind::GeneralTask => {
+            event.action().as_str() == TaskCreatedProfile::GeneralTaskIntakeV1.action()
+        }
+    };
+    stream.head().stream_id() == retained.claim.stream_id()
+        && event.stream_id() == retained.claim.stream_id()
+        && event.kind() == LedgerEventKind::TaskCreated
+        && action_matches
+        && event.event_digest() == &retained.event_digest
+        && event.command_id().as_str() == retained.command_id
+        && event.request_digest() == &retained.command_request_digest
+        && command.receipt().request_digest() == &retained.command_request_digest
+        && command.receipt().event_digest() == Some(&retained.event_digest)
+}
+
+fn command_is_general_submission(command: &AppendCommand) -> bool {
+    command.kind() == LedgerEventKind::TaskCreated
+        && command.action().as_str() == TaskCreatedProfile::GeneralTaskIntakeV1.action()
+}
+
+fn submission_matches_command(
+    submission: &TaskSubmissionEnvelope,
+    command: &AppendCommand,
+) -> bool {
+    command_is_general_submission(command)
+        && command.expected_head().sequence() == 0
+        && command.expected_head().identity() == submission.identity()
+        && command.expected_head().stream_id() == submission.stream_id()
+        && command.subject_digest() == submission.envelope_digest()
+        && command.reason_code().as_str() == "GENERAL_TASK_INTAKE_RECORDED"
+        && command.diagnostic().is_none()
+}
+
+fn submission_matches_loaded_stream(
+    retained: &RetainedTaskSubmission,
+    stream: &VerifiedStream,
+) -> bool {
+    let Some(event) = stream.events().first() else {
+        return false;
+    };
+    stream.identity() == retained.submission.identity()
+        && event.stream_id() == retained.submission.stream_id()
+        && event.sequence() == retained.event_sequence
+        && event.event_digest() == &retained.event_digest
+        && event.command_id().as_str() == retained.command_id
+        && event.request_digest() == &retained.request_digest
+        && event.kind() == LedgerEventKind::TaskCreated
+        && event.action().as_str() == retained.submission.admission_action()
+        && event.subject_digest() == retained.submission.envelope_digest()
+        && event.diagnostic().is_none()
+}
+
+fn valid_submission_lookup_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 64
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+}
+
+fn is_zero_content_digest(value: &ContentDigest) -> bool {
+    value.as_str().bytes().all(|byte| byte == b'0')
+}
+
 fn digest_bytes(value: &ContentDigest) -> PostgresTaskLedgerResult<Vec<u8>> {
     let bytes = value.as_str().as_bytes();
     if bytes.len() != 64 {
@@ -1372,6 +2255,8 @@ fn map_database_error(database: &PostgresError) -> PostgresTaskLedgerError {
 fn database_error_kind(code: &str) -> PostgresTaskLedgerErrorKind {
     match code {
         "LTX01" => PostgresTaskLedgerErrorKind::CommandSubstitution,
+        "LPG01" => PostgresTaskLedgerErrorKind::ProjectRegistryCurrentnessConflict,
+        "LPG02" => PostgresTaskLedgerErrorKind::ProjectRegistryInactive,
         "LAD01" => PostgresTaskLedgerErrorKind::AdmissionDenied,
         "LAU01" => PostgresTaskLedgerErrorKind::AuthorityMismatch,
         "LFW01" => PostgresTaskLedgerErrorKind::Malformed,
@@ -2178,6 +3063,8 @@ fn run_execute_attempt(
     writer_authority: Option<&WriterLeaseAuthorityHead>,
     autonomy_plan: Option<&AutonomyReceiptAppendPlan>,
     foreman_plan: Option<&ForemanSnapshotAppendPlan>,
+    submission: Option<&TaskSubmissionEnvelope>,
+    ingress_claim: Option<&TaskIngressClaim>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let Ok(global_schema_version) = i16::try_from(global_persistence.schema_version()) else {
         return Err(AttemptFailure::Terminal(error(
@@ -2193,11 +3080,59 @@ fn run_execute_attempt(
     if let Err(database) = transaction.batch_execute(WRITE_TRANSACTION_SETTINGS) {
         return rollback_attempt(transaction, classify_query_error(&database));
     }
+    let retained_ingress_claim = if let Some(claim) = ingress_claim {
+        if !sql_profile.supports_submission() {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(
+                    PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+                )),
+            );
+        }
+        match prepare_task_ingress_claim(&mut transaction, claim) {
+            Ok(retained) => retained,
+            Err(prepare_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(prepare_error));
+            }
+        }
+    } else {
+        None
+    };
+    let retained_submission = if let Some(submission) = submission {
+        if !sql_profile.supports_submission() {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(
+                    PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+                )),
+            );
+        }
+        match prepare_task_submission(&mut transaction, submission) {
+            Ok(retained) => retained,
+            Err(prepare_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(prepare_error));
+            }
+        }
+    } else {
+        None
+    };
+    let prepared_command_id = retained_ingress_claim
+        .as_ref()
+        .map(|retained| retained.command_id.as_str())
+        .or_else(|| {
+            retained_submission
+                .as_ref()
+                .map(|retained| retained.command_id.as_str())
+        })
+        .unwrap_or(command_id);
     let prepare_params = global_profile_params(
         sql_profile,
         &global_schema_version,
         &global_manifest_sha256,
-        [&stream_id_bytes as &(dyn ToSql + Sync), &command_id],
+        [
+            &stream_id_bytes as &(dyn ToSql + Sync),
+            &prepared_command_id,
+        ],
     );
     let prepare_row = match transaction.query_one(sql_profile.ledger_prepare_sql(), &prepare_params)
     {
@@ -2224,8 +3159,76 @@ fn run_execute_attempt(
             return rollback_attempt(transaction, AttemptFailure::Terminal(load_error));
         }
     };
-    if let Err(prepare_error) = validate_ledger_prepare(&prepare, &loaded, command_id) {
+    if let Err(prepare_error) = validate_ledger_prepare(&prepare, &loaded, prepared_command_id) {
         return rollback_attempt(transaction, AttemptFailure::Terminal(prepare_error));
+    }
+    if submission.is_some() && (retained_ingress_claim.is_some() != retained_submission.is_some()) {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+        );
+    }
+    if let Some(retained) = retained_ingress_claim.as_ref()
+        && !ingress_claim_matches_loaded_stream(retained, &loaded.stream)
+    {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+        );
+    }
+    if let Some(retained) = retained_submission.as_ref() {
+        if retained_ingress_claim.is_none()
+            || submission != Some(&retained.submission)
+            || !submission_matches_loaded_stream(retained, &loaded.stream)
+        {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::CommandSubstitution)),
+            );
+        }
+        let Some(command_record) = loaded
+            .stream
+            .commands()
+            .iter()
+            .find(|record| record.request().command_id().as_str() == retained.command_id)
+        else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        };
+        if !submission_matches_command(&retained.submission, command_record.request())
+            || command_record.receipt().request_digest() != &retained.request_digest
+        {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        }
+        let Some(store_receipt) = loaded.store_receipts.get(&retained.command_id).cloned() else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        };
+        let outbox_admission = loaded
+            .stream
+            .outboxes()
+            .iter()
+            .find(|outbox| outbox.command_id().as_str() == retained.command_id)
+            .cloned();
+        let execution = PostgresTaskLedgerExecution {
+            receipt: command_record.receipt().clone(),
+            result_checkpoint: command_record.result_checkpoint().clone(),
+            outbox_admission,
+            store_receipt,
+            persistence: global_persistence.clone(),
+            exact_retry: true,
+        };
+        return transaction
+            .commit()
+            .map(|()| execution)
+            .map_err(|database| classify_commit_error(&database));
     }
     let foreman_records = if foreman_plan.is_some() {
         match load_foreman_records(&mut transaction, stream_id_bytes, &loaded.stream) {
@@ -2279,6 +3282,23 @@ fn run_execute_attempt(
     }
 
     if plan.is_exact_retry() {
+        if ingress_claim.is_some() && retained_ingress_claim.is_none() {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
+            );
+        }
+        if submission.is_some()
+            && retained_submission.as_ref().is_none_or(|retained| {
+                Some(&retained.submission) != submission
+                    || !submission_matches_loaded_stream(retained, &loaded.stream)
+            })
+        {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::CommandSubstitution)),
+            );
+        }
         if autonomy_receipt.is_some_and(|receipt| {
             loaded.autonomy_state != VerifiedAutonomyReceiptState::RequiredComplete(receipt.clone())
         }) {
@@ -2334,6 +3354,13 @@ fn run_execute_attempt(
             .commit()
             .map(|()| execution)
             .map_err(|database| classify_commit_error(&database));
+    }
+
+    if retained_submission.is_some() || retained_ingress_claim.is_some() {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::CommandSubstitution)),
+        );
     }
 
     if let Some(writer_authority) = writer_authority
@@ -2438,19 +3465,49 @@ fn run_execute_attempt(
             return rollback_attempt(transaction, AttemptFailure::Terminal(finalize_error));
         }
     }
-    let ledger_values = match LedgerFinalizeValues::new(&plan, &store_receipt) {
-        Ok(values) => values,
-        Err(values_error) => {
-            return rollback_attempt(transaction, AttemptFailure::Terminal(values_error));
+    let ledger_status = if submission.is_some() {
+        let Some(finalize_sql) = sql_profile.general_ledger_finalize_sql() else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(
+                    PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+                )),
+            );
+        };
+        let ledger_values = match GeneralLedgerFinalizeValues::new(&plan, &store_receipt) {
+            Ok(values) => values,
+            Err(values_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(values_error));
+            }
+        };
+        let ledger_finalize_params = global_profile_params(
+            sql_profile,
+            &global_schema_version,
+            &global_manifest_sha256,
+            ledger_values.params(),
+        );
+        match transaction.query_one(finalize_sql, &ledger_finalize_params) {
+            Ok(row) => match row_value::<String>(&row, 0) {
+                Ok(status) => status,
+                Err(row_error) => {
+                    return rollback_attempt(transaction, AttemptFailure::Terminal(row_error));
+                }
+            },
+            Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
         }
-    };
-    let ledger_finalize_params = global_profile_params(
-        sql_profile,
-        &global_schema_version,
-        &global_manifest_sha256,
-        ledger_values.params(),
-    );
-    let ledger_status =
+    } else {
+        let ledger_values = match LedgerFinalizeValues::new(&plan, &store_receipt) {
+            Ok(values) => values,
+            Err(values_error) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(values_error));
+            }
+        };
+        let ledger_finalize_params = global_profile_params(
+            sql_profile,
+            &global_schema_version,
+            &global_manifest_sha256,
+            ledger_values.params(),
+        );
         match transaction.query_one(sql_profile.ledger_finalize_sql(), &ledger_finalize_params) {
             Ok(row) => match row_value::<String>(&row, 0) {
                 Ok(status) => status,
@@ -2459,7 +3516,8 @@ fn run_execute_attempt(
                 }
             },
             Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
-        };
+        }
+    };
     if ledger_status != "FINALIZED" {
         return rollback_attempt(
             transaction,
@@ -2567,6 +3625,28 @@ fn run_execute_attempt(
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
         );
     }
+    if let Some(claim) = ingress_claim {
+        let Some(event) = plan.new_event() else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+            );
+        };
+        if let Err(record_error) = record_task_ingress_claim(&mut transaction, claim, event) {
+            return rollback_attempt(transaction, record_error);
+        }
+    }
+    if let Some(submission) = submission {
+        let Some(event) = plan.new_event() else {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+            );
+        };
+        if let Err(record_error) = record_task_submission(&mut transaction, submission, event) {
+            return rollback_attempt(transaction, AttemptFailure::Terminal(record_error));
+        }
+    }
     let reloaded = match load_verified_stream(
         &mut transaction,
         loaded.stream.identity(),
@@ -2616,6 +3696,23 @@ fn run_execute_attempt(
                     .is_some_and(|records| records.iter().any(|retained| retained == record))
             })
         })
+        || ingress_claim.is_some_and(|expected| {
+            load_task_ingress_claim_by_request(&mut transaction, expected)
+                .ok()
+                .flatten()
+                .is_none_or(|retained| {
+                    !ingress_claim_matches_loaded_stream(&retained, &reloaded.stream)
+                })
+        })
+        || submission.is_some_and(|expected| {
+            load_task_submission_by_ref(&mut transaction, expected.task_ref())
+                .ok()
+                .flatten()
+                .is_none_or(|retained| {
+                    retained.submission != *expected
+                        || !submission_matches_loaded_stream(&retained, &reloaded.stream)
+                })
+        })
     {
         return rollback_attempt(
             transaction,
@@ -2663,7 +3760,9 @@ fn writer_authority_matches_identity(
         && lease.project_snapshot_id() == identity.project_snapshot_id()
         && lease.task_id() == identity.task_id()
         && lease.task_revision() == identity.task_revision()
-        && lease.task_spec_digest() == identity.task_spec_digest()
+        && identity
+            .task_spec_digest()
+            .is_some_and(|digest| lease.task_spec_digest() == digest)
 }
 
 fn assert_writer_authority(
@@ -3441,6 +4540,256 @@ fn signed_i64(value: u64) -> PostgresTaskLedgerResult<i64> {
     i64::try_from(value).map_err(|_| error(PostgresTaskLedgerErrorKind::RevisionOverflow))
 }
 
+struct GeneralLedgerFinalizeValues {
+    stream_id: Vec<u8>,
+    project_id: String,
+    project_snapshot_id: String,
+    task_id: String,
+    task_revision: String,
+    task_subject_kind: String,
+    task_subject_digest: Vec<u8>,
+    next_sequence: String,
+    next_last_event_digest: Vec<u8>,
+    next_resource_revision: String,
+    next_resource_projection_digest: Vec<u8>,
+    next_head_digest: Vec<u8>,
+    next_active_agents: String,
+    next_active_implementers: String,
+    next_elapsed_seconds: String,
+    next_attempt_number: String,
+    next_used_model_calls: String,
+    next_used_external_cost: String,
+    next_event_count: String,
+    next_command_count: String,
+    next_outbox_count: String,
+    base_checkpoint_digest: Vec<u8>,
+    next_checkpoint_digest: Vec<u8>,
+    command_id: String,
+    request_digest: Vec<u8>,
+    expected_sequence: String,
+    expected_last_event_digest: Vec<u8>,
+    expected_resource_revision: String,
+    expected_resource_projection_digest: Vec<u8>,
+    expected_head_digest: Vec<u8>,
+    correlation_id: String,
+    occurred_at: String,
+    actor_id: String,
+    event_subject_digest: Vec<u8>,
+    before_sequence: String,
+    before_last_event_digest: Vec<u8>,
+    before_resource_revision: String,
+    before_resource_projection_digest: Vec<u8>,
+    before_head_digest: Vec<u8>,
+    after_sequence: String,
+    after_last_event_digest: Vec<u8>,
+    after_resource_revision: String,
+    after_resource_projection_digest: Vec<u8>,
+    after_head_digest: Vec<u8>,
+    event_digest: Vec<u8>,
+    receipt_digest: Vec<u8>,
+    record_set_digest: Vec<u8>,
+    store_transaction_id: String,
+    event_sequence: String,
+    previous_event_digest: Vec<u8>,
+    event_resource_revision: String,
+    event_resource_projection_digest: Vec<u8>,
+}
+
+impl GeneralLedgerFinalizeValues {
+    #[allow(clippy::too_many_lines)]
+    fn new(
+        plan: &LedgerAppendPlan,
+        store_receipt: &StoreTransactionReceipt,
+    ) -> PostgresTaskLedgerResult<Self> {
+        if plan.is_exact_retry() || plan.new_outbox().is_some() {
+            return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+        let command = plan
+            .new_command()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::Malformed))?
+            .to_untrusted();
+        let event = plan
+            .new_event()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::Malformed))?
+            .to_untrusted();
+        let next = plan.next_state();
+        let identity = next.identity();
+        let head = next.head();
+        let counters = next.counters();
+        let intake_digest = identity
+            .general_task_intake_digest()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::Malformed))?;
+
+        if identity.subject_kind() != TaskLedgerSubjectKind::GeneralTaskIntake
+            || identity.task_spec_digest().is_some()
+            || identity.accounting_currency().is_some()
+            || next.events().len() != 1
+            || next.commands().len() != 1
+            || !next.outboxes().is_empty()
+            || head.sequence() != 1
+            || head.resource_revision() != 0
+            || counters.active_agents() != 0
+            || counters.active_implementers() != 0
+            || counters.elapsed_seconds() != 0
+            || counters.attempt_number() != 0
+            || counters.used_model_calls() != 0
+            || counters.used_external_cost() != "0"
+            || command.request.kind != LedgerEventKind::TaskCreated.as_str()
+            || command.request.action != TaskCreatedProfile::GeneralTaskIntakeV1.action()
+            || command.request.outcome != "RECORDED"
+            || command.request.reason_code != "GENERAL_TASK_INTAKE_RECORDED"
+            || command.request.diagnostic.is_some()
+            || command.request.resource_snapshot.is_some()
+            || command.receipt.outcome != "APPENDED"
+            || command.receipt.denial_reason.is_some()
+            || command.receipt.event_digest.as_ref() != Some(&event.event_digest)
+            || event.kind != LedgerEventKind::TaskCreated.as_str()
+            || event.action != TaskCreatedProfile::GeneralTaskIntakeV1.action()
+            || event.outcome != "RECORDED"
+            || event.reason_code != "GENERAL_TASK_INTAKE_RECORDED"
+            || event.diagnostic.is_some()
+            || event.resource_snapshot.is_some()
+            || event.sequence != 1
+            || event.resource_revision != 0
+            || event.subject_digest != command.request.subject_digest
+            || event.command_id != command.command_id
+            || event.request_digest != command.receipt.request_digest
+            || &event.stream_identity != identity
+            || event.stream_id != *head.stream_id()
+            || command.request.expected_head.identity() != identity
+            || command.request.expected_head.stream_id() != head.stream_id()
+            || command.receipt.before != command.request.expected_head
+            || command.receipt.after != *head
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::Malformed));
+        }
+
+        Ok(Self {
+            stream_id: digest_bytes(head.stream_id())?,
+            project_id: identity.project_id().as_str().to_owned(),
+            project_snapshot_id: identity.project_snapshot_id().as_str().to_owned(),
+            task_id: identity.task_id().as_str().to_owned(),
+            task_revision: identity.task_revision().to_owned(),
+            task_subject_kind: identity.subject_kind().as_str().to_owned(),
+            task_subject_digest: digest_bytes(intake_digest)?,
+            next_sequence: head.sequence().to_string(),
+            next_last_event_digest: digest_bytes(head.last_event_digest())?,
+            next_resource_revision: head.resource_revision().to_string(),
+            next_resource_projection_digest: digest_bytes(head.resource_projection_digest())?,
+            next_head_digest: digest_bytes(head.head_digest())?,
+            next_active_agents: counters.active_agents().to_string(),
+            next_active_implementers: counters.active_implementers().to_string(),
+            next_elapsed_seconds: counters.elapsed_seconds().to_string(),
+            next_attempt_number: counters.attempt_number().to_string(),
+            next_used_model_calls: counters.used_model_calls().to_string(),
+            next_used_external_cost: counters.used_external_cost().to_owned(),
+            next_event_count: next.events().len().to_string(),
+            next_command_count: next.commands().len().to_string(),
+            next_outbox_count: next.outboxes().len().to_string(),
+            base_checkpoint_digest: digest_bytes(plan.base_checkpoint().checkpoint_digest())?,
+            next_checkpoint_digest: digest_bytes(plan.next_checkpoint().checkpoint_digest())?,
+            command_id: command.command_id,
+            request_digest: digest_bytes(&command.receipt.request_digest)?,
+            expected_sequence: command.request.expected_head.sequence().to_string(),
+            expected_last_event_digest: digest_bytes(
+                command.request.expected_head.last_event_digest(),
+            )?,
+            expected_resource_revision: command
+                .request
+                .expected_head
+                .resource_revision()
+                .to_string(),
+            expected_resource_projection_digest: digest_bytes(
+                command.request.expected_head.resource_projection_digest(),
+            )?,
+            expected_head_digest: digest_bytes(command.request.expected_head.head_digest())?,
+            correlation_id: command.request.correlation_id,
+            occurred_at: command.request.occurred_at,
+            actor_id: command.request.actor_id,
+            event_subject_digest: digest_bytes(&command.request.subject_digest)?,
+            before_sequence: command.receipt.before.sequence().to_string(),
+            before_last_event_digest: digest_bytes(command.receipt.before.last_event_digest())?,
+            before_resource_revision: command.receipt.before.resource_revision().to_string(),
+            before_resource_projection_digest: digest_bytes(
+                command.receipt.before.resource_projection_digest(),
+            )?,
+            before_head_digest: digest_bytes(command.receipt.before.head_digest())?,
+            after_sequence: command.receipt.after.sequence().to_string(),
+            after_last_event_digest: digest_bytes(command.receipt.after.last_event_digest())?,
+            after_resource_revision: command.receipt.after.resource_revision().to_string(),
+            after_resource_projection_digest: digest_bytes(
+                command.receipt.after.resource_projection_digest(),
+            )?,
+            after_head_digest: digest_bytes(command.receipt.after.head_digest())?,
+            event_digest: digest_bytes(&event.event_digest)?,
+            receipt_digest: digest_bytes(&command.receipt.receipt_digest)?,
+            record_set_digest: digest_bytes(plan.record_set_digest())?,
+            store_transaction_id: store_receipt.request().transaction_id().as_str().to_owned(),
+            event_sequence: event.sequence.to_string(),
+            previous_event_digest: digest_bytes(&event.previous_event_digest)?,
+            event_resource_revision: event.resource_revision.to_string(),
+            event_resource_projection_digest: digest_bytes(&event.resource_projection_digest)?,
+        })
+    }
+
+    fn params(&self) -> [&(dyn ToSql + Sync); 52] {
+        [
+            &self.stream_id,
+            &self.project_id,
+            &self.project_snapshot_id,
+            &self.task_id,
+            &self.task_revision,
+            &self.task_subject_kind,
+            &self.task_subject_digest,
+            &self.next_sequence,
+            &self.next_last_event_digest,
+            &self.next_resource_revision,
+            &self.next_resource_projection_digest,
+            &self.next_head_digest,
+            &self.next_active_agents,
+            &self.next_active_implementers,
+            &self.next_elapsed_seconds,
+            &self.next_attempt_number,
+            &self.next_used_model_calls,
+            &self.next_used_external_cost,
+            &self.next_event_count,
+            &self.next_command_count,
+            &self.next_outbox_count,
+            &self.base_checkpoint_digest,
+            &self.next_checkpoint_digest,
+            &self.command_id,
+            &self.request_digest,
+            &self.expected_sequence,
+            &self.expected_last_event_digest,
+            &self.expected_resource_revision,
+            &self.expected_resource_projection_digest,
+            &self.expected_head_digest,
+            &self.correlation_id,
+            &self.occurred_at,
+            &self.actor_id,
+            &self.event_subject_digest,
+            &self.before_sequence,
+            &self.before_last_event_digest,
+            &self.before_resource_revision,
+            &self.before_resource_projection_digest,
+            &self.before_head_digest,
+            &self.after_sequence,
+            &self.after_last_event_digest,
+            &self.after_resource_revision,
+            &self.after_resource_projection_digest,
+            &self.after_head_digest,
+            &self.event_digest,
+            &self.receipt_digest,
+            &self.record_set_digest,
+            &self.store_transaction_id,
+            &self.event_sequence,
+            &self.previous_event_digest,
+            &self.event_resource_revision,
+            &self.event_resource_projection_digest,
+        ]
+    }
+}
+
 struct LedgerFinalizeValues {
     stream_id: Vec<u8>,
     project_id: String,
@@ -3585,14 +4934,20 @@ impl LedgerFinalizeValues {
             .map(|outbox| digest_bytes(&outbox.intent_digest))
             .transpose()?
             .unwrap_or_else(|| zero.clone());
+        let task_spec_digest = identity
+            .task_spec_digest()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        let accounting_currency = identity
+            .accounting_currency()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
         Ok(Self {
             stream_id: digest_bytes(head.stream_id())?,
             project_id: identity.project_id().as_str().to_owned(),
             project_snapshot_id: identity.project_snapshot_id().as_str().to_owned(),
             task_id: identity.task_id().as_str().to_owned(),
             task_revision: identity.task_revision().to_owned(),
-            task_spec_digest: digest_bytes(identity.task_spec_digest())?,
-            accounting_currency: identity.accounting_currency().to_owned(),
+            task_spec_digest: digest_bytes(task_spec_digest)?,
+            accounting_currency: accounting_currency.to_owned(),
             next_sequence: head.sequence().to_string(),
             next_last_event_digest: digest_bytes(head.last_event_digest())?,
             next_resource_revision: head.resource_revision().to_string(),
@@ -3875,7 +5230,11 @@ fn json_to_canonical(value: &JsonValue) -> PostgresTaskLedgerResult<CanonicalVal
 
 fn retryable_sqlstate(code: &str, constraint: Option<&str>) -> bool {
     matches!(code, "40001" | "40P01")
-        || (code == "23505" && constraint == Some("task_ledger_streams_pkey"))
+        || (code == "23505"
+            && matches!(
+                constraint,
+                Some("task_ledger_streams_pkey" | "task_ingress_claims_pkey")
+            ))
 }
 
 fn map_ledger_error(value: &LedgerError) -> PostgresTaskLedgerError {
@@ -3976,6 +5335,80 @@ mod tests {
                 map_setup_error(crate::PostgresStoreSetupError::new(kind)).kind(),
                 PostgresTaskLedgerErrorKind::RetainedRowCorrupt
             );
+        }
+    }
+
+    #[test]
+    fn neutral_ingress_claim_action_closure_preserves_historical_canary_only() {
+        for action in [
+            "CONTROLLED_CODEX_CANARY",
+            "CONTROLLED_CODEX_CANARY_AUTONOMY_V1",
+        ] {
+            assert!(ingress_claim_event_action_matches(
+                TaskIngressRequestKind::ControlledCodexCanary,
+                Some(action)
+            ));
+            assert!(!ingress_claim_event_action_matches(
+                TaskIngressRequestKind::GeneralTask,
+                Some(action)
+            ));
+        }
+        assert!(ingress_claim_event_action_matches(
+            TaskIngressRequestKind::GeneralTask,
+            Some("GENERAL_TASK_INTAKE_V1")
+        ));
+        for action in [
+            "CONTROLLED_CODEX_CANARY_V2",
+            "GENERAL_TASK_INTAKE_V2",
+            "TASK_CREATED",
+        ] {
+            assert!(!ingress_claim_event_action_matches(
+                TaskIngressRequestKind::ControlledCodexCanary,
+                Some(action)
+            ));
+            assert!(!ingress_claim_event_action_matches(
+                TaskIngressRequestKind::GeneralTask,
+                Some(action)
+            ));
+        }
+    }
+
+    #[test]
+    fn neutral_ingress_claim_requires_exact_command_client_binding() {
+        let canary = TaskIngressClaim::controlled_canary(
+            "lattice_task_submit.v1",
+            "request-1",
+            fixed_digest('1'),
+        )
+        .expect("canary claim");
+        assert!(ingress_claim_command_matches(
+            &canary,
+            "mcp-submit:request-1"
+        ));
+        for command_id in [
+            "request-1",
+            "mcp-submit:request-2",
+            "MCP-SUBMIT:request-1",
+            "mcp-submit:request-1:extra",
+        ] {
+            assert!(!ingress_claim_command_matches(&canary, command_id));
+        }
+    }
+
+    #[test]
+    fn submission_lookup_uses_the_shared_secret_free_client_request_contract() {
+        assert!(valid_submission_lookup_id("lattice_task_submit.v1"));
+        assert!(valid_task_ingress_client_request_id(
+            "general-task-request-1"
+        ));
+        for rejected in [
+            "secret:value",
+            "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "prefix-sk-do-not-use",
+            "AKIA1234567890ABCDEF",
+        ] {
+            assert!(valid_submission_lookup_id(rejected));
+            assert!(!valid_task_ingress_client_request_id(rejected));
         }
     }
 
@@ -4218,6 +5651,10 @@ mod tests {
             "23505",
             Some("task_ledger_streams_pkey")
         ));
+        assert!(retryable_sqlstate(
+            "23505",
+            Some("task_ingress_claims_pkey")
+        ));
         assert!(!retryable_sqlstate("23505", Some("other_unique")));
         assert!(!retryable_sqlstate("23505", Some("physical_heads_pkey")));
         assert!(!retryable_sqlstate(
@@ -4293,7 +5730,7 @@ mod tests {
     }
 
     #[test]
-    fn task_ledger_routes_only_verified_historical_v3_v5_and_foreman_v6_profiles() {
+    fn task_ledger_routes_only_verified_historical_and_submission_profiles() {
         assert_eq!(
             global_ledger_sql_profile(LEGACY_GLOBAL_LEDGER_SCHEMA_VERSION),
             Some(TaskLedgerSqlProfile::V3)
@@ -4306,7 +5743,14 @@ mod tests {
             global_ledger_sql_profile(FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION),
             Some(TaskLedgerSqlProfile::V6)
         );
+        assert_eq!(
+            global_ledger_sql_profile(SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION),
+            Some(TaskLedgerSqlProfile::V7)
+        );
         assert!(TaskLedgerSqlProfile::V6.supports_foreman());
+        assert!(TaskLedgerSqlProfile::V7.supports_foreman());
+        assert!(TaskLedgerSqlProfile::V7.supports_submission());
+        assert!(!TaskLedgerSqlProfile::V6.supports_submission());
         assert!(!TaskLedgerSqlProfile::V5.supports_foreman());
         for version in [0, 1, 2, 4, u16::MAX] {
             assert_eq!(global_ledger_sql_profile(version), None);

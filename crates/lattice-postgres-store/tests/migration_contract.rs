@@ -47,8 +47,8 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         .split_once("InstalledManifestState::ExactV5Prefix")
         .expect("exact v5 transition arm")
         .1
-        .split_once("InstalledManifestState::ExactV6Full")
-        .expect("exact v6 retry arm")
+        .split_once("InstalledManifestState::ExactV6Prefix")
+        .expect("exact v6 transition arm")
         .0;
     assert_eq!(
         v5_to_v6
@@ -59,7 +59,7 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
     );
     let v5_order = [
         "verify_v5_upgrade_source",
-        "apply_missing_entries(&mut transaction, 6)",
+        "apply_entries_until(&mut transaction, 6, 7)",
         "advance_compatibility_from_v5",
         "CALL writer_lease.writer_lease_rebind_v3()",
         "verify_runtime_foreman_schema_v6",
@@ -73,23 +73,23 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         v5_order.windows(2).all(|pair| pair[0] < pair[1]),
         "exact-v5 transition must retain v5 verification, 0007, v6 compatibility, fixed CALL, then catalog/ACL verification"
     );
-    let v6_retry = apply
-        .split_once("InstalledManifestState::ExactV6Full")
-        .expect("exact v6 retry arm")
+    let v6_to_v7 = apply
+        .split_once("InstalledManifestState::ExactV6Prefix")
+        .expect("exact v6 transition arm")
         .1
-        .split_once("};\n\n    preflight_connection")
-        .expect("migration match boundary")
+        .split_once("InstalledManifestState::ExactV7Full")
+        .expect("exact v7 retry arm")
         .0;
     assert_eq!(
-        v6_retry
-            .matches("CALL writer_lease.writer_lease_rebind_v3()")
+        v6_to_v7
+            .matches("CALL writer_lease.writer_lease_rebind_v4()")
             .count(),
         1,
-        "exact-v6 retry must call the same idempotent Writer procedure"
+        "exact-v6 transition must call the append-only Writer-v4 procedure"
     );
-    let rebind_sql = include_str!("../../../db/extensions/writer-lease/v3-rebind.sql");
+    let rebind_sql = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
     for required in [
-        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v3()",
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v4()",
         "SECURITY INVOKER",
         "SET search_path = pg_catalog",
         "SET row_security = on",
@@ -135,7 +135,7 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         "Writer-owned lock block must order identity, ledger, heads, commands, transitions"
     );
     assert!(!rebind_sql.contains(
-        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
+        "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v4() TO lattice_runtime"
     ));
 
     let store_live = include_str!("postgres_live.rs");
@@ -155,7 +155,8 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         "TASK094_STAGE_WRITER_V2_PASS",
         "TASK094_STAGE_WRITER_V3_BRIDGE_PASS",
         "TASK094_STAGE_REBIND_FAILURE_ATOMICITY_PASS",
-        "TASK094_STAGE_STORE_V6_PASS",
+        "TASK094_STAGE_WRITER_V4_BRIDGE_PASS",
+        "TASK094_STAGE_STORE_V7_PASS",
         "SqlState::OBJECT_NOT_IN_PREREQUISITE_STATE",
         "assert_drift_failure_preserves_state",
         "assert_ledger_drift_preserves_state",
@@ -403,14 +404,14 @@ fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
 #[test]
 fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
     let manifest = migration_manifest();
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
-    assert_eq!(manifest.len(), 7);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
+    assert_eq!(manifest.len(), 8);
     assert_eq!(
         verify_embedded_manifest()
-            .expect("exact schema-v6 manifest")
+            .expect("exact schema-v7 manifest")
             .manifest_sha256()
             .as_str(),
-        "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae"
+        "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c"
     );
 
     let registry = &manifest[4];
@@ -442,6 +443,44 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .iter()
             .all(|entry| entry.path() != "db/migrations/0005_task_autonomy_receipt.sql")
     );
+}
+
+#[test]
+fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
+    let manifest = migration_manifest();
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
+    assert_eq!(manifest.len(), 8);
+    let intake = &manifest[7];
+    assert_eq!(intake.ordinal(), 8);
+    assert_eq!(intake.id(), "0008_task_submission_envelope");
+    assert_eq!(
+        intake.path(),
+        "db/migrations/0008_task_submission_envelope.sql"
+    );
+    assert_eq!(intake.schema_version(), 7);
+    assert_eq!(intake.reader_compatibility(), 7..=7);
+    assert_eq!(intake.writer_compatibility(), 7..=7);
+
+    let sql = std::str::from_utf8(intake.bytes()).expect("canonical UTF-8 migration");
+    for required in [
+        "CREATE TABLE control.task_submission_envelopes",
+        "PRIMARY KEY (ingress_id, client_request_id)",
+        "UNIQUE (task_ref)",
+        "REFERENCES control.task_ledger_events (stream_id, sequence)",
+        "control.task_submission_prepare_v1",
+        "control.task_submission_record_v1",
+        "control.task_submission_read_by_task_ref_v1",
+        "control.task_submission_read_by_request_v1",
+        "pg_catalog.pg_advisory_xact_lock",
+        "GENERAL_TASK_INTAKE_V1",
+        "xmin = pg_catalog.pg_current_xact_id()::xid",
+    ] {
+        assert!(
+            sql.contains(required),
+            "missing schema-v7 intake boundary: {required}"
+        );
+    }
+    assert!(!sql.contains("GRANT SELECT ON TABLE control.task_submission_envelopes"));
 }
 
 #[test]
@@ -617,6 +656,7 @@ fn migration_runner_classifies_future_history_atomically_after_serial_lock_befor
         "seed_database_identity",
         "advance_compatibility_from_v1",
         "CALL writer_lease.writer_lease_rebind_v3()",
+        "CALL writer_lease.writer_lease_rebind_v4()",
     ] {
         assert!(
             classify < apply.find(mutation).expect("migration mutation boundary"),
@@ -1178,7 +1218,7 @@ fn schema_v5_catalog_measurement_has_closed_forbidden_object_diagnostics() {
 #[allow(clippy::too_many_lines)]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 7);
+    assert_eq!(manifest.len(), 8);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -1293,12 +1333,28 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         foreman.sha256(),
         "33a4e1c3ab8f29f763123ffe46c2929025a7a7256614f5c92011a1140c8300ad"
     );
-    assert_eq!(foreman.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(foreman.schema_version(), 6);
     assert_eq!(foreman.reader_compatibility(), 6..=6);
     assert_eq!(foreman.writer_compatibility(), 6..=6);
 
-    assert_eq!(evidence.entry_count(), 7);
-    assert_eq!(evidence.executable_count(), 6);
+    let submission = &manifest[7];
+    assert_eq!(submission.ordinal(), 8);
+    assert_eq!(submission.id(), "0008_task_submission_envelope");
+    assert_eq!(
+        submission.path(),
+        "db/migrations/0008_task_submission_envelope.sql"
+    );
+    assert_eq!(submission.byte_length(), 298_666);
+    assert_eq!(
+        submission.sha256(),
+        "35be9a1f34fd8209cbf7466b39811f0fad91d9049dd72336af9bcf422d68d067"
+    );
+    assert_eq!(submission.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(submission.reader_compatibility(), 7..=7);
+    assert_eq!(submission.writer_compatibility(), 7..=7);
+
+    assert_eq!(evidence.entry_count(), 8);
+    assert_eq!(evidence.executable_count(), 7);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
@@ -1309,14 +1365,15 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     );
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
-        task_ledger.matches("executable_count: 6").count(),
+        task_ledger
+            .matches("executable_count: 8 - prefix_len")
+            .count(),
         1,
-        "only the exact-prefix Ledger fixture may derive its executable count from six entries"
+        "only the exact-prefix Ledger fixture may derive its executable count from all eight entries"
     );
-    assert!(task_ledger.contains("executable_count: 6 - prefix_len"));
     assert!(
         task_ledger.contains("executable_count: 5"),
-        "historical schema-v5 fixture evidence remains explicit"
+        "fresh consolidated schema-v7 fixture evidence remains explicit"
     );
 }
 
@@ -1443,6 +1500,39 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         "runtime Writer surface must be exact"
     );
     assert!(!verifier.contains("WriterLeaseV3Profile::Bridge"));
+}
+
+#[test]
+fn schema_v7_runtime_admission_requires_writer_v4_current_and_closed_acl() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("fn verify_runtime_submission_schema_v7")
+        .expect("schema-v7 runtime verifier")
+        .1
+        .split_once("fn preflight_connection")
+        .expect("verifier boundary")
+        .0;
+    for required in [
+        "verify_writer_lease_v4_functions(client, true)",
+        "!= 15",
+        "!= 7",
+    ] {
+        assert!(
+            verifier.contains(required),
+            "missing exact Writer-v4 schema-v7 proof: {required}"
+        );
+    }
+    for required in [
+        "writer_lease_bind_runtime_v4",
+        "writer_lease_load_for_update_v4",
+        "WRITER_LEASE_V4_REBIND_SQL",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing Writer-v4 verifier asset: {required}"
+        );
+    }
+    assert!(!verifier.contains("verify_writer_lease_v3_functions(client, true)"));
 }
 
 #[test]
@@ -1948,7 +2038,7 @@ fn live_store_migration_is_fixed_function_gated_and_transaction_control_free() {
 }
 
 #[test]
-fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
+fn runner_has_closed_fresh_and_exact_prefix_states_through_v7() {
     let source = include_str!("../src/postgres_setup.rs");
     for required in [
         "enum InstalledManifestState",
@@ -1958,7 +2048,8 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
         "ExactV3Prefix",
         "ExactV4Prefix",
         "ExactV5Prefix",
-        "ExactV6Full",
+        "ExactV6Prefix",
+        "ExactV7Full",
         "classify_installed_manifest_state",
         "verify_v1_upgrade_source",
         "verify_v2_upgrade_source",
@@ -1971,6 +2062,7 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v6() {
         "advance_compatibility_from_v3",
         "advance_compatibility_from_v4",
         "advance_compatibility_from_v5",
+        "advance_compatibility_from_v6",
         "LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE",
@@ -1996,12 +2088,12 @@ fn task094_store_calls_only_the_fixed_writer_owned_rebind_boundary() {
         .split_once("InstalledManifestState::ExactV5Prefix")
         .expect("exact v5 transition arm")
         .1
-        .split_once("InstalledManifestState::ExactV6Full")
-        .expect("exact v6 no-op arm")
+        .split_once("InstalledManifestState::ExactV6Prefix")
+        .expect("exact v6 transition arm")
         .0;
     for required in [
         "verify_v5_upgrade_source",
-        "apply_missing_entries(&mut transaction, 6)",
+        "apply_entries_until(&mut transaction, 6, 7)",
         "advance_compatibility_from_v5",
         "CALL writer_lease.writer_lease_rebind_v3()",
         "verify_runtime_foreman_schema_v6",
@@ -2176,7 +2268,7 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
 fn driver_and_schema_support_are_exact_for_this_foundation() {
     assert_eq!(POSTGRES_DRIVER_VERSION, "0.19.14");
     assert_eq!(SUPPORTED_POSTGRES_MAJOR, 17);
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 6);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
 }
 
 #[test]
@@ -2190,7 +2282,11 @@ fn review_regression_verifier_uses_one_exact_catalog_snapshot_and_fixed_tables()
     assert!(source.contains("pg_inherits"));
     assert!(source.contains("c.relhassubclass"));
     assert!(source.contains("c.relispartition"));
-    assert!(!source.contains("AND NOT a.attisdropped"));
+    assert_eq!(
+        source.matches("AND NOT a.attisdropped").count(),
+        1,
+        "only the schema-v7 subject-column closure may filter dropped columns"
+    );
     assert!(source.contains("COALESCE(array_to_string(p.proconfig, ','), '<NULL>')"));
     assert!(
         source.contains(

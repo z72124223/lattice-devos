@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-003
 status: ready
-version: 5
+version: 6
 modules:
   - module_id: latticed
     constitution_version: 1.4
@@ -26,6 +26,17 @@ modules:
 ---
 
 # ChatGPT MCP Gateway
+
+> Phase 3 amendment (2026-08-26): this specification remains the detailed
+> contract for the compatible `CONTROLLED_CODEX_CANARY` execution lane. Its
+> canary-only statements at lines/sections below do not prohibit the separate
+> create-only general-task intake now authorized by the Phase 3 amendment to
+> [ADR-023](../adr/ADR-023-bounded-mcp-task-dispatch-and-postgres-writer-lease.md)
+> and the current `latticed`, Orchestrator, Task Ledger, Contracts, Ports, and
+> Postgres Store module constitutions. General intake accepts bounded natural
+> language plus a registered-project selector, creates only a durable `DRAFT`
+> task, and grants no Task Spec, agent, model, approval, Writer Lease, payment,
+> external-action, merge, deployment, or release authority.
 
 ## Problem
 
@@ -70,7 +81,8 @@ receipt returns a bounded reconciliation blocker. The operation does not run
 Codex, append or alter durable evidence, change Git, start optional Runtime
 components, or turn uncertain evidence into success.
 
-`lattice_task_submit` has this closed semantic input:
+The controlled-canary variant of `lattice_task_submit` has this closed semantic
+input:
 
 ```json
 {
@@ -79,7 +91,7 @@ components, or turn uncertain evidence into success.
 }
 ```
 
-Only the exact intent is valid. `client_request_id` uses the existing bounded
+Only the exact intent is valid in the canary variant. `client_request_id` uses the shared bounded
 safe identifier alphabet and the public 64-byte MCP limit. Both fields are required and
 `additionalProperties` is false.
 
@@ -150,10 +162,12 @@ Task lifecycle, exact idempotency, fixed actor/profile audit, Writer Lease
 state/fencing, outcomes, and status are durable
 PostgreSQL facts. Process memory and the MCP/tunnel session are not truth.
 
-The first profile contains exactly one server-owned
+The controlled execution profile contains exactly one server-owned
 `CONTROLLED_CODEX_CANARY` task subject. Exact retry returns the same accepted
 task/receipt. A different key after that subject is admitted is denied and
-does not invoke Codex. Broader task multiplicity and quotas are out of scope.
+does not invoke Codex. Broader *executable canary* multiplicity and quotas are
+out of scope; the separately typed Phase 3 general intake may create multiple
+pre-specification `DRAFT` tasks without starting Codex.
 
 Task Status opens the configured PostgreSQL-backed owners, verifies replay
 against independent current heads/checkpoints, and returns an allowlisted
@@ -192,8 +206,10 @@ projection without rerunning external effects.
 
 ## Non-Goals
 
-- Free-form task/prompt submission, arbitrary repositories, paths, commands,
-  SQL, verification, Git operations, provider settings, or credentials.
+- Treating free-form task data as an executable prompt, or accepting arbitrary
+  repositories, paths, commands, SQL, verification, Git operations, provider
+  settings, or credentials. Phase 3 general intake stores bounded objective
+  data only against a uniquely resolved registered project.
 - GPT acquiring a lease/fence, selecting a writer thread, controlling Codex,
   approving/rejecting/stopping tasks, or invoking protected release.
 - A second MCP server, HTTP listener, gateway service, orchestrator, queue,

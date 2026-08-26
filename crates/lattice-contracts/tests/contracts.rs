@@ -32,15 +32,77 @@ use lattice_contracts::{
     PROJECT_AUTHORITY_PRODUCER_VERSION, ProjectAuthorityReceipt, ProjectClass, ProjectId,
     ProjectLifecycle, ProjectSnapshotId, ProtectedChangeClass, ProtectedChangeSubject,
     ProtectedReleaseSubject, ReleaseSubject, RequestId, ResourceCounters, ResourceRequest,
-    RuntimeAdmissionMode, RuntimeKind, SubjectBinding, TASK_LEDGER_PRODUCER_ID,
-    TASK_LEDGER_PRODUCER_VERSION, TaskId, TaskLedgerResourceReceipt, TaskLedgerStreamHead,
-    TaskLedgerStreamIdentity, TaskSpecSubmission, UpgradeDelta, WRITER_LEASE_PRODUCER_ID,
+    RuntimeAdmissionMode, RuntimeKind, SubjectBinding, TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES,
+    TASK_LEDGER_PRODUCER_ID, TASK_LEDGER_PRODUCER_VERSION, TaskId, TaskIntakeBinding,
+    TaskLedgerResourceReceipt, TaskLedgerStreamHead, TaskLedgerStreamIdentity,
+    TaskLedgerSubjectKind, TaskSpecSubmission, UpgradeDelta, WRITER_LEASE_PRODUCER_ID,
     WRITER_LEASE_PRODUCER_VERSION, WriterLeaseAuthorityReceipt, WriterLeaseIdentity,
-    WriterLeaseRevision, WriterLeaseStatus,
+    WriterLeaseRevision, WriterLeaseStatus, task_ingress_text_contains_recognized_secret,
+    valid_task_ingress_client_request_id,
 };
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid test digest")
+}
+
+#[test]
+#[allow(clippy::unicode_not_nfc)]
+fn task_ingress_client_request_id_contract_is_bounded_secret_free_ascii() {
+    assert!(valid_task_ingress_client_request_id("a"));
+    assert!(valid_task_ingress_client_request_id(
+        &"a".repeat(TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES)
+    ));
+    assert!(valid_task_ingress_client_request_id("phase3.retry_1:x-y"));
+    assert!(valid_task_ingress_client_request_id("mask-based-request"));
+
+    for rejected in [
+        "",
+        " contains-spaces ",
+        "contains/slash",
+        "contains-unicode-任務",
+        "sk-do-not-use",
+        "prefix-sk-do-not-use",
+        "xghp_do-not-use",
+        "token:do-not-use",
+        "authorization:do-not-use",
+        "AKIA1234567890ABCDEF",
+    ] {
+        assert!(
+            !valid_task_ingress_client_request_id(rejected),
+            "must reject {rejected:?}"
+        );
+    }
+    assert!(!valid_task_ingress_client_request_id(
+        &"a".repeat(TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES + 1)
+    ));
+
+    for rejected in [
+        "bearer do-not-use",
+        "-----BEGIN PRIVATE KEY-----do-not-use",
+        r#"{"password":"do-not-use"}"#,
+        "password\u{2003}=do-not-use",
+        "api_key\u{a0}:do-not-use",
+        "Kpassword=do-not-use",
+        "Ksk-do-not-use",
+        "private key----- marker before -----begin marker",
+        "embedded-ghp_do-not-use",
+        "use AKIAIOSFODNN7EXAMPLE here",
+    ] {
+        assert!(
+            task_ingress_text_contains_recognized_secret(rejected),
+            "must recognize {rejected:?}"
+        );
+    }
+    for benign in [
+        "finish mask-based validation",
+        "tokenize input",
+        "monkey:value",
+    ] {
+        assert!(
+            !task_ingress_text_contains_recognized_secret(benign),
+            "must preserve benign {benign:?}"
+        );
+    }
 }
 
 fn approval_binding() -> SubjectBinding {
@@ -934,6 +996,102 @@ fn ledger_identity() -> TaskLedgerStreamIdentity {
         "TWD",
     )
     .expect("valid Ledger identity")
+}
+
+#[test]
+fn task_ledger_identity_keeps_task_spec_compatibility_and_separates_general_intake() {
+    let task_spec = ledger_identity();
+    assert_eq!(task_spec.subject_kind(), TaskLedgerSubjectKind::TaskSpec);
+    assert_eq!(task_spec.subject_digest(), &digest('2'));
+    assert_eq!(task_spec.task_spec_digest(), Some(&digest('2')));
+    assert_eq!(task_spec.general_task_intake_digest(), None);
+    assert_eq!(task_spec.accounting_currency(), Some("TWD"));
+
+    let intake = TaskLedgerStreamIdentity::new_general_task_intake(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+        TaskId::new("TASK-INTAKE-1").expect("task"),
+        "1",
+        digest('8'),
+    )
+    .expect("general intake identity");
+    assert_eq!(
+        intake.subject_kind(),
+        TaskLedgerSubjectKind::GeneralTaskIntake
+    );
+    assert_eq!(intake.subject_digest(), &digest('8'));
+    assert_eq!(intake.task_spec_digest(), None);
+    assert_eq!(intake.general_task_intake_digest(), Some(&digest('8')));
+    assert_eq!(intake.accounting_currency(), None);
+
+    let binding =
+        TaskIntakeBinding::try_from_stream_identity(&intake).expect("typed intake binding");
+    assert_eq!(binding.stream_identity(), &intake);
+    assert_eq!(binding.project_id(), intake.project_id());
+    assert_eq!(binding.project_snapshot_id(), intake.project_snapshot_id());
+    assert_eq!(binding.task_id(), intake.task_id());
+    assert_eq!(binding.task_revision(), intake.task_revision());
+    assert_eq!(binding.intake_digest(), &digest('8'));
+    assert!(TaskIntakeBinding::try_from_stream_identity(&task_spec).is_err());
+}
+
+#[test]
+fn general_intake_identity_rejects_zero_digest_without_gaining_task_spec_fields() {
+    let result = TaskLedgerStreamIdentity::new_general_task_intake(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+        TaskId::new("TASK-INTAKE-2").expect("task"),
+        "1",
+        digest('0'),
+    );
+    assert!(matches!(
+        result,
+        Err(ContractError::InvalidTaskIntakeBinding {
+            field: "intake_digest"
+        })
+    ));
+}
+
+#[test]
+fn general_intake_cannot_become_a_resource_accounting_receipt() {
+    let identity = TaskLedgerStreamIdentity::new_general_task_intake(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+        TaskId::new("TASK-INTAKE-3").expect("task"),
+        "1",
+        digest('8'),
+    )
+    .expect("intake identity");
+    let head = TaskLedgerStreamHead::new(
+        CONTRACT_VERSION,
+        TASK_LEDGER_PRODUCER_ID,
+        TASK_LEDGER_PRODUCER_VERSION,
+        RuntimeKind::Fake,
+        identity,
+        digest('1'),
+        1,
+        digest('3'),
+        1,
+        digest('4'),
+        digest('5'),
+    )
+    .expect("intake Ledger head");
+    let receipt = TaskLedgerResourceReceipt::new(
+        CONTRACT_VERSION,
+        TASK_LEDGER_PRODUCER_ID,
+        TASK_LEDGER_PRODUCER_VERSION,
+        RuntimeKind::Fake,
+        head,
+        1,
+        "effect-intake-forbidden",
+        digest('6'),
+        resource_counters(),
+        resource_request(),
+        "TWD",
+        digest('7'),
+        digest('9'),
+    );
+    assert_eq!(receipt, Err(ContractError::InvalidAccountingCurrency));
 }
 
 fn ledger_head(runtime: RuntimeKind, sequence: u64) -> TaskLedgerStreamHead {

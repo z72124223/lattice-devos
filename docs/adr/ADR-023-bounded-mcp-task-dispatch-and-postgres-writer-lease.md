@@ -1,8 +1,7 @@
 # ADR-023: Bounded MCP Task Dispatch And PostgreSQL Writer Lease
 
-- Status: accepted and implemented for TASK-038 Phase 2; canonical-local
-  PostgreSQL/Codex/Git acceptance passed, real Secure MCP Tunnel / ChatGPT
-  discovery and two-session invocation remain incomplete
+- Status: accepted for TASK-038 Phase 2 and amended for Phase 3 general task
+  intake; each implementation/acceptance claim remains evidence-dependent
 - Date: 2026-08-09
 - Decision owner: user
 - Related: SPEC-002 v34, SPEC-003 v5, ADR-005, ADR-006, ADR-012,
@@ -295,14 +294,161 @@ functions, including the fixed 15-scalar current-authority assertion, retain
 their signatures and semantics. No MCP, Task Spec, lease transition, fencing,
 credential, public-network, or provider/model contract changes.
 
+## Phase 3 General Task Intake Amendment
+
+This amendment is authorized on 2026-08-26 and supersedes only the Phase 2
+statements that made `CONTROLLED_CODEX_CANARY` the sole Task Submit intent and
+forbade every project selector or general objective. The canary contract and
+its governed writer workflow remain compatible. This amendment does not widen
+the execution, approval, payment, external-action, merge, deployment, or
+release authority of either MCP tool.
+
+### Registered-project resolution and authority boundary
+
+`lattice_task_submit` may now accept one bounded natural-language `objective`
+(with the general-task `intent` spelling retained as a compatibility alias),
+one bounded `client_request_id`, and at most one locator: an exact Control
+project ID or exact project display name. The caller never supplies a path,
+repository identity, Registry receipt, snapshot, Task Spec, command, process,
+credential, approval, lease, or execution setting.
+
+The Control Project Catalog is only `CONTROL_LOCAL_CATALOG` locator data. Its
+`registry_authority` remains `NONE`; a Control row, name, path, or UUID is not
+itself formal project authority. The composition root may use one uniquely
+matched, readable Control row only as a locator. It performs a bounded live
+filesystem/Git observation between two exact eligible Control catalog-projection
+reads, ignores unrelated Control status-field and legacy-row drift, and rejects
+eligible catalog drift before resolving or registering that physical identity through the
+existing PostgreSQL-backed Project Registry and reloads the formal record.
+Only an independently replay-verified, current `ACTIVE` Project Registry
+authority receipt and snapshot may be bound to the task. An absent, ambiguous,
+unreadable, drifted, suspended, or substituted project fails with a typed
+repairable error. Arbitrary or caller-selected unregistered paths are never
+accepted.
+
+When no selector is supplied, admission succeeds only if the eligible Control
+catalog yields exactly one project. Name matching is exact and must also be
+unique. LATTICE never guesses a project from conversational context, the
+current directory, the first catalog row, or a legacy row.
+
+### Durable create-only task
+
+Task Ledger owns the versioned `TaskSubmissionEnvelope`, its canonical digest,
+the public `task_ref`, and the create-only `GENERAL_TASK_INTAKE_V1`
+Task-created marker. The envelope binds the process-owned ingress,
+`client_request_id`, exact objective, retained project display name, formal
+Project Registry authority-receipt digest, and a complete
+`GENERAL_TASK_INTAKE` Task Ledger stream identity. That identity has a neutral
+intake digest and deliberately has no Task Spec digest or accounting currency.
+Postgres Store persists the shared ingress claim, envelope, and matching
+`TASK_CREATED` append in the same `SERIALIZABLE` transaction. The fixed record
+path also rechecks the exact current Project Registry row and authority receipt
+inside that transaction. None of these rows is a Control SQLite shadow record,
+second lifecycle table, or executable Task Spec.
+
+Schema v7 is reached only by the explicit PostgreSQL bootstrap. Existing Writer
+v3 SQL, rebind identity, checksum, and schema-v6 runtime profile remain
+immutable; the append-only Writer v4 successor stages `V6V4Bridge`, and Store's
+v6-to-v7 transaction may invoke only the fixed Writer-owned
+`writer_lease_rebind_v4()` to reach `V7V4Current`. Normal MCP startup and tool
+calls never migrate or rebind the database. Before backfilling the shared
+ingress namespace, migration fails closed if any historical canary command
+contains a now-recognized secret-shaped `client_request_id`; it neither copies
+that value into the new tables nor completes a partial v7 transition.
+
+Orchestrator exposes one pure create-only path over the separate
+`TaskIntakeLifecyclePort`. It admits the verified intake once, or returns its
+exact replay, leaving the formal task in `DRAFT`. The intake has no autonomy
+classification or receipt and cannot be passed to the Task-Spec lifecycle,
+Policy, approval, Writer Lease, delivery, or execution ports. This is not a
+Policy allow decision or bypass: no progression or external-effect operation
+exists on the intake port. Any later planning, specification, tickets,
+execution approval, agent start, mutation, integration, deployment, or release
+remains a separate governed operation with its normal gates.
+
+### Idempotency, validation, and status
+
+General-task idempotency is scoped by the server-owned ingress plus
+`client_request_id`. An exact retry with the same objective and formal project
+binding returns the already retained `task_ref`, including from a fresh
+process. Reusing the key with another objective or project is a typed command
+substitution failure and never creates another task. The retained envelope is
+loaded before attempting to infer a new project so a restart cannot silently
+retarget an exact retry. Canary and general submissions share this ingress-key
+namespace, so reusing one key across the two modes is also substitution rather
+than a second task.
+
+The Task Ledger claim, task stream, command, event, and general envelope are
+transactionally strict across concurrent processes: exactly one request kind
+can own a key and no losing request creates a second task. If identical callers
+collide while first registering or observing the formal project, the resolver
+performs at most one complete fresh Control/Git/Registry pass, pinned to the
+same initially selected project ID. It reuses an already identical active
+formal observation, but never reuses a stale physical observation or retargets
+a name/no-selector request to another project. If identical callers then
+resolved two snapshots of the same formal project, the admission loser
+fresh-loads the winning envelope and returns its `task_ref`. If the newer
+snapshot has become current but its caller has not committed the envelope yet,
+the stale caller may re-resolve that same effective project and retry admission
+once, then reload the winner once more. It never sleeps, polls, retries a
+different project, or replays a different objective. This phase does not
+add a request-wide cross-process serialization guard around the earlier
+Project Registry resolver. In the narrow race where a canary commits after a
+general request's final preflight but before its Task Ledger append, the losing
+general request may already have retained an independently valid live project
+observation before returning the typed idempotency conflict. That observation
+does not create or progress a task and grants no execution authority.
+Eliminating even this auxiliary resolver effect requires a separately reviewed
+scoped ingress guard and remains later hardening; preflight must not be
+described as globally race-atomic.
+
+Objective and project-name text must be non-empty, already NFC, trimmed, within
+their byte bounds, and free of NUL/control characters and recognized secret
+material. Client request IDs use the shared one-to-64-byte
+`[A-Za-z0-9][A-Za-z0-9._:-]*` contract; they, project IDs, and the retained
+formal project snapshot ID must also be free of the shared recognized secret
+shapes before persistence or public projection. The Task Ledger, Store, and
+public projection accept the Project Registry's closed maximum 159-byte
+snapshot form (64-byte project ID, `:registry:`, 20-digit revision, colon, and
+64-byte digest) and reject 160 bytes. The objective is retained only as task
+data. It is never parsed or
+executed as a shell command, SQL, filesystem path, permission, configuration,
+credential, provider instruction, or approval.
+
+General Task Submit and `lattice_task_status` return the closed
+`lattice.task.status.v3` projection. It includes only the durable `task_ref`,
+`SUBMITTED`/`DRAFT` disposition, Ledger-head digest, exact objective, Control
+project ID/display name, formal project snapshot ID, and nullable terminal
+result/failure fields. Status requires `task_ref`; the optional
+`client_request_id` exists only for legacy canary compatibility. A fresh
+process reconstructs v3 status from the verified PostgreSQL envelope and Task
+Ledger stream without repeating project registration, task creation, or any
+external effect. Existing canary results remain on their compatible v2
+projection.
+
+### Codex caller behavior
+
+Codex should call general Task Submit when the user asks LATTICE to create,
+record, track, or durably resume a project task and the project is already
+registered. Codex returns the resulting `task_ref` and `task_state` to the
+user. It must report the typed selector/registration error when no project is
+uniquely eligible, and must not turn a short objective into a specification,
+tickets, execution, agent dispatch, payment, external action, merge,
+deployment, or release unless a later request and its own authorization gates
+explicitly allow that operation.
+
 ## Acceptance Evidence Required
 
-- Exact four-tool discovery and closed-schema rejection matrices.
-- Same-key exact retry, different-key substitution denial, and fixed-profile
-  audit replay from PostgreSQL. Production Secure MCP Tunnel and local
-  canonical acceptance commitments are distinct and cannot substitute.
-- One spec digest across Gateway, Ledger, lease, Codex, verification/Git, and
-  status evidence.
+- Exact seven-tool discovery and closed-schema rejection matrices, including
+  the general objective/selector variants and retained canary variant.
+- Same-key exact retry, changed-objective/project/canary-mode substitution
+  denial, and general-intake envelope/Ledger replay from PostgreSQL. Production
+  Secure MCP Tunnel and local canonical acceptance commitments are distinct
+  and cannot substitute.
+- For the retained canary only, one spec digest across Gateway, Ledger, lease,
+  Codex, verification/Git, and status evidence. General intake instead proves
+  the distinct subject kind, neutral intake digest, and absence of Task Spec,
+  currency, autonomy, Writer Lease, and effect rows.
 - Concurrent acquire, monotonic non-reused fencing across restart, stale-fence
   rejection, heartbeat/release, and ambiguous-outcome reconciliation against
   PostgreSQL 17.
@@ -310,10 +456,17 @@ credential, public-network, or provider/model contract changes.
   fixed verification, commits once, and records a durable terminal result.
 - Fresh-process `lattice_task_status` equality with zero repeated external
   writer effects and zero Graphify/Hermes/Memory effects.
+- Fresh-process general Task Submit/Status proves the same `task_ref`, exact
+  objective, formal registered-project/snapshot binding, and `DRAFT` state
+  across restart. Submit performs only the documented bounded Control,
+  read-only Git-observation, Registry, and Task-Ledger effects; replay/Status
+  repeats none of them and no step starts Codex/model execution, a Writer
+  Lease, workspace/Git mutation, or downstream external action.
 - No Fake/synthetic authority in production evidence and no secret-bearing
   field in schemas, normal results, logs, or retained audit data.
-- No fake or caller-projected Project Registry fact; broader task admission
-  remains closed until durable Registry currentness and Policy composition
-  exist.
+- No fake or caller-projected Project Registry fact. Control remains a locator;
+  general intake requires durable Registry currentness, while any later task
+  progression still requires its separately governed Policy/approval/writer
+  composition.
 
 No item above is recorded as passed by this ADR.

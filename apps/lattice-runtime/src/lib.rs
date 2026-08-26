@@ -6,6 +6,7 @@ pub mod delivery_ledger;
 pub mod git_delivery;
 pub mod mcp;
 pub mod mcp_budget;
+pub(crate) mod project_bridge;
 pub mod task_control;
 
 use std::error::Error;

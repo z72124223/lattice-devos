@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 2.2
+version: 2.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -13,7 +13,8 @@ Define the abstract Rust traits through which orchestration reaches the gateway,
 sole product-code writer, read-only knowledge lane, untrusted research lane,
 typed physical control store, durable delivery ledger, bounded workspace/Git
 lane, fixed-test lane, authoritative Task lifecycle repository lane, and the
-narrow foreman snapshot append/replay boundary.
+narrow foreman snapshot append/replay boundary. It separately exposes a
+create/status-only general-task intake lane that cannot express execution.
 
 ## Non-Goals
 
@@ -32,6 +33,8 @@ narrow foreman snapshot append/replay boundary.
 - Bounded `TaskLifecycleError` and replay-derived `TaskLifecycleEvidence`
   transport values. Task Domain remains the semantic owner of `TaskState` and
   transition legality.
+- `TaskIntakeLifecyclePort`, its closed new/exact-replay admission, and its
+  structurally `DRAFT`/no-result evidence over `TaskIntakeBinding` only.
 - No runtime, durable, product, credential, or provider-session data.
 - The foreman port error boundary and typed append/load method shape only; it
   owns neither snapshot state nor persistence.
@@ -68,6 +71,10 @@ narrow foreman snapshot append/replay boundary.
   `HistoricalOptional(Option<receipt>)`, or `RequiredComplete(receipt)`. It exposes no
   SQL, database client, event fragment, arbitrary payload, cache, or alternate
   state mutation, and it does not decide transition or receipt legality.
+- `TaskIntakeLifecyclePort` admits or loads only one exact
+  `TaskIntakeBinding`. Its evidence is structurally fixed to `DRAFT` with no
+  result; the trait has no transition, result, autonomy, TaskKind, risk,
+  currency, approval, Writer Lease, workspace, model, or execution method.
 - `ForemanCoordinationPort` first replays an exact checkpoint intent from
   verified durable records, then appends one server-observed snapshot through
   a stable command and exact Writer authority only when no retry exists, or
@@ -153,6 +160,14 @@ narrow foreman snapshot append/replay boundary.
     dispatch, and Status must reject it. It is never normal Draft success or
     terminal Status. Historical optional evidence may contain `None`; no caller
     Boolean or independent `Option` selects the rule.
+23. General-task intake and Task-Spec lifecycle are distinct ports and binding
+    types. An intake adapter cannot receive `SubjectBinding` or return
+    `TaskLifecycleEvidence`.
+24. `TaskIntakeLifecycleEvidence` can represent only `DRAFT`, a non-zero Ledger
+    head commitment, and no result. It carries no autonomy or accounting field.
+25. The intake port exposes exactly `admit` and read-only `load`; no method can
+    transition, append a result/receipt, acquire writer authority, or invoke an
+    effect.
 
 ## Allowed Dependencies
 
@@ -203,6 +218,11 @@ Task Ledger 2.3 remains the semantic owner; adapters fail closed on required
 profile progress or Status without the receipt. No public MCP field, SQL type,
 profile selector, or caller authority is added.
 
+Version 2.3 adds a separate create/status-only general-intake port over the
+Contracts-owned non-executable binding. Existing `TaskLifecyclePort` remains
+Task-Spec-only and source-compatible; no persistence, transition, autonomy,
+writer, Policy, model, or execution authority enters Ports.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -211,6 +231,7 @@ profile selector, or caller authority is added.
 | Store error/trait shape | complete transaction/current-head compile and failure matrix | Security review | yes |
 | Delivery effect traits | compile-time lane separation plus intent/outcome, fixed-test, scope-before-commit, and unknown-outcome matrices | Engineering | yes |
 | Task lifecycle trait | compile-time exact admit/transition/result/load separation, typed failure/replay evidence, and no raw event/SQL/cache surface | Engineering | yes |
+| Task intake trait | compile-time admit/load-only shape, TaskIntakeBinding isolation, Draft/no-result evidence, and absence of autonomy/writer/execution methods | Engineering | yes |
 | Lease-bound writer | complete spec/intent/workspace/lease/fence mutation matrix and generic-writer non-wiring proof | Security review | yes |
 | Dependency direction | Cargo metadata proves only Contracts plus Task Domain's closed `TaskState`, with no adapter/orchestrator/I/O dependency | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
@@ -225,6 +246,7 @@ approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.3 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Add a separate admit/load-only general intake lane with structurally non-executable evidence | User-authorized Phase 3 |
 | 2.0 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079/087 | Add a narrow typed foreman append/replay port; no SQL, dashboard or second truth surface | Fixed-foreman delegation |
 | 2.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add replay-before-observation checkpoint lookup while retaining one Ledger truth and closed errors | Sole-foreman delegation |
 | 2.2 | 2026-08-25 | SPEC-010, TASK-106 | Carry the replay-derived dependency continuation projection without taking Git, persistence, or lifecycle ownership | Explicit user delegation |

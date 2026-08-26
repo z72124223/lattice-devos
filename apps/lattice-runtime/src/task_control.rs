@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
-    ContentDigest, StoreAuthorityHead, SubjectBinding, TaskIngressPeerEvidence,
-    TaskLedgerStreamIdentity, WriterLeaseAuthorityHead,
+    ContentDigest, StoreAuthorityHead, SubjectBinding, TaskIngressPeerEvidence, TaskIntakeBinding,
+    TaskLedgerStreamIdentity, TaskLedgerSubjectKind, WriterLeaseAuthorityHead,
 };
 use lattice_orchestrator::{
     AutonomyDecision as OrchestratorAutonomyDecision, AutonomyDecisionReason,
@@ -14,7 +14,8 @@ use lattice_orchestrator::{
 };
 use lattice_ports::{
     AutonomyDisposition, AutonomyModel, AutonomyReason, AutonomyReceiptProjection,
-    AutonomyVerification, TaskLifecycleAdmission, TaskLifecycleAutonomyEvidence,
+    AutonomyVerification, TaskIntakeAdmission, TaskIntakeLifecycleEvidence,
+    TaskIntakeLifecyclePort, TaskLifecycleAdmission, TaskLifecycleAutonomyEvidence,
     TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort,
     TaskLifecycleResult,
 };
@@ -27,15 +28,17 @@ use lattice_task_ledger::{
     AutonomyModel as LedgerAutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
     AutonomyRiskClass as LedgerAutonomyRiskClass, AutonomyTaskKind,
     AutonomyVerification as LedgerAutonomyVerification, CommandId, CommandOutcome, CorrelationId,
-    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile,
-    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream,
-    classify_task_created_profile, plan_autonomy_receipt_append,
-    verify_exact_autonomy_receipt_retry,
+    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile, TaskIngressClaim,
+    TaskIngressRequestKind, TaskSubmissionEnvelope, VerifiedAutonomyReceipt,
+    VerifiedAutonomyReceiptState, VerifiedStream, classify_task_created_profile,
+    plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
 
 const CORRELATION_ID: &str = "task038-controlled-codex-canary";
+const GENERAL_TASK_CORRELATION_ID: &str = "general-task-intake-v1";
+const TASK_SUBMIT_INGRESS_ID: &str = "lattice_task_submit.v1";
 #[cfg(test)]
 const TASK_CREATED_ACTION: &str = TaskCreatedProfile::AutonomyReceiptRequiredV1.action();
 const TASK_CREATED_REASON: &str = "TASK038_TASK_ACCEPTED";
@@ -59,6 +62,39 @@ pub struct PostgresTaskLifecycle {
     authority: StoreAuthorityHead,
     deadline: Instant,
     ingress_peer: Option<TaskIngressPeerEvidence>,
+    admission_profile: TaskAdmissionProfile,
+}
+
+/// Server-selected Task-created profile. MCP request bytes cannot select or
+/// construct either variant directly.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TaskAdmissionProfile {
+    /// Frozen canary-compatible admission and replay behavior.
+    ControlledCodexCanary,
+    /// Create-only general-task admission bound to one verified envelope.
+    GeneralTaskIntake(Box<TaskSubmissionEnvelope>),
+}
+
+impl TaskAdmissionProfile {
+    const fn correlation_id(&self) -> &'static str {
+        match self {
+            Self::ControlledCodexCanary => CORRELATION_ID,
+            Self::GeneralTaskIntake(_) => GENERAL_TASK_CORRELATION_ID,
+        }
+    }
+
+    const fn accepts_replayed_profile(&self, profile: TaskCreatedProfile) -> bool {
+        match self {
+            Self::ControlledCodexCanary => matches!(
+                profile,
+                TaskCreatedProfile::HistoricalAutonomyOptionalV1
+                    | TaskCreatedProfile::AutonomyReceiptRequiredV1
+            ),
+            Self::GeneralTaskIntake(_) => {
+                matches!(profile, TaskCreatedProfile::GeneralTaskIntakeV1)
+            }
+        }
+    }
 }
 
 /// Exact verified global persistence identity reused to bind independent
@@ -82,6 +118,97 @@ impl TaskPersistenceFoundation {
 }
 
 impl PostgresTaskLifecycle {
+    /// Opens a fresh fixed runtime connection and loads one replay-verified
+    /// general-task envelope by its scoped idempotency key.
+    ///
+    /// This lookup returns only Task-Ledger-verified task data. It exposes no
+    /// `PostgreSQL` client, SQL, retained row, checkpoint, or mutable lifecycle
+    /// adapter to composition.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for invalid lookup identifiers, an unavailable connection,
+    /// an unsupported/corrupt retained schema, replay disagreement, or an
+    /// expired operation deadline.
+    pub fn load_submission_by_request(
+        database: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        ingress_id: &str,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<Option<TaskSubmissionEnvelope>> {
+        let mut ledger = Self::connect_submission_lookup(database, password, deadline)?;
+        let loaded = ledger
+            .load_submission_by_request(ingress_id, client_request_id)
+            .map_err(map_submission_lookup_error)?;
+        ensure_before(deadline)?;
+        Ok(loaded.map(|value| value.submission().clone()))
+    }
+
+    /// Opens a fresh fixed runtime connection and reads the structurally
+    /// verified request family already owning one ingress idempotency key.
+    ///
+    /// This preflight exposes only the closed claim kind. It grants no
+    /// authority and does not replace the claim check in the final atomic
+    /// Task Ledger append.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for invalid lookup identifiers, an unavailable connection,
+    /// an unsupported/corrupt retained claim, or an expired deadline.
+    pub fn load_ingress_request_kind_by_request(
+        database: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        ingress_id: &str,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<Option<TaskIngressRequestKind>> {
+        let mut ledger = Self::connect_submission_lookup(database, password, deadline)?;
+        let loaded = ledger
+            .load_ingress_claim_by_request(ingress_id, client_request_id)
+            .map_err(map_submission_lookup_error)?;
+        ensure_before(deadline)?;
+        Ok(loaded.map(|claim| claim.request_kind()))
+    }
+
+    /// Opens a fresh fixed runtime connection and loads one replay-verified
+    /// general-task envelope by its durable public task reference.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for an invalid reference, an unavailable connection, an
+    /// unsupported/corrupt retained schema, replay disagreement, or an expired
+    /// operation deadline.
+    pub fn load_submission_by_task_ref(
+        database: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        task_ref: &ContentDigest,
+    ) -> TaskLifecycleResult<Option<TaskSubmissionEnvelope>> {
+        let mut ledger = Self::connect_submission_lookup(database, password, deadline)?;
+        let loaded = ledger
+            .load_submission_by_task_ref(task_ref)
+            .map_err(map_submission_lookup_error)?;
+        ensure_before(deadline)?;
+        Ok(loaded.map(|value| value.submission().clone()))
+    }
+
+    fn connect_submission_lookup(
+        database: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+    ) -> TaskLifecycleResult<PostgresTaskLedger> {
+        ensure_before(deadline)?;
+        let target = MigrationTarget::new(database.database_name(), database.run_id())
+            .map_err(|_| rejected("LATTICE_TASK_SUBMISSION_LOOKUP_TARGET_REJECTED"))?;
+        let client = connect_fixed_runtime_client(database, password, deadline)
+            .map_err(|_| unavailable("LATTICE_TASK_SUBMISSION_LOOKUP_CONNECT_REJECTED"))?;
+        let ledger =
+            PostgresTaskLedger::new(client, &target).map_err(map_submission_lookup_error)?;
+        ensure_before(deadline)?;
+        Ok(ledger)
+    }
+
     /// Opens one fixed runtime-role connection without Task ingress authority.
     ///
     /// This compatibility constructor supports persistence-foundation reads.
@@ -99,7 +226,15 @@ impl PostgresTaskLifecycle {
         identity: TaskLedgerStreamIdentity,
         authority: StoreAuthorityHead,
     ) -> TaskLifecycleResult<Self> {
-        Self::connect_inner(database, password, deadline, identity, authority, None)
+        Self::connect_inner(
+            database,
+            password,
+            deadline,
+            identity,
+            authority,
+            None,
+            TaskAdmissionProfile::ControlledCodexCanary,
+        )
     }
 
     /// Opens one fixed runtime-role connection with server-configured live
@@ -125,6 +260,44 @@ impl PostgresTaskLifecycle {
             identity,
             authority,
             Some(ingress_peer),
+            TaskAdmissionProfile::ControlledCodexCanary,
+        )
+    }
+
+    /// Opens the same fixed live Task lifecycle boundary with one
+    /// server-selected admission profile.
+    ///
+    /// The compatibility constructor remains pinned to the controlled canary;
+    /// composition must construct a verified [`TaskSubmissionEnvelope`] before
+    /// selecting general intake.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed for an invalid target, unavailable fixed connection,
+    /// rejected schema profile, expired deadline, or envelope/stream mismatch.
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_with_ingress_peer_and_admission_profile(
+        database: &DeliveryDatabaseBinding,
+        password: &str,
+        deadline: Instant,
+        identity: TaskLedgerStreamIdentity,
+        authority: StoreAuthorityHead,
+        ingress_peer: TaskIngressPeerEvidence,
+        admission_profile: TaskAdmissionProfile,
+    ) -> TaskLifecycleResult<Self> {
+        if let TaskAdmissionProfile::GeneralTaskIntake(submission) = &admission_profile
+            && submission.identity() != &identity
+        {
+            return Err(rejected("LATTICE_TASK_SUBMISSION_BINDING_REJECTED"));
+        }
+        Self::connect_inner(
+            database,
+            password,
+            deadline,
+            identity,
+            authority,
+            Some(ingress_peer),
+            admission_profile,
         )
     }
 
@@ -135,6 +308,7 @@ impl PostgresTaskLifecycle {
         identity: TaskLedgerStreamIdentity,
         authority: StoreAuthorityHead,
         ingress_peer: Option<TaskIngressPeerEvidence>,
+        admission_profile: TaskAdmissionProfile,
     ) -> TaskLifecycleResult<Self> {
         let target = MigrationTarget::new(database.database_name(), database.run_id())
             .map_err(|_| corrupt("LATTICE_TASK_LEDGER_TARGET_REJECTED"))?;
@@ -148,6 +322,7 @@ impl PostgresTaskLifecycle {
             authority,
             deadline,
             ingress_peer,
+            admission_profile,
         })
     }
 
@@ -157,10 +332,73 @@ impl PostgresTaskLifecycle {
             .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_PEER_REQUIRED"))
     }
 
+    fn ensure_controlled_profile(&self) -> TaskLifecycleResult<()> {
+        if matches!(
+            self.admission_profile,
+            TaskAdmissionProfile::ControlledCodexCanary
+        ) && self.identity.subject_kind() == TaskLedgerSubjectKind::TaskSpec
+        {
+            Ok(())
+        } else {
+            Err(rejected("LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED"))
+        }
+    }
+
+    fn general_submission(&self) -> TaskLifecycleResult<TaskSubmissionEnvelope> {
+        match &self.admission_profile {
+            TaskAdmissionProfile::GeneralTaskIntake(submission)
+                if self.identity.subject_kind() == TaskLedgerSubjectKind::GeneralTaskIntake
+                    && submission.identity() == &self.identity =>
+            {
+                Ok(submission.as_ref().clone())
+            }
+            TaskAdmissionProfile::ControlledCodexCanary
+            | TaskAdmissionProfile::GeneralTaskIntake(_) => {
+                Err(rejected("LATTICE_TASK_INTAKE_LIFECYCLE_REQUIRED"))
+            }
+        }
+    }
+
+    fn load_verified_intake(
+        &mut self,
+        binding: &TaskIntakeBinding,
+    ) -> TaskLifecycleResult<VerifiedStream> {
+        let submission = self.general_submission()?;
+        if binding.stream_identity() != &self.identity {
+            return Err(rejected("LATTICE_TASK_INTAKE_BINDING_REJECTED"));
+        }
+        ensure_before(self.deadline)?;
+        let loaded = if let Some(loaded) = self
+            .ledger
+            .load_submission_by_task_ref(submission.task_ref())
+            .map_err(map_store_error)?
+        {
+            if loaded.submission() != &submission {
+                return Err(corrupt("LATTICE_TASK_SUBMISSION_LOCATOR_MISMATCH"));
+            }
+            loaded.ledger().clone()
+        } else {
+            let vacant = self
+                .ledger
+                .load_stream(self.identity.clone())
+                .map_err(map_store_error)?;
+            if !vacant.stream().events().is_empty() {
+                return Err(corrupt("LATTICE_TASK_SUBMISSION_LOCATOR_MISSING"));
+            }
+            vacant
+        };
+        ensure_before(self.deadline)?;
+        if loaded.autonomy_state() != &VerifiedAutonomyReceiptState::NotApplicable {
+            return Err(corrupt("LATTICE_TASK_INTAKE_AUTONOMY_REJECTED"));
+        }
+        Ok(loaded.stream().clone())
+    }
+
     fn load_verified_with_autonomy(
         &mut self,
         binding: &SubjectBinding,
     ) -> TaskLifecycleResult<(VerifiedStream, VerifiedAutonomyReceiptState)> {
+        self.ensure_controlled_profile()?;
         ensure_binding(binding, &self.identity)?;
         ensure_before(self.deadline)?;
         let loaded = self
@@ -182,6 +420,7 @@ impl PostgresTaskLifecycle {
         &mut self,
         binding: &SubjectBinding,
     ) -> TaskLifecycleResult<TaskPersistenceFoundation> {
+        self.ensure_controlled_profile()?;
         ensure_binding(binding, &self.identity)?;
         ensure_before(self.deadline)?;
         let loaded = self
@@ -206,7 +445,13 @@ impl PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<String> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let evidence = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
+        let evidence = replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )?;
         if !evidence.admitted() {
             return Err(rejected("LATTICE_TASK_ADMISSION_MISSING"));
         }
@@ -240,6 +485,59 @@ impl PostgresTaskLifecycle {
         Ok(())
     }
 
+    fn execute_admission_command(
+        &mut self,
+        command: AppendCommand,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<bool> {
+        match &self.admission_profile {
+            TaskAdmissionProfile::ControlledCodexCanary => {
+                let claim = TaskIngressClaim::controlled_canary(
+                    TASK_SUBMIT_INGRESS_ID,
+                    client_request_id,
+                    command.expected_head().stream_id().clone(),
+                )
+                .map_err(|_| corrupt("LATTICE_TASK_INGRESS_CLAIM_REJECTED"))?;
+                ensure_before(self.deadline)?;
+                let execution = self
+                    .ledger
+                    .execute_task_ingress(command, self.authority.clone(), claim)
+                    .map_err(map_submission_execute_error)?;
+                ensure_after_mutation(self.deadline)?;
+                if execution.receipt().outcome() != &CommandOutcome::Appended
+                    && !execution.is_exact_retry()
+                {
+                    return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
+                }
+                Ok(execution.is_exact_retry())
+            }
+            TaskAdmissionProfile::GeneralTaskIntake(submission) => {
+                if submission.client_request_id() != client_request_id {
+                    return Err(rejected("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+                }
+                ensure_before(self.deadline)?;
+                let execution = self
+                    .ledger
+                    .execute_submission(
+                        command,
+                        self.authority.clone(),
+                        submission.as_ref().clone(),
+                    )
+                    .map_err(map_submission_execute_error)?;
+                ensure_after_mutation(self.deadline)?;
+                if execution.submission() != submission.as_ref() {
+                    return Err(corrupt("LATTICE_TASK_SUBMISSION_LOCATOR_MISMATCH"));
+                }
+                if execution.ledger_execution().receipt().outcome() != &CommandOutcome::Appended
+                    && !execution.ledger_execution().is_exact_retry()
+                {
+                    return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
+                }
+                Ok(execution.ledger_execution().is_exact_retry())
+            }
+        }
+    }
+
     fn execute(
         &mut self,
         binding: &SubjectBinding,
@@ -249,7 +547,13 @@ impl PostgresTaskLifecycle {
         let ingress_peer = self.required_ingress_peer()?;
         self.execute_command(command, writer_authority)?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
+        replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )
     }
 
     /// Replays one verified historical non-success terminal for status only.
@@ -270,8 +574,13 @@ impl PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<(TaskLifecycleEvidence, String)> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let evidence =
-            replay_historical_terminal_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
+        let evidence = replay_historical_terminal_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )?;
         let admission_command_id = stream
             .events()
             .iter()
@@ -279,6 +588,96 @@ impl PostgresTaskLifecycle {
             .map(|event| event.command_id().as_str().to_owned())
             .ok_or_else(|| corrupt("LATTICE_TASK_ADMISSION_MISSING"))?;
         Ok((evidence, admission_command_id))
+    }
+}
+
+fn project_intake_evidence(
+    stream: &VerifiedStream,
+    binding: &TaskIntakeBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    submission: &TaskSubmissionEnvelope,
+) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence> {
+    if stream.identity() != binding.stream_identity()
+        || submission.identity() != binding.stream_identity()
+        || stream.head().sequence() != 1
+        || stream.events().len() != 1
+        || stream.commands().len() != 1
+        || !stream.outboxes().is_empty()
+    {
+        return Err(corrupt("LATTICE_TASK_INTAKE_EVIDENCE_REJECTED"));
+    }
+    let event = &stream.events()[0];
+    if classify_task_created_profile(event)
+        .map_err(|_| corrupt("LATTICE_TASK_CREATED_PROFILE_REJECTED"))?
+        != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+        || event.actor_id().as_str() != ingress_peer.actor_id().as_str()
+        || event.correlation_id().as_str() != GENERAL_TASK_CORRELATION_ID
+        || event.occurred_at() != "2000-01-01T00:00:00Z"
+        || event.outcome() != LedgerOutcome::Recorded
+        || event.reason_code().as_str() != "GENERAL_TASK_INTAKE_RECORDED"
+        || event.subject_digest() != submission.envelope_digest()
+        || event.diagnostic().is_some()
+        || event.command_id().as_str() != task_admission_command_id(submission.client_request_id())
+    {
+        return Err(corrupt("LATTICE_TASK_INTAKE_EVIDENCE_REJECTED"));
+    }
+    TaskIntakeLifecycleEvidence::new(binding.clone(), stream.head().head_digest().clone())
+}
+
+impl TaskIntakeLifecyclePort for PostgresTaskLifecycle {
+    fn admit(
+        &mut self,
+        binding: &TaskIntakeBinding,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<TaskIntakeAdmission> {
+        let ingress_peer = self.required_ingress_peer()?;
+        let submission = self.general_submission()?;
+        if submission.client_request_id() != client_request_id
+            || submission.identity() != binding.stream_identity()
+        {
+            return Err(rejected("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+        }
+        let stream = self.load_verified_intake(binding)?;
+        let command_id = task_admission_command_id(client_request_id);
+        if !stream.events().is_empty() {
+            let evidence = project_intake_evidence(&stream, binding, &ingress_peer, &submission)?;
+            if stream.events()[0].command_id().as_str() != command_id {
+                return Err(rejected("LATTICE_TASK_REQUEST_SUBSTITUTED"));
+            }
+            return Ok(TaskIntakeAdmission::exact_replay(evidence));
+        }
+        if !stream.commands().is_empty() || !stream.outboxes().is_empty() {
+            return Err(corrupt("LATTICE_TASK_INTAKE_EVIDENCE_REJECTED"));
+        }
+        let command = AppendCommand::new_general_task_created(
+            stream.head().clone(),
+            CommandId::new(&command_id).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+            CorrelationId::new(GENERAL_TASK_CORRELATION_ID)
+                .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+            "2000-01-01T00:00:00Z",
+            ActorId::new(ingress_peer.actor_id().as_str())
+                .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+            &submission,
+        )
+        .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?;
+        let exact_retry = self.execute_admission_command(command, client_request_id)?;
+        let stream = self.load_verified_intake(binding)?;
+        let evidence = project_intake_evidence(&stream, binding, &ingress_peer, &submission)?;
+        Ok(if exact_retry {
+            TaskIntakeAdmission::exact_replay(evidence)
+        } else {
+            TaskIntakeAdmission::created(evidence)
+        })
+    }
+
+    fn load(
+        &mut self,
+        binding: &TaskIntakeBinding,
+    ) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence> {
+        let ingress_peer = self.required_ingress_peer()?;
+        let submission = self.general_submission()?;
+        let stream = self.load_verified_intake(binding)?;
+        project_intake_evidence(&stream, binding, &ingress_peer, &submission)
     }
 }
 
@@ -301,30 +700,51 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
             }
             return match durable_autonomy {
                 VerifiedAutonomyReceiptState::PendingRequiredReceipt => {
-                    pending_required_admission(&stream, binding, &ingress_peer)
+                    pending_required_admission_for_profile(
+                        &stream,
+                        binding,
+                        &ingress_peer,
+                        &self.admission_profile,
+                    )
                 }
-                _ => replay_lifecycle_with_autonomy(
+                _ => replay_lifecycle_with_autonomy_for_profile(
                     &stream,
                     binding,
                     &ingress_peer,
                     &durable_autonomy,
+                    &self.admission_profile,
                 )
                 .and_then(TaskLifecycleAdmission::existing),
             };
         }
-        let vacant =
-            replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &durable_autonomy)?;
+        let vacant = replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &durable_autonomy,
+            &self.admission_profile,
+        )?;
         if vacant.admitted() {
             return Err(corrupt("LATTICE_TASK_ADMISSION_STATE_REJECTED"));
         }
-        let command =
-            task_created_command(stream.head().clone(), &command_id, binding, &ingress_peer)?;
-        self.execute_command(command, None)?;
+        let command = task_created_command_for_profile(
+            stream.head().clone(),
+            &command_id,
+            binding,
+            &ingress_peer,
+            &self.admission_profile,
+        )?;
+        let _exact_retry = self.execute_admission_command(command, client_request_id)?;
         let (stream, durable_autonomy) = self.load_verified_with_autonomy(binding)?;
         if durable_autonomy != VerifiedAutonomyReceiptState::PendingRequiredReceipt {
             return Err(corrupt("LATTICE_TASK_ADMISSION_STATE_REJECTED"));
         }
-        pending_required_admission(&stream, binding, &ingress_peer)
+        pending_required_admission_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &self.admission_profile,
+        )
     }
 
     fn transition(
@@ -337,7 +757,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         let ingress_peer = self.required_ingress_peer()?;
         transition(from, to).map_err(|_| rejected("LATTICE_TASK_STATE_TRANSITION_REJECTED"))?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
+        let current = replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )?;
         if current.state() == to {
             return Ok(current);
         }
@@ -387,7 +813,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
         match &autonomy {
             VerifiedAutonomyReceiptState::RequiredComplete(existing) => {
                 ensure_exact_autonomy_retry(stream.identity(), existing, intent, &authority)?;
-                return replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy);
+                return replay_lifecycle_with_autonomy_for_profile(
+                    &stream,
+                    binding,
+                    &ingress_peer,
+                    &autonomy,
+                    &self.admission_profile,
+                );
             }
             VerifiedAutonomyReceiptState::PendingRequiredReceipt => {}
             VerifiedAutonomyReceiptState::NotApplicable
@@ -395,14 +827,19 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
                 return Err(rejected("LATTICE_AUTONOMY_RECEIPT_ORDER_REJECTED"));
             }
         }
-        let replayed = replay_lifecycle_state(&stream, binding, &ingress_peer)?;
+        let replayed = replay_lifecycle_state_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &self.admission_profile,
+        )?;
         if !replayed.created || replayed.state != TaskState::Draft || stream.events().len() != 1 {
             return Err(rejected("LATTICE_AUTONOMY_RECEIPT_ORDER_REJECTED"));
         }
         let metadata = AutonomyAppendMetadata::new(
             CommandId::new(AUTONOMY_COMMAND_ID)
                 .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?,
-            CorrelationId::new(CORRELATION_ID)
+            CorrelationId::new(self.admission_profile.correlation_id())
                 .map_err(|_| corrupt("LATTICE_AUTONOMY_LEDGER_PLAN_REJECTED"))?,
             "2000-01-01T00:00:01Z",
             ActorId::new(ingress_peer.actor_id().as_str())
@@ -421,7 +858,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
             return Err(corrupt("LATTICE_AUTONOMY_EVENT_DIGEST_MISSING"));
         }
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
+        replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )
     }
 
     fn record_result(
@@ -432,7 +875,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        let current = replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)?;
+        let current = replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )?;
         if let Some(existing) = current.result_digest() {
             if existing == result_digest {
                 return Ok(current);
@@ -459,7 +908,13 @@ impl TaskLifecyclePort for PostgresTaskLifecycle {
     fn load(&mut self, binding: &SubjectBinding) -> TaskLifecycleResult<TaskLifecycleEvidence> {
         let ingress_peer = self.required_ingress_peer()?;
         let (stream, autonomy) = self.load_verified_with_autonomy(binding)?;
-        replay_lifecycle_with_autonomy(&stream, binding, &ingress_peer, &autonomy)
+        replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            binding,
+            &ingress_peer,
+            &autonomy,
+            &self.admission_profile,
+        )
     }
 }
 
@@ -594,23 +1049,47 @@ fn ensure_exact_autonomy_retry(
         .map_err(|_| rejected("LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED"))
 }
 
+#[cfg(test)]
 fn replay_lifecycle_with_autonomy(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
     autonomy: &VerifiedAutonomyReceiptState,
 ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
-    let replayed = replay_lifecycle_state(stream, binding, ingress_peer)?;
-    project_lifecycle_with_autonomy(stream, binding, autonomy, replayed)
+    replay_lifecycle_with_autonomy_for_profile(
+        stream,
+        binding,
+        ingress_peer,
+        autonomy,
+        &TaskAdmissionProfile::ControlledCodexCanary,
+    )
 }
 
-fn replay_historical_terminal_with_autonomy(
+fn replay_lifecycle_with_autonomy_for_profile(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
     autonomy: &VerifiedAutonomyReceiptState,
+    admission_profile: &TaskAdmissionProfile,
 ) -> TaskLifecycleResult<TaskLifecycleEvidence> {
-    let replayed = replay_historical_terminal_status(stream, binding, ingress_peer)?;
+    let replayed =
+        replay_lifecycle_state_for_profile(stream, binding, ingress_peer, admission_profile)?;
+    project_lifecycle_with_autonomy(stream, binding, autonomy, replayed)
+}
+
+fn replay_historical_terminal_with_autonomy_for_profile(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    autonomy: &VerifiedAutonomyReceiptState,
+    admission_profile: &TaskAdmissionProfile,
+) -> TaskLifecycleResult<TaskLifecycleEvidence> {
+    let replayed = replay_historical_terminal_status_for_profile(
+        stream,
+        binding,
+        ingress_peer,
+        admission_profile,
+    )?;
     project_lifecycle_with_autonomy(stream, binding, autonomy, replayed)
 }
 
@@ -632,12 +1111,16 @@ fn project_lifecycle_with_autonomy(
             )
         }
         VerifiedAutonomyReceiptState::RequiredComplete(receipt)
-            if replayed.profile == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+            if replayed
+                .profile
+                .is_some_and(TaskCreatedProfile::requires_autonomy_receipt) =>
         {
             TaskLifecycleAutonomyEvidence::RequiredComplete(autonomy_projection(receipt)?)
         }
         VerifiedAutonomyReceiptState::PendingRequiredReceipt
-            if replayed.profile == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+            if replayed
+                .profile
+                .is_some_and(TaskCreatedProfile::requires_autonomy_receipt) =>
         {
             return Err(rejected("LATTICE_AUTONOMY_RECEIPT_RECONCILIATION_REQUIRED"));
         }
@@ -709,20 +1192,51 @@ struct ReplayedLifecycleState {
     result_digest: Option<ContentDigest>,
 }
 
+#[cfg(test)]
 fn replay_lifecycle_state(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<ReplayedLifecycleState> {
-    replay_lifecycle_state_inner(stream, binding, ingress_peer, false)
+    replay_lifecycle_state_for_profile(
+        stream,
+        binding,
+        ingress_peer,
+        &TaskAdmissionProfile::ControlledCodexCanary,
+    )
 }
 
+fn replay_lifecycle_state_for_profile(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    admission_profile: &TaskAdmissionProfile,
+) -> TaskLifecycleResult<ReplayedLifecycleState> {
+    replay_lifecycle_state_inner(stream, binding, ingress_peer, admission_profile, false)
+}
+
+#[cfg(test)]
 fn replay_historical_terminal_status(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<ReplayedLifecycleState> {
-    let replayed = replay_lifecycle_state_inner(stream, binding, ingress_peer, true)?;
+    replay_historical_terminal_status_for_profile(
+        stream,
+        binding,
+        ingress_peer,
+        &TaskAdmissionProfile::ControlledCodexCanary,
+    )
+}
+
+fn replay_historical_terminal_status_for_profile(
+    stream: &VerifiedStream,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    admission_profile: &TaskAdmissionProfile,
+) -> TaskLifecycleResult<ReplayedLifecycleState> {
+    let replayed =
+        replay_lifecycle_state_inner(stream, binding, ingress_peer, admission_profile, true)?;
     if !matches!(
         replayed.state,
         TaskState::Rejected | TaskState::Blocked | TaskState::Failed | TaskState::Cancelled
@@ -736,6 +1250,7 @@ fn replay_lifecycle_state_inner(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
+    admission_profile: &TaskAdmissionProfile,
     allow_historical_status_drift: bool,
 ) -> TaskLifecycleResult<ReplayedLifecycleState> {
     ensure_binding(binding, stream.identity())?;
@@ -751,25 +1266,41 @@ fn replay_lifecycle_state_inner(
             LedgerEventKind::TaskCreated => {
                 let event_profile = classify_task_created_profile(event)
                     .map_err(|_| corrupt("LATTICE_TASK_CREATED_PROFILE_REJECTED"))?;
+                if event_profile
+                    .is_some_and(|profile| !admission_profile.accepts_replayed_profile(profile))
+                {
+                    return Err(rejected("LATTICE_TASK_CREATED_PROFILE_SUBSTITUTED"));
+                }
                 if created
                     || event_profile.is_none()
                     || event.actor_id().as_str() != expected_actor
                     || event.outcome() != LedgerOutcome::Recorded
-                    || event.reason_code().as_str() != TASK_CREATED_REASON
                 {
                     return Err(corrupt("LATTICE_TASK_CREATED_EVIDENCE_REJECTED"));
                 }
-                let audit = event
-                    .diagnostic()
-                    .map(Diagnostic::value)
-                    .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?;
-                let historical = validate_task_created_audit(audit, ingress_peer)?;
-                if event.subject_digest()
-                    != &task_created_subject_digest_for_commitment(binding, &historical)?
-                {
-                    return Err(corrupt("LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH"));
+                match admission_profile {
+                    TaskAdmissionProfile::ControlledCodexCanary => {
+                        if event.reason_code().as_str() != TASK_CREATED_REASON {
+                            return Err(corrupt("LATTICE_TASK_CREATED_EVIDENCE_REJECTED"));
+                        }
+                        let audit = event
+                            .diagnostic()
+                            .map(Diagnostic::value)
+                            .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_AUDIT_REJECTED"))?;
+                        let historical = validate_task_created_audit(audit, ingress_peer)?;
+                        if event.subject_digest()
+                            != &task_created_subject_digest_for_commitment(binding, &historical)?
+                        {
+                            return Err(corrupt(
+                                "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH",
+                            ));
+                        }
+                        historical_commitment = Some(historical);
+                    }
+                    TaskAdmissionProfile::GeneralTaskIntake(_) => {
+                        return Err(rejected("LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED"));
+                    }
                 }
-                historical_commitment = Some(historical);
                 created = true;
                 profile = event_profile;
             }
@@ -826,13 +1357,19 @@ fn replay_lifecycle_state_inner(
     })
 }
 
-fn pending_required_admission(
+fn pending_required_admission_for_profile(
     stream: &VerifiedStream,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
+    admission_profile: &TaskAdmissionProfile,
 ) -> TaskLifecycleResult<TaskLifecycleAdmission> {
-    let replayed = replay_lifecycle_state(stream, binding, ingress_peer)?;
+    let replayed =
+        replay_lifecycle_state_for_profile(stream, binding, ingress_peer, admission_profile)?;
     if !replayed.created
+        || !matches!(
+            admission_profile,
+            TaskAdmissionProfile::ControlledCodexCanary
+        )
         || replayed.profile != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
         || replayed.state != TaskState::Draft
         || replayed.result_digest.is_some()
@@ -846,27 +1383,56 @@ fn pending_required_admission(
     ))
 }
 
+#[cfg(test)]
 fn task_created_command(
     head: lattice_contracts::TaskLedgerStreamHead,
     command_id: &str,
     binding: &SubjectBinding,
     ingress_peer: &TaskIngressPeerEvidence,
 ) -> TaskLifecycleResult<AppendCommand> {
-    AppendCommand::new_autonomy_required_task_created(
+    task_created_command_for_profile(
         head,
-        CommandId::new(command_id).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
-        CorrelationId::new(CORRELATION_ID).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
-        "2000-01-01T00:00:00Z",
-        ActorId::new(ingress_peer.actor_id().as_str())
-            .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
-        ReasonCode::new(TASK_CREATED_REASON)
-            .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
-        task_created_subject_digest(binding, ingress_peer)?,
-        Some(
-            Diagnostic::new(task_created_audit_value(ingress_peer)?)
-                .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
-        ),
+        command_id,
+        binding,
+        ingress_peer,
+        &TaskAdmissionProfile::ControlledCodexCanary,
     )
+}
+
+fn task_created_command_for_profile(
+    head: lattice_contracts::TaskLedgerStreamHead,
+    command_id: &str,
+    binding: &SubjectBinding,
+    ingress_peer: &TaskIngressPeerEvidence,
+    admission_profile: &TaskAdmissionProfile,
+) -> TaskLifecycleResult<AppendCommand> {
+    let command_id =
+        CommandId::new(command_id).map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?;
+    let correlation_id = CorrelationId::new(admission_profile.correlation_id())
+        .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?;
+    let actor_id = ActorId::new(ingress_peer.actor_id().as_str())
+        .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?;
+    match admission_profile {
+        TaskAdmissionProfile::ControlledCodexCanary => {
+            AppendCommand::new_autonomy_required_task_created(
+                head,
+                command_id,
+                correlation_id,
+                "2000-01-01T00:00:00Z",
+                actor_id,
+                ReasonCode::new(TASK_CREATED_REASON)
+                    .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+                task_created_subject_digest(binding, ingress_peer)?,
+                Some(
+                    Diagnostic::new(task_created_audit_value(ingress_peer)?)
+                        .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+                ),
+            )
+        }
+        TaskAdmissionProfile::GeneralTaskIntake(_) => {
+            return Err(rejected("LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED"));
+        }
+    }
     .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))
 }
 
@@ -1202,8 +1768,8 @@ fn ensure_binding(
         || identity.project_snapshot_id() != binding.project_snapshot_id()
         || identity.task_id() != binding.task_id()
         || identity.task_revision() != binding.task_revision()
-        || identity.task_spec_digest() != binding.task_spec_digest()
-        || identity.accounting_currency() != "TWD"
+        || identity.task_spec_digest() != Some(binding.task_spec_digest())
+        || identity.accounting_currency() != Some("TWD")
     {
         return Err(rejected("LATTICE_TASK_BINDING_REJECTED"));
     }
@@ -1261,9 +1827,11 @@ fn ensure_after_mutation(deadline: Instant) -> TaskLifecycleResult<()> {
 fn map_store_error(error: lattice_postgres_store::PostgresTaskLedgerError) -> TaskLifecycleError {
     use lattice_postgres_store::PostgresTaskLedgerErrorKind as Kind;
     match error.kind() {
-        Kind::CommandSubstitution | Kind::AdmissionDenied | Kind::AuthorityMismatch => {
-            rejected("LATTICE_TASK_LEDGER_REJECTED")
-        }
+        Kind::CommandSubstitution
+        | Kind::ProjectRegistryCurrentnessConflict
+        | Kind::ProjectRegistryInactive
+        | Kind::AdmissionDenied
+        | Kind::AuthorityMismatch => rejected("LATTICE_TASK_LEDGER_REJECTED"),
         Kind::CommitOutcomeUnknown => ambiguous("LATTICE_TASK_LEDGER_COMMIT_UNKNOWN"),
         Kind::Malformed
         | Kind::PhysicalStateMismatch
@@ -1274,6 +1842,30 @@ fn map_store_error(error: lattice_postgres_store::PostgresTaskLedgerError) -> Ta
         | Kind::SerializationExhausted
         | Kind::TransactionFailed
         | Kind::Unavailable => unavailable("LATTICE_TASK_LEDGER_UNAVAILABLE"),
+    }
+}
+
+fn map_submission_lookup_error(
+    error: lattice_postgres_store::PostgresTaskLedgerError,
+) -> TaskLifecycleError {
+    if error.kind() == lattice_postgres_store::PostgresTaskLedgerErrorKind::Malformed {
+        rejected("LATTICE_TASK_SUBMISSION_LOOKUP_REJECTED")
+    } else {
+        map_store_error(error)
+    }
+}
+
+fn map_submission_execute_error(
+    error: lattice_postgres_store::PostgresTaskLedgerError,
+) -> TaskLifecycleError {
+    use lattice_postgres_store::PostgresTaskLedgerErrorKind as Kind;
+    match error.kind() {
+        Kind::CommandSubstitution => rejected("LATTICE_TASK_IDEMPOTENCY_CONFLICT"),
+        Kind::ProjectRegistryCurrentnessConflict => {
+            rejected("PROJECT_REGISTRY_CURRENTNESS_CONFLICT")
+        }
+        Kind::ProjectRegistryInactive => rejected("PROJECT_REGISTRY_INACTIVE"),
+        _ => map_store_error(error),
     }
 }
 
@@ -1627,6 +2219,29 @@ mod tests {
             binding.task_revision(),
             binding.task_spec_digest().clone(),
             "TWD",
+        )
+        .unwrap()
+    }
+
+    fn intake_binding() -> TaskIntakeBinding {
+        TaskIntakeBinding::new(
+            ProjectId::new("phase3-general-project").unwrap(),
+            ProjectSnapshotId::new("phase3-general-snapshot").unwrap(),
+            TaskId::new("TASK-PHASE3-GENERAL").unwrap(),
+            "1",
+            ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn intake_submission(binding: &TaskIntakeBinding) -> TaskSubmissionEnvelope {
+        TaskSubmissionEnvelope::new(
+            TASK_SUBMIT_INGRESS_ID,
+            "client-general-1",
+            "完成角色系統",
+            "AI 劇本",
+            binding.stream_identity().clone(),
+            ContentDigest::from_sha256("f".repeat(64)).unwrap(),
         )
         .unwrap()
     }
@@ -2247,5 +2862,195 @@ mod tests {
         let error = replay_lifecycle_state(&verified(&fake, &identity), &binding, &ingress_peer)
             .unwrap_err();
         assert_eq!(error.code(), "LATTICE_TASK_ADMISSION_MISSING");
+    }
+
+    #[test]
+    fn general_task_identity_is_pre_specification_without_currency() {
+        let intake = intake_binding();
+        let intake_identity = intake.stream_identity();
+
+        assert_eq!(
+            intake_identity.subject_kind(),
+            TaskLedgerSubjectKind::GeneralTaskIntake
+        );
+        assert_eq!(
+            intake_identity.general_task_intake_digest(),
+            Some(intake.intake_digest())
+        );
+        assert_eq!(intake_identity.subject_digest(), intake.intake_digest());
+        assert!(intake_identity.task_spec_digest().is_none());
+        assert!(intake_identity.accounting_currency().is_none());
+        assert_eq!(
+            TaskIntakeBinding::try_from_stream_identity(intake_identity).unwrap(),
+            intake
+        );
+        assert!(TaskIntakeBinding::try_from_stream_identity(&identity(&binding())).is_err());
+    }
+
+    #[test]
+    fn general_task_admission_uses_one_create_only_marker_without_autonomy() {
+        let binding = intake_binding();
+        let submission = intake_submission(&binding);
+        let identity = binding.stream_identity().clone();
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let stream = verified(&fake, &identity);
+
+        let command = AppendCommand::new_general_task_created(
+            stream.head().clone(),
+            CommandId::new("mcp-submit:client-general-1").unwrap(),
+            CorrelationId::new(GENERAL_TASK_CORRELATION_ID).unwrap(),
+            "2000-01-01T00:00:00Z",
+            ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+            &submission,
+        )
+        .unwrap();
+
+        assert_eq!(command.action().as_str(), "GENERAL_TASK_INTAKE_V1");
+        assert_eq!(
+            command.reason_code().as_str(),
+            "GENERAL_TASK_INTAKE_RECORDED"
+        );
+        assert_eq!(command.subject_digest(), submission.envelope_digest());
+        assert!(command.diagnostic().is_none());
+        fake.execute(command).unwrap();
+
+        let stream = verified(&fake, &identity);
+        assert_eq!(stream.events().len(), 1);
+        assert_eq!(stream.commands().len(), 1);
+        assert!(stream.outboxes().is_empty());
+        assert_eq!(
+            verify_untrusted_autonomy_receipt_rows(&stream, &[]).unwrap(),
+            VerifiedAutonomyReceiptState::NotApplicable
+        );
+        let evidence = project_intake_evidence(&stream, &binding, &ingress_peer, &submission)
+            .expect("specialized intake evidence");
+        assert_eq!(evidence.binding(), &binding);
+        assert_eq!(evidence.state(), TaskState::Draft);
+        assert!(evidence.result_digest().is_none());
+        assert_eq!(evidence.ledger_head_digest(), stream.head().head_digest());
+
+        let created = TaskIntakeAdmission::created(evidence.clone());
+        assert!(!created.is_exact_replay());
+        assert_eq!(created.state(), TaskState::Draft);
+        assert!(created.result_digest().is_none());
+        let replay = TaskIntakeAdmission::exact_replay(evidence);
+        assert!(replay.is_exact_replay());
+        assert_eq!(replay.state(), TaskState::Draft);
+        assert!(replay.result_digest().is_none());
+    }
+
+    #[test]
+    fn full_task_spec_command_builder_rejects_general_profile() {
+        let task_spec_binding = binding();
+        let identity = identity(&task_spec_binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let profile =
+            TaskAdmissionProfile::GeneralTaskIntake(Box::new(intake_submission(&intake_binding())));
+        let fake = FakeTaskLedger::new();
+        let stream = verified(&fake, &identity);
+
+        let error = task_created_command_for_profile(
+            stream.head().clone(),
+            "mcp-submit:client-general-1",
+            &task_spec_binding,
+            &ingress_peer,
+            &profile,
+        )
+        .expect_err("general profile cannot enter the full Task-Spec command builder");
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(error.code(), "LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED");
+    }
+
+    #[test]
+    fn general_task_profile_rejects_canary_replay_substitution() {
+        let task_spec_binding = binding();
+        let identity = identity(&task_spec_binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let profile =
+            TaskAdmissionProfile::GeneralTaskIntake(Box::new(intake_submission(&intake_binding())));
+        let mut fake = FakeTaskLedger::new();
+        let stream = verified(&fake, &identity);
+        fake.execute(
+            task_created_command(
+                stream.head().clone(),
+                "mcp-submit:client-general-1",
+                &task_spec_binding,
+                &ingress_peer,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let error = replay_lifecycle_state_for_profile(
+            &verified(&fake, &identity),
+            &task_spec_binding,
+            &ingress_peer,
+            &profile,
+        )
+        .expect_err("general profile cannot accept a canary event");
+        assert_eq!(error.code(), "LATTICE_TASK_CREATED_PROFILE_SUBSTITUTED");
+    }
+
+    #[test]
+    fn fresh_submission_lookup_helpers_return_only_verified_envelopes() {
+        type RequestLookup = fn(
+            &DeliveryDatabaseBinding,
+            &str,
+            Instant,
+            &str,
+            &str,
+        ) -> TaskLifecycleResult<Option<TaskSubmissionEnvelope>>;
+        type ReferenceLookup = fn(
+            &DeliveryDatabaseBinding,
+            &str,
+            Instant,
+            &ContentDigest,
+        ) -> TaskLifecycleResult<Option<TaskSubmissionEnvelope>>;
+        type ClaimKindLookup = fn(
+            &DeliveryDatabaseBinding,
+            &str,
+            Instant,
+            &str,
+            &str,
+        ) -> TaskLifecycleResult<Option<TaskIngressRequestKind>>;
+
+        let _: RequestLookup = PostgresTaskLifecycle::load_submission_by_request;
+        let _: ReferenceLookup = PostgresTaskLifecycle::load_submission_by_task_ref;
+        let _: ClaimKindLookup = PostgresTaskLifecycle::load_ingress_request_kind_by_request;
+    }
+
+    #[test]
+    fn submission_lookup_rejects_bad_keys_but_classifies_retained_drift_as_corrupt() {
+        use lattice_postgres_store::{PostgresTaskLedgerError, PostgresTaskLedgerErrorKind};
+
+        let malformed = map_submission_lookup_error(PostgresTaskLedgerError::new(
+            PostgresTaskLedgerErrorKind::Malformed,
+        ));
+        assert_eq!(malformed.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(malformed.code(), "LATTICE_TASK_SUBMISSION_LOOKUP_REJECTED");
+
+        let retained = map_submission_lookup_error(PostgresTaskLedgerError::new(
+            PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
+        ));
+        assert_eq!(retained.kind(), TaskLifecycleErrorKind::Corrupt);
+        assert_eq!(retained.code(), "LATTICE_TASK_LEDGER_CORRUPT");
+    }
+
+    #[test]
+    fn submission_execute_exposes_idempotency_substitution_without_driver_details() {
+        use lattice_postgres_store::{PostgresTaskLedgerError, PostgresTaskLedgerErrorKind};
+
+        let conflict = map_submission_execute_error(PostgresTaskLedgerError::new(
+            PostgresTaskLedgerErrorKind::CommandSubstitution,
+        ));
+        assert_eq!(conflict.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(conflict.code(), "LATTICE_TASK_IDEMPOTENCY_CONFLICT");
+
+        let unavailable = map_submission_execute_error(PostgresTaskLedgerError::new(
+            PostgresTaskLedgerErrorKind::Unavailable,
+        ));
+        assert_eq!(unavailable.kind(), TaskLifecycleErrorKind::Unavailable);
+        assert_eq!(unavailable.code(), "LATTICE_TASK_LEDGER_UNAVAILABLE");
     }
 }

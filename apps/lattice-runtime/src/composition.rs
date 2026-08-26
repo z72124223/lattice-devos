@@ -41,10 +41,10 @@ use lattice_contracts::{
     GitCommitEvidence, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
     HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
     HermesReflectionReceipt, HermesResearchRequest, HolderProcessId, Invocation, MemoryQuery,
-    PreparedWorkspaceEvidence, ProjectId, ProjectSnapshotId, RequestId, RuntimeAdmissionMode,
-    RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding,
-    TaskId, TaskIngressPeerEvidence, TaskSpecSubmission, WorkspaceChangeEvidence,
-    WriterLeaseAuthorityHead,
+    PreparedWorkspaceEvidence, ProjectAuthorityReceipt, ProjectId, ProjectSnapshotId, RequestId,
+    RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision,
+    StoreDaemonInstanceId, SubjectBinding, TaskId, TaskIngressPeerEvidence, TaskIntakeBinding,
+    TaskSpecSubmission, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
 };
 #[cfg(test)]
 use lattice_foreman_state::ForemanSnapshot;
@@ -76,8 +76,9 @@ use lattice_openclaw_adapter::{
 };
 use lattice_orchestrator::{
     ControlledTaskOrchestratorError, ControlledTaskRequest, DeliveryOrchestratorError,
-    ForemanCheckpointOrchestratorError, GraphMemoryOrchestratorError, checkpoint_foreman,
-    delivery_status, graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
+    ForemanCheckpointOrchestratorError, GeneralTaskIntakeError, GeneralTaskIntakeRequest,
+    GraphMemoryOrchestratorError, checkpoint_foreman, create_general_task, delivery_status,
+    graph_memory_status, run_controlled_task, run_delivery, run_delivery_governed,
     run_graph_memory,
 };
 #[cfg(test)]
@@ -88,8 +89,9 @@ use lattice_ports::{
     DeliveryPortResult, ForemanCoordinationPort, GatewayService, GatewayServiceError,
     GatewayServiceResult, GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage,
     HermesPort, HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
-    TaskLifecycleError, TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort,
-    TaskLifecycleResult, TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
+    TaskIntakeLifecycleEvidence, TaskIntakeLifecyclePort, TaskLifecycleError,
+    TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
+    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 use lattice_postgres_codebase_memory::{
     ExtensionBootstrapGlobalProfile as MemoryBootstrapGlobalProfile,
@@ -106,9 +108,9 @@ use lattice_postgres_store::{
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome as WriterExtensionApplyOutcome,
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease, V3BootstrapProfile,
-    V3ExtensionTarget, apply_extension as apply_postgres_writer_extension, apply_v3_extension,
-    inspect_v3_bootstrap_profile, rebind_existing_v3_extension,
-    verify_extension as verify_writer_extension,
+    V3ExtensionTarget, V4ExtensionTarget, apply_extension as apply_postgres_writer_extension,
+    apply_v3_extension, apply_v4_extension, inspect_v3_bootstrap_profile,
+    rebind_existing_v3_extension, verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -116,7 +118,9 @@ use lattice_task_domain::{
     ScopeOperation, TASK_SPEC_SCHEMA_VERSION, TaskBudget, TaskScope, TaskSpec, TaskSpecInput,
     TaskState,
 };
-use lattice_task_ledger::foreman_coordination_identity;
+use lattice_task_ledger::{
+    TaskIngressRequestKind, TaskSubmissionEnvelope, foreman_coordination_identity,
+};
 use lattice_writer_lease::{
     WriterLeaseAcquireRequest, WriterLeaseRepository, WriterLeaseRepositoryError,
     WriterLeaseRepositoryErrorKind,
@@ -140,14 +144,17 @@ use crate::mcp::{
     ObservedEffectKind, TaskStatusArguments, TaskSubmitArguments, ToolExecutionError,
     record_observed_effect,
 };
+use crate::project_bridge::{ProjectSelector, ResolvedProjectAuthority, resolve_project_authority};
 use crate::task_control::{
-    PostgresTaskLifecycle, TaskPersistenceFoundation, task_admission_command_id,
+    PostgresTaskLifecycle, TaskAdmissionProfile, TaskPersistenceFoundation,
+    task_admission_command_id,
 };
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const FINALIZATION_RESERVE: Duration = Duration::from_secs(30);
 const CONTROLLED_TASK_MAX_RUNTIME: Duration = Duration::from_mins(5);
+const GENERAL_TASK_INGRESS_ID: &str = "lattice_task_submit.v1";
 const TASK_ID: &str = "TASK-032";
 const PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
 const CONTROLLED_TASK_ID: &str = "TASK-038-CANARY";
@@ -2081,7 +2088,9 @@ fn delivery_environment_for_mode(
 enum PostgresBootstrapAction {
     V5Apply,
     V6Rebind,
-    V6VerifyOnly,
+    V4Apply,
+    V7Apply,
+    V7VerifyOnly,
 }
 
 const fn postgres_bootstrap_action(
@@ -2109,13 +2118,24 @@ const fn postgres_bootstrap_action(
             MigrationBootstrapProfile::V6,
             MemoryBootstrapProfile::V3,
             V3BootstrapProfile::V6Current,
-        ) => Some(PostgresBootstrapAction::V6VerifyOnly),
+        ) => Some(PostgresBootstrapAction::V4Apply),
+        (
+            MigrationBootstrapProfile::V6,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V6V4Bridge,
+        ) => Some(PostgresBootstrapAction::V7Apply),
+        (
+            MigrationBootstrapProfile::V7,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V7V4Current,
+        ) => Some(PostgresBootstrapAction::V7VerifyOnly),
         _ => None,
     }
 }
 
 /// Performs the only product migration path: Store v5 foundation, Memory v3,
-/// Writer v2/v3 bridge, then Store v6/rebind and fresh-runtime replay proof.
+/// Writer v2/v3 bridge, Store v6/rebind, then the exact Store-v7 submission
+/// profile and fresh-runtime replay proof.
 ///
 /// The command temporarily closes Runtime admission while it holds the extension
 /// migration locks, then restores the configured Runtime authority. A failed setup
@@ -2136,6 +2156,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     let writer_v3 = V3ExtensionTarget::new(database.database_name(), database_identity.clone())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    let writer_v4 = V4ExtensionTarget::new(database.database_name(), database_identity.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
 
     // Classify only exact history before mutation. Product bootstrap does not
@@ -2164,6 +2186,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let memory_global = match profile {
         MigrationBootstrapProfile::V5 => MemoryBootstrapGlobalProfile::V5,
         MigrationBootstrapProfile::V6 => MemoryBootstrapGlobalProfile::V6,
+        MigrationBootstrapProfile::V7 => MemoryBootstrapGlobalProfile::V7,
         MigrationBootstrapProfile::Fresh | MigrationBootstrapProfile::LegacyPrefix => {
             return Err(LatticedError::new(
                 LatticedErrorKind::RuntimePostgresVerification,
@@ -2182,7 +2205,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         return Err(LatticedError::new(LatticedErrorKind::WriterLease));
     };
 
-    if action == PostgresBootstrapAction::V6VerifyOnly {
+    if action == PostgresBootstrapAction::V7VerifyOnly {
         let persisted_admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
         if persisted_admission != configured_admission {
             return Err(LatticedError::new(
@@ -2193,96 +2216,157 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
         admission.stop(&mut migrator)?;
         let setup = (|| {
-            if action == PostgresBootstrapAction::V5Apply {
-                match writer_profile {
-                    V3BootstrapProfile::V5Bridge => {
-                        if apply_v3_extension(&mut migrator, &writer_v3)
+            let mut next_action = action;
+            let mut next_writer_profile = writer_profile;
+            for _ in 0..4 {
+                match next_action {
+                    PostgresBootstrapAction::V5Apply => {
+                        match next_writer_profile {
+                            V3BootstrapProfile::V5Bridge => {
+                                if apply_v3_extension(&mut migrator, &writer_v3).map_err(|_| {
+                                    LatticedError::new(LatticedErrorKind::WriterLease)
+                                })? != WriterExtensionApplyOutcome::Bridged
+                                {
+                                    return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+                                }
+                            }
+                            V3BootstrapProfile::V5FallbackRequired => {
+                                let store = verify_store_schema(
+                                    &mut migrator,
+                                    &store_target,
+                                    StoreDatabaseRole::Migrator,
+                                )
+                                .map_err(|_| {
+                                    LatticedError::new(
+                                        LatticedErrorKind::RuntimePostgresVerification,
+                                    )
+                                })?;
+                                if store.schema_version() != 5 {
+                                    return Err(LatticedError::new(
+                                        LatticedErrorKind::RuntimePostgresVerification,
+                                    ));
+                                }
+                                let memory_manifest = verify_embedded_extension_manifest()
+                                    .map_err(|_| {
+                                        LatticedError::new(LatticedErrorKind::GraphConfiguration)
+                                    })?;
+                                apply_postgres_memory_extension(&mut migrator, &memory_target)
+                                    .map_err(|_| {
+                                        LatticedError::new(LatticedErrorKind::GraphConfiguration)
+                                    })?;
+                                let global_manifest =
+                                    ContentDigest::from_sha256(store.manifest_sha256().as_str())
+                                        .map_err(|_| {
+                                            LatticedError::new(
+                                                LatticedErrorKind::RuntimePostgresVerification,
+                                            )
+                                        })?;
+                                let writer_target = WriterLeaseExtensionTarget::new(
+                                    database.database_name(),
+                                    database_identity.clone(),
+                                    global_manifest,
+                                    memory_manifest.manifest_sha256().clone(),
+                                )
+                                .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                                apply_postgres_writer_extension(&mut migrator, &writer_target)
+                                    .map_err(|_| {
+                                        LatticedError::new(LatticedErrorKind::WriterLease)
+                                    })?;
+                                verify_writer_extension(&mut migrator, &writer_target).map_err(
+                                    |_| LatticedError::new(LatticedErrorKind::WriterLease),
+                                )?;
+                                verify_memory_extension(
+                                    &mut migrator,
+                                    &memory_target,
+                                    lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
+                                )
+                                .map_err(|_| {
+                                    LatticedError::new(LatticedErrorKind::GraphConfiguration)
+                                })?;
+                                if apply_v3_extension(&mut migrator, &writer_v3).map_err(|_| {
+                                    LatticedError::new(LatticedErrorKind::WriterLease)
+                                })? != WriterExtensionApplyOutcome::Bridged
+                                {
+                                    return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+                                }
+                            }
+                            V3BootstrapProfile::V6BridgePending
+                            | V3BootstrapProfile::V6Current
+                            | V3BootstrapProfile::V6V4Bridge
+                            | V3BootstrapProfile::V7V4Current => {
+                                return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+                            }
+                        }
+                        apply_store_migrations(&mut migrator, &store_target).map_err(|_| {
+                            LatticedError::new(LatticedErrorKind::RuntimePostgresMigration)
+                        })?;
+                    }
+                    PostgresBootstrapAction::V6Rebind => {
+                        match rebind_existing_v3_extension(&mut migrator, &writer_v3)
+                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+                        {
+                            WriterExtensionApplyOutcome::Rebound => {}
+                            _ => return Err(LatticedError::new(LatticedErrorKind::WriterLease)),
+                        }
+                    }
+                    PostgresBootstrapAction::V4Apply => {
+                        if apply_v4_extension(&mut migrator, &writer_v4)
                             .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
                             != WriterExtensionApplyOutcome::Bridged
                         {
                             return Err(LatticedError::new(LatticedErrorKind::WriterLease));
                         }
                     }
-                    V3BootstrapProfile::V5FallbackRequired => {
-                        let store = verify_store_schema(
-                            &mut migrator,
-                            &store_target,
-                            StoreDatabaseRole::Migrator,
-                        )
-                        .map_err(|_| {
-                            LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
+                    PostgresBootstrapAction::V7Apply => {
+                        apply_store_migrations(&mut migrator, &store_target).map_err(|_| {
+                            LatticedError::new(LatticedErrorKind::RuntimePostgresMigration)
                         })?;
-                        if store.schema_version() != 5 {
-                            return Err(LatticedError::new(
-                                LatticedErrorKind::RuntimePostgresVerification,
-                            ));
-                        }
-                        let memory_manifest =
-                            verify_embedded_extension_manifest().map_err(|_| {
-                                LatticedError::new(LatticedErrorKind::GraphConfiguration)
-                            })?;
-                        apply_postgres_memory_extension(&mut migrator, &memory_target).map_err(
-                            |_| LatticedError::new(LatticedErrorKind::GraphConfiguration),
-                        )?;
-                        let global_manifest = ContentDigest::from_sha256(
-                            store.manifest_sha256().as_str(),
-                        )
-                        .map_err(|_| {
-                            LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
-                        })?;
-                        let writer_target = WriterLeaseExtensionTarget::new(
-                            database.database_name(),
-                            database_identity.clone(),
-                            global_manifest,
-                            memory_manifest.manifest_sha256().clone(),
-                        )
-                        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-                        apply_postgres_writer_extension(&mut migrator, &writer_target)
-                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-                        verify_writer_extension(&mut migrator, &writer_target)
-                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
-                        verify_memory_extension(
-                            &mut migrator,
-                            &memory_target,
-                            lattice_postgres_codebase_memory::ExtensionDatabaseRole::Migrator,
-                        )
+                    }
+                    PostgresBootstrapAction::V7VerifyOnly => {}
+                }
+
+                profile =
+                    inspect_migration_profile(&mut migrator, &store_target).map_err(|_| {
+                        LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
+                    })?;
+                let memory_global = match profile {
+                    MigrationBootstrapProfile::V5 => MemoryBootstrapGlobalProfile::V5,
+                    MigrationBootstrapProfile::V6 => MemoryBootstrapGlobalProfile::V6,
+                    MigrationBootstrapProfile::V7 => MemoryBootstrapGlobalProfile::V7,
+                    MigrationBootstrapProfile::Fresh | MigrationBootstrapProfile::LegacyPrefix => {
+                        return Err(LatticedError::new(
+                            LatticedErrorKind::RuntimePostgresVerification,
+                        ));
+                    }
+                };
+                let memory_profile =
+                    inspect_bootstrap_profile(&mut migrator, &memory_target, memory_global)
                         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-                        if apply_v3_extension(&mut migrator, &writer_v3)
-                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
-                            != WriterExtensionApplyOutcome::Bridged
-                        {
-                            return Err(LatticedError::new(LatticedErrorKind::WriterLease));
-                        }
-                    }
-                    V3BootstrapProfile::V6BridgePending | V3BootstrapProfile::V6Current => {
-                        return Err(LatticedError::new(LatticedErrorKind::WriterLease));
-                    }
-                }
-                apply_store_migrations(&mut migrator, &store_target)
-                    .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
-            } else if action == PostgresBootstrapAction::V6Rebind {
-                match rebind_existing_v3_extension(&mut migrator, &writer_v3)
-                    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
-                {
-                    WriterExtensionApplyOutcome::Rebound => {}
-                    _ => return Err(LatticedError::new(LatticedErrorKind::WriterLease)),
-                }
-            } else {
-                return Err(LatticedError::new(
-                    LatticedErrorKind::RuntimePostgresVerification,
-                ));
-            }
-            let final_store =
-                verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
+                next_writer_profile = inspect_v3_bootstrap_profile(&mut migrator, &writer_v3)
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                next_action =
+                    postgres_bootstrap_action(profile, memory_profile, next_writer_profile)
+                        .ok_or_else(|| LatticedError::new(LatticedErrorKind::WriterLease))?;
+                if next_action == PostgresBootstrapAction::V7VerifyOnly {
+                    let final_store = verify_store_schema(
+                        &mut migrator,
+                        &store_target,
+                        StoreDatabaseRole::Migrator,
+                    )
                     .map_err(|_| {
                         LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
                     })?;
-            if final_store.schema_version() != 6 {
-                return Err(LatticedError::new(
-                    LatticedErrorKind::RuntimePostgresVerification,
-                ));
+                    if final_store.schema_version() != 7 {
+                        return Err(LatticedError::new(
+                            LatticedErrorKind::RuntimePostgresVerification,
+                        ));
+                    }
+                    return Ok(());
+                }
             }
-            Ok(())
+            Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresVerification,
+            ))
         })();
         match setup {
             Ok(()) => configured_admission.restore(&mut migrator)?,
@@ -4610,6 +4694,84 @@ fn task_lifecycle<H: FullChainHermesPort>(
     )
 }
 
+fn general_task_lifecycle<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    submission: &TaskSubmissionEnvelope,
+) -> TaskLifecycleResult<PostgresTaskLifecycle> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_MCP_OBSERVED_EFFECT_REJECTED",
+            )
+        })?;
+    PostgresTaskLifecycle::connect_with_ingress_peer_and_admission_profile(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|_| {
+            TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Unavailable,
+                "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
+            )
+        })?,
+        submission.identity().clone(),
+        core.store_authority.clone(),
+        core.task_ingress_peer.clone(),
+        TaskAdmissionProfile::GeneralTaskIntake(Box::new(submission.clone())),
+    )
+}
+
+fn load_general_submission_by_request<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    client_request_id: &str,
+) -> Result<Option<TaskSubmissionEnvelope>, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    PostgresTaskLifecycle::load_submission_by_request(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        GENERAL_TASK_INGRESS_ID,
+        client_request_id,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+fn load_task_ingress_request_kind_by_request<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    client_request_id: &str,
+) -> Result<Option<TaskIngressRequestKind>, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    PostgresTaskLifecycle::load_ingress_request_kind_by_request(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        GENERAL_TASK_INGRESS_ID,
+        client_request_id,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+fn load_general_submission_by_task_ref<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    task_ref: &ContentDigest,
+) -> Result<Option<TaskSubmissionEnvelope>, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    PostgresTaskLifecycle::load_submission_by_task_ref(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        task_ref,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
 fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::LedgerConfiguration);
     let daemon_instance_id = StoreDaemonInstanceId::new(
@@ -4697,7 +4859,7 @@ fn task_writer_lease<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     foundation: &TaskPersistenceFoundation,
 ) -> Result<PostgresWriterLease, LatticedError> {
-    let target = V3ExtensionTarget::new(
+    let target = V4ExtensionTarget::new(
         core.delivery.database.database_name(),
         foundation.database_identity_digest().clone(),
     )
@@ -4711,7 +4873,7 @@ fn task_writer_lease<H: FullChainHermesPort>(
         deadline(core.delivery.timeout)?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    PostgresWriterLease::new_v3(client, &target, &core.store_authority, 600)
+    PostgresWriterLease::new_v4_v7(client, &target, &core.store_authority, 600)
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
 }
 
@@ -4790,7 +4952,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
     let database_identity =
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
-    let target = V3ExtensionTarget::new(core.delivery.database.database_name(), database_identity)
+    let target = V4ExtensionTarget::new(core.delivery.database.database_name(), database_identity)
         .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
     drop(foundation_ledger);
     let client = connect_fixed_runtime_client(
@@ -4800,7 +4962,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
     )
     .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
-    PostgresWriterLease::new_v3(client, &target, &core.store_authority, 600)
+    PostgresWriterLease::new_v4_v7(client, &target, &core.store_authority, 600)
         .map_err(foreman_writer_observation_error)
 }
 
@@ -5310,7 +5472,10 @@ fn foreman_writer_acquire<H: FullChainHermesPort>(
         project_snapshot_id: identity.project_snapshot_id().clone(),
         task_id: identity.task_id().clone(),
         task_revision: identity.task_revision().to_owned(),
-        task_spec_digest: identity.task_spec_digest().clone(),
+        task_spec_digest: identity
+            .task_spec_digest()
+            .cloned()
+            .ok_or_else(|| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?,
         attempt_id: AttemptId::new(format!("foreman-attempt-{suffix}"))
             .map_err(|_| ToolExecutionError::new("FOREMAN_CHECKPOINT_INVALID"))?,
         lease_id: format!("foreman-lease-{suffix}"),
@@ -5371,6 +5536,275 @@ fn controlled_task_request<H: FullChainHermesPort>(
         core.process_start_identity.clone(),
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))
+}
+
+fn general_task_submission(
+    client_request_id: &str,
+    objective: &str,
+    project_display_name: &str,
+    authority: &ProjectAuthorityReceipt,
+) -> Result<TaskSubmissionEnvelope, LatticedError> {
+    let task_id_digest = digest(
+        "lattice.task.general-intake-id.v1",
+        &CanonicalValue::Object(vec![
+            (
+                "client_request_id".to_owned(),
+                CanonicalValue::String(client_request_id.to_owned()),
+            ),
+            (
+                "ingress_id".to_owned(),
+                CanonicalValue::String(GENERAL_TASK_INGRESS_ID.to_owned()),
+            ),
+        ]),
+    )?;
+    let intake_digest = digest(
+        "lattice.task.general-intake-subject.v1",
+        &CanonicalValue::Object(vec![
+            (
+                "client_request_id".to_owned(),
+                CanonicalValue::String(client_request_id.to_owned()),
+            ),
+            (
+                "objective".to_owned(),
+                CanonicalValue::String(objective.to_owned()),
+            ),
+            (
+                "project_authority_receipt_digest".to_owned(),
+                CanonicalValue::String(authority.receipt_digest().as_str().to_owned()),
+            ),
+            (
+                "project_id".to_owned(),
+                CanonicalValue::String(authority.project_id().as_str().to_owned()),
+            ),
+            (
+                "project_snapshot_id".to_owned(),
+                CanonicalValue::String(authority.project_snapshot_id().as_str().to_owned()),
+            ),
+            (
+                "schema".to_owned(),
+                CanonicalValue::String("lattice.task.general-intake-subject/1.0".to_owned()),
+            ),
+        ]),
+    )?;
+    let identity = lattice_contracts::TaskLedgerStreamIdentity::new_general_task_intake(
+        authority.project_id().clone(),
+        authority.project_snapshot_id().clone(),
+        TaskId::new(format!(
+            "TASK-GENERAL-{}",
+            task_id_digest.as_str()[..40].to_ascii_uppercase()
+        ))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?,
+        "1",
+        intake_digest,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    TaskSubmissionEnvelope::new(
+        GENERAL_TASK_INGRESS_ID,
+        client_request_id,
+        objective,
+        project_display_name,
+        identity,
+        authority.receipt_digest().clone(),
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))
+}
+
+fn general_task_binding(
+    submission: &TaskSubmissionEnvelope,
+) -> Result<TaskIntakeBinding, LatticedError> {
+    TaskIntakeBinding::try_from_stream_identity(submission.identity())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))
+}
+
+fn general_submission_matches_arguments(
+    submission: &TaskSubmissionEnvelope,
+    arguments: &TaskSubmitArguments,
+) -> bool {
+    general_submission_matches_request(
+        submission,
+        arguments.objective(),
+        arguments.project_id(),
+        arguments.project_name(),
+    )
+}
+
+fn general_submission_matches_request(
+    submission: &TaskSubmissionEnvelope,
+    objective: Option<&str>,
+    project_id: Option<&str>,
+    project_name: Option<&str>,
+) -> bool {
+    objective == Some(submission.objective())
+        && project_id
+            .is_none_or(|project_id| project_id == submission.identity().project_id().as_str())
+        && project_name.is_none_or(|project_name| project_name == submission.project_display_name())
+}
+
+fn general_submission_matches_effective_project(
+    submission: &TaskSubmissionEnvelope,
+    arguments: &TaskSubmitArguments,
+    effective_project_id: &ProjectId,
+) -> bool {
+    general_submission_matches_effective_request(
+        submission,
+        arguments.objective(),
+        arguments.project_id(),
+        arguments.project_name(),
+        effective_project_id,
+    )
+}
+
+fn general_submission_matches_effective_request(
+    submission: &TaskSubmissionEnvelope,
+    objective: Option<&str>,
+    project_id: Option<&str>,
+    project_name: Option<&str>,
+    effective_project_id: &ProjectId,
+) -> bool {
+    submission.identity().project_id() == effective_project_id
+        && general_submission_matches_request(submission, objective, project_id, project_name)
+}
+
+fn general_submission_after_ingress_preflight<T>(
+    retained_request_kind: Option<TaskIngressRequestKind>,
+    reload_submission: impl FnOnce() -> Result<Option<T>, ToolExecutionError>,
+) -> Result<Option<T>, ToolExecutionError> {
+    match retained_request_kind {
+        Some(TaskIngressRequestKind::ControlledCodexCanary) => {
+            Err(ToolExecutionError::new("LATTICE_TASK_IDEMPOTENCY_CONFLICT"))
+        }
+        Some(TaskIngressRequestKind::GeneralTask) => reload_submission()?
+            .map(Some)
+            .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_LEDGER_CORRUPT")),
+        None => Ok(None),
+    }
+}
+
+fn resolve_registered_project_for_general_submit<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+) -> Result<ResolvedProjectAuthority, ToolExecutionError> {
+    let selector = ProjectSelector::new(arguments.project_id(), arguments.project_name())
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    record_observed_effect(ObservedEffectKind::Filesystem)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Process))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Database))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    let resolved = resolve_project_authority(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        &core.store_authority,
+        &selector,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))?;
+    if &resolved.authority().head() != resolved.current_head() {
+        return Err(ToolExecutionError::new(
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+        ));
+    }
+    Ok(resolved)
+}
+
+fn replay_general_submission<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    existing: &TaskSubmissionEnvelope,
+) -> Result<Value, ToolExecutionError> {
+    if !general_submission_matches_arguments(existing, arguments) {
+        return Err(ToolExecutionError::new("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+    }
+    let binding =
+        general_task_binding(existing).map_err(|error| ToolExecutionError::new(error.code()))?;
+    let request = GeneralTaskIntakeRequest::new(binding, arguments.client_request_id())
+        .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    let mut lifecycle = general_task_lifecycle(core, existing)
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    let admission = create_general_task(&request, &mut lifecycle)
+        .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    general_task_public_status(admission.evidence(), existing)
+        .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+enum GeneralWinnerReplay {
+    Absent,
+    Conflict,
+    Replayed(Value),
+}
+
+fn replay_general_winner_after_admission_failure<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    effective_project_id: &ProjectId,
+) -> Result<GeneralWinnerReplay, ToolExecutionError> {
+    let Some(winner) = load_general_submission_by_request(core, arguments.client_request_id())?
+    else {
+        return Ok(GeneralWinnerReplay::Absent);
+    };
+    if !general_submission_matches_effective_project(&winner, arguments, effective_project_id) {
+        return Ok(GeneralWinnerReplay::Conflict);
+    }
+    replay_general_submission(core, arguments, &winner).map(GeneralWinnerReplay::Replayed)
+}
+
+fn admit_general_submission<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    resolved: &ResolvedProjectAuthority,
+) -> Result<Value, ToolExecutionError> {
+    let objective = arguments
+        .objective()
+        .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_REQUEST_REJECTED"))?;
+    let submission = general_task_submission(
+        arguments.client_request_id(),
+        objective,
+        resolved.display_name(),
+        resolved.authority(),
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))?;
+    let binding =
+        general_task_binding(&submission).map_err(|error| ToolExecutionError::new(error.code()))?;
+    let request = GeneralTaskIntakeRequest::new(binding, arguments.client_request_id())
+        .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    let mut lifecycle = general_task_lifecycle(core, &submission)
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    let admission = create_general_task(&request, &mut lifecycle)
+        .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    general_task_public_status(admission.evidence(), &submission)
+        .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+fn general_task_public_status(
+    evidence: &TaskIntakeLifecycleEvidence,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<Value, LatticedError> {
+    let binding = general_task_binding(submission)?;
+    if evidence.binding() != &binding {
+        return Err(LatticedError::new(LatticedErrorKind::TaskControl));
+    }
+    Ok(json!({
+        "schema_version": "lattice.task.status.v3",
+        "status": "SUBMITTED",
+        "task_state": evidence.state().as_str(),
+        "task_ref": submission.task_ref().as_str(),
+        "ledger_head_digest": evidence.ledger_head_digest().as_str(),
+        "result_digest": Value::Null,
+        "failure_stage": Value::Null,
+        "failure_code": Value::Null,
+        "objective": submission.objective(),
+        "project_id": submission.identity().project_id().as_str(),
+        "project_name": submission.project_display_name(),
+        "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+    }))
+}
+
+const fn general_task_error_code(error: &GeneralTaskIntakeError) -> &'static str {
+    match error {
+        GeneralTaskIntakeError::RequestRejected => "LATTICE_TASK_REQUEST_REJECTED",
+        GeneralTaskIntakeError::Lifecycle(error) => error.code(),
+        GeneralTaskIntakeError::StateMismatch => "LATTICE_TASK_STATE_MISMATCH",
+    }
 }
 
 fn controlled_task_reference(
@@ -5781,8 +6215,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             None
         } else {
             Some(
-                lifecycle
-                    .load(&binding)
+                TaskLifecyclePort::load(&mut lifecycle, &binding)
                     .map_err(|error| ToolExecutionError::new(error.code()))?,
             )
         };
@@ -5797,8 +6230,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             }
             ControlledWriterDecision::Execute => {}
         }
-        let preexisting = lifecycle
-            .load(&binding)
+        let preexisting = TaskLifecyclePort::load(&mut lifecycle, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         verify_merging_writer_history(&mut writer_lease, &preexisting)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
@@ -5822,8 +6254,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
         match outcome {
             Ok(evidence) => Ok(evidence),
             Err(error @ ControlledTaskOrchestratorError::Execution(_)) => {
-                let evidence = lifecycle
-                    .load(&binding)
+                let evidence = TaskLifecyclePort::load(&mut lifecycle, &binding)
                     .map_err(|load| ToolExecutionError::new(load.code()))?;
                 if !matches!(
                     evidence.state(),
@@ -5834,8 +6265,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
                 Ok(evidence)
             }
             Err(error @ ControlledTaskOrchestratorError::ReconciliationRequired) => {
-                let evidence = lifecycle
-                    .load(&binding)
+                let evidence = TaskLifecyclePort::load(&mut lifecycle, &binding)
                     .map_err(|load| ToolExecutionError::new(load.code()))?;
                 if !evidence.admitted() {
                     return Err(ToolExecutionError::new(controlled_task_error_code(&error)));
@@ -5894,8 +6324,7 @@ impl<H: FullChainHermesPort> FullChainService<H> {
         }
         let mut lifecycle = task_lifecycle(core, &fixed_binding)
             .map_err(|error| map_task_lifecycle_gateway_error(&error))?;
-        let task_evidence = lifecycle
-            .load(&fixed_binding)
+        let task_evidence = TaskLifecyclePort::load(&mut lifecycle, &fixed_binding)
             .map_err(|error| GatewayServiceError::new(PortErrorKind::Denied, error.code()))?;
         let result = if task_evidence.admitted() {
             core.status_task_downstream_json(FullChainEntry::OpenClawTyped, &fixed_binding)
@@ -5983,17 +6412,20 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         let binding = core.submission.binding().clone();
         let mut lifecycle = task_lifecycle(&core, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let (evidence, historical_terminal) = match lifecycle.load(&binding) {
-            Ok(evidence) => (evidence, false),
-            Err(error) if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" => {
-                lifecycle
-                    .load_historical_terminal_status(&binding)
-                    .map(|(evidence, _)| evidence)
-                    .map(|evidence| (evidence, true))
-                    .map_err(|error| ToolExecutionError::new(error.code()))?
-            }
-            Err(error) => return Err(ToolExecutionError::new(error.code())),
-        };
+        let (evidence, historical_terminal) =
+            match TaskLifecyclePort::load(&mut lifecycle, &binding) {
+                Ok(evidence) => (evidence, false),
+                Err(error)
+                    if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" =>
+                {
+                    lifecycle
+                        .load_historical_terminal_status(&binding)
+                        .map(|(evidence, _)| evidence)
+                        .map(|evidence| (evidence, true))
+                        .map_err(|error| ToolExecutionError::new(error.code()))?
+                }
+                Err(error) => return Err(ToolExecutionError::new(error.code())),
+            };
         if evidence.admitted() {
             if historical_terminal {
                 return core
@@ -6086,13 +6518,14 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
+    // Admission, replay, and currentness checks intentionally remain in one
+    // visible fail-closed sequence so later effects cannot be reordered around
+    // an idempotency winner.
+    #[allow(clippy::too_many_lines)]
     fn task_submit(
         &mut self,
         arguments: &TaskSubmitArguments,
     ) -> Result<Value, ToolExecutionError> {
-        if arguments.intent() != mcp::CONTROLLED_CODEX_CANARY_INTENT {
-            return Err(ToolExecutionError::new("LATTICE_TASK_REQUEST_REJECTED"));
-        }
         let mut core = self
             .inner
             .lock()
@@ -6103,14 +6536,94 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskSubmit,
         )?;
+        let existing_general =
+            load_general_submission_by_request(&core, arguments.client_request_id())?;
+        if arguments.is_controlled_canary() && existing_general.is_some() {
+            return Err(ToolExecutionError::new("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+        }
+        if !arguments.is_controlled_canary() {
+            if let Some(existing) = existing_general {
+                return replay_general_submission(&core, arguments, &existing);
+            }
+
+            let retained_request_kind =
+                load_task_ingress_request_kind_by_request(&core, arguments.client_request_id())?;
+            let raced_submission =
+                general_submission_after_ingress_preflight(retained_request_kind, || {
+                    load_general_submission_by_request(&core, arguments.client_request_id())
+                })?;
+            if let Some(existing) = raced_submission {
+                return replay_general_submission(&core, arguments, &existing);
+            }
+            let resolved = resolve_registered_project_for_general_submit(&core, arguments)?;
+            let effective_project_id = resolved.authority().project_id().clone();
+            match admit_general_submission(&core, arguments, &resolved) {
+                Ok(value) => return Ok(value),
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        "LATTICE_TASK_IDEMPOTENCY_CONFLICT"
+                            | "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+                    ) =>
+                {
+                    match replay_general_winner_after_admission_failure(
+                        &core,
+                        arguments,
+                        &effective_project_id,
+                    )? {
+                        GeneralWinnerReplay::Replayed(value) => return Ok(value),
+                        GeneralWinnerReplay::Conflict => {
+                            return Err(ToolExecutionError::new(
+                                "LATTICE_TASK_IDEMPOTENCY_CONFLICT",
+                            ));
+                        }
+                        GeneralWinnerReplay::Absent => {}
+                    }
+
+                    if error.code() != "PROJECT_REGISTRY_CURRENTNESS_CONFLICT" {
+                        return Err(error);
+                    }
+
+                    let refreshed =
+                        resolve_registered_project_for_general_submit(&core, arguments)?;
+                    if refreshed.authority().project_id() != &effective_project_id {
+                        return Err(error);
+                    }
+                    match admit_general_submission(&core, arguments, &refreshed) {
+                        Ok(value) => return Ok(value),
+                        Err(retry_error)
+                            if matches!(
+                                retry_error.code(),
+                                "LATTICE_TASK_IDEMPOTENCY_CONFLICT"
+                                    | "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+                            ) =>
+                        {
+                            return match replay_general_winner_after_admission_failure(
+                                &core,
+                                arguments,
+                                &effective_project_id,
+                            )? {
+                                GeneralWinnerReplay::Replayed(value) => Ok(value),
+                                GeneralWinnerReplay::Conflict => Err(ToolExecutionError::new(
+                                    "LATTICE_TASK_IDEMPOTENCY_CONFLICT",
+                                )),
+                                GeneralWinnerReplay::Absent => Err(retry_error),
+                            };
+                        }
+                        Err(retry_error) => return Err(retry_error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
         let submission = mcp_gateway_submission(arguments.client_request_id())
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         if core.run_mode == FullChainRunMode::ResumeExisting {
             let binding = submission.binding().clone();
             let mut lifecycle = task_lifecycle(&core, &binding)
                 .map_err(|error| ToolExecutionError::new(error.code()))?;
-            let evidence = lifecycle
-                .load(&binding)
+            let evidence = TaskLifecyclePort::load(&mut lifecycle, &binding)
                 .map_err(|error| ToolExecutionError::new(error.code()))?;
             if evidence.admitted() && evidence.state() == TaskState::Failed {
                 let task_ref = verified_controlled_task_reference(&core, &binding)
@@ -6149,21 +6662,47 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskStatus,
         )?;
-        let submission = mcp_gateway_submission(arguments.client_request_id())
+        let parsed_task_ref = ContentDigest::from_sha256(arguments.task_ref())
+            .map_err(|_| ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"))?;
+        if let Some(submission) = load_general_submission_by_task_ref(&core, &parsed_task_ref)? {
+            if arguments
+                .client_request_id()
+                .is_some_and(|client_request_id| {
+                    client_request_id != submission.client_request_id()
+                })
+            {
+                return Err(ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"));
+            }
+            let binding = general_task_binding(&submission)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let mut lifecycle = general_task_lifecycle(&core, &submission)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let evidence = TaskIntakeLifecyclePort::load(&mut lifecycle, &binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            return general_task_public_status(&evidence, &submission)
+                .map_err(|error| ToolExecutionError::new(error.code()));
+        }
+        let client_request_id = arguments
+            .client_request_id()
+            .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_REFERENCE_NOT_FOUND"))?;
+        let submission = mcp_gateway_submission(client_request_id)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         let binding = submission.binding().clone();
         let mut lifecycle = task_lifecycle(&core, &binding)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
-        let (evidence, historical_admission_command_id) = match lifecycle.load(&binding) {
-            Ok(evidence) => (evidence, None),
-            Err(error) if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" => {
-                let (evidence, admission_command_id) = lifecycle
-                    .load_historical_terminal_status(&binding)
-                    .map_err(|error| ToolExecutionError::new(error.code()))?;
-                (evidence, Some(admission_command_id))
-            }
-            Err(error) => return Err(ToolExecutionError::new(error.code())),
-        };
+        let (evidence, historical_admission_command_id) =
+            match TaskLifecyclePort::load(&mut lifecycle, &binding) {
+                Ok(evidence) => (evidence, None),
+                Err(error)
+                    if error.code() == "LATTICE_TASK_INGRESS_PROFILE_COMMITMENT_MISMATCH" =>
+                {
+                    let (evidence, admission_command_id) = lifecycle
+                        .load_historical_terminal_status(&binding)
+                        .map_err(|error| ToolExecutionError::new(error.code()))?;
+                    (evidence, Some(admission_command_id))
+                }
+                Err(error) => return Err(ToolExecutionError::new(error.code())),
+            };
         let admission_command_id = match historical_admission_command_id {
             Some(command_id) => command_id,
             None => lifecycle
@@ -8860,10 +9399,11 @@ mod tests {
     use super::*;
     use lattice_codebase_memory::{normalize_analysis, plan_retrieval};
     use lattice_contracts::{
-        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, DaemonEpoch, GraphConfidence,
-        GraphMemoryPersistenceEvidence, GraphSourceProvenance, GraphifyIdentity,
+        CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, DaemonEpoch, GitRefIdentity,
+        GraphConfidence, GraphMemoryPersistenceEvidence, GraphSourceProvenance, GraphifyIdentity,
         GraphifyRawEvidence, GraphifyRawNode, MemoryRetrievalDisposition, MemoryRetrievalEvidence,
-        MemoryRetrievalPlan, NormalizedGraphAnalysis, TrackedSource,
+        MemoryRetrievalPlan, NormalizedGraphAnalysis, PROJECT_AUTHORITY_PRODUCER_ID,
+        PROJECT_AUTHORITY_PRODUCER_VERSION, ProjectClass, ProjectLifecycle, TrackedSource,
     };
     use lattice_ports::{
         AutonomyDisposition, AutonomyReceiptProjection, CodebaseMemoryPort,
@@ -9404,9 +9944,11 @@ mod tests {
     #[test]
     fn postgres_bootstrap_cross_product_is_closed_before_effects() {
         use MemoryBootstrapProfile::{Empty, V2 as MemoryV2, V3 as MemoryV3};
-        use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6};
-        use PostgresBootstrapAction::{V5Apply, V6Rebind, V6VerifyOnly};
-        use V3BootstrapProfile::{V5Bridge, V5FallbackRequired, V6BridgePending, V6Current};
+        use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6, V7};
+        use PostgresBootstrapAction::{V4Apply, V5Apply, V6Rebind, V7Apply, V7VerifyOnly};
+        use V3BootstrapProfile::{
+            V5Bridge, V5FallbackRequired, V6BridgePending, V6Current, V6V4Bridge, V7V4Current,
+        };
 
         let accepted = [
             ((V5, Empty, V5FallbackRequired), V5Apply),
@@ -9414,11 +9956,20 @@ mod tests {
             ((V5, MemoryV3, V5FallbackRequired), V5Apply),
             ((V5, MemoryV3, V5Bridge), V5Apply),
             ((V6, MemoryV3, V6BridgePending), V6Rebind),
-            ((V6, MemoryV3, V6Current), V6VerifyOnly),
+            ((V6, MemoryV3, V6Current), V4Apply),
+            ((V6, MemoryV3, V6V4Bridge), V7Apply),
+            ((V7, MemoryV3, V7V4Current), V7VerifyOnly),
         ];
-        for store in [Fresh, LegacyPrefix, V5, V6] {
+        for store in [Fresh, LegacyPrefix, V5, V6, V7] {
             for memory in [Empty, MemoryV2, MemoryV3] {
-                for writer in [V5FallbackRequired, V5Bridge, V6BridgePending, V6Current] {
+                for writer in [
+                    V5FallbackRequired,
+                    V5Bridge,
+                    V6BridgePending,
+                    V6Current,
+                    V6V4Bridge,
+                    V7V4Current,
+                ] {
                     let expected = accepted.iter().find_map(
                         |((left_store, left_memory, left_writer), action)| {
                             (*left_store == store
@@ -9434,7 +9985,8 @@ mod tests {
     }
 
     #[test]
-    fn initialize_is_provisioning_only_and_bootstrap_orders_writer_v3_before_store_v6() {
+    #[allow(clippy::too_many_lines)]
+    fn initialize_is_provisioning_only_and_bootstrap_converges_once_through_store_v7() {
         let source = include_str!("composition.rs");
         let initialize = source
             .split("pub fn initialize_runtime_postgres_from_environment")
@@ -9469,6 +10021,9 @@ mod tests {
         let writer_v3 = bootstrap
             .find("apply_v3_extension")
             .expect("Writer v3 bridge");
+        let writer_v4 = bootstrap
+            .find("apply_v4_extension")
+            .expect("Writer v4 bridge");
         let generic_v5_verifier = bootstrap
             .find("verify_store_schema")
             .expect("generic Store v5 fallback verifier");
@@ -9481,14 +10036,14 @@ mod tests {
         let memory_fallback_verify = bootstrap
             .find("verify_memory_extension")
             .expect("Memory fallback verification");
-        let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v6");
+        let final_store = bootstrap.rfind("apply_store_migrations").expect("Store v7");
         let legacy_rejection = bootstrap
             .find("if profile == MigrationBootstrapProfile::LegacyPrefix")
             .expect("legacy product-bootstrap rejection");
         assert!(legacy_rejection < writer_absence && writer_absence < first_store);
         assert!(first_store < memory_inspection && memory_inspection < writer_inspection);
         assert!(writer_inspection < writer_v3);
-        assert!(writer_v3 < final_store);
+        assert!(writer_v3 < writer_v4 && writer_v4 < final_store);
         assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < memory_fallback);
         assert!(memory_fallback < writer_v2_fallback);
         assert!(writer_v2_fallback < memory_fallback_verify);
@@ -9496,6 +10051,14 @@ mod tests {
         assert!(bootstrap.contains("V3BootstrapProfile::V5Bridge"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6BridgePending"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6Current"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V6V4Bridge"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V7V4Current"));
+        assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V7"));
+        assert!(bootstrap.contains("PostgresBootstrapAction::V7Apply"));
+        assert!(bootstrap.contains("PostgresBootstrapAction::V7VerifyOnly"));
+        assert!(bootstrap.contains("final_store.schema_version() != 7"));
+        assert!(bootstrap.contains("PostgresBootstrapAction::V4Apply"));
+        assert!(bootstrap.contains("for _ in 0..4"));
         assert!(bootstrap.contains("!= WriterExtensionApplyOutcome::Bridged"));
         assert!(bootstrap.contains("persisted_admission != configured_admission"));
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
@@ -9509,6 +10072,14 @@ mod tests {
         assert!(bootstrap.contains("drop(migrator);"));
         assert!(bootstrap.contains("connect_fixed_runtime_client"));
         assert!(bootstrap.contains("load_runtime_status"));
+        let production = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production composition");
+        assert_eq!(
+            production.matches("PostgresWriterLease::new_v4_v7").count(),
+            2
+        );
 
         let ordinary_start = source
             .split("fn assemble_full_chain_service_with_mode")
@@ -9692,7 +10263,7 @@ mod tests {
                 authority.clone(),
                 ingress_peer.clone(),
             )?;
-            lifecycle.admit(&binding, client_request_id)?;
+            TaskLifecyclePort::admit(&mut lifecycle, &binding, client_request_id)?;
             let mut writer = None;
             let writer_authority = if profile == Task050AcceptanceProfile::Proceed {
                 let runtime = connect_fixed_runtime_client(
@@ -10280,6 +10851,193 @@ mod tests {
         assert_eq!(
             controlled_writer_decision(ExistingCompletionPolicy::Ignore, &binding, None),
             Ok(ControlledWriterDecision::Execute)
+        );
+    }
+
+    #[test]
+    fn retained_ingress_claim_is_key_scoped_and_rechecks_general_commit_before_resolution() {
+        use std::cell::Cell;
+        use std::collections::BTreeMap;
+
+        let retained = BTreeMap::from([(
+            "client-key-a",
+            TaskIngressRequestKind::ControlledCodexCanary,
+        )]);
+
+        let different_key_reload_calls = Cell::new(0_u8);
+        let different_key = general_submission_after_ingress_preflight(
+            retained.get("client-key-b").copied(),
+            || {
+                different_key_reload_calls.set(different_key_reload_calls.get() + 1);
+                Ok(Some("must-not-reload"))
+            },
+        )
+        .expect("a canary claim under key A must not block general key B");
+        assert_eq!(different_key, None);
+        assert_eq!(different_key_reload_calls.get(), 0);
+
+        let same_key_reload_calls = Cell::new(0_u8);
+        let same_key = general_submission_after_ingress_preflight(
+            retained.get("client-key-a").copied(),
+            || {
+                same_key_reload_calls.set(same_key_reload_calls.get() + 1);
+                Ok(Some("must-not-reload"))
+            },
+        )
+        .expect_err("general-after-canary must reject the shared idempotency key");
+        assert_eq!(same_key.code(), "LATTICE_TASK_IDEMPOTENCY_CONFLICT");
+        assert_eq!(same_key_reload_calls.get(), 0);
+
+        let raced_general_reload_calls = Cell::new(0_u8);
+        let raced_general = general_submission_after_ingress_preflight(
+            Some(TaskIngressRequestKind::GeneralTask),
+            || {
+                raced_general_reload_calls.set(raced_general_reload_calls.get() + 1);
+                Ok(Some("existing-task"))
+            },
+        )
+        .expect("a task committed between snapshots must become exact replay");
+        assert_eq!(raced_general, Some("existing-task"));
+        assert_eq!(raced_general_reload_calls.get(), 1);
+
+        let orphaned_general_reload_calls = Cell::new(0_u8);
+        let orphaned_general = general_submission_after_ingress_preflight(
+            Some(TaskIngressRequestKind::GeneralTask),
+            || {
+                orphaned_general_reload_calls.set(orphaned_general_reload_calls.get() + 1);
+                Ok(None::<&str>)
+            },
+        )
+        .expect_err("a general claim without its verified envelope is retained corruption");
+        assert_eq!(orphaned_general.code(), "LATTICE_TASK_LEDGER_CORRUPT");
+        assert_eq!(orphaned_general_reload_calls.get(), 1);
+
+        let source = include_str!("composition.rs");
+        let task_submit = source
+            .split("    fn task_submit(")
+            .nth(1)
+            .expect("Task Submit composition")
+            .split("    fn task_status(")
+            .next()
+            .expect("Task Submit body");
+        let envelope_lookups = task_submit
+            .match_indices("load_general_submission_by_request")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert!(envelope_lookups.len() >= 2);
+        let neutral_claim_lookup = task_submit
+            .find("load_task_ingress_request_kind_by_request")
+            .expect("neutral ingress-claim lookup");
+        let guarded_resolution = task_submit
+            .find("general_submission_after_ingress_preflight")
+            .expect("claim-before-resolution gate");
+        let project_resolver = task_submit
+            .find("resolve_registered_project_for_general_submit")
+            .expect("registered-project resolver");
+        assert!(
+            envelope_lookups[0] < neutral_claim_lookup
+                && neutral_claim_lookup < guarded_resolution
+                && guarded_resolution < envelope_lookups[1]
+                && envelope_lookups[1] < project_resolver
+        );
+    }
+
+    #[test]
+    fn same_request_replays_the_winner_across_project_snapshot_race_only_for_same_project() {
+        let authority = |project_id: &str, snapshot_id: &str, fill: char| {
+            ProjectAuthorityReceipt::new(
+                CONTRACT_VERSION,
+                PROJECT_AUTHORITY_PRODUCER_ID,
+                PROJECT_AUTHORITY_PRODUCER_VERSION,
+                RuntimeKind::Live,
+                ProjectId::new(project_id).expect("project"),
+                ProjectSnapshotId::new(snapshot_id).expect("snapshot"),
+                1,
+                ProjectLifecycle::Active,
+                ProjectClass::UserProject,
+                GitRefIdentity::new("refs/heads/main", test_content_digest('1'))
+                    .expect("primary ref"),
+                test_content_digest(fill),
+                test_content_digest(match fill {
+                    'a' => 'd',
+                    'b' => 'e',
+                    'c' => 'f',
+                    _ => '9',
+                }),
+            )
+            .expect("project authority")
+        };
+        let first_authority = authority("project-a", "snapshot-a-1", 'a');
+        let later_authority = authority("project-a", "snapshot-a-2", 'b');
+        let other_authority = authority("project-b", "snapshot-b-1", 'c');
+        let winner = general_task_submission(
+            "same-request-race",
+            "完成角色系統",
+            "AI 劇本",
+            &first_authority,
+        )
+        .expect("winner envelope");
+        let raced = general_task_submission(
+            "same-request-race",
+            "完成角色系統",
+            "AI 劇本",
+            &later_authority,
+        )
+        .expect("raced envelope");
+        assert_ne!(winner.task_ref(), raced.task_ref());
+
+        assert!(general_submission_matches_effective_request(
+            &winner,
+            Some("完成角色系統"),
+            Some("project-a"),
+            None,
+            later_authority.project_id(),
+        ));
+        assert!(!general_submission_matches_effective_request(
+            &winner,
+            Some("完成角色系統"),
+            None,
+            None,
+            other_authority.project_id(),
+        ));
+        assert!(!general_submission_matches_effective_request(
+            &winner,
+            Some("different objective"),
+            Some("project-a"),
+            None,
+            later_authority.project_id(),
+        ));
+
+        let source = include_str!("composition.rs");
+        let task_submit = source
+            .split("    fn task_submit(")
+            .nth(1)
+            .expect("Task Submit composition")
+            .split("    fn task_status(")
+            .next()
+            .expect("Task Submit body");
+        let admissions = task_submit
+            .match_indices("admit_general_submission")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(admissions.len(), 2, "initial and bounded retry admissions");
+        let winner_reload = task_submit
+            .find("replay_general_winner_after_admission_failure")
+            .expect("post-conflict winner reload");
+        let project_resolutions = task_submit
+            .match_indices("resolve_registered_project_for_general_submit")
+            .map(|(offset, _)| offset)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            project_resolutions.len(),
+            2,
+            "initial and one bounded currentness re-resolution"
+        );
+        assert!(
+            project_resolutions[0] < admissions[0]
+                && admissions[0] < winner_reload
+                && winner_reload < project_resolutions[1]
+                && project_resolutions[1] < admissions[1]
         );
     }
 

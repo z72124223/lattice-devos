@@ -13,9 +13,12 @@ use lattice_cjson::{
 };
 use lattice_contracts::{
     CONTRACT_VERSION, ContentDigest, ContractError, ResourceCounters, ResourceRequest,
-    RuntimeAdmissionMode, RuntimeKind, TASK_LEDGER_PRODUCER_ID, TASK_LEDGER_PRODUCER_VERSION,
-    TaskLedgerResourceHead, TaskLedgerResourceReceipt, TaskLedgerStreamHead,
-    TaskLedgerStreamIdentity, WriterLeaseAuthorityHead, WriterLeaseStatus,
+    RuntimeAdmissionMode, RuntimeKind, STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES,
+    TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES, TASK_LEDGER_PRODUCER_ID,
+    TASK_LEDGER_PRODUCER_VERSION, TaskLedgerResourceHead, TaskLedgerResourceReceipt,
+    TaskLedgerStreamHead, TaskLedgerStreamIdentity, TaskLedgerSubjectKind,
+    WriterLeaseAuthorityHead, WriterLeaseStatus, task_ingress_text_contains_recognized_secret,
+    valid_task_ingress_client_request_id,
 };
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
@@ -28,6 +31,28 @@ pub const OUTBOX_ADMISSION_SCHEMA_VERSION: &str = "1.0";
 pub const LEDGER_CHECKPOINT_SCHEMA_VERSION: &str = "1.0";
 /// Per-command persistence record-set schema version.
 pub const LEDGER_RECORD_SET_SCHEMA_VERSION: &str = "1.0";
+/// Authoritative general-task submission-envelope schema.
+pub const TASK_SUBMISSION_ENVELOPE_SCHEMA: &str = "lattice.task-ledger.task-submission/1.0";
+/// Authoritative cross-profile task-ingress idempotency-claim schema.
+pub const TASK_INGRESS_CLAIM_SCHEMA: &str = "lattice.task-ledger.task-ingress-claim/1.0";
+
+const TASK_SUBMISSION_HASH_VERSION: &str = "1.0";
+const TASK_SUBMISSION_REF_DOMAIN: &str = "lattice.task-ledger.task-submission-ref";
+const TASK_SUBMISSION_ENVELOPE_DOMAIN: &str = "lattice.task-ledger.task-submission-envelope";
+const TASK_INGRESS_REQUEST_DOMAIN: &str = "lattice.task-ledger.task-ingress-request";
+const MAX_SUBMISSION_INGRESS_ID_BYTES: usize = 64;
+const MAX_SUBMISSION_CLIENT_REQUEST_ID_BYTES: usize = TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES;
+const MAX_SUBMISSION_OBJECTIVE_CHARS: usize = 512;
+const MAX_SUBMISSION_OBJECTIVE_BYTES: usize = 2_048;
+const MAX_SUBMISSION_PROJECT_DISPLAY_NAME_CHARS: usize = 64;
+const MAX_SUBMISSION_PROJECT_DISPLAY_NAME_BYTES: usize = 256;
+const MAX_SUBMISSION_PROJECT_ID_BYTES: usize = 64;
+/// Maximum byte length of a Task Ledger project snapshot identifier.
+///
+/// This covers the Project Registry's maximum canonical authority snapshot:
+/// a 64-byte project ID, `:registry:`, a 20-digit `u64` revision, one colon,
+/// and a 64-byte SHA-256 digest.
+pub const TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX_BYTES: usize = STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES;
 
 const ZERO_DIGEST_TEXT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const MAX_DIAGNOSTIC_DEPTH: usize = 16;
@@ -53,6 +78,31 @@ pub enum LedgerError {
     InvalidDiagnostic,
     /// A diagnostic exceeds depth, node, or canonical-byte limits.
     DiagnosticLimitExceeded,
+    /// One authoritative submission-envelope field is malformed.
+    InvalidSubmissionEnvelope {
+        /// Stable field name; never includes submitted content.
+        field: &'static str,
+    },
+    /// One authoritative submission-envelope field exceeds its fixed bound.
+    SubmissionEnvelopeLimitExceeded {
+        /// Stable field name; never includes submitted content.
+        field: &'static str,
+    },
+    /// Submitted human text matched a closed secret-bearing shape.
+    SubmissionSecretRejected,
+    /// A retained submission envelope uses an unknown schema version.
+    UnknownSubmissionEnvelopeVersion,
+    /// A retained submission envelope disagrees with its canonical digest or reference.
+    SubmissionEnvelopeMismatch,
+    /// One authoritative task-ingress claim field is malformed.
+    InvalidTaskIngressClaim {
+        /// Stable field name; never includes submitted content.
+        field: &'static str,
+    },
+    /// A retained task-ingress claim uses an unknown schema version.
+    UnknownTaskIngressClaimVersion,
+    /// A retained task-ingress claim differs from the expected semantic request.
+    TaskIngressClaimMismatch,
     /// A supplied or reconstructed stream head is invalid.
     InvalidStreamHead,
     /// An event kind/resource snapshot combination is invalid.
@@ -69,6 +119,8 @@ pub enum LedgerError {
     ForemanGenerationRollback,
     /// A generic caller selected a reserved or unknown Task-created profile.
     UnknownTaskCreatedProfile,
+    /// A pre-specification intake stream was asked to append executable work.
+    GeneralTaskIntakeCreateOnly,
     /// Cumulative resource counters moved backwards.
     ResourceCounterRegression,
     /// A command ID was reused in one stream with another request digest.
@@ -125,6 +177,16 @@ impl LedgerError {
             Self::InvalidTimestamp => "LEDGER_INVALID_TIMESTAMP",
             Self::InvalidDiagnostic => "LEDGER_INVALID_DIAGNOSTIC",
             Self::DiagnosticLimitExceeded => "LEDGER_DIAGNOSTIC_LIMIT_EXCEEDED",
+            Self::InvalidSubmissionEnvelope { .. } => "LEDGER_INVALID_SUBMISSION_ENVELOPE",
+            Self::SubmissionEnvelopeLimitExceeded { .. } => {
+                "LEDGER_SUBMISSION_ENVELOPE_LIMIT_EXCEEDED"
+            }
+            Self::SubmissionSecretRejected => "LEDGER_SUBMISSION_SECRET_REJECTED",
+            Self::UnknownSubmissionEnvelopeVersion => "LEDGER_UNKNOWN_SUBMISSION_ENVELOPE_VERSION",
+            Self::SubmissionEnvelopeMismatch => "LEDGER_SUBMISSION_ENVELOPE_MISMATCH",
+            Self::InvalidTaskIngressClaim { .. } => "LEDGER_INVALID_TASK_INGRESS_CLAIM",
+            Self::UnknownTaskIngressClaimVersion => "LEDGER_UNKNOWN_TASK_INGRESS_CLAIM_VERSION",
+            Self::TaskIngressClaimMismatch => "LEDGER_TASK_INGRESS_CLAIM_MISMATCH",
             Self::InvalidStreamHead => "LEDGER_INVALID_HEAD",
             Self::InvalidResourceSnapshot => "LEDGER_INVALID_RESOURCE_SNAPSHOT",
             Self::InvalidAutonomyReceipt => "LEDGER_INVALID_AUTONOMY_RECEIPT",
@@ -133,6 +195,7 @@ impl LedgerError {
             Self::UnknownForemanSnapshotVersion => "LEDGER_UNKNOWN_FOREMAN_SNAPSHOT_VERSION",
             Self::ForemanGenerationRollback => "LEDGER_FOREMAN_GENERATION_ROLLBACK",
             Self::UnknownTaskCreatedProfile => "LEDGER_UNKNOWN_TASK_CREATED_PROFILE",
+            Self::GeneralTaskIntakeCreateOnly => "LEDGER_GENERAL_TASK_INTAKE_CREATE_ONLY",
             Self::ResourceCounterRegression => "LEDGER_RESOURCE_COUNTER_REGRESSION",
             Self::CommandIdReuse => "LEDGER_COMMAND_ID_REUSE",
             Self::UnknownEventVersion => "LEDGER_UNKNOWN_EVENT_VERSION",
@@ -171,6 +234,30 @@ impl fmt::Display for LedgerError {
             Self::DiagnosticLimitExceeded => {
                 formatter.write_str("diagnostic exceeds a bounded Ledger limit")
             }
+            Self::InvalidSubmissionEnvelope { field } => {
+                write!(formatter, "invalid submission-envelope {field}")
+            }
+            Self::SubmissionEnvelopeLimitExceeded { field } => {
+                write!(formatter, "submission-envelope {field} exceeds its bound")
+            }
+            Self::SubmissionSecretRejected => {
+                formatter.write_str("submission envelope contains prohibited secret material")
+            }
+            Self::UnknownSubmissionEnvelopeVersion => {
+                formatter.write_str("unknown submission-envelope version")
+            }
+            Self::SubmissionEnvelopeMismatch => {
+                formatter.write_str("submission envelope does not match its retained identity")
+            }
+            Self::InvalidTaskIngressClaim { field } => {
+                write!(formatter, "invalid task-ingress claim {field}")
+            }
+            Self::UnknownTaskIngressClaimVersion => {
+                formatter.write_str("unknown task-ingress claim version")
+            }
+            Self::TaskIngressClaimMismatch => {
+                formatter.write_str("task-ingress claim does not match the expected request")
+            }
             Self::InvalidStreamHead => formatter.write_str("invalid full stream head"),
             Self::InvalidResourceSnapshot => {
                 formatter.write_str("invalid event/resource snapshot combination")
@@ -192,6 +279,9 @@ impl fmt::Display for LedgerError {
             }
             Self::UnknownTaskCreatedProfile => {
                 formatter.write_str("unknown or caller-selected Task-created profile")
+            }
+            Self::GeneralTaskIntakeCreateOnly => {
+                formatter.write_str("general-task intake streams are create-only")
             }
             Self::ResourceCounterRegression => {
                 formatter.write_str("cumulative resource counter regressed")
@@ -346,6 +436,9 @@ pub enum TaskCreatedProfile {
     HistoricalAutonomyOptionalV1,
     /// Current profile requiring an exact sequence-two autonomy receipt.
     AutonomyReceiptRequiredV1,
+    /// General natural-language intake retained in Draft without classifying
+    /// risk, authority, model, or execution intent.
+    GeneralTaskIntakeV1,
 }
 
 impl TaskCreatedProfile {
@@ -355,8 +448,539 @@ impl TaskCreatedProfile {
         match self {
             Self::HistoricalAutonomyOptionalV1 => "CONTROLLED_CODEX_CANARY",
             Self::AutonomyReceiptRequiredV1 => "CONTROLLED_CODEX_CANARY_AUTONOMY_V1",
+            Self::GeneralTaskIntakeV1 => "GENERAL_TASK_INTAKE_V1",
         }
     }
+
+    /// Returns whether progress requires the exact sequence-two autonomy receipt.
+    #[must_use]
+    pub const fn requires_autonomy_receipt(self) -> bool {
+        matches!(self, Self::AutonomyReceiptRequiredV1)
+    }
+}
+
+/// Canonical authoritative intake envelope for one general task.
+///
+/// The envelope records task data only. It grants no execution, filesystem,
+/// process, payment, merge, deployment, or external-effect authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TaskSubmissionEnvelope {
+    ingress_id: String,
+    client_request_id: String,
+    objective: String,
+    project_display_name: String,
+    project_authority_receipt_digest: ContentDigest,
+    identity: TaskLedgerStreamIdentity,
+    stream_id: ContentDigest,
+    task_ref: ContentDigest,
+    envelope_digest: ContentDigest,
+}
+
+impl fmt::Debug for TaskSubmissionEnvelope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskSubmissionEnvelope")
+            .field("schema_version", &TASK_SUBMISSION_ENVELOPE_SCHEMA)
+            .field("ingress_id", &self.ingress_id)
+            .field("client_request_id", &self.client_request_id)
+            .field("objective", &"[REDACTED]")
+            .field("project_display_name", &"[REDACTED]")
+            .field(
+                "project_authority_receipt_digest",
+                &self.project_authority_receipt_digest,
+            )
+            .field("identity", &self.identity)
+            .field("stream_id", &self.stream_id)
+            .field("task_ref", &self.task_ref)
+            .field("envelope_digest", &self.envelope_digest)
+            .finish()
+    }
+}
+
+impl TaskSubmissionEnvelope {
+    /// Constructs and hashes one exact general-task intake envelope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-canonical, blank, control-bearing, oversized, or recognized
+    /// secret-bearing input and every malformed stream identity.
+    pub fn new(
+        ingress_id: impl Into<String>,
+        client_request_id: impl Into<String>,
+        objective: impl Into<String>,
+        project_display_name: impl Into<String>,
+        identity: TaskLedgerStreamIdentity,
+        project_authority_receipt_digest: ContentDigest,
+    ) -> Result<Self, LedgerError> {
+        let ingress_id = ingress_id.into();
+        let client_request_id = client_request_id.into();
+        let objective = objective.into();
+        let project_display_name = project_display_name.into();
+        validate_submission_control_id(&ingress_id, "ingress_id", MAX_SUBMISSION_INGRESS_ID_BYTES)?;
+        validate_submission_control_id(
+            &client_request_id,
+            "client_request_id",
+            MAX_SUBMISSION_CLIENT_REQUEST_ID_BYTES,
+        )?;
+        validate_submission_human_text(
+            &objective,
+            "objective",
+            MAX_SUBMISSION_OBJECTIVE_CHARS,
+            MAX_SUBMISSION_OBJECTIVE_BYTES,
+        )?;
+        validate_submission_human_text(
+            &project_display_name,
+            "project_display_name",
+            MAX_SUBMISSION_PROJECT_DISPLAY_NAME_CHARS,
+            MAX_SUBMISSION_PROJECT_DISPLAY_NAME_BYTES,
+        )?;
+        validate_submission_project_id(identity.project_id().as_str())?;
+        validate_submission_project_snapshot_id(identity.project_snapshot_id().as_str())?;
+        if is_zero_digest(&project_authority_receipt_digest) {
+            return Err(LedgerError::InvalidSubmissionEnvelope {
+                field: "project_authority_receipt_digest",
+            });
+        }
+        validate_stream_identity(&identity)?;
+        if identity.subject_kind() != TaskLedgerSubjectKind::GeneralTaskIntake
+            || identity.general_task_intake_digest().is_none()
+            || identity.task_spec_digest().is_some()
+            || identity.accounting_currency().is_some()
+        {
+            return Err(LedgerError::InvalidSubmissionEnvelope {
+                field: "stream_identity",
+            });
+        }
+        let stream_id = hash_value("lattice.task-ledger.stream-id", &identity_value(&identity))?;
+        let content = task_submission_content_value(
+            &ingress_id,
+            &client_request_id,
+            &objective,
+            &project_display_name,
+            &project_authority_receipt_digest,
+            &identity,
+            &stream_id,
+        );
+        let task_ref = hash_value_at_version(
+            TASK_SUBMISSION_REF_DOMAIN,
+            TASK_SUBMISSION_HASH_VERSION,
+            &content,
+        )?;
+        let envelope_digest = hash_value_at_version(
+            TASK_SUBMISSION_ENVELOPE_DOMAIN,
+            TASK_SUBMISSION_HASH_VERSION,
+            &task_submission_envelope_value(&content, &task_ref),
+        )?;
+        Ok(Self {
+            ingress_id,
+            client_request_id,
+            objective,
+            project_display_name,
+            project_authority_receipt_digest,
+            identity,
+            stream_id,
+            task_ref,
+            envelope_digest,
+        })
+    }
+
+    /// Returns the fixed envelope schema.
+    #[must_use]
+    pub const fn schema_version(&self) -> &'static str {
+        TASK_SUBMISSION_ENVELOPE_SCHEMA
+    }
+
+    /// Returns the process-owned ingress identity.
+    #[must_use]
+    pub fn ingress_id(&self) -> &str {
+        &self.ingress_id
+    }
+
+    /// Returns the caller's bounded idempotency key.
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
+    }
+
+    /// Returns the exact natural-language task objective.
+    #[must_use]
+    pub fn objective(&self) -> &str {
+        &self.objective
+    }
+
+    /// Returns the exact registered project display name retained at intake.
+    #[must_use]
+    pub fn project_display_name(&self) -> &str {
+        &self.project_display_name
+    }
+
+    /// Returns the formal Project Registry receipt bound at intake time.
+    #[must_use]
+    pub const fn project_authority_receipt_digest(&self) -> &ContentDigest {
+        &self.project_authority_receipt_digest
+    }
+
+    /// Returns the complete formal Task Ledger stream identity.
+    #[must_use]
+    pub const fn identity(&self) -> &TaskLedgerStreamIdentity {
+        &self.identity
+    }
+
+    /// Returns the canonical stream ID derived from the complete identity.
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+
+    /// Returns the durable public task reference.
+    #[must_use]
+    pub const fn task_ref(&self) -> &ContentDigest {
+        &self.task_ref
+    }
+
+    /// Returns the only Task-created action authorized for this envelope.
+    #[must_use]
+    pub const fn admission_action(&self) -> &'static str {
+        TaskCreatedProfile::GeneralTaskIntakeV1.action()
+    }
+
+    /// Returns the authoritative digest bound into `TASK_CREATED.subject_digest`.
+    #[must_use]
+    pub const fn envelope_digest(&self) -> &ContentDigest {
+        &self.envelope_digest
+    }
+
+    /// Exports an explicitly untrusted persistence representation.
+    #[must_use]
+    pub fn to_untrusted(&self) -> UntrustedTaskSubmissionEnvelope {
+        UntrustedTaskSubmissionEnvelope {
+            schema_version: TASK_SUBMISSION_ENVELOPE_SCHEMA.to_owned(),
+            ingress_id: self.ingress_id.clone(),
+            client_request_id: self.client_request_id.clone(),
+            objective: self.objective.clone(),
+            project_display_name: self.project_display_name.clone(),
+            project_authority_receipt_digest: self.project_authority_receipt_digest.clone(),
+            identity: self.identity.clone(),
+            stream_id: self.stream_id.clone(),
+            task_ref: self.task_ref.clone(),
+            admission_action: self.admission_action().to_owned(),
+            envelope_digest: self.envelope_digest.clone(),
+        }
+    }
+}
+
+/// Raw retained submission-envelope fields. Every field is untrusted until
+/// verified by [`verify_untrusted_task_submission`].
+#[derive(Clone, Eq, PartialEq)]
+pub struct UntrustedTaskSubmissionEnvelope {
+    /// Claimed envelope schema.
+    pub schema_version: String,
+    /// Claimed ingress identity.
+    pub ingress_id: String,
+    /// Claimed client idempotency key.
+    pub client_request_id: String,
+    /// Claimed exact objective.
+    pub objective: String,
+    /// Claimed registered project display name.
+    pub project_display_name: String,
+    /// Claimed formal Project Registry authority-receipt digest.
+    pub project_authority_receipt_digest: ContentDigest,
+    /// Claimed complete formal stream identity.
+    pub identity: TaskLedgerStreamIdentity,
+    /// Claimed canonical stream ID.
+    pub stream_id: ContentDigest,
+    /// Claimed public task reference.
+    pub task_ref: ContentDigest,
+    /// Claimed Task-created profile action.
+    pub admission_action: String,
+    /// Claimed canonical envelope digest.
+    pub envelope_digest: ContentDigest,
+}
+
+/// Reconstructs and verifies every retained submission-envelope field.
+///
+/// # Errors
+///
+/// Rejects unknown versions, invalid input, or any changed digest, reference,
+/// action, stream ID, or formal identity binding.
+pub fn verify_untrusted_task_submission(
+    raw: &UntrustedTaskSubmissionEnvelope,
+) -> Result<TaskSubmissionEnvelope, LedgerError> {
+    if raw.schema_version != TASK_SUBMISSION_ENVELOPE_SCHEMA {
+        return Err(LedgerError::UnknownSubmissionEnvelopeVersion);
+    }
+    let verified = TaskSubmissionEnvelope::new(
+        raw.ingress_id.clone(),
+        raw.client_request_id.clone(),
+        raw.objective.clone(),
+        raw.project_display_name.clone(),
+        raw.identity.clone(),
+        raw.project_authority_receipt_digest.clone(),
+    )?;
+    if raw.stream_id != verified.stream_id
+        || raw.task_ref != verified.task_ref
+        || raw.admission_action != verified.admission_action()
+        || raw.envelope_digest != verified.envelope_digest
+    {
+        return Err(LedgerError::SubmissionEnvelopeMismatch);
+    }
+    Ok(verified)
+}
+
+/// Closed semantic request families sharing one task-submission ingress keyspace.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskIngressRequestKind {
+    /// The backwards-compatible controlled Codex canary request.
+    ControlledCodexCanary,
+    /// One natural-language task bound to a formal Project Registry identity.
+    GeneralTask,
+}
+
+impl TaskIngressRequestKind {
+    /// Returns the fixed persistence value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ControlledCodexCanary => "CONTROLLED_CODEX_CANARY",
+            Self::GeneralTask => "GENERAL_TASK",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, LedgerError> {
+        match value {
+            "CONTROLLED_CODEX_CANARY" => Ok(Self::ControlledCodexCanary),
+            "GENERAL_TASK" => Ok(Self::GeneralTask),
+            _ => Err(LedgerError::InvalidTaskIngressClaim {
+                field: "request_kind",
+            }),
+        }
+    }
+}
+
+/// Canonical Task-Ledger-owned reservation for one client ingress key.
+///
+/// This claim is idempotency metadata only. It is linked to a real
+/// `TASK_CREATED` event by persistence and grants no execution authority.
+#[derive(Clone, Eq, PartialEq)]
+pub struct TaskIngressClaim {
+    ingress_id: String,
+    client_request_id: String,
+    request_kind: TaskIngressRequestKind,
+    request_digest: ContentDigest,
+    stream_id: ContentDigest,
+}
+
+impl fmt::Debug for TaskIngressClaim {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TaskIngressClaim")
+            .field("schema_version", &TASK_INGRESS_CLAIM_SCHEMA)
+            .field("ingress_id", &self.ingress_id)
+            .field("client_request_id", &"[REDACTED]")
+            .field("request_kind", &self.request_kind)
+            .field("request_digest", &self.request_digest)
+            .field("stream_id", &self.stream_id)
+            .finish()
+    }
+}
+
+impl TaskIngressClaim {
+    /// Constructs the controlled-canary claim. Its canonical stream identity
+    /// is already the complete semantic commitment for this fixed request kind.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed ingress identifiers or a zero stream digest.
+    pub fn controlled_canary(
+        ingress_id: impl Into<String>,
+        client_request_id: impl Into<String>,
+        stream_id: ContentDigest,
+    ) -> Result<Self, LedgerError> {
+        let ingress_id = ingress_id.into();
+        let client_request_id = client_request_id.into();
+        validate_submission_control_id(&ingress_id, "ingress_id", MAX_SUBMISSION_INGRESS_ID_BYTES)?;
+        validate_submission_control_id(
+            &client_request_id,
+            "client_request_id",
+            MAX_SUBMISSION_CLIENT_REQUEST_ID_BYTES,
+        )?;
+        if is_zero_digest(&stream_id) {
+            return Err(LedgerError::InvalidTaskIngressClaim { field: "stream_id" });
+        }
+        Ok(Self {
+            ingress_id,
+            client_request_id,
+            request_kind: TaskIngressRequestKind::ControlledCodexCanary,
+            request_digest: stream_id.clone(),
+            stream_id,
+        })
+    }
+
+    /// Constructs the semantic claim for one verified general submission.
+    /// The request digest intentionally binds the exact objective and formal
+    /// Project ID, while the separately retained stream binds the admitted
+    /// Project Registry snapshot and complete Task Ledger identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a canonical-hash error only if the closed hash domain fails.
+    pub fn general_submission(submission: &TaskSubmissionEnvelope) -> Result<Self, LedgerError> {
+        let request_digest = hash_value_at_version(
+            TASK_INGRESS_REQUEST_DOMAIN,
+            TASK_SUBMISSION_HASH_VERSION,
+            &object(vec![
+                ("schema_version", text(TASK_INGRESS_CLAIM_SCHEMA)),
+                ("ingress_id", text(submission.ingress_id())),
+                ("client_request_id", text(submission.client_request_id())),
+                (
+                    "request_kind",
+                    text(TaskIngressRequestKind::GeneralTask.as_str()),
+                ),
+                ("objective", text(submission.objective())),
+                (
+                    "project_id",
+                    text(submission.identity().project_id().as_str()),
+                ),
+            ]),
+        )?;
+        Ok(Self {
+            ingress_id: submission.ingress_id().to_owned(),
+            client_request_id: submission.client_request_id().to_owned(),
+            request_kind: TaskIngressRequestKind::GeneralTask,
+            request_digest,
+            stream_id: submission.stream_id().clone(),
+        })
+    }
+
+    /// Returns the fixed claim schema.
+    #[must_use]
+    pub const fn schema_version(&self) -> &'static str {
+        TASK_INGRESS_CLAIM_SCHEMA
+    }
+
+    /// Returns the process-owned ingress identity.
+    #[must_use]
+    pub fn ingress_id(&self) -> &str {
+        &self.ingress_id
+    }
+
+    /// Returns the caller idempotency key without exposing it through `Debug`.
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
+    }
+
+    /// Returns the closed request family.
+    #[must_use]
+    pub const fn request_kind(&self) -> TaskIngressRequestKind {
+        self.request_kind
+    }
+
+    /// Returns the canonical semantic request digest.
+    #[must_use]
+    pub const fn request_digest(&self) -> &ContentDigest {
+        &self.request_digest
+    }
+
+    /// Returns the exact Task Ledger stream reserved by this request.
+    #[must_use]
+    pub const fn stream_id(&self) -> &ContentDigest {
+        &self.stream_id
+    }
+
+    /// Exports explicitly untrusted retained claim fields.
+    #[must_use]
+    pub fn to_untrusted(&self) -> UntrustedTaskIngressClaim {
+        UntrustedTaskIngressClaim {
+            schema_version: TASK_INGRESS_CLAIM_SCHEMA.to_owned(),
+            ingress_id: self.ingress_id.clone(),
+            client_request_id: self.client_request_id.clone(),
+            request_kind: self.request_kind.as_str().to_owned(),
+            request_digest: self.request_digest.clone(),
+            stream_id: self.stream_id.clone(),
+        }
+    }
+}
+
+/// Raw retained fields for one task-ingress claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UntrustedTaskIngressClaim {
+    /// Claimed fixed schema.
+    pub schema_version: String,
+    /// Claimed ingress identity.
+    pub ingress_id: String,
+    /// Claimed client idempotency key.
+    pub client_request_id: String,
+    /// Claimed closed request family.
+    pub request_kind: String,
+    /// Claimed semantic request digest.
+    pub request_digest: ContentDigest,
+    /// Claimed reserved Task Ledger stream.
+    pub stream_id: ContentDigest,
+}
+
+/// Verifies one retained claim against the expected pure semantic claim.
+///
+/// # Errors
+///
+/// Rejects an unknown schema, malformed fields, or any semantic substitution.
+pub fn verify_untrusted_task_ingress_claim(
+    raw: &UntrustedTaskIngressClaim,
+    expected: &TaskIngressClaim,
+) -> Result<TaskIngressClaim, LedgerError> {
+    let retained = verify_untrusted_task_ingress_claim_structure(raw)?;
+    if &retained != expected {
+        return Err(LedgerError::TaskIngressClaimMismatch);
+    }
+    Ok(retained)
+}
+
+/// Verifies the closed structure of one retained ingress claim without
+/// requiring caller-supplied request semantics.
+///
+/// This is intentionally narrower than exact-retry verification. It lets the
+/// persistence adapter identify which request family already owns an ingress
+/// key before resolving any new general-task project. A general request digest
+/// remains opaque until its authoritative envelope is loaded; callers must not
+/// treat this function as proof of an exact general-task retry.
+///
+/// # Errors
+///
+/// Rejects unknown schemas or kinds, malformed identifiers, zero digests, and
+/// any controlled-canary claim whose fixed request digest is not its stream ID.
+pub fn verify_untrusted_task_ingress_claim_structure(
+    raw: &UntrustedTaskIngressClaim,
+) -> Result<TaskIngressClaim, LedgerError> {
+    if raw.schema_version != TASK_INGRESS_CLAIM_SCHEMA {
+        return Err(LedgerError::UnknownTaskIngressClaimVersion);
+    }
+    validate_submission_control_id(
+        &raw.ingress_id,
+        "ingress_id",
+        MAX_SUBMISSION_INGRESS_ID_BYTES,
+    )?;
+    validate_submission_control_id(
+        &raw.client_request_id,
+        "client_request_id",
+        MAX_SUBMISSION_CLIENT_REQUEST_ID_BYTES,
+    )?;
+    let request_kind = TaskIngressRequestKind::parse(&raw.request_kind)?;
+    if is_zero_digest(&raw.request_digest) || is_zero_digest(&raw.stream_id) {
+        return Err(LedgerError::InvalidTaskIngressClaim { field: "digest" });
+    }
+    let retained = TaskIngressClaim {
+        ingress_id: raw.ingress_id.clone(),
+        client_request_id: raw.client_request_id.clone(),
+        request_kind,
+        request_digest: raw.request_digest.clone(),
+        stream_id: raw.stream_id.clone(),
+    };
+    if retained.request_kind == TaskIngressRequestKind::ControlledCodexCanary
+        && retained.request_digest != retained.stream_id
+    {
+        return Err(LedgerError::TaskIngressClaimMismatch);
+    }
+    Ok(retained)
 }
 
 const AUTONOMY_RECEIPT_SCHEMA: &str = "lattice.autonomy-receipt/1.0";
@@ -1185,6 +1809,7 @@ pub struct AppendCommand {
 enum AppendConstruction {
     Generic,
     RequiredTaskCreated,
+    GeneralTaskCreated,
     VerifiedAutonomy,
     VerifiedForeman,
     VerifiedReplay,
@@ -1265,6 +1890,44 @@ impl AppendCommand {
         )
     }
 
+    /// Constructs the only `TASK_CREATED` command bound to a verified general
+    /// task submission envelope.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-vacant or differently bound stream head and any invalid
+    /// command metadata. The objective is not copied into diagnostic data.
+    pub fn new_general_task_created(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+        submission: &TaskSubmissionEnvelope,
+    ) -> Result<Self, LedgerError> {
+        if expected_head.sequence() != 0
+            || expected_head.identity() != submission.identity()
+            || expected_head.stream_id() != submission.stream_id()
+        {
+            return Err(LedgerError::SubmissionEnvelopeMismatch);
+        }
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            LedgerEventKind::TaskCreated,
+            actor_id,
+            ActionId::new(TaskCreatedProfile::GeneralTaskIntakeV1.action())?,
+            LedgerOutcome::Recorded,
+            ReasonCode::new("GENERAL_TASK_INTAKE_RECORDED")?,
+            submission.envelope_digest().clone(),
+            None,
+            None,
+            AppendConstruction::GeneralTaskCreated,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_fields(
         expected_head: TaskLedgerStreamHead,
@@ -1318,12 +1981,18 @@ impl AppendCommand {
                     return Err(LedgerError::UnknownTaskCreatedProfile);
                 }
                 AppendConstruction::RequiredTaskCreated
-                    if profile != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) =>
+                    if !profile.is_some_and(TaskCreatedProfile::requires_autonomy_receipt) =>
+                {
+                    return Err(LedgerError::UnknownTaskCreatedProfile);
+                }
+                AppendConstruction::GeneralTaskCreated
+                    if profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
                 {
                     return Err(LedgerError::UnknownTaskCreatedProfile);
                 }
                 AppendConstruction::Generic
                 | AppendConstruction::RequiredTaskCreated
+                | AppendConstruction::GeneralTaskCreated
                 | AppendConstruction::VerifiedAutonomy
                 | AppendConstruction::VerifiedForeman
                 | AppendConstruction::VerifiedReplay => {}
@@ -1616,7 +2285,11 @@ fn classify_task_created_action(action: &str) -> Result<Option<TaskCreatedProfil
         "CONTROLLED_CODEX_CANARY_AUTONOMY_V1" => {
             Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
         }
+        "GENERAL_TASK_INTAKE_V1" => Ok(Some(TaskCreatedProfile::GeneralTaskIntakeV1)),
         value if value.starts_with("CONTROLLED_CODEX_CANARY") => {
+            Err(LedgerError::UnknownTaskCreatedProfile)
+        }
+        value if value.starts_with("GENERAL_TASK_INTAKE") => {
             Err(LedgerError::UnknownTaskCreatedProfile)
         }
         _ => Ok(None),
@@ -2408,15 +3081,44 @@ pub fn plan_append(
         });
     }
 
+    let requested_profile = if command.kind == LedgerEventKind::TaskCreated {
+        classify_task_created_action(command.action.as_str())?
+    } else {
+        None
+    };
+    match current.identity().subject_kind() {
+        TaskLedgerSubjectKind::TaskSpec
+            if requested_profile == Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
+        {
+            return Err(LedgerError::InvalidStreamHead);
+        }
+        TaskLedgerSubjectKind::GeneralTaskIntake
+            if requested_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
+        {
+            return Err(LedgerError::GeneralTaskIntakeCreateOnly);
+        }
+        TaskLedgerSubjectKind::TaskSpec | TaskLedgerSubjectKind::GeneralTaskIntake => {}
+    }
+
     if command.kind == LedgerEventKind::TaskCreated
-        && classify_task_created_action(command.action.as_str())?.is_some()
+        && requested_profile.is_some()
         && !current.events.is_empty()
     {
         return Err(LedgerError::InvalidAutonomyReceipt);
     }
+    if current
+        .events
+        .first()
+        .map(classify_task_created_profile)
+        .transpose()?
+        .flatten()
+        == Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+    {
+        return Err(LedgerError::GeneralTaskIntakeCreateOnly);
+    }
     if current.events.len() == 1
         && classify_task_created_profile(&current.events[0])?
-            == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+            .is_some_and(TaskCreatedProfile::requires_autonomy_receipt)
         && command.kind != LedgerEventKind::AutonomyReceiptRecorded
     {
         return Err(LedgerError::InvalidAutonomyReceipt);
@@ -2562,8 +3264,8 @@ pub fn plan_autonomy_receipt_append(
 ) -> Result<AutonomyReceiptAppendPlan, LedgerError> {
     validate_verified_checkpoint(current)?;
     if current.events().len() != 1
-        || classify_task_created_profile(&current.events()[0])?
-            != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+        || !classify_task_created_profile(&current.events()[0])?
+            .is_some_and(TaskCreatedProfile::requires_autonomy_receipt)
         || intent.risk_class != AutonomyRiskClass::R0
     {
         return Err(LedgerError::InvalidAutonomyReceipt);
@@ -2578,13 +3280,13 @@ pub fn plan_autonomy_receipt_append(
         current.identity(),
         &authority,
         writer_lease_head_digest.as_ref(),
-    );
+    )?;
     let authority_digest = hash_value_at_version(
         AUTONOMY_AUTHORITY_DOMAIN,
         AUTONOMY_HASH_VERSION,
         &authority_value,
     )?;
-    let receipt_value = autonomy_receipt_value(current.identity(), intent, &authority_digest);
+    let receipt_value = autonomy_receipt_value(current.identity(), intent, &authority_digest)?;
     let receipt_digest = hash_value_at_version(
         AUTONOMY_RECEIPT_DOMAIN,
         AUTONOMY_HASH_VERSION,
@@ -2678,12 +3380,12 @@ pub fn verify_exact_autonomy_receipt_retry(
             identity,
             candidate_authority,
             writer_lease_head_digest.as_ref(),
-        ),
+        )?,
     )?;
     let receipt_digest = hash_value_at_version(
         AUTONOMY_RECEIPT_DOMAIN,
         AUTONOMY_HASH_VERSION,
-        &autonomy_receipt_value(identity, candidate_intent, &authority_digest),
+        &autonomy_receipt_value(identity, candidate_intent, &authority_digest)?,
     )?;
     let writer = candidate_authority.writer_authority.as_ref();
 
@@ -2758,6 +3460,13 @@ pub fn verify_untrusted_autonomy_receipt_rows(
                 .map(VerifiedAutonomyReceiptState::RequiredComplete),
             _ => Err(LedgerError::InvalidAutonomyReceipt),
         },
+        Some(TaskCreatedProfile::GeneralTaskIntakeV1) => {
+            if rows.is_empty() && autonomy_events.is_empty() && stream.events().len() == 1 {
+                Ok(VerifiedAutonomyReceiptState::NotApplicable)
+            } else {
+                Err(LedgerError::GeneralTaskIntakeCreateOnly)
+            }
+        }
     }
 }
 
@@ -2833,7 +3542,7 @@ fn verify_one_untrusted_autonomy_receipt(
         row.writer_lease_receipt_digest.as_ref(),
         row.writer_lease_head_digest.as_ref(),
         row.writer_fencing_token,
-    );
+    )?;
     let authority_digest = hash_value_at_version(
         AUTONOMY_AUTHORITY_DOMAIN,
         AUTONOMY_HASH_VERSION,
@@ -2842,7 +3551,7 @@ fn verify_one_untrusted_autonomy_receipt(
     if authority_digest != row.authority_digest {
         return Err(LedgerError::InvalidAutonomyReceipt);
     }
-    let receipt_value = autonomy_receipt_value(stream.identity(), intent, &authority_digest);
+    let receipt_value = autonomy_receipt_value(stream.identity(), intent, &authority_digest)?;
     let receipt_digest = hash_value_at_version(
         AUTONOMY_RECEIPT_DOMAIN,
         AUTONOMY_HASH_VERSION,
@@ -3004,7 +3713,9 @@ fn writer_binding_matches(
         && writer.project_snapshot_id() == identity.project_snapshot_id()
         && writer.task_id() == identity.task_id()
         && writer.task_revision() == identity.task_revision()
-        && writer.task_spec_digest() == identity.task_spec_digest()
+        && identity
+            .task_spec_digest()
+            .is_some_and(|digest| writer.task_spec_digest() == digest)
 }
 
 fn autonomy_writer_head_digest(
@@ -3056,8 +3767,13 @@ fn autonomy_writer_head_digest(
         .transpose()
 }
 
-fn autonomy_binding_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue {
-    object(vec![
+fn autonomy_binding_value(
+    identity: &TaskLedgerStreamIdentity,
+) -> Result<CanonicalValue, LedgerError> {
+    let task_spec_digest = identity
+        .task_spec_digest()
+        .ok_or(LedgerError::InvalidAutonomyReceipt)?;
+    Ok(object(vec![
         ("project_id", text(identity.project_id().as_str())),
         (
             "project_snapshot_id",
@@ -3065,18 +3781,15 @@ fn autonomy_binding_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue
         ),
         ("task_id", text(identity.task_id().as_str())),
         ("task_revision", text(identity.task_revision())),
-        (
-            "task_spec_digest",
-            text(identity.task_spec_digest().as_str()),
-        ),
-    ])
+        ("task_spec_digest", text(task_spec_digest.as_str())),
+    ]))
 }
 
 fn autonomy_authority_value(
     identity: &TaskLedgerStreamIdentity,
     authority: &AutonomyAuthorityEvidence,
     writer_head_digest: Option<&ContentDigest>,
-) -> CanonicalValue {
+) -> Result<CanonicalValue, LedgerError> {
     let writer = authority.writer_authority.as_ref();
     autonomy_authority_value_from_scalars(
         identity,
@@ -3097,9 +3810,9 @@ fn autonomy_authority_value_from_scalars(
     writer_lease_receipt_digest: Option<&ContentDigest>,
     writer_lease_head_digest: Option<&ContentDigest>,
     writer_fencing_token: Option<u64>,
-) -> CanonicalValue {
-    object(vec![
-        ("binding", autonomy_binding_value(identity)),
+) -> Result<CanonicalValue, LedgerError> {
+    Ok(object(vec![
+        ("binding", autonomy_binding_value(identity)?),
         ("authority_mode", text(AUTONOMY_AUTHORITY_MODE)),
         (
             "process_start_authority_digest",
@@ -3129,17 +3842,17 @@ fn autonomy_authority_value_from_scalars(
             "writer_fencing_token",
             optional(writer_fencing_token.map(|token| text(token.to_string()))),
         ),
-    ])
+    ]))
 }
 
 fn autonomy_receipt_value(
     identity: &TaskLedgerStreamIdentity,
     intent: AutonomyIntent,
     authority_digest: &ContentDigest,
-) -> CanonicalValue {
-    object(vec![
+) -> Result<CanonicalValue, LedgerError> {
+    Ok(object(vec![
         ("schema_version", text(AUTONOMY_RECEIPT_SCHEMA)),
-        ("binding", autonomy_binding_value(identity)),
+        ("binding", autonomy_binding_value(identity)?),
         (
             "intent",
             object(vec![
@@ -3190,7 +3903,7 @@ fn autonomy_receipt_value(
             ]),
         ),
         ("authority_digest", text(authority_digest.as_str())),
-    ])
+    ]))
 }
 
 /// Applies one indivisible pure plan only while its complete base checkpoint
@@ -3527,6 +4240,10 @@ impl FakeTaskLedger {
             .observation_revision
             .checked_add(1)
             .ok_or(LedgerError::InvalidResourceSnapshot)?;
+        let accounting_currency = state
+            .identity
+            .accounting_currency()
+            .ok_or(LedgerError::GeneralTaskIntakeCreateOnly)?;
         let observation_value = resource_observation_value(
             &expected_head,
             observation_revision,
@@ -3534,6 +4251,7 @@ impl FakeTaskLedger {
             &effect_subject_digest,
             &state.counters,
             &request,
+            accounting_currency,
         );
         let observation_digest = hash_value(
             "lattice.task-ledger.resource-observation",
@@ -3560,7 +4278,7 @@ impl FakeTaskLedger {
             effect_subject_digest,
             state.counters.clone(),
             request,
-            state.identity.accounting_currency(),
+            accounting_currency,
             observation_digest,
             receipt_digest,
         )?;
@@ -3953,6 +4671,26 @@ pub fn verify_untrusted_snapshot(
         counters = next_counters;
         events.push(reconstructed);
     }
+    let retained_profile = events
+        .first()
+        .map(classify_task_created_profile)
+        .transpose()?
+        .flatten();
+    match snapshot.identity.subject_kind() {
+        TaskLedgerSubjectKind::TaskSpec
+            if retained_profile == Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
+        {
+            return Err(LedgerError::InvalidStreamHead);
+        }
+        TaskLedgerSubjectKind::GeneralTaskIntake
+            if !events.is_empty()
+                && (retained_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+                    || events.len() != 1) =>
+        {
+            return Err(LedgerError::GeneralTaskIntakeCreateOnly);
+        }
+        TaskLedgerSubjectKind::TaskSpec | TaskLedgerSubjectKind::GeneralTaskIntake => {}
+    }
     if head != snapshot.claimed_head {
         return Err(LedgerError::HeadMismatch);
     }
@@ -4060,8 +4798,133 @@ fn validate_autonomy_order(
     Ok(())
 }
 
+fn validate_submission_control_id(
+    value: &str,
+    field: &'static str,
+    max_bytes: usize,
+) -> Result<(), LedgerError> {
+    if value.len() > max_bytes {
+        return Err(LedgerError::SubmissionEnvelopeLimitExceeded { field });
+    }
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || !bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        || !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+    {
+        return Err(LedgerError::InvalidSubmissionEnvelope { field });
+    }
+    if field == "client_request_id" && !valid_task_ingress_client_request_id(value) {
+        return Err(if task_submission_text_contains_secret(value) {
+            LedgerError::SubmissionSecretRejected
+        } else {
+            LedgerError::InvalidSubmissionEnvelope { field }
+        });
+    }
+    if task_submission_text_contains_secret(value) {
+        return Err(LedgerError::SubmissionSecretRejected);
+    }
+    Ok(())
+}
+
+fn validate_submission_human_text(
+    value: &str,
+    field: &'static str,
+    max_chars: usize,
+    max_bytes: usize,
+) -> Result<(), LedgerError> {
+    if value.len() > max_bytes || value.chars().count() > max_chars {
+        return Err(LedgerError::SubmissionEnvelopeLimitExceeded { field });
+    }
+    if normalize_nfc(value) != value {
+        return Err(LedgerError::NonCanonicalText { field });
+    }
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(LedgerError::InvalidSubmissionEnvelope { field });
+    }
+    if task_submission_text_contains_secret(value) {
+        return Err(LedgerError::SubmissionSecretRejected);
+    }
+    Ok(())
+}
+
+fn validate_submission_project_id(value: &str) -> Result<(), LedgerError> {
+    if value.len() > MAX_SUBMISSION_PROJECT_ID_BYTES {
+        return Err(LedgerError::SubmissionEnvelopeLimitExceeded {
+            field: "project_id",
+        });
+    }
+    if task_submission_text_contains_secret(value) {
+        return Err(LedgerError::SubmissionSecretRejected);
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() < 2
+        || !bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'.' | b'_' | b'-')
+        })
+    {
+        return Err(LedgerError::InvalidSubmissionEnvelope {
+            field: "project_id",
+        });
+    }
+    Ok(())
+}
+
+fn validate_submission_project_snapshot_id(value: &str) -> Result<(), LedgerError> {
+    if value.len() > TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX_BYTES {
+        return Err(LedgerError::SubmissionEnvelopeLimitExceeded {
+            field: "project_snapshot_id",
+        });
+    }
+    if task_submission_text_contains_secret(value) {
+        return Err(LedgerError::SubmissionSecretRejected);
+    }
+    let bytes = value.as_bytes();
+    if bytes.is_empty()
+        || !bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        || !bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'.' | b'_' | b':' | b'-')
+        })
+    {
+        return Err(LedgerError::InvalidSubmissionEnvelope {
+            field: "project_snapshot_id",
+        });
+    }
+    Ok(())
+}
+
+/// Returns true when untrusted task-intake text contains recognizable secret
+/// material or a sensitive-key assignment/header shape.
+///
+/// This validator is intentionally shared by the MCP boundary and the Task
+/// Ledger owner so transport validation cannot drift from durable validation.
+/// It rejects the whole request; callers must never redact and persist a
+/// content-mutated objective under the original idempotency key.
+#[must_use]
+pub fn task_submission_text_contains_secret(value: &str) -> bool {
+    task_ingress_text_contains_recognized_secret(value)
+}
+
 fn valid_identifier(value: &str) -> bool {
     (1..=128).contains(&value.len())
+        && value.trim() == value
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
+        })
+}
+
+fn valid_project_snapshot_identifier(value: &str) -> bool {
+    (1..=TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX_BYTES).contains(&value.len())
         && value.trim() == value
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
@@ -4090,7 +4953,7 @@ fn validate_stream_identity(identity: &TaskLedgerStreamIdentity) -> Result<(), L
         return Err(LedgerError::InvalidIdentifier { field: "task_id" });
     }
     let snapshot = identity.project_snapshot_id().as_str();
-    if !valid_identifier(snapshot) || recognized_secret_text(snapshot) {
+    if !valid_project_snapshot_identifier(snapshot) || recognized_secret_text(snapshot) {
         return Err(LedgerError::InvalidIdentifier {
             field: "project_snapshot_id",
         });
@@ -4403,20 +5266,93 @@ fn canonicalize_outboxes(outboxes: &mut [OutboxAdmission]) {
 }
 
 fn identity_value(identity: &TaskLedgerStreamIdentity) -> CanonicalValue {
+    let common = || {
+        vec![
+            ("stream_kind", text("TASK")),
+            ("project_id", text(identity.project_id().as_str())),
+            (
+                "project_snapshot_id",
+                text(identity.project_snapshot_id().as_str()),
+            ),
+            ("task_id", text(identity.task_id().as_str())),
+            ("task_revision", text(identity.task_revision())),
+        ]
+    };
+    match identity.subject_kind() {
+        TaskLedgerSubjectKind::TaskSpec => {
+            let mut fields = common();
+            fields.push((
+                "task_spec_digest",
+                digest_value(
+                    identity
+                        .task_spec_digest()
+                        .expect("TaskSpec subject always carries its digest"),
+                ),
+            ));
+            fields.push((
+                "accounting_currency",
+                text(
+                    identity
+                        .accounting_currency()
+                        .expect("TaskSpec subject always carries its currency"),
+                ),
+            ));
+            object(fields)
+        }
+        TaskLedgerSubjectKind::GeneralTaskIntake => {
+            let mut fields = common();
+            fields.push((
+                "task_subject_kind",
+                text(TaskLedgerSubjectKind::GeneralTaskIntake.as_str()),
+            ));
+            fields.push((
+                "intake_digest",
+                digest_value(
+                    identity
+                        .general_task_intake_digest()
+                        .expect("general intake subject always carries its digest"),
+                ),
+            ));
+            object(fields)
+        }
+    }
+}
+
+fn task_submission_content_value(
+    ingress_id: &str,
+    client_request_id: &str,
+    objective: &str,
+    project_display_name: &str,
+    project_authority_receipt_digest: &ContentDigest,
+    identity: &TaskLedgerStreamIdentity,
+    stream_id: &ContentDigest,
+) -> CanonicalValue {
     object(vec![
-        ("stream_kind", text("TASK")),
-        ("project_id", text(identity.project_id().as_str())),
+        ("schema_version", text(TASK_SUBMISSION_ENVELOPE_SCHEMA)),
         (
-            "project_snapshot_id",
-            text(identity.project_snapshot_id().as_str()),
+            "admission_action",
+            text(TaskCreatedProfile::GeneralTaskIntakeV1.action()),
         ),
-        ("task_id", text(identity.task_id().as_str())),
-        ("task_revision", text(identity.task_revision())),
+        ("ingress_id", text(ingress_id)),
+        ("client_request_id", text(client_request_id)),
+        ("objective", text(objective)),
+        ("project_display_name", text(project_display_name)),
         (
-            "task_spec_digest",
-            digest_value(identity.task_spec_digest()),
+            "project_authority_receipt_digest",
+            digest_value(project_authority_receipt_digest),
         ),
-        ("accounting_currency", text(identity.accounting_currency())),
+        ("stream_identity", identity_value(identity)),
+        ("stream_id", digest_value(stream_id)),
+    ])
+}
+
+fn task_submission_envelope_value(
+    content: &CanonicalValue,
+    task_ref: &ContentDigest,
+) -> CanonicalValue {
+    object(vec![
+        ("content", content.clone()),
+        ("task_ref", digest_value(task_ref)),
     ])
 }
 
@@ -5106,16 +6042,17 @@ fn next_resource_projection(
         .resource_revision()
         .checked_add(1)
         .ok_or(LedgerError::InvalidResourceSnapshot)?;
+    let accounting_currency = head
+        .identity()
+        .accounting_currency()
+        .ok_or(LedgerError::GeneralTaskIntakeCreateOnly)?;
     let projection_digest = hash_value(
         "lattice.task-ledger.resource-projection",
         &object(vec![
             ("stream_id", digest_value(head.stream_id())),
             ("revision", unsigned(revision)),
             ("counters", counters_value(next)),
-            (
-                "accounting_currency",
-                text(head.identity().accounting_currency()),
-            ),
+            ("accounting_currency", text(accounting_currency)),
         ]),
     )?;
     Ok((next.clone(), revision, projection_digest))
@@ -5164,6 +6101,7 @@ fn resource_observation_value(
     effect_subject_digest: &ContentDigest,
     counters: &ResourceCounters,
     request: &ResourceRequest,
+    accounting_currency: &str,
 ) -> CanonicalValue {
     object(vec![
         ("stream_head", full_head_value(head)),
@@ -5172,10 +6110,7 @@ fn resource_observation_value(
         ("effect_subject_digest", digest_value(effect_subject_digest)),
         ("counters", counters_value(counters)),
         ("request", request_value(request)),
-        (
-            "accounting_currency",
-            text(head.identity().accounting_currency()),
-        ),
+        ("accounting_currency", text(accounting_currency)),
     ])
 }
 

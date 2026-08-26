@@ -77,6 +77,11 @@ pub const STORE_PRODUCER_ID: &str = "lattice-postgres-store";
 pub const STORE_PRODUCER_VERSION: &str = "1.0";
 /// Maximum canonical ASCII length of Store transaction/daemon identifiers.
 pub const STORE_IDENTIFIER_MAX_BYTES: usize = 128;
+/// Maximum canonical ASCII length of a Store project snapshot identifier.
+///
+/// Unlike transaction and daemon identifiers, this must hold the Project
+/// Registry's maximum 159-byte authority snapshot.
+pub const STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES: usize = 159;
 
 /// Failure to construct a valid shared contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +113,11 @@ pub enum ContractError {
     InvalidAccountingCurrency,
     /// A Task Ledger identifier violates its exact bounded ASCII contract.
     InvalidTaskLedgerIdentifier {
+        /// Stable field name for diagnostic and test evidence.
+        field: &'static str,
+    },
+    /// A general-task intake binding violates its non-executable identity contract.
+    InvalidTaskIntakeBinding {
         /// Stable field name for diagnostic and test evidence.
         field: &'static str,
     },
@@ -260,6 +270,9 @@ impl fmt::Display for ContractError {
             }
             Self::InvalidTaskLedgerIdentifier { field } => {
                 write!(formatter, "invalid Task Ledger {field}")
+            }
+            Self::InvalidTaskIntakeBinding { field } => {
+                write!(formatter, "invalid general-task intake {field}")
             }
             Self::InvalidTaskLedgerHead => {
                 formatter.write_str("invalid Task Ledger stream head")
@@ -432,6 +445,148 @@ identifier!(RequestId, "request_id");
 identifier!(TaskId, "task_id");
 identifier!(AttemptId, "attempt_id");
 identifier!(ProjectSnapshotId, "project_snapshot_id");
+
+/// Maximum byte length of the shared task-ingress idempotency key.
+pub const TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES: usize = 64;
+
+const TASK_INGRESS_ANYWHERE_SECRET_PREFIXES: [&str; 14] = [
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "github_pat_",
+    "glpat-",
+    "npm_",
+    "pypi-",
+    "xoxa-",
+    "xoxb-",
+    "xoxp-",
+    "xoxr-",
+    "xoxs-",
+];
+
+const TASK_INGRESS_SENSITIVE_KEYS: [&str; 24] = [
+    "password",
+    "passphrase",
+    "passwd",
+    "pwd",
+    "token",
+    "access_token",
+    "access-token",
+    "refresh_token",
+    "refresh-token",
+    "id_token",
+    "id-token",
+    "session_token",
+    "session-token",
+    "api_key",
+    "api-key",
+    "apikey",
+    "client_secret",
+    "client-secret",
+    "secret",
+    "credential",
+    "credentials",
+    "cookie",
+    "set-cookie",
+    "authorization",
+];
+
+/// Verifies the shared task-ingress idempotency-key contract.
+///
+/// The key is data only: one to 64 ASCII letters, digits, dots, underscores,
+/// colons, or hyphens, beginning with a letter or digit, and free of the
+/// recognized credential/token shapes that intake boundaries must never
+/// retain or echo.
+#[must_use]
+pub fn valid_task_ingress_client_request_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+        && !task_ingress_text_contains_recognized_secret(value)
+}
+
+/// Returns true when untrusted task-ingress text contains recognizable secret
+/// material or a sensitive-key assignment/header shape.
+///
+/// This is the shared fail-closed predicate for every public intake boundary
+/// and the Task Ledger owner. Callers reject the whole value; this predicate is
+/// not a redaction or secret-classification authority.
+#[must_use]
+pub fn task_ingress_text_contains_recognized_secret(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("bearer ")
+        || (lower.contains("-----begin ") && lower.contains("private key-----"))
+        || TASK_INGRESS_ANYWHERE_SECRET_PREFIXES
+            .iter()
+            .any(|prefix| lower.contains(prefix))
+        || contains_bounded_secret_prefix(&lower, "sk-")
+    {
+        return true;
+    }
+    if TASK_INGRESS_SENSITIVE_KEYS.iter().any(|key| {
+        lower.match_indices(key).any(|(start, matched)| {
+            let boundary_before = lower[..start].chars().next_back().is_none_or(|character| {
+                !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-')
+            });
+            if !boundary_before {
+                return false;
+            }
+            let mut suffix = lower[start + matched.len()..].chars().peekable();
+            if suffix.peek().is_some_and(|character| {
+                character.is_ascii_alphanumeric() || matches!(*character, '_' | '-')
+            }) {
+                return false;
+            }
+            while suffix
+                .peek()
+                .is_some_and(|character| character.is_whitespace())
+            {
+                suffix.next();
+            }
+            if suffix
+                .peek()
+                .is_some_and(|character| matches!(*character, '"' | '\''))
+            {
+                suffix.next();
+            }
+            while suffix
+                .peek()
+                .is_some_and(|character| character.is_whitespace())
+            {
+                suffix.next();
+            }
+            matches!(suffix.next(), Some(':' | '='))
+        })
+    }) {
+        return true;
+    }
+
+    value
+        .as_bytes()
+        .windows(20)
+        .enumerate()
+        .any(|(start, candidate)| {
+            matches!(&candidate[..4], b"AKIA" | b"ASIA")
+                && candidate[4..]
+                    .iter()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+                && (start == 0 || !value.as_bytes()[start - 1].is_ascii_alphanumeric())
+                && (start + candidate.len() == value.len()
+                    || !value.as_bytes()[start + candidate.len()].is_ascii_alphanumeric())
+        })
+}
+
+fn contains_bounded_secret_prefix(value: &str, prefix: &str) -> bool {
+    value
+        .match_indices(prefix)
+        .any(|(index, _)| index == 0 || !value.as_bytes()[index - 1].is_ascii_alphanumeric())
+}
 
 /// One canonical project identifier shared by Task Domain, Registry, and Policy.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -3228,15 +3383,53 @@ impl ProjectAuthorityHead {
     }
 }
 
-/// Complete immutable identity of one Task Ledger task stream.
+/// Closed semantic subject carried by a Task Ledger stream identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum TaskLedgerSubjectKind {
+    /// One immutable Task Domain Task Spec, eligible for separately governed
+    /// execution lanes.
+    TaskSpec,
+    /// One pre-specification general-task intake. This grants no execution,
+    /// cost, approval, Writer Lease, or Task Domain authority.
+    GeneralTaskIntake,
+}
+
+impl TaskLedgerSubjectKind {
+    /// Complete closed set.
+    pub const ALL: [Self; 2] = [Self::TaskSpec, Self::GeneralTaskIntake];
+
+    /// Returns the fixed persistence-facing discriminator.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TaskSpec => "TASK_SPEC",
+            Self::GeneralTaskIntake => "GENERAL_TASK_INTAKE",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum TaskLedgerStreamSubject {
+    TaskSpec {
+        task_spec_digest: ContentDigest,
+        accounting_currency: String,
+    },
+    GeneralTaskIntake {
+        intake_digest: ContentDigest,
+    },
+}
+
+/// Complete immutable identity of one Task Ledger stream.
+///
+/// The legacy constructor remains exactly Task-Spec-only. General intake uses
+/// a separate constructor and cannot expose a Task Spec digest or currency.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TaskLedgerStreamIdentity {
     project_id: ProjectId,
     project_snapshot_id: ProjectSnapshotId,
     task_id: TaskId,
     task_revision: String,
-    task_spec_digest: ContentDigest,
-    accounting_currency: String,
+    subject: TaskLedgerStreamSubject,
 }
 
 impl TaskLedgerStreamIdentity {
@@ -3267,8 +3460,42 @@ impl TaskLedgerStreamIdentity {
             project_snapshot_id,
             task_id,
             task_revision,
-            task_spec_digest,
-            accounting_currency,
+            subject: TaskLedgerStreamSubject::TaskSpec {
+                task_spec_digest,
+                accounting_currency,
+            },
+        })
+    }
+
+    /// Constructs one pre-specification general-task intake identity without
+    /// manufacturing Task Domain or accounting fields.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-canonical positive revision or the all-zero intake
+    /// commitment sentinel.
+    pub fn new_general_task_intake(
+        project_id: ProjectId,
+        project_snapshot_id: ProjectSnapshotId,
+        task_id: TaskId,
+        task_revision: impl Into<String>,
+        intake_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        let task_revision = task_revision.into();
+        if !canonical_positive_u64(&task_revision) {
+            return Err(ContractError::InvalidTaskRevision);
+        }
+        if is_zero_digest(&intake_digest) {
+            return Err(ContractError::InvalidTaskIntakeBinding {
+                field: "intake_digest",
+            });
+        }
+        Ok(Self {
+            project_id,
+            project_snapshot_id,
+            task_id,
+            task_revision,
+            subject: TaskLedgerStreamSubject::GeneralTaskIntake { intake_digest },
         })
     }
 
@@ -3290,22 +3517,154 @@ impl TaskLedgerStreamIdentity {
         &self.task_id
     }
 
-    /// Returns the canonical positive Task Spec revision.
+    /// Returns the canonical positive subject revision.
     #[must_use]
     pub fn task_revision(&self) -> &str {
         &self.task_revision
     }
 
-    /// Returns the Task Spec SHA-256 digest.
+    /// Returns the closed stream-subject discriminator.
     #[must_use]
-    pub const fn task_spec_digest(&self) -> &ContentDigest {
-        &self.task_spec_digest
+    pub const fn subject_kind(&self) -> TaskLedgerSubjectKind {
+        match self.subject {
+            TaskLedgerStreamSubject::TaskSpec { .. } => TaskLedgerSubjectKind::TaskSpec,
+            TaskLedgerStreamSubject::GeneralTaskIntake { .. } => {
+                TaskLedgerSubjectKind::GeneralTaskIntake
+            }
+        }
     }
 
-    /// Returns the exact accounting currency.
+    /// Returns the neutral immutable subject digest.
     #[must_use]
-    pub fn accounting_currency(&self) -> &str {
-        &self.accounting_currency
+    pub const fn subject_digest(&self) -> &ContentDigest {
+        match &self.subject {
+            TaskLedgerStreamSubject::TaskSpec {
+                task_spec_digest, ..
+            } => task_spec_digest,
+            TaskLedgerStreamSubject::GeneralTaskIntake { intake_digest } => intake_digest,
+        }
+    }
+
+    /// Returns the Task Spec SHA-256 digest only for a Task-Spec stream.
+    #[must_use]
+    pub const fn task_spec_digest(&self) -> Option<&ContentDigest> {
+        match &self.subject {
+            TaskLedgerStreamSubject::TaskSpec {
+                task_spec_digest, ..
+            } => Some(task_spec_digest),
+            TaskLedgerStreamSubject::GeneralTaskIntake { .. } => None,
+        }
+    }
+
+    /// Returns the general intake commitment only for an intake stream.
+    #[must_use]
+    pub const fn general_task_intake_digest(&self) -> Option<&ContentDigest> {
+        match &self.subject {
+            TaskLedgerStreamSubject::TaskSpec { .. } => None,
+            TaskLedgerStreamSubject::GeneralTaskIntake { intake_digest } => Some(intake_digest),
+        }
+    }
+
+    /// Returns the exact accounting currency only for a Task-Spec stream.
+    #[must_use]
+    pub fn accounting_currency(&self) -> Option<&str> {
+        match &self.subject {
+            TaskLedgerStreamSubject::TaskSpec {
+                accounting_currency,
+                ..
+            } => Some(accounting_currency),
+            TaskLedgerStreamSubject::GeneralTaskIntake { .. } => None,
+        }
+    }
+}
+
+/// Exact non-executable binding for one general-task intake stream.
+///
+/// This wrapper can be constructed only from a `GENERAL_TASK_INTAKE` identity;
+/// it cannot be passed where [`SubjectBinding`] (and therefore a Task Spec) is
+/// required.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct TaskIntakeBinding {
+    identity: TaskLedgerStreamIdentity,
+    intake_digest: ContentDigest,
+}
+
+impl TaskIntakeBinding {
+    /// Constructs one exact pre-specification intake binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the same invalid revision or zero intake digest as
+    /// [`TaskLedgerStreamIdentity::new_general_task_intake`].
+    pub fn new(
+        project_id: ProjectId,
+        project_snapshot_id: ProjectSnapshotId,
+        task_id: TaskId,
+        task_revision: impl Into<String>,
+        intake_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        let retained_intake_digest = intake_digest.clone();
+        TaskLedgerStreamIdentity::new_general_task_intake(
+            project_id,
+            project_snapshot_id,
+            task_id,
+            task_revision,
+            intake_digest,
+        )
+        .map(|identity| Self {
+            identity,
+            intake_digest: retained_intake_digest,
+        })
+    }
+
+    /// Narrows a neutral stream identity to a general-task intake binding.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every Task-Spec identity rather than promoting it across lanes.
+    pub fn try_from_stream_identity(
+        identity: &TaskLedgerStreamIdentity,
+    ) -> Result<Self, ContractError> {
+        if identity.subject_kind() != TaskLedgerSubjectKind::GeneralTaskIntake {
+            return Err(ContractError::InvalidTaskIntakeBinding {
+                field: "subject_kind",
+            });
+        }
+        Ok(Self {
+            identity: identity.clone(),
+            intake_digest: identity.subject_digest().clone(),
+        })
+    }
+
+    /// Returns the exact neutral Task Ledger stream identity.
+    #[must_use]
+    pub const fn stream_identity(&self) -> &TaskLedgerStreamIdentity {
+        &self.identity
+    }
+
+    #[must_use]
+    pub const fn project_id(&self) -> &ProjectId {
+        self.identity.project_id()
+    }
+
+    #[must_use]
+    pub const fn project_snapshot_id(&self) -> &ProjectSnapshotId {
+        self.identity.project_snapshot_id()
+    }
+
+    #[must_use]
+    pub const fn task_id(&self) -> &TaskId {
+        self.identity.task_id()
+    }
+
+    #[must_use]
+    pub fn task_revision(&self) -> &str {
+        self.identity.task_revision()
+    }
+
+    #[must_use]
+    pub const fn intake_digest(&self) -> &ContentDigest {
+        &self.intake_digest
     }
 }
 
@@ -3672,7 +4031,7 @@ impl TaskLedgerResourceReceipt {
         }
         let accounting_currency = accounting_currency.into();
         if !valid_accounting_currency(&accounting_currency)
-            || accounting_currency != stream_head.identity().accounting_currency()
+            || stream_head.identity().accounting_currency() != Some(accounting_currency.as_str())
         {
             return Err(ContractError::InvalidAccountingCurrency);
         }
@@ -8048,6 +8407,16 @@ fn valid_store_identifier(value: &str) -> bool {
         })
 }
 
+fn valid_store_project_snapshot_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'_' | b'-' | b':')
+        })
+}
+
 fn valid_store_daemon_identifier(value: &str) -> bool {
     valid_store_identifier(value)
         && value
@@ -8146,7 +8515,7 @@ impl StoreScope {
     ///
     /// # Errors
     ///
-    /// Rejects a snapshot outside the canonical 128-byte Store identifier
+    /// Rejects a snapshot outside the canonical 159-byte Store identifier
     /// alphabet or an all-zero aggregate-key commitment.
     pub fn new(
         project_id: ProjectId,
@@ -8154,7 +8523,7 @@ impl StoreScope {
         owner: StoreRepositoryOwner,
         aggregate_key_digest: ContentDigest,
     ) -> Result<Self, ContractError> {
-        if !valid_store_identifier(project_snapshot_id.as_str()) {
+        if !valid_store_project_snapshot_identifier(project_snapshot_id.as_str()) {
             return Err(ContractError::InvalidStoreValue {
                 field: "project_snapshot_id",
             });

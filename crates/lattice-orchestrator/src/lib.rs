@@ -9,7 +9,7 @@ use lattice_contracts::{
     DeliveryContractError, DeliveryOutcomeRequest, DeliveryReceipt, DeliveryRunRequest,
     DeliveryStage, DeliveryStatusRequest, DeliveryTerminalStatus, DurableIntentEvidence,
     GraphMemoryReceipt, GraphMemoryRunRequest, HolderProcessId, MemoryQuery, SubjectBinding,
-    WriterLeaseAuthorityHead,
+    TaskIntakeBinding, WriterLeaseAuthorityHead, valid_task_ingress_client_request_id,
 };
 use lattice_foreman_state::{ForemanCheckpointIntent, ForemanServerObservation, SnapshotError};
 use lattice_ports::{
@@ -17,9 +17,9 @@ use lattice_ports::{
     ControlledTaskExecutionPort, DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort,
     DeliveryPortError, ForemanAppendReceipt, ForemanCoordinationError,
     ForemanCoordinationErrorKind, ForemanCoordinationPort, GraphMemoryPortError, GraphMemoryStage,
-    GraphifyAnalysisPort, PortErrorKind, TaskLifecycleAutonomyEvidence, TaskLifecycleError,
-    TaskLifecycleEvidence, TaskLifecyclePort, TestRunnerPort, WorkspaceGitPort,
-    WriterAuthorityGuardPort,
+    GraphifyAnalysisPort, PortErrorKind, TaskIntakeAdmission, TaskIntakeLifecyclePort,
+    TaskLifecycleAutonomyEvidence, TaskLifecycleError, TaskLifecycleEvidence, TaskLifecyclePort,
+    TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
 };
 
 /// Closed failure for the replay-first sole-foreman checkpoint workflow.
@@ -327,6 +327,97 @@ pub struct ControlledTaskRequest {
     worktree_id: String,
     holder_process_id: HolderProcessId,
     holder_process_start_identity: ContentDigest,
+}
+
+/// Server-bound request for durable general-task intake only.
+///
+/// This value intentionally carries no attempt, workspace, Writer Lease,
+/// process, model, command, Git, or execution configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GeneralTaskIntakeRequest {
+    binding: TaskIntakeBinding,
+    client_request_id: String,
+}
+
+impl GeneralTaskIntakeRequest {
+    /// Constructs one bounded create-only request after project selection and
+    /// formal task-identity binding have been completed by the composition root.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty, unbounded, padded, or structurally unsafe retry key.
+    pub fn new(
+        binding: TaskIntakeBinding,
+        client_request_id: impl Into<String>,
+    ) -> Result<Self, GeneralTaskIntakeError> {
+        let client_request_id = client_request_id.into();
+        if !valid_task_ingress_client_request_id(&client_request_id) {
+            return Err(GeneralTaskIntakeError::RequestRejected);
+        }
+        Ok(Self {
+            binding,
+            client_request_id,
+        })
+    }
+
+    #[must_use]
+    pub const fn binding(&self) -> &TaskIntakeBinding {
+        &self.binding
+    }
+
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
+    }
+}
+
+/// Failure from the create-only general-task intake coordinator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GeneralTaskIntakeError {
+    RequestRejected,
+    Lifecycle(TaskLifecycleError),
+    StateMismatch,
+}
+
+impl fmt::Display for GeneralTaskIntakeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RequestRejected => formatter.write_str("general task intake request rejected"),
+            Self::Lifecycle(error) => write!(formatter, "general task intake rejected: {error}"),
+            Self::StateMismatch => {
+                formatter.write_str("general task intake lifecycle state mismatch")
+            }
+        }
+    }
+}
+
+impl Error for GeneralTaskIntakeError {}
+
+/// Creates or exactly replays one durable task without obtaining execution
+/// authority or advancing beyond Draft.
+///
+/// The API deliberately receives only [`TaskIntakeLifecyclePort`]. It therefore
+/// cannot acquire a Writer Lease, transition lifecycle state, invoke a model,
+/// classify autonomy/risk/cost, touch a workspace, run Git, or record a result.
+///
+/// # Errors
+///
+/// Returns a typed lifecycle error or rejects a substituted binding. The
+/// narrow admission type can represent only `DRAFT` with no result.
+pub fn create_general_task<T>(
+    request: &GeneralTaskIntakeRequest,
+    lifecycle: &mut T,
+) -> Result<TaskIntakeAdmission, GeneralTaskIntakeError>
+where
+    T: TaskIntakeLifecyclePort,
+{
+    let admission = lifecycle
+        .admit(&request.binding, &request.client_request_id)
+        .map_err(GeneralTaskIntakeError::Lifecycle)?;
+    if admission.binding() != &request.binding {
+        return Err(GeneralTaskIntakeError::StateMismatch);
+    }
+    Ok(admission)
 }
 
 impl ControlledTaskRequest {

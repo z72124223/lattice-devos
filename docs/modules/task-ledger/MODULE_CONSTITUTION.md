@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.7
+version: 2.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -13,8 +13,10 @@ Own the versioned event, hash-chain, exact command-receipt, verified replay,
 resource-projection, effect-intent outbox-admission, pure append-plan, and
 complete checkpoint semantics, including the closed autonomy-receipt event,
 the fixed foreman stream/event append plan and child-row verifier, and the
-authoritative Task-created autonomy profile discriminator that PostgreSQL
-persists as the single durable control-plane truth.
+authoritative Task-created autonomy profile discriminator. Version 2.9 also
+owns the distinct pre-specification general-task subject, canonical submission
+envelope, task reference, and idempotency binding that PostgreSQL persists
+beside the task stream as the single durable control-plane truth.
 
 ## Non-Goals
 
@@ -53,6 +55,14 @@ persists as the single durable control-plane truth.
   the authoritative `TASK_CREATED.action` field for bounded task-control
   streams. The legacy `CONTROLLED_CODEX_CANARY` value is receipt-optional;
   `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` requires exactly one V1 receipt.
+- The separate create-only `GENERAL_TASK_INTAKE_V1` Task-created marker. It is
+  valid only for a `GENERAL_TASK_INTAKE` stream, has no autonomy receipt, and
+  permits no event after its single `TASK_CREATED` append.
+- The versioned `TaskSubmissionEnvelope` for one create-only general task,
+  including the process-owned ingress, caller idempotency key, exact objective,
+  registered project display name, formal Project Registry authority-receipt
+  digest, complete stream identity, derived stream ID, durable `task_ref`, and
+  envelope digest. The objective is task data, never executable authority.
 - The fixed `FOREMAN_COORDINATION` stream identity and versioned
   `FOREMAN_SNAPSHOT_RECORDED` event, including payload digest, exact-next generation
   order, exact command retry, and typed child-row replay verification.
@@ -107,6 +117,15 @@ until a separately approved module/ticket owns those mechanics.
 - Plan one fixed foreman append, exact retry, or changed-ID rejection against
   replay-verified event/command/child rows; verify exact-next generation and
   return the existing Ledger checkpoint without creating a current-state row.
+- Construct and verify one canonical general-task submission envelope from
+  bounded already-NFC inputs and a complete formal stream identity. Derive its
+  public `task_ref` and envelope digest without accepting a path, command,
+  credential, lease, approval, provider, or execution setting.
+- Construct the matching `TASK_CREATED` append only with action
+  `GENERAL_TASK_INTAKE_V1`, reason
+  `GENERAL_TASK_INTAKE_RECORDED`, no diagnostic payload, and the envelope digest
+  as its subject. Replay requires exactly that one event and no autonomy,
+  transition, result, resource, outbox, or other effect record.
 
 ## Invariants
 
@@ -157,36 +176,59 @@ until a separately approved module/ticket owns those mechanics.
     receipt. Their events, commands, receipts, projections, checkpoints, and
     hash domains replay byte-identically; an already present valid V1 receipt
     remains replayable.
-21. `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` is the only current required marker.
-    It contains exactly one autonomy receipt event immediately after
-    `TASK_CREATED` and before any later event or external effect. Other values
-    in the reserved `CONTROLLED_CODEX_CANARY*` namespace, duplicate,
+21. `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` is the only current
+    autonomy-receipt-required marker. It contains exactly one autonomy receipt
+    event immediately after `TASK_CREATED` and before any later event or
+    external effect. Other values in its reserved namespace, duplicate,
     missing-before-progress, late, reordered, or substituted receipts fail
     closed. Other action families are `NotApplicable`, not unknown profiles.
-22. The event subject, event, terminal command receipt, stream head/resource
+22. A `GENERAL_TASK_INTAKE` identity contains a non-zero neutral intake digest
+    and no Task Spec digest or accounting currency. It accepts only one
+    `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event; autonomy state is exactly
+    `NotApplicable`, and any second event or append attempt fails closed.
+23. The event subject, event, terminal command receipt, stream head/resource
     projection/checkpoint, optional outbox admission, and physical Store
     receipt are one indivisible plan. A persistence adapter commits all or none.
-23. An autonomy receipt records already-issued authority evidence; it does not
+24. An autonomy receipt records already-issued authority evidence; it does not
     grant, refresh, broaden, or execute authority and cannot authorize its own
     creation.
-24. The `writer_lease_head_digest` is a commitment to the exact 15-scalar
+25. The `writer_lease_head_digest` is a commitment to the exact 15-scalar
     Writer current-authority assertion tuple. Caller-supplied projection fields
     outside that predicate cannot alter or enlarge the durable authority claim.
-25. The internal event alone never widens MCP. ADR-027/SPEC-009 separately
+26. The internal event alone never widens MCP. ADR-027/SPEC-009 separately
     authorize one closed `lattice_foreman_checkpoint` adapter and a verified
     Runtime Status projection; neither becomes a second durable record or wire
     authority, and the legacy observer remains unchanged.
-26. The event-kind contract cannot expose a value that the active PostgreSQL
+27. The event-kind contract cannot expose a value that the active PostgreSQL
     schema cannot persist. Schema-v5 readers continue to reject the withdrawn
     `INGRESS_RECEIPT_HANDOFF` spelling as unknown.
-27. Every foreman child record binds one matching Ledger event, command,
+28. Every foreman child record binds one matching Ledger event, command,
     request digest, payload digest and generation. Missing, duplicate, changed,
     reordered, or cross-stream records fail replay; exact retry is byte-equal.
+29. A general-task envelope binds one exact objective and formal project
+    authority receipt to one complete Task Ledger identity. Its `task_ref` and
+    envelope digest change if any authoritative input changes.
+30. Objective and project-display-name text must be non-empty, trimmed,
+    already NFC, bounded, free of NUL/control characters, and free of
+    recognized secret material. Debug and error projections redact the human
+    text; diagnostic JSON never stores a second copy.
+31. Task-ingress idempotency is the exact pair of process-owned `ingress_id`
+    and `client_request_id`, shared across controlled-canary and general intake.
+    The key must satisfy the `lattice-contracts` one-to-64-byte secret-free
+    ASCII predicate before project resolution and again at durable admission.
+    An exact envelope retry returns the retained task; changed objective,
+    project binding, or submission mode is substitution and discloses no
+    different task. Task Ledger owns this meaning even though Postgres Store
+    owns the unique index and transaction mechanics.
+32. The submission envelope is an authoritative intake binding, not lifecycle
+    state, an execution-ready Task Spec, a Policy decision, an approval, or a
+    writer lease. Persisting it grants no model, process, filesystem, Git,
+    payment, external-action, merge, deployment, or release authority.
 
 ## Allowed Dependencies
 
 - Rust standard library.
-- `lattice-contracts` 1.9 immutable shared values and Task Ledger receipt/head
+- `lattice-contracts` 1.15 immutable shared values and Task Ledger receipt/head
   representations, whose Ledger-specific semantics remain unchanged from 1.3.
 - `lattice-cjson` 1.0 canonical-byte/hash mechanics only.
 - `lattice-foreman-state` 1.3 only for the closed snapshot/checkpoint input and
@@ -246,6 +288,15 @@ without changing historical event bytes. PostgreSQL may persist a fixed-scalar
 child only beside the matching Ledger append in one transaction; diagnostic
 JSON, hypotheses, and child rows cannot become lifecycle authority.
 
+Version 2.9 corrects the unreleased Phase 3 intake model. General intake is a
+distinct stream subject with a neutral digest and no Task Spec digest,
+accounting currency, autonomy receipt, transition, or result. Its exact
+`GENERAL_TASK_INTAKE_V1` create-only marker replaces the initial erroneous
+required-profile proposal. Existing canary and historical event/hash/profile
+bytes remain unchanged. Postgres Store 1.22 may persist the shared ingress
+claim and envelope only in the same transaction as the matching Ledger append
+and must replay-verify all three before returning it.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -260,6 +311,8 @@ JSON, hypotheses, and child rows cannot become lifecycle authority.
 | Autonomy event contract | fixed subject/authority fields, exactly-one ordering, full substitution/duplicate/missing/late matrices, and zero arbitrary payload surface | Security review | yes |
 | Mixed historical replay | pre-autonomy streams replay byte-identically without a synthesized event; autonomy-enabled streams require the closed event and unchanged public MCP bytes | Compatibility review | yes |
 | Autonomy atomicity | schema-v5 command, optional event, projection/checkpoint, terminal receipt, and physical receipt persist all-or-none | Engineering | yes |
+| General intake envelope | objective/project/authority/identity substitution, strict text/secret bounds, stable `task_ref`, Debug redaction, distinct subject kind, absent spec/currency, and no-autonomy matrices | Security review | yes |
+| General intake persistence parity | shared canary/general ingress-key collision, exact retry, and changed-key rejection use the same claim/envelope verifier; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
 | Schema/event parity | schema-v5 rejects the withdrawn handoff spelling and no unpersistable event remains in the public enum | Compatibility review | yes |
 | Dependency/no-I/O boundary | Cargo tree and forbidden-reference scan | Architecture review | yes |
 | Full verification | workspace format, lint, Rust, and preserved Node tests | Engineering | yes |
@@ -284,3 +337,5 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.5 | 2026-08-24 | ADR-025, SPEC-008 v2 | Withdraw the unpersistable source-only handoff event while preserving all deployed schema-v5 and historical bytes | User-authorized bounded repair |
 | 2.6 | 2026-08-25 | SPEC-006 v3, ADR-024/025, TASK-079/087/094 | Add fixed foreman stream/event generation, typed payload commitment and child-row replay verification without changing historical bytes | Fixed-foreman delegation and TASK-105 integration |
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Require exact-next foreman generation and narrow the separately approved MCP adapter/status projection without changing Ledger bytes or legacy MCP | Sole-foreman delegation |
+| 2.8 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial general-intake envelope and required-profile model; superseded before release by 2.9 because intake must not fabricate Task-Spec/autonomy semantics | User-authorized Phase 3 |
+| 2.9 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate general intake from Task Spec, remove currency/autonomy/progression, and retain one create-only event in the shared ingress-idempotency namespace | User-authorized Phase 3 |

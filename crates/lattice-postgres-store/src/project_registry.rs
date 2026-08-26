@@ -22,10 +22,12 @@ use lattice_project_registry::{
 use postgres::types::{FromSqlOwned, ToSql};
 use postgres::{Client, Error as PostgresError, GenericClient, IsolationLevel, Row, Transaction};
 
+use crate::migrations::CURRENT_V5_MANIFEST_SHA256;
 use crate::postgres_setup::verify_runtime_store_schema;
 use crate::{MigrationTarget, PostgresStoreSetupErrorKind};
 
-const GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 5;
+const FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 5;
+const CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 7;
 const REGISTRY_V4_MANIFEST_SHA256: &str =
     "df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f";
 const REGISTRY_CATALOG_ID: &str = "PROJECT_REGISTRY_V1";
@@ -33,6 +35,29 @@ const REGISTRY_ADAPTER_PRODUCER_ID: &str = "lattice-postgres-store";
 const REGISTRY_ADAPTER_PRODUCER_VERSION: &str = "1.4";
 const MAX_LIVE_SERIALIZATION_RETRIES: u8 = 3;
 const EXECUTION_DEADLINE: Duration = Duration::from_secs(45);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegistrySqlProfile {
+    FrozenV5,
+    CurrentV7,
+}
+
+impl RegistrySqlProfile {
+    fn from_schema_version(schema_version: u16) -> PostgresProjectRegistryResult<Self> {
+        match schema_version {
+            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION => Ok(Self::FrozenV5),
+            CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION => Ok(Self::CurrentV7),
+            _ => Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt)),
+        }
+    }
+
+    const fn schema_version(self) -> u16 {
+        match self {
+            Self::FrozenV5 => FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            Self::CurrentV7 => CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+        }
+    }
+}
 
 const WRITE_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
@@ -370,7 +395,7 @@ pub struct PostgresProjectRegistry {
 }
 
 impl PostgresProjectRegistry {
-    /// Verifies the exact schema-v5 runtime surface and current Registry state.
+    /// Verifies an exact supported runtime surface and current Registry state.
     ///
     /// # Errors
     ///
@@ -381,12 +406,11 @@ impl PostgresProjectRegistry {
         target: &MigrationTarget,
     ) -> PostgresProjectRegistryResult<Self> {
         let evidence = verify_runtime_store_schema(&mut client, target).map_err(map_setup_error)?;
-        if evidence.global_schema_version() != GLOBAL_REGISTRY_SCHEMA_VERSION {
-            return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
-        }
+        let sql_profile =
+            RegistrySqlProfile::from_schema_version(evidence.global_schema_version())?;
         let persistence = PostgresProjectRegistryPersistenceEvidence {
             database_identity_digest: digest(target.expected_database_identity_sha256().as_str())?,
-            schema_version: evidence.global_schema_version(),
+            schema_version: sql_profile.schema_version(),
             manifest_digest: digest(evidence.global_manifest_sha256().as_str())?,
         };
         let mut adapter = Self {
@@ -2125,10 +2149,15 @@ fn retained_command_persistence_from_parts(
 ) -> PostgresProjectRegistryResult<PostgresProjectRegistryPersistenceEvidence> {
     let profile_is_frozen_v4 =
         schema_version == 4 && manifest_sha256 == REGISTRY_V4_MANIFEST_SHA256;
-    let profile_is_current_v5 = schema_version == GLOBAL_REGISTRY_SCHEMA_VERSION
-        && current.schema_version() == GLOBAL_REGISTRY_SCHEMA_VERSION
+    let profile_is_frozen_v5 = schema_version == FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION
+        && manifest_sha256 == CURRENT_V5_MANIFEST_SHA256;
+    let profile_is_current = schema_version == current.schema_version()
+        && matches!(
+            current.schema_version(),
+            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION | CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION
+        )
         && manifest_sha256 == current.manifest_digest().as_str();
-    if !profile_is_frozen_v4 && !profile_is_current_v5 {
+    if !profile_is_frozen_v4 && !profile_is_frozen_v5 && !profile_is_current {
         return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
     }
     Ok(PostgresProjectRegistryPersistenceEvidence {
@@ -2308,14 +2337,32 @@ mod tests {
     }
 
     #[test]
-    fn retained_registry_commands_bind_frozen_v4_or_current_v5_profile() {
-        let current = PostgresProjectRegistryPersistenceEvidence {
+    fn registry_sql_profiles_accept_exact_v5_and_v7_only() {
+        assert_eq!(
+            RegistrySqlProfile::from_schema_version(5),
+            Ok(RegistrySqlProfile::FrozenV5)
+        );
+        assert_eq!(
+            RegistrySqlProfile::from_schema_version(7),
+            Ok(RegistrySqlProfile::CurrentV7)
+        );
+        for unsupported in [0, 1, 3, 4, 6, 8, u16::MAX] {
+            assert_eq!(
+                RegistrySqlProfile::from_schema_version(unsupported),
+                Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))
+            );
+        }
+    }
+
+    #[test]
+    fn retained_registry_commands_bind_only_frozen_v4_v5_or_exact_current_profile() {
+        let current_v5 = PostgresProjectRegistryPersistenceEvidence {
             database_identity_digest: digest(&"a".repeat(64)).expect("database identity"),
-            schema_version: GLOBAL_REGISTRY_SCHEMA_VERSION,
-            manifest_digest: digest(&"b".repeat(64)).expect("current manifest"),
+            schema_version: FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            manifest_digest: digest(CURRENT_V5_MANIFEST_SHA256).expect("v5 manifest"),
         };
         let historical =
-            retained_command_persistence_from_parts(4, REGISTRY_V4_MANIFEST_SHA256, &current)
+            retained_command_persistence_from_parts(4, REGISTRY_V4_MANIFEST_SHA256, &current_v5)
                 .expect("frozen v4 profile");
         assert_eq!(historical.schema_version(), 4);
         assert_eq!(
@@ -2324,19 +2371,51 @@ mod tests {
         );
         assert_eq!(
             retained_command_persistence_from_parts(
-                GLOBAL_REGISTRY_SCHEMA_VERSION,
-                current.manifest_digest().as_str(),
-                &current,
+                FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+                CURRENT_V5_MANIFEST_SHA256,
+                &current_v5,
             ),
-            Ok(current.clone())
+            Ok(current_v5.clone())
+        );
+        let current_v7 = PostgresProjectRegistryPersistenceEvidence {
+            database_identity_digest: current_v5.database_identity_digest().clone(),
+            schema_version: CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            manifest_digest: digest(&"b".repeat(64)).expect("v7 manifest"),
+        };
+        let frozen_v5 = retained_command_persistence_from_parts(
+            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            CURRENT_V5_MANIFEST_SHA256,
+            &current_v7,
+        )
+        .expect("frozen v5 profile under v7");
+        assert_eq!(
+            frozen_v5.schema_version(),
+            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION
+        );
+        assert_eq!(
+            retained_command_persistence_from_parts(
+                CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+                current_v7.manifest_digest().as_str(),
+                &current_v7,
+            ),
+            Ok(current_v7.clone())
         );
         for (version, manifest) in [
-            (4, current.manifest_digest().as_str()),
-            (GLOBAL_REGISTRY_SCHEMA_VERSION, REGISTRY_V4_MANIFEST_SHA256),
+            (4, current_v7.manifest_digest().as_str()),
+            (
+                FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+                current_v7.manifest_digest().as_str(),
+            ),
+            (
+                CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+                CURRENT_V5_MANIFEST_SHA256,
+            ),
+            (6, current_v7.manifest_digest().as_str()),
             (3, REGISTRY_V4_MANIFEST_SHA256),
+            (8, current_v7.manifest_digest().as_str()),
         ] {
             assert_eq!(
-                retained_command_persistence_from_parts(version, manifest, &current),
+                retained_command_persistence_from_parts(version, manifest, &current_v7),
                 Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))
             );
         }

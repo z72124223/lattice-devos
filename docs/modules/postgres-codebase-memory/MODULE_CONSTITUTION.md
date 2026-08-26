@@ -1,10 +1,10 @@
 ---
 module_id: postgres-codebase-memory
 name: LATTICE PostgreSQL Codebase Memory Adapter
-version: 1.3
+version: 1.4
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -20,6 +20,9 @@ verification required to upgrade a previously accepted combined profile.
 Version 1.3 adds a read-only, Memory-owned bootstrap inspector that classifies
 only exact empty, v2, or v3 Memory state under an explicit exact Store-v5/v6
 context. It does not inspect Writer state or add durable data.
+Version 1.4 extends only that read-only inspector with the exact Store-v7
+manifest and `LATTICE_DEVOS_MEMORY_SCHEMA_V7` namespace profile. Existing
+Memory-v3 identity remains bound to its retained Store-v5 provenance.
 
 ## Non-Goals
 
@@ -85,8 +88,9 @@ context. It does not inspect Writer state or add durable data.
    catalog and ACL verifiers. Every profile also verifies the exact global and
    namespace-scoped default-ACL closure. Writer state is not interpreted by
    this API.
-10. The bootstrap inspector accepts only exact Store-v5 or Store-v6 context;
-    Memory-v3 identity retains its Store-v5 provenance in either context.
+10. The bootstrap inspector accepts only exact Store-v5, Store-v6, or
+    Store-v7 context;
+    Memory-v3 identity retains its Store-v5 provenance in each context.
 
 ## Allowed Dependencies
 
@@ -137,6 +141,12 @@ evidence in an exact Store-v5/v6 context; partial, extra, ACL-drifted,
 identity-disagreeing, or unsupported Memory state fails before Runtime
 admission mutation.
 
+Version 1.4 adds no migration, Memory row, or extension-byte change. The
+bootstrap inspector accepts Store v7 only when both schema version and the
+frozen eight-entry manifest digest match exactly and the namespace comment is
+the exact v7 value. Store v5/v6 remain distinct accepted profiles; unknown or
+future Store versions are not inferred.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -165,3 +175,4 @@ user approval.
 | 1.1 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Add extension-v3/global-v5 compatibility and retained per-analysis profile replay while preserving v1/v2 bytes and receipts | User-approved TASK-075 reconciliation |
 | 1.2 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Verify the exact Writer-v2 bridge companion under the common lock order during Memory-v3 migration without owning or mutating Writer state | User continuation authorization |
 | 1.3 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the read-only closed Memory bootstrap inspector for exact Store-v5/v6 composition without interpreting Writer state | Sole-foreman delegation |
+| 1.4 | 2026-08-26 | ADR-023 Phase 3 amendment | Add the exact Store-v7 read-only bootstrap profile while preserving v5/v6 and retained Memory-v3 provenance | User Phase 3 authorization |

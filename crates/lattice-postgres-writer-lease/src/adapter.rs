@@ -15,9 +15,10 @@ use postgres::{Client, IsolationLevel, Row, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-use crate::setup::{ExtensionTarget, V3ExtensionTarget};
+use crate::setup::{ExtensionTarget, V3ExtensionTarget, V4ExtensionTarget};
 use crate::{
     sha256_bytes, verify_embedded_extension_manifest, verify_embedded_v3_extension_manifest,
+    verify_embedded_v4_extension_manifest,
 };
 
 const MAX_SERIALIZATION_RETRIES: usize = 3;
@@ -29,6 +30,10 @@ const BIND_RUNTIME_V3_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_bind_runtime_v3($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOAD_FOR_UPDATE_V3_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_for_update_v3($1,$2,$3,$4,$5)";
+const BIND_RUNTIME_V4_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_bind_runtime_v4($1,$2,$3,$4,$5,$6,$7,$8)";
+const LOAD_FOR_UPDATE_V4_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_load_for_update_v4($1,$2,$3,$4,$5)";
 const LOAD_COMMANDS_SQL: &str = "SELECT * FROM writer_lease.writer_lease_load_commands_v1($1)";
 const LOAD_TRANSITIONS_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_transitions_v1($1)";
@@ -54,6 +59,7 @@ pub struct PostgresWriterLease {
 enum RuntimeProcedureProfile {
     V2,
     V3,
+    V4,
 }
 
 impl RuntimeProcedureProfile {
@@ -61,6 +67,7 @@ impl RuntimeProcedureProfile {
         match self {
             Self::V2 => BIND_RUNTIME_SQL,
             Self::V3 => BIND_RUNTIME_V3_SQL,
+            Self::V4 => BIND_RUNTIME_V4_SQL,
         }
     }
 
@@ -68,6 +75,7 @@ impl RuntimeProcedureProfile {
         match self {
             Self::V2 => LOAD_FOR_UPDATE_SQL,
             Self::V3 => LOAD_FOR_UPDATE_V3_SQL,
+            Self::V4 => LOAD_FOR_UPDATE_V4_SQL,
         }
     }
 }
@@ -125,6 +133,35 @@ impl PostgresWriterLease {
             store_authority,
             lease_ttl_seconds,
             RuntimeProcedureProfile::V3,
+            manifest.sql_sha256(),
+            manifest.manifest_sha256(),
+        )
+    }
+
+    /// Constructs the exact schema-v7 adapter through the append-only
+    /// Writer-owned v4 procedure surface. Frozen v3 callers remain version-
+    /// closed to schema v6.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any target, authority, manifest, or database profile mismatch.
+    pub fn new_v4_v7(
+        client: Client,
+        target: &V4ExtensionTarget,
+        store_authority: &StoreAuthorityHead,
+        lease_ttl_seconds: u32,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        let runtime_target = target
+            .successor()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        let manifest = verify_embedded_v4_extension_manifest()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        Self::new_with_profile(
+            client,
+            runtime_target,
+            store_authority,
+            lease_ttl_seconds,
+            RuntimeProcedureProfile::V4,
             manifest.sql_sha256(),
             manifest.manifest_sha256(),
         )

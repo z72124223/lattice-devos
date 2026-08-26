@@ -2,10 +2,11 @@ use lattice_contracts::{
     AttemptId, ContentDigest, DaemonEpoch, FencingToken, GatewayChannelId, GatewayInstanceId,
     HolderProcessId, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind,
     StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding, TaskId,
-    TaskIngressPeerEvidence, TaskLedgerStreamIdentity, WriterLeaseAuthorityHead,
-    WriterLeaseAuthorityReceipt, WriterLeaseIdentity,
+    TaskIngressPeerEvidence, TaskIntakeBinding, TaskLedgerStreamIdentity, TaskLedgerSubjectKind,
+    WRITER_LEASE_PRODUCER_ID, WRITER_LEASE_PRODUCER_VERSION, WriterLeaseAuthorityHead,
+    WriterLeaseAuthorityReceipt, WriterLeaseIdentity, WriterLeaseRevision, WriterLeaseStatus,
 };
-use lattice_ports::{TaskLifecycleErrorKind, TaskLifecyclePort};
+use lattice_ports::{TaskIntakeLifecyclePort, TaskLifecycleErrorKind, TaskLifecyclePort};
 use lattice_postgres_codebase_memory::{
     ExtensionApplyOutcome as MemoryExtensionApplyOutcome,
     ExtensionDatabaseRole as MemoryExtensionDatabaseRole, ExtensionTarget as MemoryExtensionTarget,
@@ -19,7 +20,7 @@ use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionTarget, PostgresWriterLease, apply_extension, verify_extension,
 };
 use lattice_runtime::delivery_ledger::DeliveryDatabaseBinding;
-use lattice_runtime::task_control::PostgresTaskLifecycle;
+use lattice_runtime::task_control::{PostgresTaskLifecycle, TaskAdmissionProfile};
 use lattice_task_domain::TaskState;
 use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
@@ -94,6 +95,45 @@ fn store_authority() -> StoreAuthorityHead {
             .expect("head digest"),
     )
     .expect("store authority")
+}
+
+fn structural_writer_authority(binding: &SubjectBinding) -> WriterLeaseAuthorityHead {
+    let identity = WriterLeaseIdentity::new(
+        binding.project_id().clone(),
+        binding.project_snapshot_id().clone(),
+        binding.task_id().clone(),
+        binding.task_revision(),
+        binding.task_spec_digest().clone(),
+        AttemptId::new("phase3-general-intake-denial-attempt").expect("attempt"),
+        "phase3-general-intake-denial-lease",
+        "codex-writer",
+        "phase3-general-intake-denial-worktree",
+        HolderProcessId::new(std::process::id().into()).expect("pid"),
+        digest('1'),
+        "phase3-general-intake-denial-daemon",
+        DaemonEpoch::new(1).expect("daemon epoch"),
+        FencingToken::new(1).expect("fencing token"),
+    )
+    .expect("structural writer identity");
+    WriterLeaseAuthorityReceipt::new(
+        1,
+        WRITER_LEASE_PRODUCER_ID,
+        WRITER_LEASE_PRODUCER_VERSION,
+        RuntimeKind::Fake,
+        identity,
+        WriterLeaseStatus::Active,
+        WriterLeaseRevision::new(1).expect("writer revision"),
+        RuntimeAdmissionMode::Active,
+        "2000-01-01T00:00:00Z",
+        "2000-01-01T00:00:01Z",
+        "2000-01-01T00:10:00Z",
+        digest('2'),
+        digest('3'),
+        digest('4'),
+        digest('5'),
+    )
+    .expect("structural writer receipt")
+    .head()
 }
 
 fn append(
@@ -323,7 +363,10 @@ fn acquire_task050_writer(
         project_snapshot_id: identity.project_snapshot_id().clone(),
         task_id: identity.task_id().clone(),
         task_revision: identity.task_revision().to_owned(),
-        task_spec_digest: identity.task_spec_digest().clone(),
+        task_spec_digest: identity
+            .task_spec_digest()
+            .expect("TASK-050 is Task-Spec-bound")
+            .clone(),
         attempt_id: AttemptId::new(format!("task050-{case}-attempt-{generation}"))
             .expect("attempt"),
         lease_id: format!("task050-{case}-lease-{generation}"),
@@ -484,9 +527,12 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
         ingress_peer,
     )
     .expect("lifecycle");
-    lifecycle
-        .admit(&lifecycle_binding, "task038-transition-policy-submit")
-        .expect("admit lifecycle");
+    TaskLifecyclePort::admit(
+        &mut lifecycle,
+        &lifecycle_binding,
+        "task038-transition-policy-submit",
+    )
+    .expect("admit lifecycle");
     let policy_writer_runtime = connect_as(&database, "lattice_runtime");
     let mut policy_writer = PostgresWriterLease::new(
         policy_writer_runtime,
@@ -535,7 +581,8 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
             None,
         )
         .expect("prepare lifecycle");
-    let before_missing_authority = lifecycle.load(&lifecycle_binding).expect("before denial");
+    let before_missing_authority =
+        TaskLifecyclePort::load(&mut lifecycle, &lifecycle_binding).expect("before denial");
     let missing_authority = lifecycle
         .transition(
             &lifecycle_binding,
@@ -549,7 +596,8 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
         missing_authority.code(),
         "LATTICE_TASK_TRANSITION_WRITER_AUTHORITY_REQUIRED"
     );
-    let after_missing_authority = lifecycle.load(&lifecycle_binding).expect("after denial");
+    let after_missing_authority =
+        TaskLifecyclePort::load(&mut lifecycle, &lifecycle_binding).expect("after denial");
     assert_eq!(after_missing_authority.state(), TaskState::Preparing);
     assert_eq!(
         after_missing_authority.ledger_head_digest(),
@@ -879,5 +927,189 @@ fn task050_proceed_requires_current_writer_and_retries_without_currentness_when_
 
     println!(
         "TASK050_POSTGRES_PROCEED_WRITER_MATRIX_OK current=1 stale=1 wrong_fence=1 substituted=1 exact_retry=1"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn phase3_general_intake_is_create_only_and_full_lifecycle_is_denied_when_provisioned() {
+    if std::env::var("LATTICE_PHASE3_INTAKE_LIVE").ok().as_deref() != Some("1") {
+        eprintln!("SKIP: LATTICE_PHASE3_INTAKE_LIVE is not configured");
+        return;
+    }
+    assert_eq!(required_environment("LATTICE_TASK019_LIVE"), "1");
+    assert_eq!(required_environment("LATTICE_TASK019_PHASE"), "restart");
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    assert_eq!(run_id.len(), 32);
+    let database = format!("lattice_task019_{}_base", &run_id[..8]);
+    let migration_target =
+        MigrationTarget::new(database.clone(), run_id.clone()).expect("migration target");
+    let delivery_binding = DeliveryDatabaseBinding::new(
+        required_environment("LATTICE_TASK019_HOST"),
+        required_environment("LATTICE_TASK019_PORT")
+            .parse::<u16>()
+            .expect("port"),
+        run_id,
+    )
+    .expect("delivery binding");
+    let password = required_environment("LATTICE_TASK019_PASSWORD");
+    let task_ref = ContentDigest::from_sha256(required_environment("LATTICE_PHASE3_TASK_REF"))
+        .expect("general task_ref");
+    let submission = PostgresTaskLifecycle::load_submission_by_task_ref(
+        &delivery_binding,
+        &password,
+        Instant::now() + Duration::from_secs(30),
+        &task_ref,
+    )
+    .expect("fresh submission lookup")
+    .expect("retained general submission");
+    assert_eq!(submission.task_ref(), &task_ref);
+    assert_eq!(submission.objective(), "完成角色系統");
+    assert_eq!(submission.admission_action(), "GENERAL_TASK_INTAKE_V1");
+
+    let intake_binding = TaskIntakeBinding::try_from_stream_identity(submission.identity())
+        .expect("general intake binding");
+    assert_eq!(
+        intake_binding.stream_identity().subject_kind(),
+        TaskLedgerSubjectKind::GeneralTaskIntake
+    );
+    assert_eq!(
+        intake_binding
+            .stream_identity()
+            .general_task_intake_digest(),
+        Some(intake_binding.intake_digest())
+    );
+    assert!(
+        intake_binding
+            .stream_identity()
+            .task_spec_digest()
+            .is_none()
+    );
+    assert!(
+        intake_binding
+            .stream_identity()
+            .accounting_currency()
+            .is_none()
+    );
+
+    let ingress_peer = TaskIngressPeerEvidence::new_local_canonical_mcp_acceptance_live(
+        GatewayInstanceId::new("lattice-mcp-local-acceptance").expect("gateway"),
+        "1.0.0",
+        digest('6'),
+        digest('7'),
+        GatewayChannelId::new("stdio").expect("channel"),
+        digest('8'),
+        digest('9'),
+    )
+    .expect("local acceptance ingress");
+    let mut lifecycle = PostgresTaskLifecycle::connect_with_ingress_peer_and_admission_profile(
+        &delivery_binding,
+        &password,
+        Instant::now() + Duration::from_secs(30),
+        submission.identity().clone(),
+        store_authority(),
+        ingress_peer,
+        TaskAdmissionProfile::GeneralTaskIntake(Box::new(submission.clone())),
+    )
+    .expect("general intake lifecycle");
+
+    let loaded = TaskIntakeLifecyclePort::load(&mut lifecycle, &intake_binding)
+        .expect("specialized intake load");
+    assert_eq!(loaded.binding(), &intake_binding);
+    assert_eq!(loaded.state(), TaskState::Draft);
+    assert!(loaded.result_digest().is_none());
+    let retained_head = loaded.ledger_head_digest().clone();
+
+    let replay = TaskIntakeLifecyclePort::admit(
+        &mut lifecycle,
+        &intake_binding,
+        submission.client_request_id(),
+    )
+    .expect("specialized intake exact retry");
+    assert!(replay.is_exact_replay());
+    assert_eq!(replay.binding(), &intake_binding);
+    assert_eq!(replay.state(), TaskState::Draft);
+    assert!(replay.result_digest().is_none());
+    assert_eq!(replay.evidence().ledger_head_digest(), &retained_head);
+
+    let runtime = connect_as(&database, "lattice_runtime");
+    let mut ledger = PostgresTaskLedger::new(runtime, &migration_target).expect("task ledger");
+    let durable = ledger
+        .load_submission_by_task_ref(&task_ref)
+        .expect("durable submission load")
+        .expect("durable submission");
+    assert_eq!(
+        durable.ledger().autonomy_state(),
+        &VerifiedAutonomyReceiptState::NotApplicable
+    );
+    assert!(durable.ledger().autonomy_receipt().is_none());
+    let stream = durable.ledger().stream();
+    assert_eq!(stream.head().sequence(), 1);
+    assert_eq!(stream.events().len(), 1);
+    assert_eq!(stream.commands().len(), 1);
+    assert!(stream.outboxes().is_empty());
+    assert_eq!(stream.events()[0].kind(), LedgerEventKind::TaskCreated);
+    assert_eq!(
+        stream.events()[0].action().as_str(),
+        "GENERAL_TASK_INTAKE_V1"
+    );
+    assert_eq!(
+        stream.commands()[0].request().action().as_str(),
+        "GENERAL_TASK_INTAKE_V1"
+    );
+    assert!(stream.events()[0].diagnostic().is_none());
+
+    // The full Task-Spec lifecycle surface cannot be entered by a general
+    // profile, even if an internal caller manufactures same-scalar Task-Spec
+    // and Writer shapes. Every operation fails before a durable mutation.
+    let counterfeit_task_spec = SubjectBinding::new(
+        intake_binding.project_id().clone(),
+        intake_binding.project_snapshot_id().clone(),
+        intake_binding.task_id().clone(),
+        intake_binding.task_revision(),
+        digest('a'),
+    )
+    .expect("counterfeit Task-Spec binding");
+    let writer = structural_writer_authority(&counterfeit_task_spec);
+    for error in [
+        TaskLifecyclePort::admit(
+            &mut lifecycle,
+            &counterfeit_task_spec,
+            submission.client_request_id(),
+        )
+        .expect_err("full lifecycle admit must reject general profile"),
+        TaskLifecyclePort::record_autonomy_receipt(&mut lifecycle, &counterfeit_task_spec, None)
+            .expect_err("autonomy receipt must reject general profile"),
+        TaskLifecyclePort::transition(
+            &mut lifecycle,
+            &counterfeit_task_spec,
+            TaskState::Draft,
+            TaskState::AwaitingExecutionApproval,
+            None,
+        )
+        .expect_err("transition must reject general profile"),
+        TaskLifecyclePort::record_result(
+            &mut lifecycle,
+            &counterfeit_task_spec,
+            &digest('b'),
+            &writer,
+        )
+        .expect_err("result must reject general profile"),
+        TaskLifecyclePort::load(&mut lifecycle, &counterfeit_task_spec)
+            .expect_err("full lifecycle load must reject general profile"),
+    ] {
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(error.code(), "LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED");
+    }
+
+    let after_denials = TaskIntakeLifecyclePort::load(&mut lifecycle, &intake_binding)
+        .expect("intake after full-lifecycle denials");
+    assert_eq!(after_denials.state(), TaskState::Draft);
+    assert!(after_denials.result_digest().is_none());
+    assert_eq!(after_denials.ledger_head_digest(), &retained_head);
+
+    println!(
+        "PHASE3_GENERAL_INTAKE_BOUNDARY_OK task_ref={} state=DRAFT events=1 autonomy=NOT_APPLICABLE",
+        task_ref.as_str()
     );
 }

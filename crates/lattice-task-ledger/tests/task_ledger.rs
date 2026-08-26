@@ -12,11 +12,12 @@ use lattice_task_ledger::{
     AutonomyRecommendation, AutonomyRiskClass, AutonomyTaskKind, AutonomyVerification, CommandId,
     CommandOutcome, CorrelationId, Diagnostic, EffectClaimId, FakeTaskLedger, LedgerCheckpoint,
     LedgerDenial, LedgerError, LedgerEventKind, LedgerOutcome, OutboxAdmissionState, ReasonCode,
-    ResourceSnapshot, TaskCreatedProfile, UntrustedAutonomyReceiptRow,
+    ResourceSnapshot, TaskCreatedProfile, TaskSubmissionEnvelope, UntrustedAutonomyReceiptRow,
     VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan, classify_task_created_profile,
     export_untrusted_snapshot, plan_append, plan_autonomy_receipt_append,
     verify_exact_autonomy_receipt_retry, verify_untrusted_autonomy_receipt_rows,
     verify_untrusted_snapshot, verify_untrusted_snapshot_against_checkpoint,
+    verify_untrusted_task_submission,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -47,6 +48,167 @@ fn autonomy_identity() -> TaskLedgerStreamIdentity {
     .expect("stream identity")
 }
 
+fn general_identity(project: &str, task: &str) -> TaskLedgerStreamIdentity {
+    TaskLedgerStreamIdentity::new_general_task_intake(
+        ProjectId::new(project).expect("project"),
+        ProjectSnapshotId::new(format!("{project}:snapshot:1")).expect("snapshot"),
+        TaskId::new(task).expect("task"),
+        "1",
+        digest('a'),
+    )
+    .expect("general intake identity")
+}
+
+fn general_submission() -> TaskSubmissionEnvelope {
+    TaskSubmissionEnvelope::new(
+        "lattice-mcp",
+        "request-1",
+        "完成角色系統",
+        "AI 劇本",
+        general_identity("project-1", "TASK-GENERAL-1"),
+        digest('9'),
+    )
+    .expect("valid general-task submission")
+}
+
+#[test]
+fn general_submission_is_canonical_secret_safe_and_tamper_evident() {
+    let submission = general_submission();
+    assert_eq!(
+        submission.schema_version(),
+        "lattice.task-ledger.task-submission/1.0"
+    );
+    assert_eq!(submission.ingress_id(), "lattice-mcp");
+    assert_eq!(submission.client_request_id(), "request-1");
+    assert_eq!(submission.objective(), "完成角色系統");
+    assert_eq!(submission.project_display_name(), "AI 劇本");
+    assert_eq!(submission.project_authority_receipt_digest(), &digest('9'));
+    assert_eq!(
+        submission.identity(),
+        &general_identity("project-1", "TASK-GENERAL-1")
+    );
+    assert_eq!(submission.task_ref().as_str().len(), 64);
+    assert_eq!(submission.admission_action(), "GENERAL_TASK_INTAKE_V1");
+    assert!(!format!("{submission:?}").contains("完成角色系統"));
+
+    let retained = submission.to_untrusted();
+    assert_eq!(
+        verify_untrusted_task_submission(&retained).expect("verified retained envelope"),
+        submission
+    );
+
+    let mut changed_objective = retained.clone();
+    changed_objective.objective = "完成另一個系統".to_owned();
+    assert_eq!(
+        verify_untrusted_task_submission(&changed_objective),
+        Err(LedgerError::SubmissionEnvelopeMismatch)
+    );
+
+    let mut changed_ref = retained;
+    changed_ref.task_ref = digest('f');
+    assert_eq!(
+        verify_untrusted_task_submission(&changed_ref),
+        Err(LedgerError::SubmissionEnvelopeMismatch)
+    );
+}
+
+#[test]
+fn general_submission_rejects_blank_controls_oversize_non_nfc_and_secret_shapes() {
+    let make = |objective: &str| {
+        TaskSubmissionEnvelope::new(
+            "lattice-mcp",
+            "request-1",
+            objective,
+            "AI 劇本",
+            general_identity("project-1", "TASK-GENERAL-1"),
+            digest('9'),
+        )
+    };
+    for invalid in [
+        "",
+        "   ",
+        " leading",
+        "trailing ",
+        "line\nbreak",
+        "nul\0byte",
+    ] {
+        assert!(matches!(
+            make(invalid),
+            Err(LedgerError::InvalidSubmissionEnvelope { field: "objective" })
+        ));
+    }
+    assert!(matches!(
+        make(&"目".repeat(683)),
+        Err(LedgerError::SubmissionEnvelopeLimitExceeded { field: "objective" })
+    ));
+    assert!(matches!(
+        make("e\u{301}"),
+        Err(LedgerError::NonCanonicalText { field: "objective" })
+    ));
+    for secret in [
+        "password=hunter2",
+        "authorization: Bearer abcdefghijklmnopqrstuvwxyz",
+        "-----BEGIN PRIVATE KEY-----",
+        "sk-abcdefghijklmnopqrstuvwxyz0123456789",
+        "完成設定 secret=hunter2",
+        "credential: do-not-store",
+        "Cookie = session-value",
+        "refresh_token=do-not-store",
+        r#"{"password":"hunter2"}"#,
+        r#"{"api_key":"do-not-store"}"#,
+        "password\u{2003}=hunter2",
+        "api_key\u{a0}:do-not-store",
+        "使用 AKIAIOSFODNN7EXAMPLE 完成設定",
+    ] {
+        assert_eq!(make(secret), Err(LedgerError::SubmissionSecretRejected));
+    }
+    assert!(make("finish mask-based validation").is_ok());
+}
+
+#[test]
+fn general_task_created_profile_binds_the_submission_digest_and_is_create_only() {
+    let submission = general_submission();
+    let vacant = VerifiedStream::vacant(submission.identity().clone(), RuntimeKind::Live)
+        .expect("vacant live stream");
+    let command = AppendCommand::new_general_task_created(
+        vacant.head().clone(),
+        CommandId::new("general-create-1").expect("command"),
+        CorrelationId::new("general-correlation-1").expect("correlation"),
+        "2026-08-26T00:00:00Z",
+        ActorId::new("lattice-mcp").expect("actor"),
+        &submission,
+    )
+    .expect("general task-created command");
+    assert_eq!(command.subject_digest(), submission.envelope_digest());
+    let plan = plan_append(&vacant, command).expect("plan general task creation");
+    let created = apply_append_plan(&vacant, &plan).expect("apply general task creation");
+    assert_eq!(
+        classify_task_created_profile(&created.events()[0]).expect("known profile"),
+        Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+    );
+    assert_eq!(
+        plan_append(
+            &created,
+            AppendCommand::new(
+                created.head().clone(),
+                CommandId::new("skip-receipt").expect("command"),
+                CorrelationId::new("skip-receipt").expect("correlation"),
+                "2026-08-26T00:00:01Z",
+                LedgerEventKind::EvidenceRecorded,
+                ActorId::new("worker").expect("actor"),
+                ActionId::new("RECORD").expect("action"),
+                LedgerOutcome::Recorded,
+                ReasonCode::new("RECORDED").expect("reason"),
+                digest('b'),
+                None,
+                None,
+            )
+            .expect("ordinary command")
+        ),
+        Err(LedgerError::GeneralTaskIntakeCreateOnly)
+    );
+}
+
 fn writer_authority(identity: &TaskLedgerStreamIdentity) -> WriterLeaseAuthorityHead {
     writer_authority_variant(identity, 1, 'e')
 }
@@ -61,7 +223,10 @@ fn writer_authority_variant(
         identity.project_snapshot_id().clone(),
         identity.task_id().clone(),
         identity.task_revision(),
-        identity.task_spec_digest().clone(),
+        identity
+            .task_spec_digest()
+            .expect("writer identity requires TaskSpec")
+            .clone(),
         AttemptId::new("attempt-1").expect("attempt"),
         "lease-1",
         "codex-writer-1",
@@ -301,7 +466,10 @@ fn substituted_writer_authority(
         identity.project_snapshot_id().clone(),
         identity.task_id().clone(),
         identity.task_revision(),
-        identity.task_spec_digest().clone(),
+        identity
+            .task_spec_digest()
+            .expect("writer substitution requires TaskSpec")
+            .clone(),
         AttemptId::new(
             if matches!(substitution, WriterAuthoritySubstitution::Attempt) {
                 "attempt-2"

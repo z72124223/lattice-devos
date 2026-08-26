@@ -13,7 +13,7 @@ pub const POSTGRES_DRIVER_VERSION: &str = "0.19.14";
 /// Only `PostgreSQL` server major accepted by the Store 1.3 verifier.
 pub const SUPPORTED_POSTGRES_MAJOR: u32 = 17;
 /// Current global database schema contract version.
-pub const POSTGRES_SCHEMA_VERSION: u16 = 6;
+pub const POSTGRES_SCHEMA_VERSION: u16 = 7;
 /// Immutable physical schema profile retained by every Store v2 receipt.
 pub const STORE_V2_SCHEMA_VERSION: u16 = 2;
 /// Immutable first-three-entry manifest retained by every Store v2 receipt.
@@ -33,6 +33,8 @@ const TASK_AUTONOMY_RECEIPT_BYTES: &[u8] =
     include_bytes!("../../../db/migrations/0006_task_autonomy_receipt.sql");
 const FOREMAN_COORDINATION_BYTES: &[u8] =
     include_bytes!("../../../db/migrations/0007_foreman_coordination.sql");
+const TASK_SUBMISSION_ENVELOPE_BYTES: &[u8] =
+    include_bytes!("../../../db/migrations/0008_task_submission_envelope.sql");
 const BOOTSTRAP_SHA256: &str = "7bff021fc17f738551309c906578c8015b2dd0307d27d239c21df1697c4d09c8";
 const FOUNDATION_SHA256: &str = "e996dc64af3112a647e75ebf07df2a77b1e9b3a018ed443880150365184883f0";
 const LIVE_CONTROL_STORE_SHA256: &str =
@@ -45,8 +47,12 @@ const TASK_AUTONOMY_RECEIPT_SHA256: &str =
     "c50f2a51380950b5f6c757b736b35b550d903319a46d2bcd9319938e02106a61";
 const FOREMAN_COORDINATION_SHA256: &str =
     "33a4e1c3ab8f29f763123ffe46c2929025a7a7256614f5c92011a1140c8300ad";
-const CURRENT_V6_MANIFEST_SHA256: &str =
+pub(crate) const CURRENT_V6_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
+const TASK_SUBMISSION_ENVELOPE_SHA256: &str =
+    "35be9a1f34fd8209cbf7466b39811f0fad91d9049dd72336af9bcf422d68d067";
+const CURRENT_V7_MANIFEST_SHA256: &str =
+    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
 pub(crate) const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 pub(crate) const REGISTRY_V4_MANIFEST_SHA256: &str =
@@ -184,7 +190,7 @@ pub(crate) struct MigrationMetadata<'a> {
     pub(crate) max_writer: u16,
 }
 
-static MIGRATION_MANIFEST: [MigrationDescriptor; 7] = [
+static MIGRATION_MANIFEST: [MigrationDescriptor; 8] = [
     MigrationDescriptor {
         ordinal: 1,
         id: "0001_bootstrap_draft",
@@ -284,11 +290,26 @@ static MIGRATION_MANIFEST: [MigrationDescriptor; 7] = [
         sha256: FOREMAN_COORDINATION_SHA256,
         status: MigrationStatus::Executable,
         transaction_mode: MigrationTransactionMode::RunnerOwned,
-        schema_version: POSTGRES_SCHEMA_VERSION,
+        schema_version: 6,
         min_reader: 6,
         max_reader: 6,
         min_writer: 6,
         max_writer: 6,
+    },
+    MigrationDescriptor {
+        ordinal: 8,
+        id: "0008_task_submission_envelope",
+        path: "db/migrations/0008_task_submission_envelope.sql",
+        bytes: TASK_SUBMISSION_ENVELOPE_BYTES,
+        byte_length: 298_666,
+        sha256: TASK_SUBMISSION_ENVELOPE_SHA256,
+        status: MigrationStatus::Executable,
+        transaction_mode: MigrationTransactionMode::RunnerOwned,
+        schema_version: POSTGRES_SCHEMA_VERSION,
+        min_reader: 7,
+        max_reader: 7,
+        min_writer: 7,
+        max_writer: 7,
     },
 ];
 
@@ -614,8 +635,8 @@ fn verify_manifest(
 
     let evidence = verify_manifest_entries(manifest)?;
     if manifest != MIGRATION_MANIFEST
-        || evidence.executable_count != 6
-        || evidence.manifest_sha256.as_str() != CURRENT_V6_MANIFEST_SHA256
+        || evidence.executable_count != 7
+        || evidence.manifest_sha256.as_str() != CURRENT_V7_MANIFEST_SHA256
         || manifest[0].status != MigrationStatus::Superseded
         || manifest[0].schema_version != 0
         || manifest[1].status != MigrationStatus::Executable
@@ -639,9 +660,13 @@ fn verify_manifest(
         || manifest[5].reader_compatibility() != (5..=5)
         || manifest[5].writer_compatibility() != (5..=5)
         || manifest[6].status != MigrationStatus::Executable
-        || manifest[6].schema_version != POSTGRES_SCHEMA_VERSION
+        || manifest[6].schema_version != 6
         || manifest[6].reader_compatibility() != (6..=6)
         || manifest[6].writer_compatibility() != (6..=6)
+        || manifest[7].status != MigrationStatus::Executable
+        || manifest[7].schema_version != POSTGRES_SCHEMA_VERSION
+        || manifest[7].reader_compatibility() != (7..=7)
+        || manifest[7].writer_compatibility() != (7..=7)
     {
         return Err(PostgresStoreSetupError::new(
             PostgresStoreSetupErrorKind::ManifestInvalid,
@@ -713,6 +738,21 @@ pub(crate) fn verify_v5_manifest_prefix() -> Result<ManifestEvidence, PostgresSt
         || evidence.executable_count != 5
         || evidence.schema_version != 5
         || evidence.manifest_sha256.as_str() != CURRENT_V5_MANIFEST_SHA256
+    {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::ManifestInvalid,
+        ));
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn verify_v6_manifest_prefix() -> Result<ManifestEvidence, PostgresStoreSetupError> {
+    let prefix = &MIGRATION_MANIFEST[..7];
+    let evidence = verify_manifest_entries(prefix)?;
+    if evidence.entry_count != 7
+        || evidence.executable_count != 6
+        || evidence.schema_version != 6
+        || evidence.manifest_sha256.as_str() != CURRENT_V6_MANIFEST_SHA256
     {
         return Err(PostgresStoreSetupError::new(
             PostgresStoreSetupErrorKind::ManifestInvalid,
@@ -878,7 +918,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_prefix_digests_are_frozen_and_full_manifest_requires_seven_entries() {
+    fn legacy_prefix_digests_are_frozen_and_partial_manifest_is_rejected() {
         let legacy = verify_v1_manifest_prefix().expect("exact v1 prefix");
         assert_eq!(legacy.entry_count(), 2);
         assert_eq!(legacy.executable_count(), 1);

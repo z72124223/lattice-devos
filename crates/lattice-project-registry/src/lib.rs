@@ -953,6 +953,15 @@ impl VerifiedRegistryState {
             && self.checkpoint.reservation_count == 0
     }
 
+    /// Returns the verified current projection for one project.
+    ///
+    /// This is an in-memory accessor over an already verified Registry state;
+    /// it does not perform I/O or claim that an exported snapshot is current.
+    #[must_use]
+    pub fn project(&self, project_id: &ProjectId) -> Option<&RegistryProjectProjection> {
+        self.projects.get(project_id)
+    }
+
     /// Returns the complete retained first-seen command history.
     #[must_use]
     pub const fn commands(&self) -> &BTreeMap<u64, RegistryCommandRecord> {

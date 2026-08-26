@@ -1,10 +1,11 @@
 use lattice_contracts::{
     ContentDigest, ContractError, DaemonEpoch, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode,
     RuntimeKind, STORE_CONTRACT_VERSION, STORE_CONTRACT_VERSION_V1, STORE_IDENTIFIER_MAX_BYTES,
-    STORE_PRODUCER_ID, STORE_PRODUCER_VERSION, StoreAuthorityHead, StoreAuthorityRevision,
-    StoreDaemonInstanceId, StoreDurability, StoreMutationCommitment, StorePersistenceEvidence,
-    StorePhysicalHead, StoreReceiptDisposition, StoreRepositoryOwner, StoreRevision, StoreScope,
-    StoreTransactionId, StoreTransactionReceipt, StoreTransactionRequest,
+    STORE_PRODUCER_ID, STORE_PRODUCER_VERSION, STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES,
+    StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, StoreDurability,
+    StoreMutationCommitment, StorePersistenceEvidence, StorePhysicalHead, StoreReceiptDisposition,
+    StoreRepositoryOwner, StoreRevision, StoreScope, StoreTransactionId, StoreTransactionReceipt,
+    StoreTransactionRequest,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -163,6 +164,19 @@ fn store_owner_and_scope_are_closed_and_project_scoped() {
     assert_eq!(value.project_snapshot_id().as_str(), "snapshot-1");
     assert_eq!(value.owner(), StoreRepositoryOwner::ProjectRegistry);
     assert_eq!(value.aggregate_key_digest(), &digest('a'));
+    let maximum_snapshot = "s".repeat(STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES);
+    assert_eq!(
+        StoreScope::new(
+            ProjectId::new("project-1").expect("valid project"),
+            ProjectSnapshotId::new(maximum_snapshot.clone()).expect("maximum snapshot"),
+            StoreRepositoryOwner::ProjectRegistry,
+            digest('1'),
+        )
+        .expect("159-byte Registry snapshot")
+        .project_snapshot_id()
+        .as_str(),
+        maximum_snapshot
+    );
     assert!(matches!(
         StoreScope::new(
             ProjectId::new("project-1").expect("valid project"),
@@ -174,7 +188,10 @@ fn store_owner_and_scope_are_closed_and_project_scoped() {
             field: "aggregate_key_digest"
         })
     ));
-    for invalid_snapshot in ["Snapshot-1".to_owned(), "x".repeat(129)] {
+    for invalid_snapshot in [
+        "Snapshot-1".to_owned(),
+        "x".repeat(STORE_PROJECT_SNAPSHOT_ID_MAX_BYTES + 1),
+    ] {
         assert!(matches!(
             StoreScope::new(
                 ProjectId::new("project-1").expect("valid project"),

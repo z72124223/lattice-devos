@@ -422,6 +422,153 @@ impl fmt::Display for TaskLifecycleError {
 
 impl Error for TaskLifecycleError {}
 
+/// Replay-verified projection of one pre-specification general-task intake.
+///
+/// The type is structurally fixed to `DRAFT` with no result and carries no
+/// Task Spec, currency, autonomy, approval, Writer Lease, or execution field.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskIntakeLifecycleEvidence {
+    binding: lattice_contracts::TaskIntakeBinding,
+    ledger_head_digest: lattice_contracts::ContentDigest,
+}
+
+impl TaskIntakeLifecycleEvidence {
+    /// Constructs the only successful intake lifecycle projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the all-zero Ledger-head commitment sentinel.
+    pub fn new(
+        binding: lattice_contracts::TaskIntakeBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+    ) -> TaskLifecycleResult<Self> {
+        if ledger_head_digest.as_str().bytes().all(|byte| byte == b'0') {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_TASK_INTAKE_LEDGER_HEAD_REJECTED",
+            ));
+        }
+        Ok(Self {
+            binding,
+            ledger_head_digest,
+        })
+    }
+
+    /// Returns the exact non-executable intake binding.
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::TaskIntakeBinding {
+        &self.binding
+    }
+
+    /// Returns the only state representable by general intake.
+    #[must_use]
+    pub const fn state(&self) -> TaskState {
+        TaskState::Draft
+    }
+
+    /// General intake cannot carry an execution result.
+    #[must_use]
+    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        None
+    }
+
+    /// Returns the verified current Task Ledger head commitment.
+    #[must_use]
+    pub const fn ledger_head_digest(&self) -> &lattice_contracts::ContentDigest {
+        &self.ledger_head_digest
+    }
+}
+
+/// Closed result of one idempotent general-task intake admission.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskIntakeAdmission {
+    evidence: TaskIntakeLifecycleEvidence,
+    exact_replay: bool,
+}
+
+impl TaskIntakeAdmission {
+    /// Wraps evidence for a newly durably created intake.
+    #[must_use]
+    pub const fn created(evidence: TaskIntakeLifecycleEvidence) -> Self {
+        Self {
+            evidence,
+            exact_replay: false,
+        }
+    }
+
+    /// Wraps evidence for an exact idempotent replay.
+    #[must_use]
+    pub const fn exact_replay(evidence: TaskIntakeLifecycleEvidence) -> Self {
+        Self {
+            evidence,
+            exact_replay: true,
+        }
+    }
+
+    /// Returns the complete verified intake evidence.
+    #[must_use]
+    pub const fn evidence(&self) -> &TaskIntakeLifecycleEvidence {
+        &self.evidence
+    }
+
+    /// Returns whether no new durable intake was created.
+    #[must_use]
+    pub const fn is_exact_replay(&self) -> bool {
+        self.exact_replay
+    }
+
+    /// Returns the exact non-executable intake binding.
+    #[must_use]
+    pub const fn binding(&self) -> &lattice_contracts::TaskIntakeBinding {
+        self.evidence.binding()
+    }
+
+    /// Returns the fixed `DRAFT` intake state.
+    #[must_use]
+    pub const fn state(&self) -> TaskState {
+        self.evidence.state()
+    }
+
+    /// Intake admission cannot carry an execution result.
+    #[must_use]
+    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        None
+    }
+
+    /// Consumes the admission wrapper and returns its verified evidence.
+    #[must_use]
+    pub fn into_evidence(self) -> TaskIntakeLifecycleEvidence {
+        self.evidence
+    }
+}
+
+/// Narrow durable boundary for create/status-only general-task intake.
+///
+/// Unlike [`TaskLifecyclePort`], this trait cannot transition state, record a
+/// result or autonomy classification, or receive Writer authority.
+pub trait TaskIntakeLifecyclePort {
+    /// Idempotently admits one exact intake binding and client retry key.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn admit(
+        &mut self,
+        binding: &lattice_contracts::TaskIntakeBinding,
+        client_request_id: &str,
+    ) -> TaskLifecycleResult<TaskIntakeAdmission>;
+
+    /// Replays one exact authoritative intake projection without mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed rejection, availability, ambiguity, or corruption error.
+    fn load(
+        &mut self,
+        binding: &lattice_contracts::TaskIntakeBinding,
+    ) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence>;
+}
+
 /// Replay-derived authoritative Task lifecycle projection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AutonomyDisposition {
@@ -1585,7 +1732,9 @@ pub trait HermesPort {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_contracts::{ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId};
+    use lattice_contracts::{
+        ContentDigest, ProjectId, ProjectSnapshotId, SubjectBinding, TaskId, TaskIntakeBinding,
+    };
 
     fn digest(byte: char) -> ContentDigest {
         ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
@@ -1658,6 +1807,38 @@ mod tests {
                 None,
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn task_intake_evidence_is_draft_only_and_has_no_execution_projection() {
+        let binding = TaskIntakeBinding::new(
+            ProjectId::new("project-1").expect("project"),
+            ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+            TaskId::new("TASK-INTAKE-1").expect("task"),
+            "1",
+            digest('a'),
+        )
+        .expect("intake binding");
+        let evidence = TaskIntakeLifecycleEvidence::new(binding.clone(), digest('b'))
+            .expect("intake evidence");
+        assert_eq!(evidence.binding(), &binding);
+        assert_eq!(evidence.state(), TaskState::Draft);
+        assert_eq!(evidence.result_digest(), None);
+        assert_eq!(evidence.ledger_head_digest(), &digest('b'));
+
+        let created = TaskIntakeAdmission::created(evidence.clone());
+        assert!(!created.is_exact_replay());
+        assert_eq!(created.evidence(), &evidence);
+        let replay = TaskIntakeAdmission::exact_replay(evidence.clone());
+        assert!(replay.is_exact_replay());
+        assert_eq!(replay.into_evidence(), evidence);
+
+        assert_eq!(
+            TaskIntakeLifecycleEvidence::new(binding, digest('0'))
+                .expect_err("zero Ledger head cannot become intake evidence")
+                .code(),
+            "LATTICE_TASK_INTAKE_LEDGER_HEAD_REJECTED"
         );
     }
 

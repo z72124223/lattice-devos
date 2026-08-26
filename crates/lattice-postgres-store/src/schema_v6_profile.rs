@@ -75,7 +75,7 @@ impl ForemanSchemaV6Candidate {
             || writer_compatibility != (6..=6)
             || stream_identity != FOREMAN_COORDINATION_STREAM_IDENTITY
             || event_identity != FOREMAN_COORDINATION_EVENT_IDENTITY
-            || migration_manifest().len() != 7
+            || migration_manifest().len() < 7
             || migration_manifest()
                 .get(5)
                 .map(MigrationDescriptor::schema_version)

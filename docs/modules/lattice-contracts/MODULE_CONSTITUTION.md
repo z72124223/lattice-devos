@@ -1,10 +1,10 @@
 ---
 module_id: lattice-contracts
 name: LATTICE Shared Contracts
-version: 1.14
+version: 1.15
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-21
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -28,6 +28,9 @@ their mutable domain state.
   immutable Project Registry authority receipt/full-head representations.
 - Immutable Task Ledger stream-head, checked resource usage, and resource
   observation receipt/full-head representations.
+- A closed Task Ledger stream-subject discriminator that preserves the legacy
+  Task-Spec identity while representing pre-specification general intake with
+  a distinct neutral digest and `TaskIntakeBinding`.
 - Immutable Writer Lease identity, signed-BIGINT-safe epoch/fence/revision,
   runtime-admission, and authority receipt/full-head representations.
 - Complete neutral typed approval subjects, challenge/authority identity,
@@ -97,11 +100,17 @@ their mutable domain state.
   to the complete Task Spec 2.1 digest and the exact current Writer Lease
   authority identity, fencing token, and current-head commitment. A receipt
   projection alone cannot satisfy currentness.
-- Represent exactly one controlled public task intent,
-  `CONTROLLED_CODEX_CANARY`, plus a bounded `client_request_id` and lowercase
-  SHA-256 `task_ref`. No shared value contains free-form implementation text, path,
+- Keep `SubjectBinding` Task-Spec-only. A `GENERAL_TASK_INTAKE` stream exposes
+  only its neutral intake digest through `TaskIntakeBinding`; Task Spec digest
+  and accounting currency accessors return no value for that discriminator.
+  The intake binding cannot be promoted into approval, Policy, Writer Lease,
+  delivery, or execution authority.
+- Represent the shared one-to-64-byte secret-free ASCII
+  `client_request_id` contract and lowercase SHA-256 `task_ref` shape used by
+  both controlled-canary and general-task ingress. The general objective stays
+  outside shared authority values; no shared value turns free-form text, path,
   command, SQL, credential, actor/session claim, lease/fence selection, or
-  writable-thread identifier.
+  writable-thread identifier into authority.
 - Represent a server-derived fixed tunnel/profile peer separately from the
   existing visibly fake peer. MCP `clientInfo` is absent from its authority
   subject and cannot affect its actor/session/role classification.
@@ -312,9 +321,11 @@ their mutable domain state.
     adapter/profile/session authority evidence and a closed client/actor pair;
     no public constructor accepts a caller-authenticated Boolean or raw
     `clientInfo` as authority.
-40. Controlled Task Submit and Status values are bounded closed types. Unknown
-    intent, malformed/oversized `client_request_id` or `task_ref`, and every prohibited
-    caller field fail before Gateway service dispatch.
+40. Task Submit and Status values are bounded closed types. The shared ingress
+    `client_request_id` is one to 64 ASCII bytes, begins with an alphanumeric,
+    uses only `[A-Za-z0-9._:-]`, and rejects the same recognized secret shapes
+    at every boundary. Unknown intent, malformed/oversized ID or `task_ref`,
+    and every prohibited caller field fail before Gateway service dispatch.
 41. The Task Spec digest in Gateway binding, controlled delivery, Writer Lease
     identity, and public status must be identical. Any substitution is
     structurally rejected.
@@ -347,6 +358,13 @@ their mutable domain state.
 50. Worker observation types contain no raw command, terminal content,
      environment, prompt, conversation, stderr, credential, secret, screen,
      input-monitoring, or arbitrary path field.
+51. The legacy `TaskLedgerStreamIdentity::new` constructor remains exactly a
+    `TASK_SPEC` constructor. Its canonical Task-Spec consumer representation
+    must remain byte-for-byte compatible.
+52. `GENERAL_TASK_INTAKE` has a non-zero neutral intake digest but no Task Spec
+    digest or accounting currency. Only its closed `TaskIntakeBinding` can be
+    constructed from that identity; a Task-Spec identity cannot be narrowed to
+    an intake binding.
 
 ## Allowed Dependencies
 
@@ -378,6 +396,11 @@ bounded gateway peer/request/reply representations and replaces the nominal
 does not parse or hash frames, enforce wire NFC, authenticate a peer, route a
 workflow, persist idempotency, validate Task Spec semantics, or grant
 approval/stop authority.
+Version 1.15 preserves every legacy Task-Spec constructor field and adds only
+the closed `TASK_SPEC` / `GENERAL_TASK_INTAKE` discriminator plus the
+non-executable `TaskIntakeBinding` and the shared bounded secret-free task-
+ingress key/secret-recognition predicate. It performs no Task Spec promotion,
+approval, accounting, persistence, lifecycle transition, or execution.
 Version 1.6 adds neutral
 project-scoped artifact object/generation, immutable reference/provenance,
 bounded length, purpose/availability, fixed-producer receipt/head, and typed
@@ -412,7 +435,8 @@ global-v5 persistence identity while freezing v1/v2 constructors to global v3.
 | Store transaction/substitution matrix | identifier/scope/digest/revision/runtime/durability and complete receipt-field checks | Security review | yes |
 | Delivery request/evidence matrix | binding/digest/stage/order/runtime/status substitution plus prohibited-input construction tests | Security review | yes |
 | Fixed-profile peer | live/fake separation, closed client/actor pairs, non-zero authority, and hostile `clientInfo` non-authority matrix | Security review | yes |
-| Controlled task values | exact intent, idempotency/handle bounds, public-status allowlist, and prohibited-field construction matrix | Security review | yes |
+| Task-ingress values | canary compatibility, shared 64-byte idempotency-key bounds, secret-shape parity, status-handle bounds, public-status allowlist, and prohibited-field construction matrix | Security review | yes |
+| Task intake identity separation | legacy Task-Spec compatibility, closed discriminator, zero-digest rejection, absent spec/currency, and failed cross-lane narrowing | Security review | yes |
 | Spec/lease writer binding | Task Spec, lease identity/fence/current-head, workspace, Codex, verification, Git, and status substitution matrix | Security review | yes |
 | Memory persistence profiles | frozen v1/v2 global-v3 constructors, distinct v3/global-v5 constructor, and complete cross-profile substitution matrix | Compatibility review | yes |
 | Worker/session observation matrix | provider neutrality, ownership/visibility, source/confidence/freshness, process/session/task/authority separation, process-only downgrade, prohibited-data shape, and closed read-only query tests | Security review | yes |
@@ -428,6 +452,7 @@ a versioned amendment, SPEC-002 trace, architecture review, and user approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.15 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate pre-specification general intake from Task Spec identity and add a non-executable typed intake binding | User-authorized Phase 3 |
 | 1.0 | 2026-07-29 | SPEC-002 v3, ADR-004 | Shared adapter-boundary contracts | User |
 | 1.1 | 2026-07-29 | SPEC-002 v7, ADR-010, TASK-012 | Shared Project ID/class/lifecycle, physical Git-ref identity, and minimal Registry authority receipt/head | User MVP-3 execution directive |
 | 1.2 | 2026-07-29 | SPEC-002 v8, ADR-010 review amendment, TASK-012 | Fixed Registry producer/version, full security-field head projection, and explicit pseudo-ref denial with valid uppercase branches preserved | User MVP-3 execution directive |

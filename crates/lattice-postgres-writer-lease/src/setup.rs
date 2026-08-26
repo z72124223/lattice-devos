@@ -12,9 +12,10 @@ use postgres::{Client, GenericClient, IsolationLevel, Transaction};
 
 use crate::{
     ExtensionManifestEvidence, WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH,
-    WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH, sha256_hex,
-    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
+    WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH, WRITER_LEASE_V4_EXTENSION_PATH,
+    sha256_hex, verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
     verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
+    verify_embedded_v4_extension_manifest, verify_embedded_v4_rebind_manifest,
 };
 
 const GLOBAL_MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
@@ -29,6 +30,8 @@ const CURRENT_GLOBAL_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 const V6_GLOBAL_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
+const V7_GLOBAL_MANIFEST_SHA256: &str =
+    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
 const HISTORICAL_MEMORY_MANIFEST_SHA256: &str =
     "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
 const CURRENT_MEMORY_MANIFEST_SHA256: &str =
@@ -426,6 +429,67 @@ impl V3ExtensionTarget {
     }
 }
 
+/// Exact database identity for the append-only Writer-v4 schema-v7 transition.
+///
+/// Both Store-v6 predecessor and Store-v7 successor manifests are fixed by
+/// this crate; callers cannot substitute a generation or extension path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct V4ExtensionTarget {
+    database_name: String,
+    database_identity_digest: ContentDigest,
+}
+
+impl V4ExtensionTarget {
+    /// Constructs the fixed v4 transition target.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unsafe or unbounded database name.
+    pub fn new(
+        database_name: String,
+        database_identity_digest: ContentDigest,
+    ) -> Result<Self, ExtensionSetupError> {
+        ExtensionTarget::new(
+            database_name.clone(),
+            database_identity_digest.clone(),
+            fixed_digest(V6_GLOBAL_MANIFEST_SHA256)?,
+            fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+        )?;
+        Ok(Self {
+            database_name,
+            database_identity_digest,
+        })
+    }
+
+    #[must_use]
+    pub fn database_name(&self) -> &str {
+        &self.database_name
+    }
+
+    #[must_use]
+    pub const fn database_identity_digest(&self) -> &ContentDigest {
+        &self.database_identity_digest
+    }
+
+    fn predecessor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
+        ExtensionTarget::new(
+            self.database_name.clone(),
+            self.database_identity_digest.clone(),
+            fixed_digest(V6_GLOBAL_MANIFEST_SHA256)?,
+            fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+        )
+    }
+
+    pub(crate) fn successor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
+        ExtensionTarget::new(
+            self.database_name.clone(),
+            self.database_identity_digest.clone(),
+            fixed_digest(V7_GLOBAL_MANIFEST_SHA256)?,
+            fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+        )
+    }
+}
+
 fn fixed_digest(value: &str) -> Result<ContentDigest, ExtensionSetupError> {
     ContentDigest::from_sha256(value.to_owned())
         .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))
@@ -454,6 +518,10 @@ pub enum V3BootstrapProfile {
     V6BridgePending,
     /// Schema v6 already has the exact current Writer-v3 profile.
     V6Current,
+    /// Schema v6 has the quarantined Writer-v4 bridge, ready for Store v7.
+    V6V4Bridge,
+    /// Schema v7 has the exact current Writer-v4 successor profile.
+    V7V4Current,
 }
 
 /// Closed extension setup/verifier failure classes.
@@ -777,6 +845,136 @@ pub fn apply_v3_extension(
     result
 }
 
+/// Applies the append-only Writer-v4 bridge to an exact current Writer-v3 /
+/// Store-v6 database while leaving Runtime execute authority quarantined.
+///
+/// # Errors
+///
+/// Rejects absent/partial Writer state, any non-v3-current predecessor, live
+/// authority, changed immutable asset, or catalog/ACL ambiguity.
+pub fn apply_v4_extension(
+    client: &mut Client,
+    target: &V4ExtensionTarget,
+) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
+    let v1 = verify_embedded_v1_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v2 = verify_embedded_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v3 = verify_embedded_v3_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v3_rebind = verify_embedded_v3_rebind_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v4 = verify_embedded_v4_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v4_rebind = verify_embedded_v4_rebind_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let predecessor = target.predecessor()?;
+    let mut gate = GlobalApplyGate::acquire(client)?;
+    let mut result = Err(ExtensionSetupError::new(ExtensionSetupErrorKind::Database));
+    for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+        result = match apply_v4_extension_attempt(
+            gate.client(),
+            &predecessor,
+            &v1,
+            &v2,
+            &v3,
+            &v3_rebind,
+            &v4,
+            &v4_rebind,
+        ) {
+            Err(SetupAttemptError::SerializationFailure)
+                if attempt < MAX_SERIALIZATION_ATTEMPTS =>
+            {
+                continue;
+            }
+            Err(error) => Err(error.into_public()),
+            Ok(outcome) => Ok(outcome),
+        };
+        break;
+    }
+    gate.release()?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_v4_extension_attempt(
+    client: &mut Client,
+    target: &ExtensionTarget,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v3_rebind: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    v4_rebind: &ExtensionManifestEvidence,
+) -> Result<ExtensionApplyOutcome, SetupAttemptError> {
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .map_err(map_database)?;
+    enter_migrator(&mut transaction)?;
+    acquire_common_locks(&mut transaction)?;
+    let foundation = verify_v3_foundation(&mut transaction, target)?;
+    if foundation.profile != FoundationProfile::G6MemoryV3 {
+        return Err(setup_attempt_error(
+            ExtensionSetupErrorKind::UnsupportedFoundation,
+        ));
+    }
+    let outcome = match classify_v3_state(&mut transaction)? {
+        V3InstalledState::G6MemoryV3WriterV3Current => {
+            verify_v3_current_profile(
+                &mut transaction,
+                target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+            )?;
+            verify_v3_rebind_boundary(&mut transaction, v3_rebind)?;
+            verify_bridge_safety(&mut transaction)?;
+            apply_v3_to_v4_bridge(&mut transaction, target, v3, v4)?;
+            ensure_v4_rebind_boundary(&mut transaction, v4_rebind)?;
+            verify_v4_bridge_profile(
+                &mut transaction,
+                target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+                v4,
+            )?;
+            ExtensionApplyOutcome::Bridged
+        }
+        V3InstalledState::G6MemoryV3WriterV4Bridge => {
+            verify_bridge_safety(&mut transaction)?;
+            verify_v4_rebind_boundary(&mut transaction, v4_rebind)?;
+            verify_v4_bridge_profile(
+                &mut transaction,
+                target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+                v4,
+            )?;
+            ExtensionApplyOutcome::Bridged
+        }
+        V3InstalledState::Absent
+        | V3InstalledState::V2BridgePending
+        | V3InstalledState::V2Current
+        | V3InstalledState::G5MemoryV3WriterV3Bridge
+        | V3InstalledState::G6MemoryV3WriterV3BridgePending
+        | V3InstalledState::G7MemoryV3WriterV4Current => {
+            return Err(setup_attempt_error(
+                ExtensionSetupErrorKind::UnsupportedFoundation,
+            ));
+        }
+    };
+    verify_replay_safe_history(&mut transaction)?;
+    transaction.commit().map_err(map_database)?;
+    Ok(outcome)
+}
+
 /// Classifies and fully verifies the closed Writer-v3 product-bootstrap state
 /// without changing Writer, Store, Memory, or Runtime admission state.
 ///
@@ -802,8 +1000,17 @@ pub fn inspect_v3_bootstrap_profile(
         .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
     let rebind = verify_embedded_v3_rebind_manifest()
         .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v4 = verify_embedded_v4_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v4_rebind = verify_embedded_v4_rebind_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
     let predecessor = target.predecessor()?;
     let successor = target.successor()?;
+    let v4_target = V4ExtensionTarget::new(
+        target.database_name().to_owned(),
+        target.database_identity_digest().clone(),
+    )?;
+    let v7_successor = v4_target.successor()?;
     let mut gate = GlobalApplyGate::acquire(client)?;
     let mut transaction = gate
         .client()
@@ -898,6 +1105,42 @@ pub fn inspect_v3_bootstrap_profile(
             verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
             V3BootstrapProfile::V6Current
         }
+        V3InstalledState::G6MemoryV3WriterV4Bridge => {
+            let foundation = verify_v3_foundation(&mut transaction, &successor)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_v4_bridge_profile(
+                &mut transaction,
+                &successor,
+                &foundation.database_uuid,
+                &v1,
+                &v2,
+                &v3,
+                &v4,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            verify_v4_rebind_boundary(&mut transaction, &v4_rebind)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V6V4Bridge
+        }
+        V3InstalledState::G7MemoryV3WriterV4Current => {
+            let foundation = verify_v7_foundation(&mut transaction, &v7_successor)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_v4_v7_current_profile(
+                &mut transaction,
+                &v7_successor,
+                &foundation.database_uuid,
+                &v1,
+                &v2,
+                &v3,
+                &v4,
+            )
+            .map_err(SetupAttemptError::into_public)?;
+            verify_v4_rebind_boundary(&mut transaction, &v4_rebind)
+                .map_err(SetupAttemptError::into_public)?;
+            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
+            V3BootstrapProfile::V7V4Current
+        }
     };
     transaction.commit().map_err(map_public_database)?;
     gate.release()?;
@@ -979,7 +1222,9 @@ fn apply_v3_extension_attempt(
         V3InstalledState::Absent
         | V3InstalledState::V2BridgePending
         | V3InstalledState::G6MemoryV3WriterV3BridgePending
-        | V3InstalledState::G6MemoryV3WriterV3Current => {
+        | V3InstalledState::G6MemoryV3WriterV3Current
+        | V3InstalledState::G6MemoryV3WriterV4Bridge
+        | V3InstalledState::G7MemoryV3WriterV4Current => {
             return Err(setup_attempt_error(
                 ExtensionSetupErrorKind::UnsupportedFoundation,
             ));
@@ -1112,7 +1357,9 @@ fn rebind_v3_extension_attempt(
             }
             V3InstalledState::V2BridgePending
             | V3InstalledState::V2Current
-            | V3InstalledState::G5MemoryV3WriterV3Bridge => {
+            | V3InstalledState::G5MemoryV3WriterV3Bridge
+            | V3InstalledState::G6MemoryV3WriterV4Bridge
+            | V3InstalledState::G7MemoryV3WriterV4Current => {
                 return Err(ExtensionSetupError::new(
                     ExtensionSetupErrorKind::UnsupportedFoundation,
                 ));
@@ -1172,6 +1419,8 @@ enum FoundationProfile {
     G3MemoryV2,
     G5MemoryV2,
     G5MemoryV3,
+    G6MemoryV3,
+    G7MemoryV3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1192,6 +1441,8 @@ enum V3InstalledState {
     G5MemoryV3WriterV3Bridge,
     G6MemoryV3WriterV3BridgePending,
     G6MemoryV3WriterV3Current,
+    G6MemoryV3WriterV4Bridge,
+    G7MemoryV3WriterV4Current,
 }
 
 struct FoundationEvidence {
@@ -1324,7 +1575,50 @@ fn verify_v3_foundation<C: GenericClient>(
     }
     Ok(FoundationEvidence {
         database_uuid,
-        profile: FoundationProfile::G5MemoryV3,
+        profile: FoundationProfile::G6MemoryV3,
+    })
+}
+
+fn verify_v7_foundation<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+) -> Result<FoundationEvidence, SetupAttemptError> {
+    let row = client
+        .query_one(
+            "SELECT pg_catalog.current_database()::text, d.database_uuid::text, \
+                    pg_catalog.btrim(m.database_identity_sha256)::text, c.current_schema_version, \
+                    pg_catalog.btrim(c.manifest_sha256)::text, m.extension_schema_version, \
+                    pg_catalog.btrim(m.extension_manifest_sha256)::text \
+               FROM ONLY control.database_identity AS d \
+               CROSS JOIN ONLY control.schema_compatibility AS c \
+               CROSS JOIN ONLY memory.codebase_memory_extension_identity AS m \
+              WHERE m.singleton AND m.database_uuid = d.database_uuid",
+            &[],
+        )
+        .map_err(|error| map_database_or(error, ExtensionSetupErrorKind::UnsupportedFoundation))?;
+    let database_name: String = row.try_get(0).map_err(map_database)?;
+    let database_uuid: String = row.try_get(1).map_err(map_database)?;
+    let database_identity: String = row.try_get(2).map_err(map_database)?;
+    let global_version: i16 = row.try_get(3).map_err(map_database)?;
+    let global_manifest: String = row.try_get(4).map_err(map_database)?;
+    let memory_version: i16 = row.try_get(5).map_err(map_database)?;
+    let memory_manifest: String = row.try_get(6).map_err(map_database)?;
+    if database_name != target.database_name()
+        || database_identity != target.database_identity_digest().as_str()
+        || global_version != 7
+        || global_manifest != V7_GLOBAL_MANIFEST_SHA256
+        || global_manifest != target.global_manifest_digest().as_str()
+        || memory_version != 3
+        || memory_manifest != CURRENT_MEMORY_MANIFEST_SHA256
+        || memory_manifest != target.memory_manifest_digest().as_str()
+    {
+        return Err(setup_attempt_error(
+            ExtensionSetupErrorKind::UnsupportedFoundation,
+        ));
+    }
+    Ok(FoundationEvidence {
+        database_uuid,
+        profile: FoundationProfile::G7MemoryV3,
     })
 }
 
@@ -1540,6 +1834,51 @@ fn classify_v3_shape(
             5,
             Some("1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6"),
         ) => Ok(V3InstalledState::G6MemoryV3WriterV3Current),
+        (4, WRITER_LEASE_V4_EXTENSION_PATH, 6, 3, 2, Some("1:INSTALLED:3:6,2:UPGRADED:4:6"))
+        | (
+            4,
+            WRITER_LEASE_V4_EXTENSION_PATH,
+            6,
+            3,
+            4,
+            Some("1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6,4:UPGRADED:4:6"),
+        )
+        | (
+            4,
+            WRITER_LEASE_V4_EXTENSION_PATH,
+            6,
+            3,
+            6,
+            Some(
+                "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6,6:UPGRADED:4:6",
+            ),
+        ) => Ok(V3InstalledState::G6MemoryV3WriterV4Bridge),
+        (
+            4,
+            WRITER_LEASE_V4_EXTENSION_PATH,
+            7,
+            3,
+            3,
+            Some("1:INSTALLED:3:6,2:UPGRADED:4:6,3:REBOUND:4:7"),
+        )
+        | (
+            4,
+            WRITER_LEASE_V4_EXTENSION_PATH,
+            7,
+            3,
+            5,
+            Some("1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6,4:UPGRADED:4:6,5:REBOUND:4:7"),
+        )
+        | (
+            4,
+            WRITER_LEASE_V4_EXTENSION_PATH,
+            7,
+            3,
+            7,
+            Some(
+                "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6,6:UPGRADED:4:6,7:REBOUND:4:7",
+            ),
+        ) => Ok(V3InstalledState::G7MemoryV3WriterV4Current),
         _ => Err(profile_collision()),
     }
 }
@@ -1756,6 +2095,60 @@ fn apply_v2_to_v3_bridge<C: GenericClient>(
     insert_current_ledger(client, next_ordinal, "UPGRADED")
 }
 
+fn apply_v3_to_v4_bridge<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    let prior_ledger_count: i64 = client
+        .query_one(
+            "SELECT pg_catalog.count(*) FROM ONLY writer_lease.writer_lease_extension_ledger",
+            &[],
+        )
+        .map_err(map_database)?
+        .try_get(0)
+        .map_err(map_database)?;
+    let next_ordinal = match prior_ledger_count {
+        1 => 2_i16,
+        3 => 4_i16,
+        5 => 6_i16,
+        _ => return Err(profile_collision()),
+    };
+    let sql = std::str::from_utf8(v4.bytes())
+        .map_err(|_| setup_attempt_error(ExtensionSetupErrorKind::ManifestMismatch))?;
+    client.batch_execute(sql).map_err(map_database)?;
+    let updated = client
+        .execute(
+            "UPDATE ONLY writer_lease.writer_lease_extension_identity SET \
+                 extension_schema_version = 4, extension_path = $1, \
+                 extension_sql_sha256 = $2, extension_manifest_sha256 = $3 \
+              WHERE singleton AND extension_id = $4 AND extension_schema_version = 3 \
+                AND extension_path = $5 AND extension_sql_sha256 = $6 \
+                AND extension_manifest_sha256 = $7 AND database_identity_sha256 = $8 \
+                AND global_schema_version = 6 AND global_manifest_sha256 = $9 \
+                AND required_memory_schema_version = 3 \
+                AND required_memory_manifest_sha256 = $10",
+            &[
+                &WRITER_LEASE_V4_EXTENSION_PATH,
+                &v4.sql_sha256().as_str(),
+                &v4.manifest_sha256().as_str(),
+                &WRITER_LEASE_EXTENSION_ID,
+                &WRITER_LEASE_V3_EXTENSION_PATH,
+                &v3.sql_sha256().as_str(),
+                &v3.manifest_sha256().as_str(),
+                &target.database_identity_digest().as_str(),
+                &V6_GLOBAL_MANIFEST_SHA256,
+                &CURRENT_MEMORY_MANIFEST_SHA256,
+            ],
+        )
+        .map_err(map_database)?;
+    if updated != 1 {
+        return Err(profile_collision());
+    }
+    insert_current_ledger(client, next_ordinal, "UPGRADED")
+}
+
 fn ensure_v3_rebind_boundary<C: GenericClient>(
     client: &mut C,
     rebind: &ExtensionManifestEvidence,
@@ -1823,6 +2216,79 @@ fn verify_v3_rebind_boundary<C: GenericClient>(
             != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
         || row.try_get::<_, String>(8).map_err(map_database)?.trim() != expected_body
         || row.try_get::<_, String>(9).map_err(map_database)? != "LATTICE_WRITER_LEASE_REBIND_V3"
+    {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+fn ensure_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    let count: i64 = client
+        .query_one(
+            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4'",
+            &[],
+        )
+        .map_err(map_database)?
+        .try_get(0)
+        .map_err(map_database)?;
+    match count {
+        0 => {
+            let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
+            client.batch_execute(sql).map_err(map_database)?;
+        }
+        1 => {}
+        _ => return Err(profile_collision()),
+    }
+    verify_v4_rebind_boundary(client, rebind)
+}
+
+fn verify_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
+    let marker = "$lattice_writer_lease_rebind_v4$";
+    let expected_body = sql
+        .split_once(marker)
+        .and_then(|(_, remainder)| remainder.rsplit_once(marker).map(|(body, _)| body.trim()))
+        .ok_or_else(profile_collision)?;
+    let rows = client
+        .query(
+            "SELECT p.prokind::text,l.lanname,r.rolname,p.prosecdef,p.provolatile::text, \
+                    p.proparallel::text,pg_catalog.pg_get_function_identity_arguments(p.oid), \
+                    COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),p.prosrc, \
+                    COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>') \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+               JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+              WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4'",
+            &[],
+        )
+        .map_err(map_database)?;
+    if rows.len() != 1 {
+        return Err(profile_collision());
+    }
+    let row = &rows[0];
+    if row.try_get::<_, String>(0).map_err(map_database)? != "p"
+        || row.try_get::<_, String>(1).map_err(map_database)? != "plpgsql"
+        || row.try_get::<_, String>(2).map_err(map_database)? != "lattice_migrator"
+        || row.try_get::<_, bool>(3).map_err(map_database)?
+        || row.try_get::<_, String>(4).map_err(map_database)? != "v"
+        || row.try_get::<_, String>(5).map_err(map_database)? != "u"
+        || !row
+            .try_get::<_, String>(6)
+            .map_err(map_database)?
+            .is_empty()
+        || row.try_get::<_, String>(7).map_err(map_database)?
+            != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+        || row.try_get::<_, String>(8).map_err(map_database)?.trim() != expected_body
+        || row.try_get::<_, String>(9).map_err(map_database)? != "LATTICE_WRITER_LEASE_REBIND_V4"
     {
         return Err(profile_collision());
     }
@@ -2643,6 +3109,255 @@ fn verify_v3_current_profile<C: GenericClient>(
     Ok(())
 }
 
+fn verify_v4_bridge_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v4_catalog(client, RuntimeProfile::Quarantined)?;
+    let identity = load_identity_shape(client)?;
+    let expected_identity = identity_shape(
+        database_uuid,
+        target.database_identity_digest().as_str(),
+        V6_GLOBAL_MANIFEST_SHA256,
+        CURRENT_MEMORY_MANIFEST_SHA256,
+        v4,
+        6,
+        3,
+    );
+    let ledger = load_ledger_shape(client)?;
+    let [fresh, fresh_v2_upgrade, upgraded] =
+        v4_expected_histories(database_uuid, target, v1, v2, v3, v4, false);
+    if identity != expected_identity
+        || (ledger != fresh && ledger != fresh_v2_upgrade && ledger != upgraded)
+    {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+fn verify_v4_v7_current_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v4_catalog(client, RuntimeProfile::Current)?;
+    let identity = load_identity_shape(client)?;
+    let expected_identity = identity_shape(
+        database_uuid,
+        target.database_identity_digest().as_str(),
+        V7_GLOBAL_MANIFEST_SHA256,
+        CURRENT_MEMORY_MANIFEST_SHA256,
+        v4,
+        7,
+        3,
+    );
+    let ledger = load_ledger_shape(client)?;
+    let [fresh, fresh_v2_upgrade, upgraded] =
+        v4_expected_histories(database_uuid, target, v1, v2, v3, v4, true);
+    if identity != expected_identity
+        || (ledger != fresh && ledger != fresh_v2_upgrade && ledger != upgraded)
+    {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn v4_expected_histories(
+    database_uuid: &str,
+    target: &ExtensionTarget,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    current_v7: bool,
+) -> [Vec<String>; 3] {
+    let database_identity = target.database_identity_digest().as_str();
+    let mut fresh = vec![
+        ledger_shape(
+            1,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            6,
+            3,
+            "INSTALLED",
+        ),
+        ledger_shape(
+            2,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            6,
+            3,
+            "UPGRADED",
+        ),
+    ];
+    let mut fresh_v2_upgrade = vec![
+        ledger_shape(
+            1,
+            database_uuid,
+            database_identity,
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v2,
+            5,
+            3,
+            "INSTALLED",
+        ),
+        ledger_shape(
+            2,
+            database_uuid,
+            database_identity,
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            5,
+            3,
+            "UPGRADED",
+        ),
+        ledger_shape(
+            3,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            6,
+            3,
+            "REBOUND",
+        ),
+        ledger_shape(
+            4,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            6,
+            3,
+            "UPGRADED",
+        ),
+    ];
+    let mut upgraded = vec![
+        ledger_shape(
+            1,
+            database_uuid,
+            database_identity,
+            HISTORICAL_GLOBAL_MANIFEST_SHA256,
+            HISTORICAL_MEMORY_MANIFEST_SHA256,
+            v1,
+            3,
+            2,
+            "INSTALLED",
+        ),
+        ledger_shape(
+            2,
+            database_uuid,
+            database_identity,
+            HISTORICAL_GLOBAL_MANIFEST_SHA256,
+            HISTORICAL_MEMORY_MANIFEST_SHA256,
+            v2,
+            3,
+            2,
+            "UPGRADED",
+        ),
+        ledger_shape(
+            3,
+            database_uuid,
+            database_identity,
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v2,
+            5,
+            3,
+            "REBOUND",
+        ),
+        ledger_shape(
+            4,
+            database_uuid,
+            database_identity,
+            CURRENT_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            5,
+            3,
+            "UPGRADED",
+        ),
+        ledger_shape(
+            5,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v3,
+            6,
+            3,
+            "REBOUND",
+        ),
+        ledger_shape(
+            6,
+            database_uuid,
+            database_identity,
+            V6_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            6,
+            3,
+            "UPGRADED",
+        ),
+    ];
+    if current_v7 {
+        fresh.push(ledger_shape(
+            3,
+            database_uuid,
+            database_identity,
+            V7_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            7,
+            3,
+            "REBOUND",
+        ));
+        fresh_v2_upgrade.push(ledger_shape(
+            5,
+            database_uuid,
+            database_identity,
+            V7_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            7,
+            3,
+            "REBOUND",
+        ));
+        upgraded.push(ledger_shape(
+            7,
+            database_uuid,
+            database_identity,
+            V7_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v4,
+            7,
+            3,
+            "REBOUND",
+        ));
+    }
+    [fresh, fresh_v2_upgrade, upgraded]
+}
+
 fn verify_v2_bridge_profile<C: GenericClient>(
     client: &mut C,
     target: &ExtensionTarget,
@@ -3218,6 +3933,232 @@ fn verify_v3_catalog<C: GenericClient>(
     verify_namespace_and_effective_acl_closure(client, expected_missing, expected_usage)
 }
 
+#[allow(clippy::too_many_lines)]
+fn verify_v4_catalog<C: GenericClient>(
+    client: &mut C,
+    runtime: RuntimeProfile,
+) -> Result<(), SetupAttemptError> {
+    let rebind = verify_embedded_v4_rebind_manifest().map_err(|_| profile_collision())?;
+    verify_v4_rebind_boundary(client, &rebind)?;
+    for (query, rows, signature) in [
+        (
+            COLUMN_PROFILE_SQL,
+            73,
+            "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+        ),
+        (
+            TABLE_ACL_PROFILE_SQL,
+            40,
+            "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+        ),
+        (
+            COLUMN_ACL_PROFILE_SQL,
+            0,
+            "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+        ),
+        (
+            TYPE_PROFILE_SQL,
+            10,
+            "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+        ),
+    ] {
+        verify_catalog_profile(client, query, rows, signature)?;
+    }
+    let expected_runtime_functions = match runtime {
+        RuntimeProfile::Quarantined => 0_i64,
+        RuntimeProfile::Current => 7_i64,
+    };
+    let expected_usage = runtime == RuntimeProfile::Current;
+    let row = client
+        .query_one(
+            "SELECT \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_namespace n \
+                 JOIN pg_catalog.pg_roles r ON r.oid=n.nspowner \
+                WHERE n.nspname='writer_lease' AND r.rolname='lattice_migrator'), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                WHERE n.nspname='writer_lease' AND c.relkind IN ('r','p','v','m','S','f')), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                WHERE n.nspname='writer_lease'), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+                WHERE n.nspname='writer_lease' AND r.rolname='lattice_migrator'), \
+               (SELECT pg_catalog.count(*) FILTER (WHERE p.prosecdef) \
+                  FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='writer_lease'), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                WHERE n.nspname='writer_lease' \
+                  AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                WHERE n.nspname='writer_lease' AND (\
+                  pg_catalog.has_table_privilege('lattice_runtime',c.oid,'SELECT') OR \
+                  pg_catalog.has_table_privilege('lattice_runtime',c.oid,'INSERT') OR \
+                  pg_catalog.has_table_privilege('lattice_runtime',c.oid,'UPDATE') OR \
+                  pg_catalog.has_table_privilege('lattice_runtime',c.oid,'DELETE'))), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace \
+                WHERE n.nspname='writer_lease'), \
+               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                WHERE n.nspname='writer_lease' AND c.relkind='i'), \
+               pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
+               pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE'), \
+               pg_catalog.obj_description('writer_lease.writer_lease_extension_identity'::regclass,'pg_class'), \
+               pg_catalog.obj_description('writer_lease.writer_lease_extension_ledger'::regclass,'pg_class'), \
+               pg_catalog.obj_description('writer_lease'::regnamespace,'pg_namespace')",
+            &[],
+        )
+        .map_err(map_database)?;
+    let counts = [1_i64, 5, 15, 15, 13, expected_runtime_functions, 0, 27, 8];
+    for (index, expected) in counts.into_iter().enumerate() {
+        if row.try_get::<_, i64>(index).map_err(map_database)? != expected {
+            return Err(profile_collision());
+        }
+    }
+    if row.try_get::<_, bool>(9).map_err(map_database)? != expected_usage
+        || row.try_get::<_, bool>(10).map_err(map_database)?
+        || row.try_get::<_, String>(11).map_err(map_database)?
+            != "LATTICE_WRITER_LEASE_EXTENSION_IDENTITY_V4"
+        || row.try_get::<_, String>(12).map_err(map_database)?
+            != "LATTICE_WRITER_LEASE_EXTENSION_LEDGER_V4"
+        || row.try_get::<_, String>(13).map_err(map_database)? != "LATTICE_WRITER_LEASE_SCHEMA_V4"
+    {
+        return Err(profile_collision());
+    }
+
+    let functions = client
+        .query(
+            "SELECT p.proname::text, p.prokind::text, p.provolatile::text, \
+                    p.proparallel::text, p.prosecdef, \
+                    pg_catalog.pg_get_function_identity_arguments(p.oid), \
+                    pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE') \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' \
+              ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)",
+            &[],
+        )
+        .map_err(map_database)?;
+    let expected = [
+        (
+            "writer_lease_assert_current_v1",
+            "f",
+            "s",
+            "s",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        ("writer_lease_bind_runtime_v1", "f", "s", "s", true, false),
+        ("writer_lease_bind_runtime_v2", "f", "s", "s", true, false),
+        ("writer_lease_bind_runtime_v3", "f", "s", "s", true, false),
+        (
+            "writer_lease_bind_runtime_v4",
+            "f",
+            "s",
+            "s",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "f",
+            "v",
+            "u",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        (
+            "writer_lease_load_commands_v1",
+            "f",
+            "s",
+            "s",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        (
+            "writer_lease_load_current_v1",
+            "f",
+            "s",
+            "s",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        (
+            "writer_lease_load_for_update_v1",
+            "f",
+            "v",
+            "u",
+            true,
+            false,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "f",
+            "v",
+            "u",
+            true,
+            false,
+        ),
+        (
+            "writer_lease_load_for_update_v3",
+            "f",
+            "v",
+            "u",
+            true,
+            false,
+        ),
+        (
+            "writer_lease_load_for_update_v4",
+            "f",
+            "v",
+            "u",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "f",
+            "s",
+            "s",
+            true,
+            runtime == RuntimeProfile::Current,
+        ),
+        ("writer_lease_rebind_v3", "p", "v", "u", false, false),
+        ("writer_lease_rebind_v4", "p", "v", "u", false, false),
+    ];
+    if functions.len() != expected.len() {
+        return Err(profile_collision());
+    }
+    for (row, (name, kind, volatility, parallel, security_definer, runtime_execute)) in
+        functions.iter().zip(expected)
+    {
+        if row.try_get::<_, String>(0).map_err(map_database)? != name
+            || row.try_get::<_, String>(1).map_err(map_database)? != kind
+            || row.try_get::<_, String>(2).map_err(map_database)? != volatility
+            || row.try_get::<_, String>(3).map_err(map_database)? != parallel
+            || row.try_get::<_, bool>(4).map_err(map_database)? != security_definer
+            || row.try_get::<_, bool>(6).map_err(map_database)? != runtime_execute
+            || ((name == "writer_lease_rebind_v3" || name == "writer_lease_rebind_v4")
+                && !row
+                    .try_get::<_, String>(5)
+                    .map_err(map_database)?
+                    .is_empty())
+        {
+            return Err(profile_collision());
+        }
+    }
+    verify_v4_function_sources(client)?;
+    let expected_missing = match runtime {
+        RuntimeProfile::Quarantined => 15,
+        RuntimeProfile::Current => 8,
+    };
+    verify_namespace_and_effective_acl_closure(client, expected_missing, expected_usage)
+}
+
 fn verify_v3_function_sources<C: GenericClient>(client: &mut C) -> Result<(), SetupAttemptError> {
     let v1 = verify_embedded_v1_extension_manifest().map_err(|_| profile_collision())?;
     let v2 = verify_embedded_extension_manifest().map_err(|_| profile_collision())?;
@@ -3275,6 +4216,104 @@ fn verify_v3_function_sources<C: GenericClient>(client: &mut C) -> Result<(), Se
             "writer_lease_load_for_update_v3",
             "lattice_writer_lease_load_for_update_v3",
             v3_sql,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "lattice_writer_lease_load_transitions_v1",
+            v1_sql,
+        ),
+    ];
+    let observed = client
+        .query(
+            "SELECT p.proname::text,p.prosrc::text FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+              WHERE n.nspname='writer_lease' AND p.prokind='f' ORDER BY p.proname",
+            &[],
+        )
+        .map_err(map_database)?;
+    if observed.len() != descriptors.len() {
+        return Err(profile_collision());
+    }
+    for (row, (name, delimiter, sql)) in observed.iter().zip(descriptors) {
+        if row.try_get::<_, String>(0).map_err(map_database)? != name
+            || row.try_get::<_, String>(1).map_err(map_database)?
+                != embedded_function_source(sql, delimiter)?
+        {
+            return Err(profile_collision());
+        }
+    }
+    Ok(())
+}
+
+fn verify_v4_function_sources<C: GenericClient>(client: &mut C) -> Result<(), SetupAttemptError> {
+    let v1 = verify_embedded_v1_extension_manifest().map_err(|_| profile_collision())?;
+    let v2 = verify_embedded_extension_manifest().map_err(|_| profile_collision())?;
+    let v3 = verify_embedded_v3_extension_manifest().map_err(|_| profile_collision())?;
+    let v4 = verify_embedded_v4_extension_manifest().map_err(|_| profile_collision())?;
+    let v1_sql = std::str::from_utf8(v1.bytes()).map_err(|_| profile_collision())?;
+    let v2_sql = std::str::from_utf8(v2.bytes()).map_err(|_| profile_collision())?;
+    let v3_sql = std::str::from_utf8(v3.bytes()).map_err(|_| profile_collision())?;
+    let v4_sql = std::str::from_utf8(v4.bytes()).map_err(|_| profile_collision())?;
+    let descriptors = [
+        (
+            "writer_lease_assert_current_v1",
+            "lattice_writer_lease_assert_current_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_bind_runtime_v1",
+            "lattice_writer_lease_bind_runtime_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_bind_runtime_v2",
+            "lattice_writer_lease_bind_runtime_v2",
+            v2_sql,
+        ),
+        (
+            "writer_lease_bind_runtime_v3",
+            "lattice_writer_lease_bind_runtime_v3",
+            v3_sql,
+        ),
+        (
+            "writer_lease_bind_runtime_v4",
+            "lattice_writer_lease_bind_runtime_v4",
+            v4_sql,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "lattice_writer_lease_commit_plan_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_load_commands_v1",
+            "lattice_writer_lease_load_commands_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_load_current_v1",
+            "lattice_writer_lease_load_current_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_load_for_update_v1",
+            "lattice_writer_lease_load_for_update_v1",
+            v1_sql,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "lattice_writer_lease_load_for_update_v2",
+            v2_sql,
+        ),
+        (
+            "writer_lease_load_for_update_v3",
+            "lattice_writer_lease_load_for_update_v3",
+            v3_sql,
+        ),
+        (
+            "writer_lease_load_for_update_v4",
+            "lattice_writer_lease_load_for_update_v4",
+            v4_sql,
         ),
         (
             "writer_lease_load_transitions_v1",
@@ -3976,6 +5015,49 @@ mod tests {
             )
             .is_err(),
             "crossed pending/current evidence must remain closed"
+        );
+    }
+
+    #[test]
+    fn schema_v7_bootstrap_accepts_only_the_three_exact_v4_rebound_histories() {
+        for (count, shape) in [
+            (3, "1:INSTALLED:3:6,2:UPGRADED:4:6,3:REBOUND:4:7"),
+            (
+                5,
+                "1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6,4:UPGRADED:4:6,5:REBOUND:4:7",
+            ),
+            (
+                7,
+                "1:INSTALLED:1:3,2:UPGRADED:2:3,3:REBOUND:2:5,4:UPGRADED:3:5,5:REBOUND:3:6,6:UPGRADED:4:6,7:REBOUND:4:7",
+            ),
+        ] {
+            assert_eq!(
+                classify_v3_shape(4, WRITER_LEASE_V4_EXTENSION_PATH, 7, 3, count, Some(shape),)
+                    .expect("exact v7 Writer history"),
+                V3InstalledState::G7MemoryV3WriterV4Current
+            );
+        }
+        assert!(
+            classify_v3_shape(
+                4,
+                WRITER_LEASE_V4_EXTENSION_PATH,
+                8,
+                3,
+                3,
+                Some("1:INSTALLED:3:6,2:UPGRADED:4:6,3:REBOUND:4:8"),
+            )
+            .is_err()
+        );
+        assert!(
+            classify_v3_shape(
+                3,
+                WRITER_LEASE_V3_EXTENSION_PATH,
+                7,
+                3,
+                2,
+                Some("1:INSTALLED:3:6,2:REBOUND:3:7"),
+            )
+            .is_err()
         );
     }
 

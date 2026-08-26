@@ -555,7 +555,10 @@ pub(crate) fn resource_binding_reason(
     if identity.task_revision() != fields.revision {
         return Some(PolicyReason::TaskRevisionMismatch);
     }
-    if identity.task_spec_digest().as_str() != spec.spec_hash().to_hex() {
+    let Some(task_spec_digest) = identity.task_spec_digest() else {
+        return Some(PolicyReason::TaskSpecHashMismatch);
+    };
+    if task_spec_digest.as_str() != spec.spec_hash().to_hex() {
         return Some(PolicyReason::TaskSpecHashMismatch);
     }
     None

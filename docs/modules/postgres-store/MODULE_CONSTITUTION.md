@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.20
+version: 1.22
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -89,6 +89,17 @@ schema entries whose canonical full-history metadata digest and compatibility
 row agree is `UnsupportedFutureSchema`. Missing, reordered, substituted,
 gapped, or compatibility-divergent history remains corruption. The classifier
 adds no migration, mutation, repair, or successful future bootstrap profile.
+Version 1.22 corrects the still-unreleased schema-v7 migration `0008` to retain
+the Task-Ledger-owned shared ingress claim and distinct general-intake stream
+subject. It atomically binds a general envelope to exactly one matching
+`TASK_CREATED` append and supplies fresh-process lookup by `task_ref` or scoped
+idempotency key without owning task identity, lifecycle state, objective
+meaning, or Project Registry authority. The same migration transaction invokes
+only the fixed Writer-owned `writer_lease_rebind_v4()` after exact v6/v4 bridge
+proof; Store does not acquire Writer state semantics. The same migration
+rejects a historical canary command whose derived `client_request_id` matches
+the shared recognized-secret predicate before any claim is backfilled, so the
+v7 transition cannot retain or partially copy that identifier.
 
 ## Non-Goals
 
@@ -119,6 +130,9 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
 - Rebuild, reinterpret, or replace a domain receipt/current head.
 - Execute an outbox effect or call OpenClaw, Codex, Graphify, Hermes, Git, a
   provider, product code, or a companion/playmate website.
+- Treat a submission-envelope row as an execution request, Task Spec, lifecycle
+  projection, Policy decision, approval, writer lease, or second task-state
+  machine; or persist it in Control SQLite or another shadow store.
 - Claim that physical live durability alone proves One Writer composition,
   Guardian activation, domain repository completeness, effect delivery, or
   release safety.
@@ -127,7 +141,10 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
   `writer_lease_assert_current_v1` predicate at a Task Ledger mutation boundary
   and, solely for the exact-v5 transition or exact-v6 idempotent retry in the
   existing migration transaction, the fixed Writer-owned zero-argument
-  `writer_lease.writer_lease_rebind_v3()` procedure. Neither exception grants a
+  `writer_lease.writer_lease_rebind_v3()` procedure, plus the exact-v6/v4-
+  bridge-to-v7 transition call to
+  `writer_lease.writer_lease_rebind_v4()`. Exact v7 retry is verify-only and
+  invokes no rebind. No exception grants a
   Writer repository API, generic SQL, state parsing, state construction, or
   semantic ownership; PostgreSQL Writer Lease remains the persistence adapter
   and Writer Lease remains the semantic owner.
@@ -135,9 +152,9 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
   head, command, or transition rows. Store may retain only its existing fixed
   15-scalar Writer current-authority assertion and pg_catalog procedure/
   owner/body/ACL/grant closure recognition. Its only Writer mutation seam is
-  the exact-v5 transition and exact-v6 idempotent retry call to the fixed
-  zero-argument rebind
-  procedure in the governed migration transaction.
+  the exact-v5-to-v6 or exact-v6/v4-to-v7 transition call to the fixed
+  generation-specific zero-argument rebind procedure in the governed migration
+  transaction. Already-current v7 is read-only verification.
 
 ## Owned Data
 
@@ -181,6 +198,17 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
 - The adapter-level PostgreSQL client, transaction, static row conversion,
   bounded retry/poison state, and current global schema-v4 durability evidence
   used by `PostgresTaskLedger`.
+- The schema-v7 physical `control.task_ingress_claims` and
+  `control.task_submission_envelopes` rows plus exact runtime
+  prepare/record/read functions. The ingress row is the one Task-Ledger-owned
+  idempotency namespace shared by controlled-canary and general submissions.
+  The envelope is a general-intake locator bound by foreign keys and scalar
+  equality to the matching Task Ledger event/command/stream; neither row
+  carries independent lifecycle state.
+- The schema-v7 physical stream-subject discriminator and neutral subject
+  digest. Existing `TASK_SPEC` streams retain their exact Task Spec digest and
+  currency. `GENERAL_TASK_INTAKE` streams retain neither field and instead bind
+  a non-zero neutral intake digest under a closed database constraint.
 - Schema-v4 physical persistence mechanics for one global Registry aggregate:
   singleton state/checkpoint, immutable complete observations, current project
   projections, ordered complete command records, and normalized accepted/
@@ -240,9 +268,9 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
   database identity, bootstrap admission, effective-role, ACL/ownership, and
   protected-function checks.
 - `inspect_migration_profile` is a read-only migrator-bound classification of
-  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, or `V6`. Partial,
-  colliding, changed, unavailable, or wrong-target evidence is an error; the
-  caller receives no catalog rows or Writer semantics.
+  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, `V6`, or current
+  `V7`. Partial, colliding, changed, unavailable, or wrong-target evidence is
+  an error; the caller receives no catalog rows or Writer semantics.
 - The deterministic fake remains visibly non-durable and preserves Store v1
   behavior. Contracts 1.9 / Ports 1.4 add v2 live durability and explicit
   mutable current-head observation without exposing a driver.
@@ -270,6 +298,20 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
 - A durable Ledger load returns a pure verified stream plus independently
   matched Ledger checkpoint, physical head, and global schema evidence; no
   database row is authoritative before the pure verifier passes.
+- `PostgresTaskLedger::execute_submission` prepares the scoped
+  `(ingress_id, client_request_id)` idempotency binding, executes the matching
+  Task-Ledger-planned `TASK_CREATED` append, and records the complete envelope
+  in the same `SERIALIZABLE` transaction. It returns only after the Ledger
+  append, envelope row, checkpoint, physical receipt, and commit are mutually
+  replay-verified. Before recording a new general intake, the fixed function
+  verifies that the exact Project Registry project/snapshot/authority-receipt
+  row is still current, `ACTIVE`, accepted, live, and drift-free in that same
+  transaction; a Control locator or caller-projected receipt cannot satisfy it.
+- `PostgresTaskLedger` loads a general submission by exact lowercase
+  `task_ref`, or by exact process-owned ingress plus `client_request_id`, and
+  replays the complete associated Task Ledger stream before returning the
+  Task-Ledger-verified envelope. The read path performs no project resolution,
+  lifecycle mutation, model/writer effect, or automatic repair.
 - `PostgresTaskLedger::execute_fenced` invokes exactly
   `writer_lease_assert_current_v1` with the complete typed 15-field authority
   inside the same `SERIALIZABLE` transaction and before a new Ledger/Store
@@ -736,13 +778,50 @@ adds no migration, mutation, repair, or successful future bootstrap profile.
 87. Memory v3 verification closes its own relation/function/owner/ACL and
     extension-ledger profile. Partial, extra, drifted, wrong-owner, or
     wrong-profile objects fail closed and cannot fall back to base schema v5.
+88. Schema v7 adds one normalized shared task-ingress claim table, one
+    general-submission envelope table, and a closed stream-subject shape. They
+    are authoritative Task Ledger bindings and lookup indexes, never a second
+    lifecycle/state machine. The matching Ledger stream/event/command remains
+    the sole durable task-intake history.
+89. A `TASK_SPEC` stream retains its exact historical spec digest/currency
+    identity. A `GENERAL_TASK_INTAKE` stream instead retains a non-zero neutral
+    intake digest with null Task Spec digest and currency; cross-shaped or
+    zero-digest rows fail constraints and replay.
+90. The envelope row is inserted only in the same `SERIALIZABLE` transaction as
+    its matching new `TASK_CREATED` event with action
+    `GENERAL_TASK_INTAKE_V1`, reason `GENERAL_TASK_INTAKE_RECORDED`, null
+    diagnostic, and subject equal to the envelope digest. No autonomy, result,
+    resource, outbox, or transition row is created. Either every
+    Ledger/Store/claim/envelope row commits or none do.
+91. Unique `(ingress_id, client_request_id)` and unique `task_ref` constraints
+    implement only Task Ledger's exact-idempotency semantics in one namespace
+    shared with retained canary ingress. Exact retry returns the retained
+    envelope; changed objective/project/identity or submission-mode content is
+    command substitution and never reveals or creates a second task. Migration
+    `0008` backfills retained controlled-canary claims from their existing
+    verified `TASK_CREATED`/command binding; any duplicate or cross-mode
+    collision, or any historical secret-shaped client request ID, rolls back
+    the migration rather than choosing a winner or copying unsafe data.
+92. Before a new envelope is recorded, the fixed transaction rechecks the exact
+    formal Project Registry project, snapshot, authority receipt, accepted
+    observation, `ACTIVE` lifecycle, live runtime, and absence of drift or
+    pending identity. An absent/stale/substituted row fails closed; Control
+    catalog data and paths never become database authority.
+93. Every loaded envelope is untrusted until Task Ledger reconstructs and
+    verifies its schema, text bounds, project authority-receipt digest, complete
+    stream identity, stream ID, task reference, admission action, envelope
+    digest, and exact event/command linkage.
+94. Normal runtime has no direct table privilege. Only the fixed schema-v7
+    prepare/record/read functions are executable by `lattice_runtime`; they are
+    migrator-owned, schema-qualified, dynamic-SQL-free, row-security-on, and
+    bounded like the existing Task Ledger runtime surface.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.14.
-- `lattice-ports` 2.1.
+- `lattice-contracts` 1.15.
+- `lattice-ports` 2.3.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.7 pure planner/checkpoint/replay/profile/autonomy-subject API.
+- `lattice-task-ledger` 2.9 pure planner/checkpoint/replay/profile/autonomy-subject/submission-envelope API.
 - `lattice-foreman-state` 1.3 pure retained foreman verification types.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
@@ -892,6 +971,18 @@ both torn evidence and a stale snapshot fixed before a contended lock returns.
 `inspect_migration_profile` still returns no future success profile, and Task
 Ledger alone translates this exact setup kind into unsupported replay.
 
+Version 1.22 corrects the unreleased migration `0008` and exact global schema-v7
+profile. It adds the shared ingress-claim namespace, closed stream-subject
+shape, and general submission envelope plus fixed prepare/record/read
+functions. General streams have no Task Spec digest, currency, autonomy, or
+later event. Historical migrations, canary Task-Spec stream bytes, Registry
+semantics, Writer Lease semantics, and prior receipts remain immutable. A v7
+runtime rejects partial/extra/drifted catalog or ACL state and never falls back
+to a v6 write profile. Only exact `V6V4Bridge` may enter the Store-v7 migration
+transaction and call the Writer-owned fixed `writer_lease_rebind_v4()`; exact
+v7 retry verifies the same boundary, while every partial or cross-generation
+Writer profile fails closed.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -920,6 +1011,8 @@ Ledger alone translates this exact setup kind into unsupported replay.
 | Ledger planner parity | fake and PostgreSQL use Task Ledger 2.3 plan/checkpoint/replay/profile/autonomy verifier; no duplicated domain builder or hash | Architecture review | yes |
 | Ledger atomicity | command plus optional event/outbox, projection/checkpoint, and physical receipt all-or-none | Engineering | yes |
 | Ledger restart/corruption | restart replay plus event/command/denial/outbox/head/checkpoint/physical mismatch matrices | Security review | yes |
+| General submission atomicity | retained-canary claim backfill plus shared ingress claim, envelope, and one matching `TASK_CREATED`/checkpoint/physical receipt commit all-or-none; exact retry, cross-mode reuse, migration collision, and changed-content races are deterministic | Engineering | yes |
+| General submission restart/corruption | fresh-client load by `task_ref` and ingress/request, complete Task Ledger replay, exact retained formal Registry project/snapshot/authority-receipt binding, subject/spec/currency/action/row/event/digest substitution rejection, no autonomy/effect rows, and no shadow lifecycle state; current Registry state is checked atomically on creation, not required again for historical Status | Security review | yes |
 | Ledger concurrency/reconciliation | same command, same stream, cross-stream, bounded retry, response loss, reconnect replay | Engineering | yes |
 | Schema-v3 migration | fresh, v1, non-empty stopped v2, v3 no-op, rollback/concurrent runner, ACTIVE denial | Integration review | yes |
 | Registry planner parity | Fake and PostgreSQL use Project Registry 1.2 vacant/plan/apply/checkpoint/replay; Registry 1.1 observation/request/authority-receipt/command-result golden vectors stay byte-identical, while vacant/non-vacant checkpoint and record-set vectors are new in 1.2 | Architecture review | yes |
@@ -942,8 +1035,9 @@ Ledger alone translates this exact setup kind into unsupported replay.
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
 | Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
+| Schema-v7 migration/profile | immutable 0001..0007 prefix, exact 0008 hash/order, closed subject/claim/envelope shape, exact runtime function/catalog/ACL profile, v6/v4 bridge rebind, v7 exact retry, rollback, and partial/extra/drift rejection | Architecture and integration review | yes |
 | Future schema taxonomy | exact current prefix plus contiguous exact-next suffix, canonical full-history metadata digest and matching future compatibility return only `STORE_SCHEMA_UNSUPPORTED_FUTURE`; extra/missing/reordered/substituted/gapped/divergent history remains corrupt | Compatibility review | yes |
-| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1` predicate and the exact-v5 transition/exact-v6 retry calls to Writer-owned `writer_lease_rebind_v3()` are executable | Architecture review | yes |
+| Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1`, v5-to-v6 `writer_lease_rebind_v3()`, and v6/v4-to-v7 `writer_lease_rebind_v4()` boundaries are executable | Architecture review | yes |
 
 ## Change Policy
 
@@ -982,3 +1076,5 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.18 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Preserve exact 1..256 foreman scalar bounds through varchar caps plus PostgreSQL-valid non-empty printable-ASCII checks | Sole-foreman delegation |
 | 1.19 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Classify only a coherent canonical future migration suffix as unsupported from atomic history-plus-compatibility evidence before mutation while preserving Read Committed advisory-lock retry freshness; retain all divergent history as corruption | Sole-foreman delegation |
 | 1.20 | 2026-08-25 | SPEC-010, TASK-106 | Reconstruct the typed dependency continuation projection from existing verified foreman snapshot scalars without a migration, new row, or alternate durable truth | Explicit user delegation |
+| 1.21 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial schema-v7 general submission-envelope persistence; superseded before release by 1.22 because intake must not reuse Task-Spec/currency/autonomy semantics | User-authorized Phase 3 |
+| 1.22 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Add the shared ingress claim, distinct no-spec/no-currency subject, one-event general intake, same-transaction formal Registry currentness check, and exact Writer-v4 rebind in the Store-v7 transaction | User-authorized Phase 3 |

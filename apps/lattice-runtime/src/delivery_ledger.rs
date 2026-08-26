@@ -2416,7 +2416,11 @@ mod tests {
             LedgerEventKind::TaskCreated,
             LedgerOutcome::Recorded,
             "TASK038_TASK_ACCEPTED",
-            vacant.identity().task_spec_digest().clone(),
+            vacant
+                .identity()
+                .task_spec_digest()
+                .cloned()
+                .expect("fixture stream has a Task Spec subject"),
             CanonicalValue::Object(vec![]),
         );
         let pending = apply_fixture_command(

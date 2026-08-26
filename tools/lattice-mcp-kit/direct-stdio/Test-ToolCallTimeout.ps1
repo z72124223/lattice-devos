@@ -20,8 +20,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $script:Utf8 = [Text.UTF8Encoding]::new($false)
 $script:ExpectedTools = @(
+    'lattice_delivery_reconcile',
     'lattice_delivery_run',
     'lattice_delivery_status',
+    'lattice_foreman_checkpoint',
+    'lattice_runtime_status',
     'lattice_task_status',
     'lattice_task_submit'
 )

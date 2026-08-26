@@ -437,6 +437,7 @@ dependencies = [
  "lattice-postgres-codebase-memory",
  "lattice-postgres-store",
  "lattice-postgres-writer-lease",
+ "lattice-project-registry",
  "lattice-task-domain",
  "lattice-task-ledger",
  "lattice-writer-lease",
@@ -444,6 +445,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "time",
+ "unicode-normalization",
  "windows-sys",
 ]
 

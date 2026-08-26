@@ -39,6 +39,7 @@ pub use task_ledger::{
     PostgresForemanReplay, PostgresTaskLedger, PostgresTaskLedgerError,
     PostgresTaskLedgerErrorKind, PostgresTaskLedgerExecution, PostgresTaskLedgerLoad,
     PostgresTaskLedgerPersistenceEvidence, PostgresTaskLedgerResult,
+    PostgresTaskSubmissionExecution, PostgresTaskSubmissionLoad,
 };
 
 use std::collections::BTreeMap;

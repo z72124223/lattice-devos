@@ -201,6 +201,8 @@ fn map_error(error: crate::PostgresTaskLedgerError) -> ForemanCoordinationError 
         PostgresTaskLedgerErrorKind::CheckpointCorrupt
         | PostgresTaskLedgerErrorKind::RetainedRowCorrupt
         | PostgresTaskLedgerErrorKind::PhysicalStateMismatch
+        | PostgresTaskLedgerErrorKind::ProjectRegistryCurrentnessConflict
+        | PostgresTaskLedgerErrorKind::ProjectRegistryInactive
         | PostgresTaskLedgerErrorKind::RevisionOverflow => ForemanCoordinationErrorKind::Corrupt,
         PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => {
             return ForemanCoordinationError::new(

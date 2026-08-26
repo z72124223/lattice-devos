@@ -12,10 +12,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
-use lattice_contracts::{ContentDigest, SubjectBinding};
+use lattice_contracts::{
+    ContentDigest, SubjectBinding, TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES,
+    valid_task_ingress_client_request_id,
+};
 use lattice_foreman_state::{DependencyBinding, ForemanCheckpointIntent, ForemanState};
+use lattice_task_ledger::{
+    TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX_BYTES, task_submission_text_contains_secret,
+};
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
+use unicode_normalization::is_nfc;
 
 use crate::mcp_budget::{McpAdmission, McpBudget, McpToolClass};
 
@@ -37,16 +44,27 @@ pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
 pub const TASK_STATUS_TOOL: &str = "lattice_task_status";
 /// Sole durable foreman checkpoint tool.
 pub const FOREMAN_CHECKPOINT_TOOL: &str = "lattice_foreman_checkpoint";
-/// Sole task intent accepted by the transport boundary.
+/// Retained exact canary intent accepted alongside bounded general objectives.
 pub const CONTROLLED_CODEX_CANARY_INTENT: &str = "CONTROLLED_CODEX_CANARY";
 
 const LEGACY_DELIVERY_RUN_DISABLED: &str = "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED";
 
-const MAX_CLIENT_REQUEST_ID_BYTES: usize = 64;
+const MAX_CLIENT_REQUEST_ID_BYTES: usize = TASK_INGRESS_CLIENT_REQUEST_ID_MAX_BYTES;
+// JSON Schema `maxLength` counts Unicode scalar values while the durable
+// ledger bounds UTF-8 bytes.  Keep both limits explicit and choose character
+// limits whose worst-case UTF-8 representation still fits the durable bound.
+const MAX_TASK_OBJECTIVE_CHARS: usize = 512;
+const MAX_TASK_OBJECTIVE_BYTES: usize = 2_048;
+const MAX_PROJECT_ID_BYTES: usize = 64;
+const MAX_PROJECT_NAME_CHARS: usize = 64;
+const MAX_PROJECT_NAME_BYTES: usize = 256;
+const MAX_PROJECT_SNAPSHOT_ID_BYTES: usize = TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX_BYTES;
 const FOREMAN_CHECKPOINT_RESULT_SCHEMA: &str = "lattice.foreman-checkpoint-result/1.0";
-const TASK_PUBLIC_STATUS_SCHEMA_VERSION: &str = "lattice.task.status.v2";
-const TASK_PUBLIC_STATUS_VALUES: [&str; 4] = [
+const TASK_PUBLIC_STATUS_SCHEMA_V2: &str = "lattice.task.status.v2";
+const TASK_PUBLIC_STATUS_SCHEMA_V3: &str = "lattice.task.status.v3";
+const TASK_PUBLIC_STATUS_VALUES: [&str; 5] = [
     "NOT_SUBMITTED",
+    "SUBMITTED",
     "RECONCILIATION_REQUIRED",
     "FAILED",
     "COMPLETED",
@@ -1148,7 +1166,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_submit_schema".to_owned(),
             CanonicalValue::String(format!(
-                "closed:client_request_id:ascii-control-id:1..={MAX_CLIENT_REQUEST_ID_BYTES};intent:{CONTROLLED_CODEX_CANARY_INTENT}"
+                "closed:v2:client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};legacy-intent:{CONTROLLED_CODEX_CANARY_INTENT}|general-objective-or-intent:nfc-no-control-no-secret:chars:1..={MAX_TASK_OBJECTIVE_CHARS}:utf8-bytes:1..={MAX_TASK_OBJECTIVE_BYTES};optional-selector:zero-or-one:project_id:canonical:bytes:2..={MAX_PROJECT_ID_BYTES}|project_name:chars:1..={MAX_PROJECT_NAME_CHARS}:utf8-bytes:1..={MAX_PROJECT_NAME_BYTES}"
             )),
         ),
         (
@@ -1158,13 +1176,13 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_status_schema".to_owned(),
             CanonicalValue::String(format!(
-                "closed:client_request_id:ascii-control-id:1..={MAX_CLIENT_REQUEST_ID_BYTES};task_ref:lower-sha256"
+                "closed:v2:optional-client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};task_ref:lower-sha256"
             )),
         ),
         (
             "task_output_schema".to_owned(),
             CanonicalValue::String(
-                "closed:schema_version:lattice.task.status.v2;status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;task_ref:lower-sha256;ledger_head_digest:lower-sha256;result_digest:lower-sha256|null;failure_stage:upper-underscore|null;failure_code:upper-underscore|null"
+                "closed:v2-legacy|v3-general-create-only;v2-status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;v2-task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;v3-status:SUBMITTED;v3-task_state:DRAFT;task_ref:lower-sha256;ledger_head_digest:lower-sha256;v2-result_digest:lower-sha256|null;v2-failure_stage:upper-underscore|null;v2-failure_code:upper-underscore|null;v3-result_digest:null;v3-failure_stage:null;v3-failure_code:null;v3:objective|project_id|project_name|project_snapshot_id"
                     .to_owned(),
             ),
         ),
@@ -1224,25 +1242,71 @@ impl DeliveryToolArguments {
 pub struct TaskSubmitArguments {
     client_request_id: String,
     intent: String,
+    objective: Option<String>,
+    project_id: Option<String>,
+    project_name: Option<String>,
 }
 
 impl TaskSubmitArguments {
     fn from_value(value: Option<&Value>) -> Option<Self> {
         let arguments = value?.as_object()?;
-        if arguments.len() != 2
-            || !arguments.contains_key("client_request_id")
-            || !arguments.contains_key("intent")
+        let client_request_id = arguments.get("client_request_id")?.as_str()?;
+        if !valid_client_request_id(client_request_id) {
+            return None;
+        }
+        let intent_value = arguments.get("intent").and_then(Value::as_str);
+        let objective_value = arguments.get("objective").and_then(Value::as_str);
+        if arguments.contains_key("intent") != intent_value.is_some()
+            || arguments.contains_key("objective") != objective_value.is_some()
+            || intent_value.is_some() == objective_value.is_some()
         {
             return None;
         }
-        let client_request_id = arguments.get("client_request_id")?.as_str()?;
-        let intent = arguments.get("intent")?.as_str()?;
-        if !valid_client_request_id(client_request_id) || intent != CONTROLLED_CODEX_CANARY_INTENT {
+        if intent_value == Some(CONTROLLED_CODEX_CANARY_INTENT) {
+            if arguments.len() != 2
+                || arguments
+                    .keys()
+                    .any(|key| !matches!(key.as_str(), "client_request_id" | "intent"))
+            {
+                return None;
+            }
+            return Some(Self {
+                client_request_id: client_request_id.to_owned(),
+                intent: CONTROLLED_CODEX_CANARY_INTENT.to_owned(),
+                objective: None,
+                project_id: None,
+                project_name: None,
+            });
+        }
+
+        let objective = objective_value.or(intent_value)?;
+        if !valid_task_objective(objective)
+            || arguments.len() > 3
+            || arguments.keys().any(|key| {
+                !matches!(
+                    key.as_str(),
+                    "client_request_id" | "intent" | "objective" | "project_id" | "project_name"
+                )
+            })
+        {
+            return None;
+        }
+        let project_id = arguments.get("project_id").and_then(Value::as_str);
+        let project_name = arguments.get("project_name").and_then(Value::as_str);
+        if arguments.contains_key("project_id") != project_id.is_some()
+            || arguments.contains_key("project_name") != project_name.is_some()
+            || (project_id.is_some() && project_name.is_some())
+            || project_id.is_some_and(|value| !valid_project_id(value))
+            || project_name.is_some_and(|value| !valid_project_name(value))
+        {
             return None;
         }
         Some(Self {
             client_request_id: client_request_id.to_owned(),
-            intent: intent.to_owned(),
+            intent: objective.to_owned(),
+            objective: Some(objective.to_owned()),
+            project_id: project_id.map(ToOwned::to_owned),
+            project_name: project_name.map(ToOwned::to_owned),
         })
     }
 
@@ -1257,12 +1321,37 @@ impl TaskSubmitArguments {
     pub fn intent(&self) -> &str {
         &self.intent
     }
+
+    /// Distinguishes the retained execution canary from a create-only objective.
+    #[must_use]
+    pub fn is_controlled_canary(&self) -> bool {
+        self.objective.is_none()
+    }
+
+    /// Returns the validated natural-language objective for create-only intake.
+    #[must_use]
+    pub fn objective(&self) -> Option<&str> {
+        self.objective.as_deref()
+    }
+
+    /// Returns an optional exact Control catalog identifier. It is a locator,
+    /// never a caller-supplied path or Registry authority claim.
+    #[must_use]
+    pub fn project_id(&self) -> Option<&str> {
+        self.project_id.as_deref()
+    }
+
+    /// Returns an optional exact Control catalog display-name selector.
+    #[must_use]
+    pub fn project_name(&self) -> Option<&str> {
+        self.project_name.as_deref()
+    }
 }
 
 /// Validated durable task reference accepted by the MCP transport boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskStatusArguments {
-    client_request_id: String,
+    client_request_id: Option<String>,
     task_ref: String,
 }
 
@@ -1360,27 +1449,32 @@ impl ForemanCheckpointArguments {
 impl TaskStatusArguments {
     fn from_value(value: Option<&Value>) -> Option<Self> {
         let arguments = value?.as_object()?;
-        if arguments.len() != 2
-            || !arguments.contains_key("client_request_id")
+        if !(arguments.len() == 1 || arguments.len() == 2)
             || !arguments.contains_key("task_ref")
+            || arguments
+                .keys()
+                .any(|key| !matches!(key.as_str(), "client_request_id" | "task_ref"))
         {
             return None;
         }
-        let client_request_id = arguments.get("client_request_id")?.as_str()?;
+        let client_request_id = arguments.get("client_request_id").and_then(Value::as_str);
         let task_ref = arguments.get("task_ref")?.as_str()?;
-        if !valid_client_request_id(client_request_id) || !valid_task_ref(task_ref) {
+        if arguments.contains_key("client_request_id") != client_request_id.is_some()
+            || client_request_id.is_some_and(|value| !valid_client_request_id(value))
+            || !valid_task_ref(task_ref)
+        {
             return None;
         }
         Some(Self {
-            client_request_id: client_request_id.to_owned(),
+            client_request_id: client_request_id.map(ToOwned::to_owned),
             task_ref: task_ref.to_owned(),
         })
     }
 
-    /// Returns the idempotency key that owns this task reference.
+    /// Returns the optional legacy idempotency key used to reconstruct a canary.
     #[must_use]
-    pub fn client_request_id(&self) -> &str {
-        &self.client_request_id
+    pub fn client_request_id(&self) -> Option<&str> {
+        self.client_request_id.as_deref()
     }
 
     /// Returns the exact lowercase SHA-256 task reference.
@@ -1392,6 +1486,7 @@ impl TaskStatusArguments {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TaskPublicStatus {
+    schema_version: String,
     status: String,
     task_state: String,
     task_ref: String,
@@ -1399,33 +1494,46 @@ struct TaskPublicStatus {
     result_digest: Option<String>,
     failure_stage: Option<String>,
     failure_code: Option<String>,
+    objective: Option<String>,
+    project_id: Option<String>,
+    project_name: Option<String>,
+    project_snapshot_id: Option<String>,
 }
 
 impl TaskPublicStatus {
     fn from_value(value: &Value) -> Option<Self> {
         let object = value.as_object()?;
-        if object.len() != 8
-            || ![
-                "schema_version",
-                "status",
-                "task_state",
-                "task_ref",
-                "ledger_head_digest",
-                "result_digest",
-                "failure_stage",
-                "failure_code",
-            ]
-            .iter()
-            .all(|field| object.contains_key(*field))
+        let schema_version = object.get("schema_version")?.as_str()?;
+        let required = [
+            "schema_version",
+            "status",
+            "task_state",
+            "task_ref",
+            "ledger_head_digest",
+            "result_digest",
+            "failure_stage",
+            "failure_code",
+        ];
+        if !required.iter().all(|field| object.contains_key(*field)) {
+            return None;
+        }
+        let general_fields = [
+            "objective",
+            "project_id",
+            "project_name",
+            "project_snapshot_id",
+        ];
+        let is_general = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V3;
+        if (schema_version != TASK_PUBLIC_STATUS_SCHEMA_V2 && !is_general)
+            || object.len() != if is_general { 12 } else { 8 }
+            || general_fields
+                .iter()
+                .any(|field| object.contains_key(*field) != is_general)
         {
             return None;
         }
-
-        if object.get("schema_version")?.as_str()? != TASK_PUBLIC_STATUS_SCHEMA_VERSION {
-            return None;
-        }
         let status = object.get("status")?.as_str()?;
-        if !TASK_PUBLIC_STATUS_VALUES.contains(&status) {
+        if !TASK_PUBLIC_STATUS_VALUES.contains(&status) || (!is_general && status == "SUBMITTED") {
             return None;
         }
         let task_state = object.get("task_state")?.as_str()?;
@@ -1447,8 +1555,39 @@ impl TaskPublicStatus {
         if failure_stage.is_some() != failure_code.is_some() {
             return None;
         }
+        if is_general
+            && (status != "SUBMITTED"
+                || task_state != "DRAFT"
+                || result_digest.is_some()
+                || failure_stage.is_some()
+                || failure_code.is_some())
+        {
+            return None;
+        }
+        let (objective, project_id, project_name, project_snapshot_id) = if is_general {
+            let objective = object.get("objective")?.as_str()?;
+            let project_id = object.get("project_id")?.as_str()?;
+            let project_name = object.get("project_name")?.as_str()?;
+            let project_snapshot_id = object.get("project_snapshot_id")?.as_str()?;
+            if !valid_task_objective(objective)
+                || !valid_project_id(project_id)
+                || !valid_project_name(project_name)
+                || !valid_project_snapshot_id(project_snapshot_id)
+            {
+                return None;
+            }
+            (
+                Some(objective.to_owned()),
+                Some(project_id.to_owned()),
+                Some(project_name.to_owned()),
+                Some(project_snapshot_id.to_owned()),
+            )
+        } else {
+            (None, None, None, None)
+        };
 
         Some(Self {
+            schema_version: schema_version.to_owned(),
             status: status.to_owned(),
             task_state: task_state.to_owned(),
             task_ref: task_ref.to_owned(),
@@ -1456,12 +1595,16 @@ impl TaskPublicStatus {
             result_digest,
             failure_stage,
             failure_code,
+            objective,
+            project_id,
+            project_name,
+            project_snapshot_id,
         })
     }
 
     fn into_value(self) -> Value {
-        json!({
-            "schema_version": TASK_PUBLIC_STATUS_SCHEMA_VERSION,
+        let mut value = json!({
+            "schema_version": self.schema_version,
             "status": self.status,
             "task_state": self.task_state,
             "task_ref": self.task_ref,
@@ -1469,7 +1612,23 @@ impl TaskPublicStatus {
             "result_digest": self.result_digest,
             "failure_stage": self.failure_stage,
             "failure_code": self.failure_code,
-        })
+        });
+        if let (Some(objective), Some(project_id), Some(project_name), Some(project_snapshot_id)) = (
+            self.objective,
+            self.project_id,
+            self.project_name,
+            self.project_snapshot_id,
+        ) {
+            let object = value.as_object_mut().expect("task status object");
+            object.insert("objective".to_owned(), Value::String(objective));
+            object.insert("project_id".to_owned(), Value::String(project_id));
+            object.insert("project_name".to_owned(), Value::String(project_name));
+            object.insert(
+                "project_snapshot_id".to_owned(),
+                Value::String(project_snapshot_id),
+            );
+        }
+        value
     }
 }
 
@@ -2260,34 +2419,75 @@ fn delivery_arguments_schema() -> Value {
 
 fn task_submit_arguments_schema() -> Value {
     json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "client_request_id": client_request_id_schema(),
+                    "intent": {
+                        "type": "string",
+                        "enum": [CONTROLLED_CODEX_CANARY_INTENT]
+                    }
+                },
+                "required": ["client_request_id", "intent"],
+                "additionalProperties": false
+            },
+            general_task_submit_schema("objective", false),
+            general_task_submit_schema("intent", true)
+        ]
+    })
+}
+
+fn client_request_id_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_CLIENT_REQUEST_ID_BYTES,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
+        "description": "Bounded ASCII idempotency key without recognized secret material."
+    })
+}
+
+fn general_task_submit_schema(objective_field: &str, excludes_canary: bool) -> Value {
+    let mut schema = json!({
         "type": "object",
         "properties": {
-            "client_request_id": {
+            "client_request_id": client_request_id_schema(),
+            (objective_field): {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": MAX_CLIENT_REQUEST_ID_BYTES,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+                "maxLength": MAX_TASK_OBJECTIVE_CHARS,
+                "description": "NFC text without leading/trailing whitespace, control characters, or secret material."
             },
-            "intent": {
+            "project_id": {
                 "type": "string",
-                "enum": [CONTROLLED_CODEX_CANARY_INTENT]
+                "minLength": 2,
+                "maxLength": MAX_PROJECT_ID_BYTES,
+                "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "project_name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_PROJECT_NAME_CHARS,
+                "description": "Exact NFC Control catalog display name."
             }
         },
-        "required": ["client_request_id", "intent"],
+        "required": ["client_request_id", objective_field],
+        "not": {"required": ["project_id", "project_name"]},
         "additionalProperties": false
-    })
+    });
+    if excludes_canary {
+        schema["properties"][objective_field]["not"] =
+            json!({"enum": [CONTROLLED_CODEX_CANARY_INTENT]});
+    }
+    schema
 }
 
 fn task_status_arguments_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "client_request_id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": MAX_CLIENT_REQUEST_ID_BYTES,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-            },
+            "client_request_id": client_request_id_schema(),
             "task_ref": {
                 "type": "string",
                 "minLength": 64,
@@ -2295,7 +2495,7 @@ fn task_status_arguments_schema() -> Value {
                 "pattern": "^[0-9a-f]{64}$"
             }
         },
-        "required": ["client_request_id", "task_ref"],
+        "required": ["task_ref"],
         "additionalProperties": false
     })
 }
@@ -2410,42 +2610,35 @@ fn foreman_checkpoint_output_schema() -> Value {
 
 fn task_public_status_schema() -> Value {
     json!({
-        "type": "object",
-        "properties": {
+        "oneOf": [
+            task_public_status_variant_schema(false),
+            task_public_status_variant_schema(true)
+        ]
+    })
+}
+
+fn task_public_status_variant_schema(general: bool) -> Value {
+    let mut properties = json!({
             "schema_version": {
                 "type": "string",
-                "enum": [TASK_PUBLIC_STATUS_SCHEMA_VERSION]
+                "enum": [if general { TASK_PUBLIC_STATUS_SCHEMA_V3 } else { TASK_PUBLIC_STATUS_SCHEMA_V2 }]
             },
             "status": {
                 "type": "string",
-                "enum": TASK_PUBLIC_STATUS_VALUES
+                "enum": if general {
+                    Value::Array(TASK_PUBLIC_STATUS_VALUES.iter().map(|value| json!(value)).collect())
+                } else {
+                    json!(["NOT_SUBMITTED", "RECONCILIATION_REQUIRED", "FAILED", "COMPLETED"])
+                }
             },
             "task_state": {
                 "type": "string",
                 "enum": TASK_PUBLIC_STATE_VALUES
             },
-            "task_ref": {
-                "type": "string",
-                "minLength": 64,
-                "maxLength": 64,
-                "pattern": "^[0-9a-f]{64}$"
-            },
-            "ledger_head_digest": {
-                "type": "string",
-                "minLength": 64,
-                "maxLength": 64,
-                "pattern": "^[0-9a-f]{64}$"
-            },
+            "task_ref": lower_sha256_schema(),
+            "ledger_head_digest": lower_sha256_schema(),
             "result_digest": {
-                "anyOf": [
-                    {
-                        "type": "string",
-                        "minLength": 64,
-                        "maxLength": 64,
-                        "pattern": "^[0-9a-f]{64}$"
-                    },
-                    {"type": "null"}
-                ]
+                "anyOf": [lower_sha256_schema(), {"type": "null"}]
             },
             "failure_stage": {
                 "anyOf": [
@@ -2459,18 +2652,65 @@ fn task_public_status_schema() -> Value {
                     {"type": "null"}
                 ]
             }
-        },
-        "required": [
-            "schema_version",
-            "status",
-            "task_state",
-            "task_ref",
-            "ledger_head_digest",
-            "result_digest",
-            "failure_stage",
-            "failure_code"
-        ],
+    });
+    if general {
+        properties["status"] = json!({"type": "string", "enum": ["SUBMITTED"]});
+        properties["task_state"] = json!({"type": "string", "enum": ["DRAFT"]});
+        properties["result_digest"] = json!({"type": "null"});
+        properties["failure_stage"] = json!({"type": "null"});
+        properties["failure_code"] = json!({"type": "null"});
+    }
+    let mut required = vec![
+        "schema_version",
+        "status",
+        "task_state",
+        "task_ref",
+        "ledger_head_digest",
+        "result_digest",
+        "failure_stage",
+        "failure_code",
+    ];
+    if general {
+        let object = properties
+            .as_object_mut()
+            .expect("status properties object");
+        object.insert(
+            "objective".to_owned(),
+            json!({"type": "string", "minLength": 1, "maxLength": MAX_TASK_OBJECTIVE_CHARS}),
+        );
+        object.insert(
+            "project_id".to_owned(),
+            json!({"type": "string", "minLength": 2, "maxLength": MAX_PROJECT_ID_BYTES, "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"}),
+        );
+        object.insert(
+            "project_name".to_owned(),
+            json!({"type": "string", "minLength": 1, "maxLength": MAX_PROJECT_NAME_CHARS}),
+        );
+        object.insert(
+            "project_snapshot_id".to_owned(),
+            json!({"type": "string", "minLength": 1, "maxLength": MAX_PROJECT_SNAPSHOT_ID_BYTES, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,158}$"}),
+        );
+        required.extend([
+            "objective",
+            "project_id",
+            "project_name",
+            "project_snapshot_id",
+        ]);
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
         "additionalProperties": false
+    })
+}
+
+fn lower_sha256_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 64,
+        "maxLength": 64,
+        "pattern": "^[0-9a-f]{64}$"
     })
 }
 
@@ -2499,14 +2739,14 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             json!({
                 "name": TASK_SUBMIT_TOOL,
                 "title": "Submit a bounded LATTICE task",
-                "description": "Submits the one approved high-level intent through the existing LATTICE service.",
+                "description": "Creates a durable general LATTICE task for one registered project, or runs the retained controlled canary. General creation does not start an Agent or grant execution, merge, deployment, payment, or external-action authority.",
                 "inputSchema": task_submit_arguments_schema(),
                 "outputSchema": task_public_status_schema()
             }),
             json!({
                 "name": TASK_STATUS_TOOL,
                 "title": "Read bounded LATTICE task status",
-                "description": "Reads durable status for one validated LATTICE task reference.",
+                "description": "Reads durable status for one validated task reference. General tasks need only task_ref; client_request_id remains optional for legacy canary compatibility.",
                 "inputSchema": task_status_arguments_schema(),
                 "outputSchema": task_public_status_schema()
             }),
@@ -2766,13 +3006,54 @@ fn valid_logging_level(value: &Value) -> bool {
 }
 
 fn valid_client_request_id(value: &str) -> bool {
+    valid_task_ingress_client_request_id(value)
+}
+
+fn valid_task_objective(value: &str) -> bool {
     let bytes = value.as_bytes();
     !bytes.is_empty()
-        && bytes.len() <= MAX_CLIENT_REQUEST_ID_BYTES
+        && bytes.len() <= MAX_TASK_OBJECTIVE_BYTES
+        && value.chars().count() <= MAX_TASK_OBJECTIVE_CHARS
+        && value.trim() == value
+        && is_nfc(value)
+        && !value.chars().any(char::is_control)
+        && !task_submission_text_contains_secret(value)
+}
+
+fn valid_project_name(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_PROJECT_NAME_BYTES
+        && value.chars().count() <= MAX_PROJECT_NAME_CHARS
+        && value.trim() == value
+        && is_nfc(value)
+        && !value.chars().any(char::is_control)
+        && !task_submission_text_contains_secret(value)
+}
+
+fn valid_project_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (2..=MAX_PROJECT_ID_BYTES).contains(&bytes.len())
+        && bytes
+            .first()
+            .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        && bytes.iter().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(*byte, b'.' | b'_' | b'-')
+        })
+        && !task_submission_text_contains_secret(value)
+}
+
+fn valid_project_snapshot_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= MAX_PROJECT_SNAPSHOT_ID_BYTES
         && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
         && bytes
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'_' | b':' | b'-'))
+        && !task_submission_text_contains_secret(value)
 }
 
 fn valid_task_ref(value: &str) -> bool {

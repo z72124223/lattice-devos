@@ -1,12 +1,15 @@
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupError, V3BootstrapProfile, V3ExtensionTarget,
-    WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH, WRITER_LEASE_EXTENSION_SCHEMA_VERSION,
-    WRITER_LEASE_V1_EXTENSION_PATH, WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH,
-    WRITER_LEASE_V3_REBIND_PATH, WriterLeaseV3BridgeState, apply_v3_extension,
-    inspect_v3_bootstrap_profile, rebind_existing_v3_extension, rebind_v3_extension,
-    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
-    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
-    verify_embedded_v3_rebind_manifest, verify_writer_lease_v3_transition,
+    V4ExtensionTarget, WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH,
+    WRITER_LEASE_EXTENSION_SCHEMA_VERSION, WRITER_LEASE_V1_EXTENSION_PATH,
+    WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH, WRITER_LEASE_V3_REBIND_PATH,
+    WRITER_LEASE_V4_EXTENSION_PATH, WRITER_LEASE_V4_REBIND_PATH, WriterLeaseV3BridgeState,
+    WriterLeaseV4BridgeState, apply_v3_extension, apply_v4_extension, inspect_v3_bootstrap_profile,
+    rebind_existing_v3_extension, rebind_v3_extension, verify_embedded_extension_manifest,
+    verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
+    verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
+    verify_embedded_v4_extension_manifest, verify_embedded_v4_rebind_manifest,
+    verify_writer_lease_v3_transition, verify_writer_lease_v4_transition,
 };
 
 #[test]
@@ -15,6 +18,10 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
         &mut postgres::Client,
         &V3ExtensionTarget,
     ) -> Result<V3BootstrapProfile, ExtensionSetupError> = inspect_v3_bootstrap_profile;
+    assert_eq!(
+        format!("{:?}", V3BootstrapProfile::V7V4Current),
+        "V7V4Current"
+    );
 
     let setup = include_str!("../src/setup.rs");
     let inspector = setup
@@ -31,6 +38,8 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
         "verify_v3_bridge_profile",
         "verify_v3_bridge_pending_profile",
         "verify_v3_current_profile",
+        "verify_v4_bridge_profile",
+        "verify_v4_v7_current_profile",
         "verify_v3_rebind_boundary",
         "verify_replay_safe_history",
     ] {
@@ -52,6 +61,44 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
 }
 
 #[test]
+fn v4_profile_names_exact_store_v7_without_future_wildcards() {
+    let setup = include_str!("../src/setup.rs");
+    let extension = include_str!("../../../db/extensions/writer-lease/v4.sql");
+    let rebind = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
+    for required in [
+        "const V7_GLOBAL_MANIFEST_SHA256: &str",
+        "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c",
+        "G7MemoryV3WriterV4Current",
+        "V3BootstrapProfile::V7V4Current",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact v7 Writer profile {required}"
+        );
+    }
+    for required in [
+        "global_schema_version IN (6, 7)",
+        "ledger_ordinal = 7",
+        "global_schema_version = 7",
+        "1:INSTALLED:3:6,2:UPGRADED:4:6,3:REBOUND:4:7",
+        "w.global_manifest_sha256 = p_global_manifest_sha256",
+    ] {
+        assert!(
+            extension.contains(required),
+            "missing v7 extension constraint {required}"
+        );
+    }
+    assert!(rebind.contains("7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c"));
+    assert!(rebind.contains("writer_lease_rebind_v4"));
+    assert_eq!(extension.matches(")) IS NOT TRUE THEN").count(), 2);
+    assert_eq!(rebind.matches(") IS NOT TRUE THEN").count(), 2);
+    assert!(!extension.contains("global_schema_version >="));
+    assert!(!rebind.contains("current_schema_version >="));
+    assert!(!extension.contains("extension_schema_version = 5"));
+    assert!(!rebind.contains("current_schema_version IN"));
+}
+
+#[test]
 fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
     let _: fn(
         &mut postgres::Client,
@@ -65,6 +112,10 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
         &mut postgres::Client,
         &V3ExtensionTarget,
     ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = rebind_existing_v3_extension;
+    let _: fn(
+        &mut postgres::Client,
+        &V4ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = apply_v4_extension;
 
     let setup = include_str!("../src/setup.rs");
     for required in [
@@ -99,7 +150,7 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
         "writer_lease.writer_lease_heads",
         "$lattice_writer_lease_rebind_v3$",
         "GRANT USAGE ON SCHEMA writer_lease TO lattice_runtime",
-        "WHEN 4 THEN 5",
+        "SELECT CASE pg_catalog.count(*) WHEN 2 THEN 3 WHEN 4 THEN 5 END",
         "event_kind = 'REBOUND'",
     ] {
         assert!(
@@ -111,6 +162,24 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
     assert!(!sql.contains(
         "GRANT EXECUTE ON PROCEDURE writer_lease.writer_lease_rebind_v3() TO lattice_runtime"
     ));
+
+    let v4_rebind = verify_embedded_v4_rebind_manifest().expect("fixed v4 rebind bytes");
+    assert_eq!(v4_rebind.path(), WRITER_LEASE_V4_REBIND_PATH);
+    let v4_sql = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
+    for required in [
+        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v4()",
+        "$lattice_writer_lease_rebind_v4$",
+        "WHEN 2 THEN 3 WHEN 4 THEN 5 WHEN 6 THEN 7",
+        "writer_lease_bind_runtime_v4",
+        "writer_lease_load_for_update_v4",
+        ") IS NOT TRUE THEN",
+    ] {
+        assert!(
+            v4_sql.contains(required),
+            "missing v4 rebind boundary: {required}"
+        );
+    }
+    assert!(!v4_sql.contains("CREATE OR REPLACE"));
 }
 
 #[test]
@@ -174,7 +243,7 @@ fn v1_history_is_immutable_and_v2_is_the_current_append_only_successor() {
 }
 
 #[test]
-fn task087_v2_stays_frozen_and_v3_is_append_only_schema_v6_successor() {
+fn immutable_v3_remains_exact_schema_v5_v6_and_v4_is_the_v7_successor() {
     let v2 = verify_embedded_v2_extension_manifest().expect("frozen v2 manifest");
     assert_eq!(v2.path(), WRITER_LEASE_V2_EXTENSION_PATH);
     assert_eq!(v2.schema_version(), 2);
@@ -187,6 +256,15 @@ fn task087_v2_stays_frozen_and_v3_is_append_only_schema_v6_successor() {
     let v3 = verify_embedded_v3_extension_manifest().expect("Writer v3 manifest");
     assert_eq!(v3.path(), WRITER_LEASE_V3_EXTENSION_PATH);
     assert_eq!(v3.schema_version(), 3);
+    assert_eq!(v3.byte_length(), 17_568);
+    assert_eq!(
+        v3.sql_sha256().as_str(),
+        "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0"
+    );
+    assert_eq!(
+        v3.manifest_sha256().as_str(),
+        "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4"
+    );
     let sql = std::str::from_utf8(v3.bytes()).expect("UTF-8 v3 SQL");
     for required in [
         "extension_schema_version = 2",
@@ -209,6 +287,24 @@ fn task087_v2_stays_frozen_and_v3_is_append_only_schema_v6_successor() {
     assert_eq!(sql.matches("CREATE FUNCTION writer_lease.").count(), 2);
     assert!(!sql.contains("GRANT USAGE ON SCHEMA writer_lease"));
     assert!(!sql.contains("GRANT EXECUTE ON FUNCTION writer_lease"));
+    assert!(!sql.contains("global_schema_version = 7"));
+
+    let v4 = verify_embedded_v4_extension_manifest().expect("Writer v4 manifest");
+    assert_eq!(v4.path(), WRITER_LEASE_V4_EXTENSION_PATH);
+    assert_eq!(v4.schema_version(), 4);
+    let v4_sql = std::str::from_utf8(v4.bytes()).expect("UTF-8 v4 SQL");
+    for required in [
+        "extension_schema_version = 4",
+        "global_schema_version IN (6, 7)",
+        "writer_lease_bind_runtime_v4",
+        "writer_lease_load_for_update_v4",
+        "LATTICE_WRITER_LEASE_SCHEMA_V4",
+    ] {
+        assert!(v4_sql.contains(required), "missing v4 boundary: {required}");
+    }
+    assert_eq!(v4_sql.matches("CREATE FUNCTION writer_lease.").count(), 2);
+    assert!(!v4_sql.contains("CREATE OR REPLACE"));
+    assert!(!v4_sql.contains("global_schema_version >="));
 }
 
 #[test]
@@ -231,12 +327,21 @@ fn task087_v3_transition_is_closed_ordered_idempotent_and_runtime_quarantined() 
         .expect("exact v3 rebind");
     assert_eq!(current, WriterLeaseV3BridgeState::Current);
     assert_eq!(current.runtime_function_count(), 7);
+    assert!(
+        verify_writer_lease_v3_transition(
+            current,
+            7,
+            "1:INSTALLED,2:UPGRADED,3:REBOUND,4:REBOUND",
+        )
+        .is_err(),
+        "immutable v3 must not accept schema v7"
+    );
 
     for (state, generation, ledger) in [
         (WriterLeaseV3BridgeState::V2Current, 6, "1:INSTALLED"),
         (
             WriterLeaseV3BridgeState::Bridge,
-            7,
+            8,
             "1:INSTALLED,2:UPGRADED",
         ),
         (WriterLeaseV3BridgeState::Bridge, 6, "1:INSTALLED,3:REBOUND"),
@@ -249,6 +354,44 @@ fn task087_v3_transition_is_closed_ordered_idempotent_and_runtime_quarantined() 
         assert!(
             verify_writer_lease_v3_transition(state, generation, ledger).is_err(),
             "cross-generation or reordered replay must fail"
+        );
+    }
+}
+
+#[test]
+fn v4_transition_accepts_only_old_v3_v6_to_exact_v4_v7() {
+    let bridge = verify_writer_lease_v4_transition(
+        WriterLeaseV4BridgeState::V3Current,
+        6,
+        "1:INSTALLED,2:UPGRADED,3:REBOUND",
+    )
+    .expect("old v3 current to v4 bridge");
+    assert_eq!(bridge, WriterLeaseV4BridgeState::Bridge);
+    assert_eq!(bridge.runtime_function_count(), 0);
+    assert_eq!(
+        verify_writer_lease_v4_transition(
+            bridge,
+            6,
+            "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED",
+        )
+        .expect("exact v4 bridge retry"),
+        bridge
+    );
+    let current = verify_writer_lease_v4_transition(
+        bridge,
+        7,
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND",
+    )
+    .expect("exact v4 schema-v7 rebind");
+    assert_eq!(current, WriterLeaseV4BridgeState::Current);
+    assert_eq!(current.runtime_function_count(), 7);
+    for (generation, ledger) in [
+        (7, "1:INSTALLED,2:UPGRADED,3:REBOUND,4:REBOUND"),
+        (8, "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND"),
+    ] {
+        assert!(
+            verify_writer_lease_v4_transition(bridge, generation, ledger).is_err(),
+            "skipped upgrade or future generation must fail"
         );
     }
 }

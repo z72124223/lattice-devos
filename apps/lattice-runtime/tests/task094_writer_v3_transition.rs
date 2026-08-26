@@ -5,13 +5,22 @@
 
 use std::env;
 
-use lattice_contracts::ContentDigest;
+use lattice_contracts::{
+    ContentDigest, DaemonEpoch, ProjectId, ProjectSnapshotId, RuntimeAdmissionMode, RuntimeKind,
+    StoreAuthorityHead, StoreAuthorityRevision, StoreDaemonInstanceId, TaskId,
+    TaskLedgerStreamIdentity,
+};
 use lattice_postgres_store::{
-    DatabaseRole, MigrationApplyOutcome, MigrationTarget, apply_migrations, verify_postgres_schema,
+    DatabaseRole, MigrationApplyOutcome, MigrationTarget, PostgresTaskLedger, apply_migrations,
+    verify_postgres_schema,
 };
 use lattice_postgres_writer_lease::{
-    ExtensionApplyOutcome, ExtensionTarget, V3ExtensionTarget, apply_extension, apply_v3_extension,
-    rebind_v3_extension,
+    ExtensionApplyOutcome, ExtensionTarget, V3BootstrapProfile, V3ExtensionTarget,
+    V4ExtensionTarget, apply_extension, apply_v3_extension, apply_v4_extension,
+    inspect_v3_bootstrap_profile,
+};
+use lattice_task_ledger::{
+    ActorId, AppendCommand, CommandId, CorrelationId, ReasonCode, TaskIngressClaim,
 };
 use postgres::config::SslMode;
 use postgres::error::SqlState;
@@ -19,6 +28,7 @@ use postgres::{Client, Config, IsolationLevel, NoTls};
 
 const REQUIRED_APPLICATION_NAME: &str = "lattice-devos-task019";
 const HARNESS_ROLE: &str = "task019_harness";
+const TASK_SUBMIT_INGRESS_ID: &str = "lattice_task_submit.v1";
 const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 const CODEBASE_MEMORY_V2_PATH: &str = "db/extensions/codebase-memory/v2.sql";
@@ -120,6 +130,290 @@ impl LiveConfig {
     }
 }
 
+fn task094_digest(value: char) -> ContentDigest {
+    ContentDigest::from_sha256(value.to_string().repeat(64)).expect("TASK094_DIGEST")
+}
+
+fn task094_digest_bytes(value: &ContentDigest) -> Vec<u8> {
+    value
+        .as_str()
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).expect("TASK094_HEX_UTF8");
+            u8::from_str_radix(text, 16).expect("TASK094_HEX_BYTE")
+        })
+        .collect()
+}
+
+fn task094_store_authority() -> StoreAuthorityHead {
+    StoreAuthorityHead::new(
+        RuntimeKind::Live,
+        StoreDaemonInstanceId::new("task094-historical-canary").expect("TASK094_DAEMON"),
+        DaemonEpoch::new(94).expect("TASK094_EPOCH"),
+        RuntimeAdmissionMode::Active,
+        StoreAuthorityRevision::new(94).expect("TASK094_REVISION"),
+        task094_digest('a'),
+        task094_digest('b'),
+    )
+    .expect("TASK094_AUTHORITY")
+}
+
+fn set_task094_runtime_admission(client: &mut Client, active: bool) {
+    if active {
+        let authority = task094_store_authority();
+        let epoch = i64::try_from(authority.daemon_epoch().get()).expect("TASK094_EPOCH_I64");
+        let revision = i64::try_from(authority.revision().get()).expect("TASK094_REVISION_I64");
+        assert_eq!(
+            client
+                .execute(
+                    "UPDATE ONLY control.runtime_admission SET admission_mode='ACTIVE', \
+                     daemon_instance_id=$1, daemon_epoch=$2, authority_revision=$3, \
+                     observation_digest=$4::bytea, authority_head_digest=$5::bytea, \
+                     updated_at=pg_catalog.clock_timestamp() WHERE singleton",
+                    &[
+                        &authority.daemon_instance_id().as_str(),
+                        &epoch,
+                        &revision,
+                        &task094_digest_bytes(authority.observation_digest()),
+                        &task094_digest_bytes(authority.head_digest()),
+                    ],
+                )
+                .expect("TASK094_ACTIVATE_RUNTIME"),
+            1
+        );
+    } else {
+        assert_eq!(
+            client
+                .execute(
+                    "UPDATE ONLY control.runtime_admission SET admission_mode='STOPPED', \
+                     daemon_instance_id=NULL, daemon_epoch=NULL, authority_revision=0, \
+                     observation_digest=NULL, authority_head_digest=NULL, \
+                     updated_at=pg_catalog.clock_timestamp() WHERE singleton",
+                    &[],
+                )
+                .expect("TASK094_STOP_RUNTIME"),
+            1
+        );
+    }
+}
+
+fn persist_historical_canary_before_v4(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+    migrator: &mut Client,
+) -> TaskIngressClaim {
+    let retained_writer = migrator
+        .query_one(
+            "SELECT extension_schema_version, extension_sql_sha256::text, \
+                    extension_manifest_sha256::text, global_schema_version \
+               FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton",
+            &[],
+        )
+        .expect("TASK094_RETAINED_WRITER_V3_IDENTITY");
+    assert_eq!(retained_writer.get::<_, i16>(0), 3);
+    assert_eq!(
+        retained_writer.get::<_, String>(1),
+        "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0"
+    );
+    assert_eq!(
+        retained_writer.get::<_, String>(2),
+        "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4"
+    );
+    assert_eq!(retained_writer.get::<_, i16>(3), 6);
+
+    set_task094_runtime_admission(migrator, true);
+    let client_request_id = "task094-historical-canary";
+    let identity = TaskLedgerStreamIdentity::new(
+        ProjectId::new("task094-historical-project").expect("TASK094_PROJECT"),
+        ProjectSnapshotId::new("task094-historical-snapshot").expect("TASK094_SNAPSHOT"),
+        TaskId::new("TASK-094-HISTORICAL-CANARY").expect("TASK094_TASK"),
+        "1",
+        task094_digest('7'),
+        "TWD",
+    )
+    .expect("TASK094_IDENTITY");
+    let vacant = lattice_task_ledger::VerifiedStream::vacant(identity, RuntimeKind::Live)
+        .expect("TASK094_VACANT_STREAM");
+    let command = AppendCommand::new_autonomy_required_task_created(
+        vacant.head().clone(),
+        CommandId::new(format!("mcp-submit:{client_request_id}")).expect("TASK094_COMMAND_ID"),
+        CorrelationId::new("task094-historical-canary").expect("TASK094_CORRELATION"),
+        "2026-08-26T00:00:00Z",
+        ActorId::new("lattice-runtime").expect("TASK094_ACTOR"),
+        ReasonCode::new("TASK038_TASK_ACCEPTED").expect("TASK094_REASON"),
+        task094_digest('8'),
+        None,
+    )
+    .expect("TASK094_HISTORICAL_COMMAND");
+    let claim = TaskIngressClaim::controlled_canary(
+        TASK_SUBMIT_INGRESS_ID,
+        client_request_id,
+        vacant.head().stream_id().clone(),
+    )
+    .expect("TASK094_HISTORICAL_CLAIM");
+    let mut ledger = PostgresTaskLedger::new(
+        config.role_client(
+            target.database_name(),
+            DatabaseRole::Runtime,
+            REQUIRED_APPLICATION_NAME,
+        ),
+        target,
+    )
+    .expect("TASK094_V6_LEDGER");
+    ledger
+        .execute(command, task094_store_authority())
+        .expect("TASK094_PERSIST_HISTORICAL_CANARY");
+    drop(ledger);
+
+    let mut admin = config.connect(target.database_name(), "lattice-devos-task094-history");
+    assert_eq!(
+        admin
+            .execute(
+                "UPDATE ONLY control.task_ledger_events \
+                    SET action_id='CONTROLLED_CODEX_CANARY' \
+                  WHERE stream_id=$1::bytea AND sequence=1",
+                &[&task094_digest_bytes(claim.stream_id())],
+            )
+            .expect("TASK094_RETAIN_HISTORICAL_ACTION"),
+        1
+    );
+    set_task094_runtime_admission(migrator, false);
+    claim
+}
+
+fn prove_historical_canary_claim_backfill(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+    migrator: &mut Client,
+    claim: &TaskIngressClaim,
+) {
+    set_task094_runtime_admission(migrator, true);
+    let mut ledger = PostgresTaskLedger::new(
+        config.role_client(
+            target.database_name(),
+            DatabaseRole::Runtime,
+            REQUIRED_APPLICATION_NAME,
+        ),
+        target,
+    )
+    .expect("TASK094_V7_LEDGER");
+    let loaded = ledger
+        .load_ingress_claim_by_request(TASK_SUBMIT_INGRESS_ID, claim.client_request_id())
+        .expect("TASK094_LOAD_HISTORICAL_CLAIM")
+        .expect("TASK094_HISTORICAL_CLAIM_PRESENT");
+    assert_eq!(&loaded, claim);
+    println!("TASK094_HISTORICAL_CANARY_BACKFILL_PASS");
+}
+
+fn rewrite_historical_canary_command_id(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+    claim: &TaskIngressClaim,
+    expected_command_id: &str,
+    replacement_command_id: &str,
+) {
+    let mut admin = config.connect(
+        target.database_name(),
+        "lattice-devos-task094-history-corruption",
+    );
+    let mut transaction = admin
+        .transaction()
+        .expect("TASK094_HISTORY_REWRITE_TRANSACTION");
+    transaction
+        .batch_execute("SET LOCAL session_replication_role = replica")
+        .expect("TASK094_HISTORY_REWRITE_DISABLE_FK_TRIGGERS");
+    let stream_id = task094_digest_bytes(claim.stream_id());
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE ONLY control.task_ledger_commands SET command_id=$1 \
+                 WHERE stream_id=$2::bytea AND command_id=$3",
+                &[&replacement_command_id, &stream_id, &expected_command_id],
+            )
+            .expect("TASK094_HISTORY_REWRITE_COMMAND"),
+        1
+    );
+    assert_eq!(
+        transaction
+            .execute(
+                "UPDATE ONLY control.task_ledger_events SET command_id=$1 \
+                 WHERE stream_id=$2::bytea AND sequence=1 AND command_id=$3",
+                &[&replacement_command_id, &stream_id, &expected_command_id],
+            )
+            .expect("TASK094_HISTORY_REWRITE_EVENT"),
+        1
+    );
+    transaction
+        .commit()
+        .expect("TASK094_HISTORY_REWRITE_COMMIT");
+}
+
+fn prove_historical_secret_client_migration_rejected(
+    config: &LiveConfig,
+    target: &MigrationTarget,
+    migrator: &mut Client,
+    claim: &TaskIngressClaim,
+) {
+    let original_command_id = format!("mcp-submit:{}", claim.client_request_id());
+    let rejected_command_id = "mcp-submit:secret:value";
+    rewrite_historical_canary_command_id(
+        config,
+        target,
+        claim,
+        &original_command_id,
+        rejected_command_id,
+    );
+    let failure = apply_migrations(migrator, target)
+        .expect_err("TASK094_SECRET_SHAPED_HISTORICAL_CLIENT_ID_MUST_REJECT_V7");
+    assert_eq!(
+        failure.kind().code(),
+        "STORE_MIGRATION_TRANSACTION_FAILED",
+        "TASK094_SECRET_SHAPED_HISTORY_FAILURE_KIND"
+    );
+    let retained = migrator
+        .query_one(
+            "SELECT \
+                (SELECT current_schema_version FROM ONLY control.schema_compatibility \
+                  WHERE singleton), \
+                (SELECT count(*)::bigint FROM ONLY control.migration_history \
+                  WHERE ordinal=8), \
+                (SELECT global_schema_version FROM ONLY \
+                    writer_lease.writer_lease_extension_identity WHERE singleton)",
+            &[],
+        )
+        .expect("TASK094_SECRET_SHAPED_HISTORY_ROLLBACK_STATE");
+    assert_eq!(retained.get::<_, i16>(0), 6);
+    assert_eq!(retained.get::<_, i64>(1), 0);
+    assert_eq!(retained.get::<_, i16>(2), 6);
+    rewrite_historical_canary_command_id(
+        config,
+        target,
+        claim,
+        rejected_command_id,
+        &original_command_id,
+    );
+    let restored = migrator
+        .query_one(
+            "SELECT \
+                (SELECT count(*)::bigint FROM ONLY control.task_ledger_commands \
+                  WHERE stream_id=$1::bytea AND command_id=$2), \
+                (SELECT count(*)::bigint FROM ONLY control.task_ledger_events \
+                  WHERE stream_id=$1::bytea AND sequence=1 AND command_id=$2), \
+                (SELECT current_schema_version FROM ONLY control.schema_compatibility \
+                  WHERE singleton)",
+            &[
+                &task094_digest_bytes(claim.stream_id()),
+                &original_command_id,
+            ],
+        )
+        .expect("TASK094_RESTORED_HISTORY_AFTER_SECRET_REJECTION");
+    assert_eq!(restored.get::<_, i64>(0), 1);
+    assert_eq!(restored.get::<_, i64>(1), 1);
+    assert_eq!(restored.get::<_, i16>(2), 6);
+    println!("TASK094_HISTORICAL_SECRET_CLIENT_MIGRATION_REJECTION_PASS");
+}
+
 #[test]
 fn task094_writer_v3_transition_composition() {
     let Some(config) = LiveConfig::from_environment() else {
@@ -168,8 +462,11 @@ fn task094_writer_v3_transition_composition() {
     )
     .expect("TASK094_WRITER_V2_TARGET");
     let writer_v3_target =
-        V3ExtensionTarget::new(target.database_name().to_owned(), database_identity)
+        V3ExtensionTarget::new(target.database_name().to_owned(), database_identity.clone())
             .expect("TASK094_WRITER_V3_TARGET");
+    let writer_v4_target =
+        V4ExtensionTarget::new(target.database_name().to_owned(), database_identity)
+            .expect("TASK094_WRITER_V4_TARGET");
     let mut migrator = config.role_client(
         target.database_name(),
         DatabaseRole::Migrator,
@@ -224,16 +521,64 @@ fn task094_writer_v3_transition_composition() {
     let evidence = verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
         .expect("TASK094_STORE_V6_SCHEMA_VERIFY");
     assert_eq!(evidence.schema_version(), 6);
+    let historical_claim = persist_historical_canary_before_v4(&config, &target, &mut migrator);
+    println!("TASK094_STAGE_WRITER_V4_BRIDGE_ENTER");
     assert_eq!(
-        apply_migrations(&mut migrator, &target).expect("TASK094_STORE_V6_RETRY_FAILED"),
+        apply_v4_extension(&mut migrator, &writer_v4_target).expect("TASK094_WRITER_V4_BRIDGE"),
+        ExtensionApplyOutcome::Bridged
+    );
+    assert_eq!(
+        inspect_v3_bootstrap_profile(&mut migrator, &writer_v3_target)
+            .expect("TASK094_WRITER_V4_BRIDGE_PROFILE"),
+        V3BootstrapProfile::V6V4Bridge
+    );
+    println!("TASK094_STAGE_WRITER_V4_BRIDGE_PASS");
+    prove_historical_secret_client_migration_rejected(
+        &config,
+        &target,
+        &mut migrator,
+        &historical_claim,
+    );
+    assert_eq!(
+        apply_migrations(&mut migrator, &target).expect("TASK094_STORE_V7_FAILED"),
+        MigrationApplyOutcome::Applied {
+            executable_count: 1
+        },
+        "TASK094_EXACT_V6_TO_V7_OUTCOME"
+    );
+    let evidence = verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
+        .expect("TASK094_STORE_V7_SCHEMA_VERIFY");
+    assert_eq!(evidence.schema_version(), 7);
+    assert_eq!(
+        apply_migrations(&mut migrator, &target).expect("TASK094_STORE_V7_RETRY_FAILED"),
         MigrationApplyOutcome::AlreadyCurrent
     );
+    migrator
+        .batch_execute("CALL writer_lease.writer_lease_rebind_v4()")
+        .expect("TASK094_WRITER_V4_V7_REBIND_RETRY");
     assert_eq!(
-        rebind_v3_extension(&mut migrator, &writer_v3_target)
-            .expect("TASK094_WRITER_V3_REBIND_RETRY"),
-        ExtensionApplyOutcome::AlreadyCurrent
+        inspect_v3_bootstrap_profile(&mut migrator, &writer_v3_target)
+            .expect("TASK094_WRITER_V4_V7_PROFILE"),
+        V3BootstrapProfile::V7V4Current
     );
-    println!("TASK094_STAGE_STORE_V6_PASS");
+    prove_historical_canary_claim_backfill(&config, &target, &mut migrator, &historical_claim);
+    assert_eq!(
+        migrator
+            .execute(
+                "UPDATE ONLY control.task_ledger_events \
+                 SET action_id='CONTROLLED_CODEX_CANARY_AUTONOMY_V1' \
+                 WHERE stream_id=$1::bytea AND sequence=1 \
+                   AND action_id='CONTROLLED_CODEX_CANARY'",
+                &[&task094_digest_bytes(historical_claim.stream_id())],
+            )
+            .expect("TASK094_RESTORE_CANARY_ACTION_AFTER_HISTORICAL_PREFLIGHT"),
+        1
+    );
+    set_task094_runtime_admission(&mut migrator, false);
+    let final_evidence = verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
+        .expect("TASK094_FINAL_STOPPED_V7_SCHEMA_VERIFY");
+    assert_eq!(final_evidence.schema_version(), 7);
+    println!("TASK094_STAGE_STORE_V7_PASS");
     println!(
         "TASK094_TRANSITION_OK database_uuid={} manifest_sha256={}",
         evidence.database_uuid(),

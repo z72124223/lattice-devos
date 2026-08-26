@@ -15,7 +15,9 @@
 
 ## 穩定邊界
 
-- 沿用現有 Foreman snapshot 與 Task Ledger／PostgreSQL schema-v6，不新增資料表或第二份真相。
+- 沿用現有 Foreman snapshot 與 Task Ledger／PostgreSQL schema-v7；一般任務只在正式
+  Task Ledger owner 內新增 ingress claim、submission envelope 與 create-only stream，
+  不建立 Control 影子任務或第二份狀態機。
 - `blocker_ref` 新增封閉、可版本化的 dependency binding；舊字串 blocker 仍可 replay。
 - 子工作樹由既有 `GitWorkspace` 安全建立；MCP 不接受任意路徑或任意分支。
 - 新 `BLOCKED` 寫入及 `BLOCKED -> ACTIVE` 續接前，都要驗證工作樹身分、乾淨度、base/HEAD 祖先關係與已整合證據；不確定或衝突一律保留 `BLOCKED`。
@@ -27,9 +29,9 @@
 - 正式產品分支是 `product/lattice-control-mvp`。
 - 已核准的 `apps/lattice-control` Codex App Server 生命週期修復已完成本機
   實作與真實驗收；保留在產品分支的本機提交，不推送、合併或部署。
-- 本次 live audit 找不到能綁定一般修復的 LATTICE task 介面；唯一 submit
-  intent 是無關的 `CONTROLLED_CODEX_CANARY`，因此不重播 canary，也不捏造
-  task identity。
+- 第三階段讓 `lattice_task_submit` 接受自然語言 objective，透過 Control locator 與
+  PostgreSQL Project Registry 的明確橋接建立可由 `task_ref` 重啟查回的正式 `DRAFT`
+  任務；既有 canary 相容性保留，任務建檔與 Agent 執行／規格／tickets／部署分離。
 - 易變 SHA、PR、CI、安裝收據與 replay 歷史保留在 Git 與 LATTICE；完整
   驗收索引由 TASK-106 workflow ledger 提供，不複製成會過期的計畫狀態。
 

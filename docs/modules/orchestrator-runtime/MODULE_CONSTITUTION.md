@@ -1,10 +1,10 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.7
+version: 2.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -16,6 +16,9 @@ injected ports. `latticed`, not this module, is the application entry and
 composition root.
 It also owns the pure replay-first foreman checkpoint effect order; it does not
 own the snapshot, Ledger, Git observation, or Writer authority.
+Version 2.9 additionally owns the one-call create-only order for a verified
+general-task intake; that order uses a separate narrow port and deliberately
+cannot reach Task-Spec lifecycle or execution authority.
 
 ## Non-Goals
 
@@ -26,9 +29,9 @@ own the snapshot, Ledger, Git observation, or Writer authority.
 - Let an adapter append events, call another adapter, or own workflow order.
 - Call PostgreSQL, a process, filesystem, test command, or Git implementation
   directly.
-- Bypass Policy on any project-selectable, general, protected, approval-bound,
-  or externally effective task; or bypass scope, writer lease, review, or
-  release gates.
+- Treat create-only general intake as a Policy allow decision or use it to
+  bypass Policy on any progression, protected, approval-bound, or externally
+  effective task; or bypass scope, writer lease, review, or release gates.
 
 ## Owned Data
 
@@ -51,10 +54,21 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
 
 - Implement the typed `GatewayService` after codec/peer admission.
 - Route submit/plan/status/normal approval/rejection/task-stop only.
-- Revalidate Task Spec 2.1 through Task Domain before any task creation.
+- Revalidate Task Spec 2.1 through Task Domain before any executable
+  Task-Spec lifecycle creation or progression.
 - For MCP Task Submit, accept only the composition-built
-  `CONTROLLED_CODEX_CANARY` Task Spec and fixed server-derived peer; never
-  interpret raw model text or construct ingress authority.
+  `CONTROLLED_CODEX_CANARY` Task Spec or one composition-verified general-task
+  binding and fixed server-derived peer. Natural-language objective text is
+  validated and retained outside Orchestrator; this module never interprets it
+  as a command or constructs project/ingress authority.
+- For create-only general Task Submit, receive only a bounded
+  `GeneralTaskIntakeRequest` with the shared one-to-64-byte secret-free ingress
+  key plus `TaskIntakeLifecyclePort`; call only `admit`
+  and return its exact `DRAFT`/no-result admission. Exact replay uses that same
+  call. The binding and evidence have no Task Spec, currency, TaskKind, risk,
+  autonomy, Policy, Writer Lease, workspace, Codex/model, verification, Git,
+  payment, network, merge, deployment, or release surface and therefore
+  cannot start execution.
 - Preserve the one Task Spec digest across Gateway, Task Ledger,
   Writer Lease, Codex, verification/Git, status, and downstream evidence.
 - Persist intent before an external effect and outcome after it.
@@ -127,12 +141,15 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
     status have no in-memory authoritative fallback.
 16. Fresh-process Task Status replays PostgreSQL and cannot rerun Codex,
     verification, Git, Graphify, Hermes, or Memory.
-17. The fixed MCP actor may submit/status only the approved canary template;
-    it cannot plan, approve, reject, stop, acquire a lease directly, or control
-    a writable Codex thread.
-18. The canary cannot fabricate a live Project Registry fact or be generalized
-    into project selection/free-form work. Those surfaces require the normal
-    independently current Registry and Policy composition first.
+17. The fixed MCP actor may submit/status the approved canary template and may
+    create/status a separately typed general intake only after composition has
+    supplied an independently current Project Registry binding. It cannot
+    plan, specify, approve, reject, stop, acquire a lease, or control a writable
+    Codex thread through either intake surface.
+18. The canary profile cannot fabricate a Registry fact or be generalized into
+    free-form work. General intake is a distinct binding/port and remains
+    pre-specification; it cannot be converted to `SubjectBinding` or enter
+    Policy, approval, Writer Lease, delivery, or execution.
 19. Autonomy-control recommendation is non-authoritative: it cannot schedule,
     create, persist, approve, or transition a task. Only Task Ledger can build,
     hash, order, and verify its durable receipt after an existing binding.
@@ -150,6 +167,19 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
     deterministic release when the replayed checkpoint's retained authority
     receipt digest matches exactly; this is the sole reconciliation exception.
     No unknown append/release outcome is converted to success or duplicate append.
+24. General-task creation is exactly one narrow `admit` call returning a
+    `DRAFT`/no-result intake, or its exact replay. The port cannot represent an
+    autonomy receipt, TaskKind, risk class, currency, transition, or result; a
+    different binding is rejected.
+25. General-task creation cannot be reused as a plan, specification, ticket,
+    approval, execution, writer, payment, external-action, merge, deployment,
+    or release coordinator. Every such successor remains separately governed.
+26. General intake does not invoke or bypass Policy because its separate port
+    cannot express a Task Spec, progression, result, or external effect. Any
+    later specification, project-affecting progression, execution, or external
+    effect must enter the normal Task Domain, current Registry, Policy,
+    approval, lease/fence, and downstream gates as a separately governed
+    operation.
 
 ## Allowed Dependencies
 
@@ -195,14 +225,22 @@ admission and before any task transition or external effect. It removes
 canonical receipt/hash ownership from Orchestrator while preserving the pure
 classifier, dependency direction, and public MCP surface.
 
+Version 2.9 corrects general intake to use only `TaskIntakeBinding` and
+`TaskIntakeLifecyclePort::admit`. It removes the erroneous autonomy-receipt and
+Task-Spec lifecycle path. Project resolution and the authoritative submission
+envelope remain outside this module; Task Ledger/PostgreSQL remain durable
+truth. Existing canary execution order and every protected-action gate remain
+unchanged.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Gateway routing | closed action and exact binding tests | Engineering | yes when implemented |
 | Controlled submit | fixed actor/template, complete Task Spec 2.1 validation, exact idempotency/audit, and digest-unity matrices | Engineering | yes |
+| General create-only intake | one admit call, exact replay, binding substitution rejection, structurally Draft/no-result evidence, and compile-time absence of Task-Spec/autonomy/writer/execution ports | Engineering | yes |
 | Writer authority order | fixed admission -> real lease/current head -> workspace -> Codex -> verification -> Git -> release/outcome, with stale/fake/synthetic substitution denial | Security review | yes |
-| Required autonomy order | admission -> recommendation -> required receipt -> transition/effect, with missing/late/duplicate/unknown profile suppression | Security review | yes |
+| Controlled-canary autonomy order | admission -> recommendation -> required receipt -> transition/effect, with missing/late/duplicate/unknown profile suppression; general intake is structurally unreachable from this lane | Security review | yes |
 | Task status replay | fresh-process PostgreSQL projection equality and zero external-effect calls | Engineering | yes |
 | Call order | intent/effect/outcome/stop/review tests | Engineering | yes when implemented |
 | Delivery call order | intent -> workspace prepare -> Codex -> scope -> fixed test -> Git -> outcome/receipt, with first-failure call suppression | Engineering | yes |
@@ -221,7 +259,9 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.9 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate one-call general intake from Task-Spec lifecycle and remove autonomy/writer/execution classification | User-authorized Phase 3 |
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Order replay-first foreman checkpoint, Writer acquire, fenced append and known-success release with explicit unknown-outcome stops | Sole-foreman delegation |
+| 2.8 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial general-intake coordinator; superseded before release by 2.9 because it incorrectly reused Task-Spec lifecycle/autonomy types | User-authorized Phase 3 |
 | 1.0 | 2026-07-29 | SPEC-001, ADR-001/002 | Initial Node deterministic control loop | Current user task |
 | 2.0 | 2026-08-01 | SPEC-002 v13, ADR-004/005/006/007/015 | Rust routing, transaction/effect/stop/reconciliation boundary | User MVP-3 execution directive |
 | 2.1 | 2026-08-05 | SPEC-002 v25, ADR-021, TASK-032 | Pure injected delivery ordering and explicit separation from `latticed` composition/MCP/concrete adapters | User approval in preceding implementation window |

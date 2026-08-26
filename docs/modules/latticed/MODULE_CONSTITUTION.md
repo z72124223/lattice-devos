@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.2
+version: 3.4
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -21,9 +21,10 @@ Orchestrator composition.
   semantics, or product-code mutation logic.
 - Become a second gateway service, database authority, product writer,
   approval surface, Guardian, release controller, or deployment service.
-- Accept arbitrary task text, shell, SQL, path, credential, provider, process,
-  Git, test-command, actor/session, lease, fence, or writable-thread input
-  through MCP.
+- Interpret a natural-language objective as shell, SQL, path, credential,
+  permission, configuration, provider instruction, approval, or execution
+  authority; or accept caller-selected paths, commands, actor/session, lease,
+  fence, or writable-thread input through MCP.
 - Promote the legacy `lattice-runtime` scripted acceptance command into an
   official writer entry or let it claim MCP/tunnel provenance.
 
@@ -38,7 +39,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.7 instance with typed Contracts 1.13 / Ports 2.2
+- Construct one Orchestrator 2.9 instance with typed Contracts 1.15 / Ports 2.3
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly seven MCP tools:
@@ -68,11 +69,13 @@ Orchestrator composition.
   with a fixed code before service dispatch, permits only durable Delivery
   Status reads, and treats both task names and `lattice_foreman_checkpoint` as
   unknown under legacy and stateless MCP.
-- Preserve zero-parameter closed schemas for both delivery tools. Give Task
-  Submit only the closed `CONTROLLED_CODEX_CANARY` intent plus one bounded
-  `client_request_id`, and give Task Status only the lowercase SHA-256
-  `task_ref` returned by Submit. Every schema has
-  `additionalProperties: false`.
+- Preserve zero-parameter closed schemas for both delivery tools. Task Submit
+  accepts either the legacy closed `CONTROLLED_CODEX_CANARY` intent or one
+  bounded create-only natural-language `objective` (with a general `intent`
+  alias), a bounded `client_request_id`, and at most one exact `project_id` or
+  `project_name` locator. Task Status requires the lowercase SHA-256 `task_ref`;
+  `client_request_id` is optional only for legacy canary compatibility. Every
+  variant has `additionalProperties: false` and no path/command/authority field.
 - Through canonical `latticed --hermes-launch`, expose one exact
   process-start-only Hermes lifecycle entry. It accepts no additional CLI
   arguments, reuses the production Hermes configuration and runner from the
@@ -106,9 +109,12 @@ Orchestrator composition.
   and home, broker run root, and deadline. Legacy
   `LATTICE_HERMES_BROKER_HELPER{,_SHA256}` values are ignored and must not be
   read, validated, echoed, or allowed to affect launch classification.
-- Select every project, snapshot, repository/base, scope, verification,
-  capability, budget, approval, prompt, workspace, and downstream binding from
-  process-start composition configuration, never from MCP arguments.
+- For executable delivery/canary work, select every project, snapshot,
+  repository/base, scope, verification, capability, budget, approval, prompt,
+  workspace, and downstream binding from process-start composition
+  configuration, never from MCP arguments. General intake may carry only an
+  exact Control catalog ID or display-name locator; it can select no path,
+  scope, verification, model, workspace, command, or downstream binding.
   Credentials remain adapter-private process input and never enter tool
   schemas, diagnostics, or results.
 - Map `lattice_delivery_run` to the one typed delivery coordinator and map
@@ -120,6 +126,17 @@ Orchestrator composition.
   production Secure MCP Tunnel and local canonical acceptance use distinct
   non-substitutable actor/adapter commitments. `clientInfo` and caller identity
   fields grant no authority.
+- Resolve a general-task project in two explicit layers. Control supplies only
+  a uniquely matched readable `CONTROL_LOCAL_CATALOG` locator whose
+  `registry_authority` remains `NONE`; it is never formal authority. The
+  composition root performs a bounded live repository observation between two
+  exact eligible Control catalog-projection reads and rejects eligible catalog drift while
+  ignoring unrelated Control status fields, then uses
+  `PostgresProjectRegistry` to resolve or register and reload the formal
+  identity. Only a replay-verified current `ACTIVE` Project Registry authority
+  receipt/snapshot may enter the Task Ledger binding. Missing, ambiguous,
+  legacy, unreadable, drifted, suspended, or substituted projects return typed
+  repairable errors; an arbitrary caller path is never accepted.
 - Map Foreman Checkpoint into that same `FullChainService` and injected
   Orchestrator. The composition root may observe its fixed server binding and
   make one closed, read-only Git observation of the configured parent plus an
@@ -133,22 +150,38 @@ Orchestrator composition.
   revalidate it through Task Domain, and preserve its one digest across
   Gateway, Task Ledger, Writer Lease, Codex, verification/Git, and status
   evidence.
+- For general intake, construct and revalidate the Task-Ledger-owned
+  `TaskSubmissionEnvelope` from the exact objective, registered-project
+  authority receipt, formal stream identity, and process-owned ingress. Do not
+  manufacture an execution-ready Task Spec, spec/ticket tree, or parallel task
+  record from the objective.
 - Compose the injected Writer Lease domain 1.1 repository and Task lifecycle
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
-- The local Task lifecycle edge wrapper implements `TaskLifecyclePort` only by
-  translating typed admit/transition/result/load calls into Task Ledger 2.5 and
-  `PostgresTaskLedger` public append/replay APIs. New admissions carry the
-  exact required-profile marker, and canonical autonomy receipt construction/
-  verification remains Task-Ledger-owned. The wrapper owns no transition
-  legality, receipt semantics, SQL/schema, alternate cache, or workflow order.
+- The local Task-Spec lifecycle edge wrapper implements `TaskLifecyclePort`
+  only by translating typed admit/transition/result/load calls into Task Ledger
+  and `PostgresTaskLedger` public append/replay APIs. Controlled-canary
+  admissions carry their exact required-profile marker, and canonical autonomy
+  receipt construction/verification remains Task-Ledger-owned. A separate
+  `TaskIntakeLifecyclePort` edge admits or loads only `TaskIntakeBinding`; it
+  cannot transition, record a result or autonomy receipt, acquire Writer
+  authority, or invoke an effect. Neither wrapper owns transition legality,
+  receipt semantics, SQL/schema, alternate cache, or workflow order.
 - After the preconfigured scripted delivery receipt, the run tool invokes the
   same coordinator's exact-snapshot Graphify/memory node. The status tool loads
   delivery plus exact analysis/retrieval evidence from PostgreSQL; neither tool
   gains an argument, and task tools cannot alter their delivery binding.
-- Task Submit/Status remains `WriterOnly`: after the durable result and Writer
-  Lease release it returns status without running Graphify, Hermes, or Memory.
-  The fixed canary accepts only a process deadline above the 30-second cleanup
+- The fixed canary remains `WriterOnly`: after its durable result and Writer
+  Lease release, Submit/Status returns without running Graphify, Hermes, or
+  Memory. General Task Submit is create-only: it atomically records the
+  shared ingress claim, authoritative envelope, and one
+  `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event, then returns
+  `SUBMITTED`/`DRAFT`. It creates no Task Spec, accounting currency, autonomy
+  classification/receipt, transition, result, or effect and does not acquire
+  Writer authority or invoke workspace, Codex/model, verification, Git,
+  Graphify, Hermes, Memory, payment, network, merge, deployment, or release.
+  The fixed canary
+  accepts only a process deadline above the 30-second cleanup
   reserve and at most 300 seconds, below its 600-second lease TTL. Longer task
   profiles remain forbidden until heartbeat, interruption, and orphan recovery
   are composed.
@@ -156,11 +189,18 @@ Orchestrator composition.
   repository-owned acceptance fixture. It rejects official Codex mode before
   identity, database, workspace, or process effects; canonical `latticed` is
   the only official writer entry.
-- Keep OpenClaw as the broader normal human gateway. MCP permits only the one
-  fixed typed Submit template and its Status projection; it provides no
-  general submit/plan/approve/reject/stop or protected-release operation.
+- Keep OpenClaw as the broader normal human gateway. MCP permits the retained
+  fixed canary plus bounded general create/status only; it provides no general
+  plan/specification/ticket generation, approve/reject/stop, execution start,
+  writable-agent control, or protected-release operation.
 - Return only the allowlisted typed status projection and reconstruct it from
   PostgreSQL in a fresh process/session without rerunning external effects.
+  General tasks use `lattice.task.status.v3`, exposing only `task_ref`,
+  `SUBMITTED`/`DRAFT`, Ledger-head digest, exact objective, Control project
+  ID/display name, formal project snapshot ID, and nullable result/failure
+  fields. The snapshot boundary is the Registry-compatible 159 ASCII bytes
+  across Ledger, Store, and MCP projection. Canary results retain the
+  compatible v2 projection.
   A Completed projection additionally requires an existing, independently
   replayed Writer Lease project with no current authority and the fixed canary
   `1/2/2` fence/transition/command history. `Merging + result` recovery verifies
@@ -179,14 +219,15 @@ Orchestrator composition.
 3. Concrete adapters are constructed at the edge, implement typed ports, and
    never call one another.
 4. Canonical `latticed` MCP enumeration contains exactly the seven approved
-   names. Delivery and Runtime Status schemas remain zero-parameter; task schemas remain closed
-   to the one approved intent/`client_request_id` and returned `task_ref`.
+   names. Delivery and Runtime Status schemas remain zero-parameter; task
+   schemas remain closed to the legacy canary or bounded create-only objective,
+   one idempotency key, at most one catalog locator, and returned `task_ref`.
    Alternate `lattice-full-chain` is an observer only: it exposes the two
    delivery names, cannot dispatch Delivery Run, and never exposes or
    dispatches either task tool.
-5. No MCP request can carry shell, SQL, path, credential, provider, arbitrary
-   task text, process, Git/test command, actor/session authority, lease, fence,
-   or writable Codex-thread data.
+5. No MCP request can carry shell, SQL, path, credential, provider/execution
+   settings, process, Git/test command, actor/session authority, lease, fence,
+   or writable Codex-thread data. A bounded objective is inert task data only.
 6. MCP calls reach the same `FullChainService` / Orchestrator composition as
    the normal `latticed` action. The MCP adapter is not a second gateway or
    orchestrator and cannot represent broader OpenClaw or protected Guardian
@@ -203,23 +244,28 @@ Orchestrator composition.
 10. Graphify executable, source repository, commit, staging root, fixed memory
     query, timeout, and database configuration are process-owned and digest-
     bound. They never enter MCP schemas or echo secrets.
-11. The server-owned Task Spec digest is the sole task binding; legacy fixed
-    submission, profile/run, or synthetic authority digests cannot substitute.
-12. Task lifecycle, exact idempotency, audit,
+11. The server-owned canary Task Spec digest remains that execution path's sole
+    binding. A general task instead uses the Task-Ledger-owned submission
+    envelope and formal Registry-bound stream identity; neither binding can
+    substitute for the other or grant later execution authority.
+12. Task lifecycle/intake, exact idempotency, audit,
     lease/fencing, and status are PostgreSQL-backed and fail closed when their
     independently verified current heads are unavailable.
 13. Public task status is an allowlist of typed state/disposition and digests;
     it contains no raw spec, prompt, diff, command, path, secret, lease/fence,
     child output, or database detail.
-14. The Task lifecycle edge wrapper cannot construct event/receipt fragments,
-    bypass Task Domain validation, or treat a PostgreSQL row as authoritative
-    before Task Ledger replay/current-head verification.
-15. The fixed canary cannot fabricate a live Project Registry authority or be
-    generalized into project-selectable/free-form work before durable
-    Registry currentness and normal Policy composition exist.
+14. Neither Task-Spec lifecycle nor general-intake edge wrapper can construct
+    event/receipt fragments or treat a PostgreSQL row as authoritative before
+    Task Ledger replay/current-head verification. The Task-Spec wrapper cannot
+    bypass Task Domain validation; the intake wrapper cannot represent a Task
+    Spec, transition, result, autonomy receipt, or effect at all.
+15. Neither canary nor general intake can fabricate Project Registry authority.
+    Control is only a locator and general creation requires independently
+    current PostgreSQL Registry evidence. Policy/approval/writer composition
+    remains mandatory before any project-selectable progression or effect.
 16. Missing, active-at-completion, or physically corrupt Writer Lease history
     cannot be downgraded to a valid terminal Task status or recovery path.
-17. A required-profile stream without its exact second autonomy event cannot
+17. A controlled-canary required-profile stream without its exact second autonomy event cannot
     transition, replay as completed, or produce normal Task Status. The
     one-event prefix maps only to reconciliation; historical optional streams
     remain byte-compatible.
@@ -230,14 +276,18 @@ Orchestrator composition.
 19. Historical status observation grants no successor ingress authority.
     Historical non-terminal and Completed streams remain current-profile-bound.
 20. Normal no-argument MCP startup and every tool call are migration-free.
-    Only explicit `--postgres-bootstrap` may sequence Writer v3 before Store v6,
-    close migrator credentials, construct fresh runtime clients, verify foreman
-    replay and then report readiness.
+    Only explicit `--postgres-bootstrap` may iterate the exact Store/Memory/
+    Writer profile closure: complete v5/v6 prerequisites, apply Writer v4 at
+    exact v6 current, apply Store v7 with the fixed v4 rebind, then verify exact
+    v7 current. It closes migrator credentials, constructs fresh runtime
+    clients, verifies foreman plus general-intake replay, and only then reports
+    readiness.
 21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.3
-    and PostgreSQL Writer Lease 1.8 closed read-only profiles. It accepts only Store-v5 +
+    and PostgreSQL Writer Lease 2.0 closed read-only profiles. It accepts only Store-v5 +
     Memory `Empty|V2|V3` + Writer `V5FallbackRequired`, Store-v5 + Memory `V3`
     + Writer `V5Bridge`, or Store-v6 + Memory `V3` + Writer
-    `V6BridgePending|V6Current`. Every other triple fails closed. Only the v5
+    `V6BridgePending|V6Current|V6V4Bridge`, or Store-v7 + Memory `V3` + Writer
+    `V7V4Current`. Every other triple fails closed. Only the v5
     fallback runs Store verification, Memory apply/verify, Writer-v2
     apply/verify, then exact Writer-v3 bridge. Composition never parses Memory
     or Writer rows or substitutes its own classifier.
@@ -247,18 +297,54 @@ Orchestrator composition.
     before Store schema creation. Product bootstrap rejects every Store legacy
     prefix before admission observation or mutation; only the Store-owned
     administrative API may advance historical prefixes.
-22. Exact v6 current requires persisted Runtime admission to equal the
-    configured authority and performs zero stop, restore, rebind, Store
-    migration, row, or ACL write. Migrator credentials are then closed and a
-    fresh Runtime-role Task Ledger construction plus foreman replay performs
-    the full Store/runtime verification. V6 bridge-pending alone may stop,
-    rebind under Writer-owned reclassification, verify Store v6, and restore.
+22. Exact v6 bridge-pending may run only `V6Rebind`; exact v6 current may run
+    only Writer-owned `V4Apply`; exact `V6V4Bridge` may run only Store-owned
+    `V7Apply`, whose transaction invokes the fixed v4 rebind. Exact Store-v7 +
+    Memory-v3 + `V7V4Current` is the sole `V7VerifyOnly` state and performs zero
+    migration, rebind, row, or ACL write. Migrator credentials are then closed;
+    fresh Runtime-role Task Ledger and Writer-v4 construction plus replay
+    perform the full Store/runtime verification.
+23. Task-ingress idempotency is scoped by the process-owned ingress plus
+    `client_request_id` and is shared across controlled-canary and general
+    submission. Exact objective/formal-project retries return the retained
+    `task_ref`; changed objective, project binding, or submission mode returns
+    typed substitution and creates no second task, including after restart.
+    Concurrent identical requests that observed different snapshots of the
+    same effective project reload and return the one committed winner rather
+    than surfacing a false changed-request conflict. A first Registry
+    register/observe currentness collision permits one complete fresh
+    Control/Git/Registry pass pinned to the initially selected project ID; it
+    may reuse an identical active formal observation, but cannot reuse a stale
+    physical observation or retarget the selector. If the newer-snapshot
+    caller has not committed yet, the stale caller may re-resolve only that
+    same effective project and retry admission once before its final winner
+    reload; it must not poll, sleep, retarget, or retry without a bound.
+24. No-selector general intake succeeds only when exactly one eligible Control
+    project can be resolved. Exact ID/name selection must also yield one
+    readable current project. Current directory, first row, legacy row, or
+    conversational inference can never choose the project.
+25. Objective/project-name validation occurs before durable mutation: non-empty,
+    trimmed, already NFC, within fixed byte bounds, no NUL/control character,
+    and no recognized secret material. Client request IDs and project IDs must
+    also match their closed ASCII forms and be secret-free before project
+    resolution; the retained formal project snapshot ID is secret-free before
+    persistence or public projection. The objective is never executed or interpolated into shell,
+    path, SQL, configuration, permission, or prompt authority.
+26. General creation stops at replay-verified `DRAFT` after exactly one
+    `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event, with no Task Spec, currency,
+    autonomy receipt, transition, result, Writer Lease, or effect. Any state or
+    operation beyond that boundary is separately governed and cannot be
+    inferred from Submit.
+27. General Status is reconstructed by `task_ref` from the PostgreSQL envelope
+    plus verified Task Ledger stream. It neither depends on process memory nor
+    repeats Control/Registry mutation, Codex/model, Writer, Git, or downstream
+    effects.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.13, `lattice-ports` 2.2,
-  `orchestrator-runtime` 2.7, Foreman State 1.4, Task Ledger 2.7, PostgreSQL
-  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 1.8 public APIs.
+- `lattice-contracts` 1.15, `lattice-ports` 2.3,
+  `orchestrator-runtime` 2.9, Foreman State 1.4, Task Ledger 2.9, PostgreSQL
+  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 2.0 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -267,7 +353,7 @@ Orchestrator composition.
   construction and typed bootstrap inspection/port implementation.
 - Bounded stdio/JSON/MCP framing, process configuration, hashing, timeout, and
   diagnostics libraries required at the application edge.
-- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 1.8 adapters only
+- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 2.0 adapters only
   for construction behind their typed boundaries.
 - `lattice-hermes-adapter` 1.1 only for production runner construction,
   ephemeral liveness, and lifecycle teardown; it grants no durable truth,
@@ -350,17 +436,28 @@ incomplete. It keeps exactly four MCP tools and the existing six-field task
 status output, and requires fresh canonical `latticed` restart evidence rather
 than a Store test binary as acceptance.
 
+Version 3.4 corrects the unreleased general intake path to use the separate
+`GENERAL_TASK_INTAKE` identity and `TaskIntakeLifecyclePort`. It persists only
+the shared ingress claim, envelope, and one `GENERAL_TASK_INTAKE_V1`
+`TASK_CREATED` event, with no Task Spec, currency, autonomy, progression,
+Writer Lease, or effect. Control remains only a locator; PostgreSQL Project
+Registry and Task Ledger remain authority; canary v2 remains compatible. The
+explicit bootstrap reaches the required schema-v7 profile only through the
+append-only Writer-v4 successor and finishes with fresh-runtime verification.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Composition direction | Cargo metadata proves orchestrator has no concrete dependency and only `latticed` selects adapters | Architecture review | yes |
 | MCP tool closure | exact seven-tool list; unchanged zero-argument Delivery/Runtime Status requests; versioned Runtime dependency projection; closed task/checkpoint schemas; legacy exact two with checkpoint unknown; unknown/additional-property rejection | Engineering | yes |
-| Restricted input | shell/SQL/path/credential/provider/task-text/actor/session/lease/fence/writable-thread matrix is rejected before dispatch | Security review | yes |
+| Restricted input | objective/selector bounds plus shell/SQL/path/credential/provider/actor/session/lease/fence/writable-thread rejection before durable mutation | Security review | yes |
 | One Gateway | both task tools plus Foreman Checkpoint invoke the same `FullChainService` / Orchestrator composition; MCP has no direct database/Codex/Git/Writer call path | Architecture review | yes |
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
-| Required autonomy profile | new marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
+| Registered general intake | unique Control locator, live double-read/physical observation, exact Registry authority/currentness, no arbitrary path/default guess, shared-key exact retry/substitution, distinct no-spec/no-currency subject, one create event, v3 `DRAFT` restart replay, and zero autonomy/execution/model/writer effects | Engineering and security review | yes |
+| Store-v7 bootstrap closure | exact accepted cross-product, v6 pending rebind, v6 current Writer-v4 apply, v6/v4 bridge Store-v7 apply plus fixed v4 rebind, final v7/v4 verify-only, and fresh runtime-role replay | Architecture and integration review | yes |
+| Controlled-canary autonomy profile | required canary marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
 | Writer authority | real PostgreSQL lease/fencing/current-head evidence; no fake/synthetic production path | Security review | yes |
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
@@ -383,6 +480,8 @@ constitution cannot be weakened merely to excuse implementation drift.
 |---|---|---|---|---|
 | 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
 | 3.2 | 2026-08-25 | SPEC-010, TASK-106 | Accept one closed dependency blocker, prove owned Git binding before block/resume, and expose restart-restored dependency next action without adding a tool or database schema | Explicit user delegation |
+| 3.3 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial registered-project general Task Submit; superseded before release by 3.4 because intake must not reuse Task-Spec/autonomy lifecycle semantics | User-authorized Phase 3 |
+| 3.4 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Use a distinct pre-specification intake identity and admit/load-only port with one create event, no currency/autonomy/progression, append-only Writer-v4/Store-v7 bootstrap closure, and unchanged canary/protected-action gates | User-authorized Phase 3 |
 | 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
 | 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |
