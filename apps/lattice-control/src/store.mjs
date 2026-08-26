@@ -6,12 +6,24 @@ import { DatabaseSync } from "node:sqlite";
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const statuses = new Set([
   "draft",
+  "starting",
   "running",
   "waiting_approval",
   "codex_done",
   "verified",
   "failed",
   "archived",
+]);
+const workItemChangeFields = new Set([
+  "status",
+  "codex_thread_id",
+  "codex_turn_id",
+  "progress",
+  "approval_json",
+  "final_response",
+  "verification_notes",
+  "failure_summary",
+  "archived_at",
 ]);
 const installationReceiptSchemaVersion = "lattice.control.installation-receipt.v1";
 const installationObservationKind = "OBSERVED_AFTER_INSTALL";
@@ -73,6 +85,12 @@ function decodeItem(row) {
     approval: row.approval_json ? JSON.parse(row.approval_json) : null,
     approval_json: undefined,
   };
+}
+
+function workItemChangeEntries(changes) {
+  const entries = Object.entries(changes).filter(([key]) => workItemChangeFields.has(key));
+  if (changes.status && !statuses.has(changes.status)) throw new TypeError("invalid status");
+  return entries;
 }
 
 export class LatticeStore {
@@ -309,20 +327,8 @@ export class LatticeStore {
   }
 
   updateWorkItem(id, changes) {
-    const allowed = new Set([
-      "status",
-      "codex_thread_id",
-      "codex_turn_id",
-      "progress",
-      "approval_json",
-      "final_response",
-      "verification_notes",
-      "failure_summary",
-      "archived_at",
-    ]);
-    const entries = Object.entries(changes).filter(([key]) => allowed.has(key));
+    const entries = workItemChangeEntries(changes);
     if (entries.length === 0) return this.getWorkItem(id);
-    if (changes.status && !statuses.has(changes.status)) throw new TypeError("invalid status");
     entries.push(["updated_at", now()]);
     const result = this.database.prepare(`
       UPDATE work_items
@@ -331,6 +337,24 @@ export class LatticeStore {
     `).run(...entries.map(([, value]) => value), id);
     if (result.changes !== 1) throw new Error("work item not found");
     return this.getWorkItem(id);
+  }
+
+  transitionWorkItem(id, fromStatuses, changes) {
+    if (!Array.isArray(fromStatuses) || fromStatuses.length === 0) {
+      throw new TypeError("at least one source status is required");
+    }
+    if (fromStatuses.some((status) => !statuses.has(status))) {
+      throw new TypeError("invalid source status");
+    }
+    const entries = workItemChangeEntries(changes);
+    if (entries.length === 0) throw new TypeError("at least one work item change is required");
+    entries.push(["updated_at", now()]);
+    const result = this.database.prepare(`
+      UPDATE work_items
+      SET ${entries.map(([key]) => `${key} = ?`).join(", ")}
+      WHERE id = ? AND status IN (${fromStatuses.map(() => "?").join(", ")})
+    `).run(...entries.map(([, value]) => value), id, ...fromStatuses);
+    return result.changes === 1 ? this.getWorkItem(id) : null;
   }
 
   appendEvent(workItemId, kind, payload = {}) {

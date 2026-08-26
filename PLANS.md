@@ -25,10 +25,68 @@
 ## 目前方向
 
 - 正式產品分支是 `product/lattice-control-mvp`。
-- 目前沒有另一項已核准的產品實作；下一個工作須重新做 live audit、建立
-  耐久 task 身分與有界工作樹。
+- 已核准的 `apps/lattice-control` Codex App Server 生命週期修復已完成本機
+  實作與真實驗收；保留在產品分支的本機提交，不推送、合併或部署。
+- 本次 live audit 找不到能綁定一般修復的 LATTICE task 介面；唯一 submit
+  intent 是無關的 `CONTROLLED_CODEX_CANARY`，因此不重播 canary，也不捏造
+  task identity。
 - 易變 SHA、PR、CI、安裝收據與 replay 歷史保留在 Git 與 LATTICE；完整
   驗收索引由 TASK-106 workflow ledger 提供，不複製成會過期的計畫狀態。
+
+## Codex App Server 生命週期修復
+
+### 目標
+
+讓並行 connect、turn readiness、中斷、一次有界 retry、fresh-process
+read/resume/reconcile 與主動 request 回覆都能 fail closed，且只有關聯的
+`turn/started` 才把 LATTICE work item 標成 `running`。
+
+### 全域策略
+
+以目前 Control 實際使用的 `codex-cli 0.144.6` 生成 Schema 為協定基準；先用
+既有 Node 測試鎖住競態，再在同一產品路徑做最薄狀態機與原子 claim，最後用
+兩個真實 Codex thread 完成 A-F 有界驗收。
+
+### 非目標
+
+- 不導入 Temporal、LangGraph、OpenHands、Process Compose、新 UI 或第二份任務真實。
+- 不接線 Rust delivery adapter 或 Hermes broker，也不重造 Codex agent loop。
+- 不推送、合併、部署、發布或改公開可見性。
+
+### 已確認事實
+
+- 基線提交只保存兩份既有失敗證據，開始修改前工作樹沒有其他未提交變更。
+- 兩次真實失敗都沒有收到 `turn/started`；第二次 interrupt 回覆 `no active turn to interrupt`，fresh process 讀取又遇到 not-loaded／empty-rollout。
+- 官方與本機 Schema 都區分 `turn/start` RPC 回覆、`turn/started` 與 `turn/completed`。
+
+### 已驗證結果
+
+- 同一個已初始化的 App Server 程序承載兩個獨立真實 thread；兩者都收到
+  可關聯的 `turn/started`，且在其中一個完成前已同時 active。
+- active turn 的 interrupt 收到精確 `interrupted` 終態；一次有界 retry 完成，
+  已完成工作沒有新增 turn。
+- 關閉並重建 Control store、service 與 App Server 後，兩個既有 thread 均由
+  已保存 ID resume/read/reconcile，沒有重做 completed turn。
+
+### 實作步驟
+
+- [x] 以聚焦測試重現 single-flight、timeout/cleanup、readiness、interrupt、reconnect 與防重複缺口。
+- [x] 實作接頭生命週期與服務／store 的原子、可關聯狀態轉移。
+- [x] 跑聚焦與完整 Node 驗證，完成獨立程式碼及架構審查並修正 P0/P1。
+- [x] 跑真實 App Server A-F 驗收並保存 PASS 原始證據；本機提交為最後一步。
+
+### 驗證與風險
+
+- 聚焦：`node --test apps/lattice-control/test/codex-app-server.test.mjs apps/lattice-control/test/control-plane.test.mjs`。
+- 完整：`npm.cmd run verify`、`git diff --check` 與真實 A-F runner。
+- 結果：Control 42/42；全庫 117 PASS、0 FAIL、1 個既有不適用 skip；
+  A-F 全部 PASS；獨立 code/architecture review 為 GO，P0/P1 皆為 0。
+- 最高風險是 rollout 尚未落盤時誤報可恢復；任何 read/turn 關聯不完整都停止於 fail closed。
+
+### 漂移紀錄
+
+- 本機 `0.144.6` 生成 Schema 與真實事件確認原路線；沒有導入新框架、UI、
+  agent loop 或第二份任務真實。
 
 ## 尚待產品擁有者決定
 

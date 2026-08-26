@@ -115,19 +115,26 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
         return;
       }
 
-      for (const action of ["start", "resume", "approve", "verify", "archive"]) {
+      for (const action of [
+        "start",
+        "resume",
+        "interrupt",
+        "reconcile",
+        "approve",
+        "verify",
+        "archive",
+      ]) {
         const id = routeId(url.pathname, action);
         if (!id || request.method !== "POST") continue;
         const body = await readJson(request);
-        const result = action === "start"
-          ? await service.start(id)
-          : action === "resume"
-            ? await service.resume(id, body.prompt)
-            : action === "approve"
-              ? service.approve(id, body.decision)
-              : action === "verify"
-                ? service.verify(id, body.notes)
-                : await service.archive(id);
+        let result;
+        if (action === "start") result = await service.start(id);
+        else if (action === "resume") result = await service.resume(id, body.prompt);
+        else if (action === "interrupt") result = await service.interrupt(id);
+        else if (action === "reconcile") result = await service.reconcile(id);
+        else if (action === "approve") result = await service.approve(id, body.decision);
+        else if (action === "verify") result = service.verify(id, body.notes);
+        else result = await service.archive(id);
         sendJson(response, 200, result);
         return;
       }

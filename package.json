@@ -10,6 +10,7 @@
   "scripts": {
     "check": "node scripts/check-project.mjs",
     "control:start": "node apps/lattice-control/src/server.mjs",
+    "control:codex-lifecycle-acceptance": "node scripts/run-codex-app-server-lifecycle-acceptance.mjs",
     "control:receipt": "node apps/lattice-control/src/installation-receipt-client.mjs",
     "control:test": "node --test \"apps/lattice-control/test/*.test.mjs\"",
     "dependency:create": "node scripts/lattice-dependency-worktree.mjs create",

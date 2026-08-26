@@ -6,83 +6,75 @@
 
 ## Objective and scope
 
-- Objective: 讓進行中的父工作可耐久 `BLOCKED` 於一個有界依賴，安全建立
-  子 branch/worktree，整合後解除阻塞，並由 PostgreSQL 在新程序還原完整
-  dependency binding 與 next action。
-- Scope: Foreman/MCP/Git guard/CLI、PostgreSQL replay、delivery receipt 與
-  no-restart fresh Runtime verification；不含公開網路、帳戶或安全變更。
+- 修復 `apps/lattice-control` 的 Codex App Server 接頭生命週期：single-flight
+  connect、精確 turn readiness、bounded wait/cleanup、active interrupt、
+  fresh-process resume/reconcile、主動 request settlement 與 work-item 冪等。
+- Runtime 工作真相：LATTICE／PostgreSQL；未導入新 orchestrator、agent loop、UI 或
+  Temporal／LangGraph／OpenHands／Process Compose。
+- 本次沒有可綁定一般修復的 durable task submit；唯一可用 intent 是無關的
+  `CONTROLLED_CODEX_CANARY`，已明確保留限制且未重播 canary。
 
 ## Completed work
 
-- 結構化 `lattice.dependency-blocker/1.0` 保存父／子 task、子 branch/worktree、
-  base SHA 與 `COMPLETE_DEPENDENCY`；舊 blocker 保持 opaque replay。
-- `BLOCKED` 與 `BLOCKED -> ACTIVE` 都受 marker、Git identity、cleanliness、
-  ancestry 與 integration proof 保護；直接 `COMPLETED`、衝突或不確定狀態
-  fail closed。
-- Node CLI 只建立規則化的 dependency branch/worktree；Runtime status 1.1
-  投影 `depends_on`、狀態、verification 與 next action。
-- PostgreSQL live fixture 證明 exact retry、阻塞、實際子工作樹、整合、續接、
-  fresh-process replay、競爭與失敗分類。
+- App Server initialize/initialized 改為 single-flight；所有 RPC、notification
+  與 server request waiter 都有 timeout、精確關聯及 teardown。
+- `thread/start`／`turn/start` RPC 接受只保存診斷；只有同一 thread/turn 的
+  `turn/started` 才能把 LATTICE work item 轉成 `running`。
+- interrupt 只接受已確認 active turn，並等待同一 turn 的 interrupted/failed
+  終態；timeout 才關閉 LATTICE 擁有的 App Server 程序。
+- fresh process 先 `thread/resume` 載入 rollout，再用 `thread/read` 對帳；空白、
+  非終態或 ID 不符一律 fail closed。
+- SQLite compare-and-set 防止跨程序重複建 thread；completed turn 不 replay，
+  interrupted/failed 只可 claim 一次有界 retry。
+- 未知主動 request 明確拒絕，支援的 approval 有 bounded settlement；完整保存
+  `mcpServer/startupStatus/updated` 原始診斷欄位。
 
 ## Files changed
 
-- Foreman／Runtime／Ports／PostgreSQL Store、bounded CLI 與 tests，以及對應
-  spec、ticket、module contracts 和 workflow ledger。逐檔範圍由 Git 保存。
-
-## Workflow ledger
-
-| Stage | Status | Evidence / artifact |
-|---|---|---|
-| Local implementation/tests | DONE | 三個已驗證功能提交；Node/Rust suites |
-| Independent review | DONE | final code/architecture GO; no P0-P3 |
-| Integration/CI/merge | DONE | PR #23, CI `verify` PASS, product merge |
-| Install/reload | DONE | versioned artifact、Control receipt、fresh Codex reload |
-| Durable replay | DONE | feature 與 post-deploy live runs |
+- Git diff 保存 Control adapter/service/store/API、測試、兩支 runner、證據與文件。
 
 ## Verification
 
-- Commands and exit codes: `npm.cmd run verify` 0; required Cargo test suites 0;
-  `cargo fmt --check` 0; `git diff --check` 0; scoped strict Clippy 0.
-- Tests/build/lint: Control 17/17; Node 117 pass/0 fail/1 platform skip;
-  Runtime library 134 pass/0 fail/2 coordinated-live ignored; MCP 37/37;
-  Foreman 16/16; Ports/Store/Orchestrator full suites PASS. Full Runtime strict
-  Clippy retains the same 22 pre-existing diagnostics on product and feature,
-  with zero TASK-106 symbol lines.
-- CI: GitHub `verify` PASS in 46 seconds on PR #23 的已驗證 head。
-- Runtime: installed merge artifact exposed exactly seven tools and Runtime
-  projection 1.1; generation 3 replay was `VERIFIED` with `CONTINUE`.
+- 真實 Codex App Server：A-F 全部 PASS；兩個 unique thread/turn 均收到
+  `turn/started`，確認並行、正常 completed、active interrupt 的 exact
+  interrupted terminal、一次 retry、completed 不重做及 fresh-process 對帳。
+- E 關先確認舊原生 App Server PID 退出，再由不同 Node PID 的 Control 啟動
+  不同原生 App Server PID；兩個新程序在驗收後也確認退出。
+- Runtime：`codex-cli 0.144.6`，證據保存實際 binary SHA-256、生成 Schema
+  SHA-256、249 筆 notification、36 筆 MCP 診斷與 2 筆 request settlement。
+- `npm.cmd run control:test`：42/42 PASS。
+- `npm.cmd run verify`：exit 0；全庫 117 PASS、0 FAIL、1 個既有不適用 skip。
+- `git diff --check`：PASS。
+- 原先兩份失敗證據保持原檔與原 SHA-256，未 reset、clean 或刪除。
 
-## Review and integration
+## Review
 
-- Code review: independent final GO, P0-P3 = 0.
-- Architecture review: independent final GO; PostgreSQL remains sole durable truth,
-  seven tools and existing dependency directions preserved.
-- Branch/worktree synchronization: isolated integration clean; product worktree,
-  remote default branch and merge commit matched before this evidence-only
-  finalization.
-- Merge status and authorization: implementation PR #23 merged under explicit
-  user authorization. No branch protection/ruleset/required review exists, so no
-  service enforcement is claimed.
+- 獨立 code review：GO；P0=0、P1=0。
+- 獨立 architecture review：GO；修復留在既有 adapter/service/store/API 邊界，
+  沒有第二份 durable truth 或新增依賴。
 
-## Risks and open decisions
+## Artifacts
 
-- Existing desktop MCP processes keep their open binary. Active writer locks
-  prevented persistent pointer rotation; fresh reload/MCP verified the artifact
-  without App restart or writer interruption.
-- Repository licensing remains a product-owner decision; visibility was unchanged.
+- Durable evidence：`docs/reviews/CODEX_APP_SERVER_LIFECYCLE_ACCEPTANCE_2026-08-26.json`
+- 第一輪同程序重建的不足證據已原樣保存為
+  `docs/reviews/CODEX_APP_SERVER_LIFECYCLE_ACCEPTANCE_2026-08-26_IN_PROCESS_ATTEMPT.json`。
+- 本機驗收資料庫與生成 Schema：證據 JSON 的 `artifacts` 欄位所列
+  `.lattice/acceptance/<runId>/`；該目錄維持 gitignored，但檔案與 hash 已保存。
+- 原始失敗證據：
+  `docs/reviews/CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26.json` 與
+  `docs/reviews/CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26_ATTEMPT_2.json`。
 
-## Next action
+## Delivery status and next action
 
-1. No product work is pending. When all writers are naturally idle,
-   `scripts/lattice-safe-mcp-update.py` may rotate the persistent MCP pointer;
-   this is optional operational cleanup.
+- 程式交付真相：GitHub 提交、PR 與 CI；本次只建立本機乾淨提交，未 push、
+  merge、deploy 或 release。
+- 若日後要交付，需另取得 push／整合／部署授權，並以本文件所在提交重新驗證
+  remote 與 live gate；本次沒有待修 P0/P1。
 
 ## Restart context
 
-- Current product branch: `product/lattice-control-mvp`.
-- Runtime 工作真相：LATTICE／PostgreSQL。
-- 程式交付真相：GitHub 提交、PR 與 CI。
-- Relevant plan: `PLANS.md`; complete evidence: TASK-106 workflow ledger.
-- First command or file to inspect: call zero-argument `lattice_runtime_status`,
-  then read `docs/reviews/WORKFLOW_LEDGER_TASK_106_2026-08-25.md` if exact
-  historical evidence is needed.
+- Branch：`product/lattice-control-mvp`。
+- 先呼叫零參數 `lattice_runtime_status`；目前 general repair 沒有可用 durable
+  task submit，不得用 `CONTROLLED_CODEX_CANARY` 冒充。
+- 先讀本文件與 lifecycle acceptance JSON；目前 LATTICE/runtime 狀態仍以
+  live tool response 為準，不以本 handoff 取代。
