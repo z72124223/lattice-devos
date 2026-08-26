@@ -1,0 +1,267 @@
+{
+  "schema_version": "lattice.control.codex-multi-agent-feasibility.v1",
+  "run_id": "codex-multi-agent-2026-08-26T00-22-22-076Z-9290ca07",
+  "started_at": "2026-08-26T00:22:22.079Z",
+  "completed_at": "2026-08-26T00:22:28.704Z",
+  "source": {
+    "repository_root": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy",
+    "branch": "product/lattice-control-mvp",
+    "head": "e8c83cc20b23cd64550f9efbc0cb1601b9501600"
+  },
+  "durable_parent": {
+    "task_ref": "ff2f63fd39ba16e321d2ca4e31b4d3284fc5c8ca6ad8081ff6d1ac45ce9d0b93",
+    "status": "COMPLETED",
+    "result_digest": "f1d7e77633b7e8e5ad208e4432feac4e282ed28ede1dee4e7a33ba3b707e424a",
+    "limitation": "The bounded LATTICE task MCP does not expose child thread binding, interrupt, or resume fields."
+  },
+  "execution_profile": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "low",
+    "task_class": "bounded read-only live evidence",
+    "routing_reason": "Luna/low is sufficient for two deterministic read-only probes; no architecture or code change is delegated.",
+    "sandbox": "read-only",
+    "approval_policy": "never",
+    "max_resume_attempts": 1
+  },
+  "artifacts": {
+    "database_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\.lattice\\feasibility\\codex-multi-agent-2026-08-26T00-22-22-076Z-9290ca07\\control.db",
+    "evidence_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\docs\\reviews\\CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26.json",
+    "database_sha256": "73702ac4a70aa72195983c5118c8f608efe39b3ef4d36081d7d3f652d9284b8b"
+  },
+  "gates": [
+    {
+      "id": 1,
+      "name": "create two independent real Codex tasks",
+      "status": "PASS",
+      "evidence": {
+        "parallel_dispatch_at": "2026-08-26T00:22:22.206Z",
+        "work_item_ids": [
+          "d5d45b68-afee-41eb-8c41-789a912538fd",
+          "62953a9f-a354-4de2-ac6e-a77b9bed7b99"
+        ],
+        "thread_ids": [
+          "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+          "01a03b72-51d7-70b2-bef1-8504224184f9"
+        ],
+        "initial_turn_ids": [
+          "01a03b72-6837-7e93-bc93-fdf3784063c5",
+          "01a03b72-683e-7a13-bb62-cede9bb5a7c6"
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "name": "parallel read-only messaging and independent completions",
+      "status": "FAIL",
+      "evidence": {}
+    },
+    {
+      "id": 3,
+      "name": "interrupt one active turn and observe termination",
+      "status": "NOT RUN",
+      "evidence": {}
+    },
+    {
+      "id": 4,
+      "name": "bounded resume without duplicate completed work",
+      "status": "NOT RUN",
+      "evidence": {}
+    },
+    {
+      "id": 5,
+      "name": "restart and reconcile persisted task state",
+      "status": "NOT RUN",
+      "evidence": {}
+    },
+    {
+      "id": 6,
+      "name": "save inspectable PASS/FAIL/NOT RUN evidence",
+      "status": "PASS",
+      "evidence": {
+        "evidence_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\docs\\reviews\\CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26.json",
+        "sqlite_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\.lattice\\feasibility\\codex-multi-agent-2026-08-26T00-22-22-076Z-9290ca07\\control.db",
+        "sqlite_sha256": "73702ac4a70aa72195983c5118c8f608efe39b3ef4d36081d7d3f652d9284b8b",
+        "gate_statuses": [
+          "PASS",
+          "FAIL",
+          "NOT RUN",
+          "NOT RUN",
+          "NOT RUN"
+        ]
+      }
+    }
+  ],
+  "notifications": [
+    {
+      "sequence": 1,
+      "observed_at": "2026-08-26T00:22:22.490Z",
+      "method": "remoteControl/status/changed",
+      "thread_id": null,
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 2,
+      "observed_at": "2026-08-26T00:22:28.655Z",
+      "method": "thread/started",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 3,
+      "observed_at": "2026-08-26T00:22:28.659Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 4,
+      "observed_at": "2026-08-26T00:22:28.659Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 5,
+      "observed_at": "2026-08-26T00:22:28.660Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 6,
+      "observed_at": "2026-08-26T00:22:28.660Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 7,
+      "observed_at": "2026-08-26T00:22:28.660Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-5202-71b2-9dd4-92d6a723ebb2",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 8,
+      "observed_at": "2026-08-26T00:22:28.661Z",
+      "method": "thread/started",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 9,
+      "observed_at": "2026-08-26T00:22:28.662Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 10,
+      "observed_at": "2026-08-26T00:22:28.663Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 11,
+      "observed_at": "2026-08-26T00:22:28.663Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 12,
+      "observed_at": "2026-08-26T00:22:28.663Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 13,
+      "observed_at": "2026-08-26T00:22:28.686Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b72-51d7-70b2-bef1-8504224184f9",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    }
+  ],
+  "diagnostics": [
+    "{\"timestamp\":\"2026-08-26T00:22:22.511358Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"failed to load models cache: missing field `base_instructions` at line 97 column 5\"},\"target\":\"codex_models_manager::cache\"}\n{\"timestamp\":\"2026-08-26T00:22:22.511358Z\",\"level\":\"ERROR\",\"fields\":{\"message\":\"failed to load models cache: missing field `base_instructions` at line 97 column 5\"},\"target\":\"codex_models_manager::cache\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:23.150207Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:23.205965Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/.tmp/marketplaces/chatcut-inc/codex/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:23.491781Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:24.866662Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:24.866725Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:27.957289Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell\"},\"target\":\"codex_core::shell_snapshot\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:27.990693Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell\"},\"target\":\"codex_core::shell_snapshot\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:28.220644Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring C:\\\\Users\\\\f7212\\\\.codex\\\\skills\\\\select-best-model\\\\agents\\\\openai.yaml: failed to read openai.yaml: invalid utf-8 sequence of 1 bytes from index 29\"},\"target\":\"codex_core_skills::loader\"}\n{\"timestamp\":\"2026-08-26T00:22:28.220645Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring C:\\\\Users\\\\f7212\\\\.codex\\\\skills\\\\select-best-model\\\\agents\\\\openai.yaml: failed to read openai.yaml: invalid utf-8 sequence of 1 bytes from index 29\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:28.685596Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"state db discrepancy during find_thread_path_by_id_str_in_subdir: falling_back\"},\"target\":\"codex_rollout::list\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:28.686711Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"state db discrepancy during read_repair_rollout_path: upsert_needed (slow path)\"},\"target\":\"codex_rollout::state_db\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:22:28.687915Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"state db reconcile_rollout extraction failed C:\\\\Users\\\\f7212\\\\.codex\\\\sessions\\\\2026\\\\08\\\\26\\\\rollout-2026-08-26T08-22-27-01a03b72-5202-71b2-9dd4-92d6a723ebb2.jsonl: empty session file\"},\"target\":\"codex_rollout::state_db\"}\n"
+  ],
+  "error": {
+    "name": "Error",
+    "message": "failed to read thread: thread-store internal error: failed to read session metadata C:\\Users\\f7212\\.codex\\sessions\\2026\\08\\26\\rollout-2026-08-26T08-22-27-01a03b72-5202-71b2-9dd4-92d6a723ebb2.jsonl: rollout at C:\\Users\\f7212\\.codex\\sessions\\2026\\08\\26\\rollout-2026-08-26T08-22-27-01a03b72-5202-71b2-9dd4-92d6a723ebb2.jsonl is empty",
+    "stack": [
+      "Error: failed to read thread: thread-store internal error: failed to read session metadata C:\\Users\\f7212\\.codex\\sessions\\2026\\08\\26\\rollout-2026-08-26T08-22-27-01a03b72-5202-71b2-9dd4-92d6a723ebb2.jsonl: rollout at C:\\Users\\f7212\\.codex\\sessions\\2026\\08\\26\\rollout-2026-08-26T08-22-27-01a03b72-5202-71b2-9dd4-92d6a723ebb2.jsonl is empty",
+      "    at #receive (file:///C:/Users/f7212/Documents/Codex/2026-07-29/lattice-worktrees/lattice-control-product-deploy/apps/lattice-control/src/codex-app-server.mjs:168:24)",
+      "    at Interface.<anonymous> (file:///C:/Users/f7212/Documents/Codex/2026-07-29/lattice-worktrees/lattice-control-product-deploy/apps/lattice-control/src/codex-app-server.mjs:59:50)",
+      "    at Interface.emit (node:events:509:28)",
+      "    at [_onLine] [as _onLine] (node:internal/readline/interface:465:12)",
+      "    at [_normalWrite] [as _normalWrite] (node:internal/readline/interface:647:22)",
+      "    at Socket.ondata (node:internal/readline/interface:263:23)",
+      "    at Socket.emit (node:events:509:28)"
+    ]
+  }
+}

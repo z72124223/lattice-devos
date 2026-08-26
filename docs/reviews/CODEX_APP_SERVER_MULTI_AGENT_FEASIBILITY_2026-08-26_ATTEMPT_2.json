@@ -1,0 +1,266 @@
+{
+  "schema_version": "lattice.control.codex-multi-agent-feasibility.v1",
+  "run_id": "codex-multi-agent-2026-08-26T00-24-06-716Z-f0b84fbc",
+  "started_at": "2026-08-26T00:24:06.718Z",
+  "completed_at": "2026-08-26T00:27:09.6174608Z",
+  "source": {
+    "repository_root": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy",
+    "branch": "product/lattice-control-mvp",
+    "head": "e8c83cc20b23cd64550f9efbc0cb1601b9501600"
+  },
+  "durable_parent": {
+    "task_ref": "ff2f63fd39ba16e321d2ca4e31b4d3284fc5c8ca6ad8081ff6d1ac45ce9d0b93",
+    "status": "COMPLETED",
+    "result_digest": "f1d7e77633b7e8e5ad208e4432feac4e282ed28ede1dee4e7a33ba3b707e424a",
+    "limitation": "The bounded LATTICE task MCP does not expose child thread binding, interrupt, or resume fields."
+  },
+  "execution_profile": {
+    "model": "gpt-5.6-luna",
+    "reasoning_effort": "low",
+    "task_class": "bounded read-only live evidence",
+    "routing_reason": "Luna/low is sufficient for two deterministic read-only probes; no architecture or code change is delegated.",
+    "sandbox": "read-only",
+    "approval_policy": "never",
+    "max_resume_attempts": 1
+  },
+  "artifacts": {
+    "database_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\.lattice\\feasibility\\codex-multi-agent-2026-08-26T00-24-06-716Z-f0b84fbc\\control.db",
+    "evidence_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\docs\\reviews\\CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26_ATTEMPT_2.json",
+    "database_sha256": "ad302fd632067c04895f40519afc878bdd00cd4237d464c1f608327d45352629"
+  },
+  "gates": [
+    {
+      "id": 1,
+      "name": "create two independent real Codex tasks",
+      "status": "PASS",
+      "evidence": {
+        "parallel_dispatch_at": "2026-08-26T00:24:06.834Z",
+        "work_item_ids": [
+          "ab336d7a-a424-4f9c-b91a-4976e11ff402",
+          "8461fed8-c230-439c-9e9b-e1d8ace2391f"
+        ],
+        "thread_ids": [
+          "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+          "01a03b73-e8d4-7f53-8704-84cb9b48d395"
+        ],
+        "initial_turn_ids": [
+          "01a03b73-febd-7121-9d5f-537b705da675",
+          "01a03b73-feb5-79e3-81b9-c14f28443acc"
+        ]
+      }
+    },
+    {
+      "id": 2,
+      "name": "parallel read-only messaging and independent completions",
+      "status": "FAIL",
+      "evidence": {
+        "thread_started_notifications": 2,
+        "turn_completed_notifications": 0,
+        "reason": "Both independent threads were created, but neither emitted a turn/completed event before the bounded probe stopped."
+      }
+    },
+    {
+      "id": 3,
+      "name": "interrupt one active turn and observe termination",
+      "status": "FAIL",
+      "evidence": {
+        "interrupt_rpc_error": "no active turn to interrupt",
+        "turn_started_notifications": 0,
+        "reason": "turn/start returned an ID before the App Server exposed an interruptible active turn; Control has no readiness barrier."
+      }
+    },
+    {
+      "id": 4,
+      "name": "bounded resume without duplicate completed work",
+      "status": "NOT RUN",
+      "evidence": {}
+    },
+    {
+      "id": 5,
+      "name": "restart and reconcile persisted task state",
+      "status": "FAIL",
+      "evidence": {
+        "fresh_process_read_results": [
+          {
+            "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+            "error": "thread not loaded: 01a03b73-e8d4-7f53-8704-84ec3819a5f0"
+          },
+          {
+            "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+            "error": "failed to read thread: thread-store internal error: rollout metadata is empty"
+          }
+        ],
+        "reason": "A fresh App Server process could not reread either persisted thread, so exact reconciliation is not currently available."
+      }
+    },
+    {
+      "id": 6,
+      "name": "save inspectable PASS/FAIL/NOT RUN evidence",
+      "status": "PASS",
+      "evidence": {
+        "evidence_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\docs\\reviews\\CODEX_APP_SERVER_MULTI_AGENT_FEASIBILITY_2026-08-26_ATTEMPT_2.json",
+        "sqlite_path": "C:\\Users\\f7212\\Documents\\Codex\\2026-07-29\\lattice-worktrees\\lattice-control-product-deploy\\.lattice\\feasibility\\codex-multi-agent-2026-08-26T00-24-06-716Z-f0b84fbc\\control.db",
+        "sqlite_sha256": "ad302fd632067c04895f40519afc878bdd00cd4237d464c1f608327d45352629",
+        "gate_statuses": [
+          "PASS",
+          "FAIL",
+          "FAIL",
+          "NOT RUN",
+          "FAIL"
+        ]
+      }
+    }
+  ],
+  "notifications": [
+    {
+      "sequence": 1,
+      "observed_at": "2026-08-26T00:24:07.100Z",
+      "method": "remoteControl/status/changed",
+      "thread_id": null,
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 2,
+      "observed_at": "2026-08-26T00:24:12.724Z",
+      "method": "thread/started",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 3,
+      "observed_at": "2026-08-26T00:24:12.725Z",
+      "method": "thread/started",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 4,
+      "observed_at": "2026-08-26T00:24:12.725Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 5,
+      "observed_at": "2026-08-26T00:24:12.725Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 6,
+      "observed_at": "2026-08-26T00:24:12.725Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 7,
+      "observed_at": "2026-08-26T00:24:12.726Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 8,
+      "observed_at": "2026-08-26T00:24:12.726Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 9,
+      "observed_at": "2026-08-26T00:24:12.726Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 10,
+      "observed_at": "2026-08-26T00:24:12.727Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84cb9b48d395",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    },
+    {
+      "sequence": 11,
+      "observed_at": "2026-08-26T00:24:12.727Z",
+      "method": "mcpServer/startupStatus/updated",
+      "thread_id": "01a03b73-e8d4-7f53-8704-84ec3819a5f0",
+      "turn_id": null,
+      "turn_status": null,
+      "item_type": null,
+      "item_text": null,
+      "terminal_texts": []
+    }
+  ],
+  "diagnostics": [
+    "{\"timestamp\":\"2026-08-26T00:24:07.144478Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:07.183871Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:07.259719Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:07.259789Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:07.915153Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/.tmp/marketplaces/chatcut-inc/codex/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.143956Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell\"},\"target\":\"codex_core::shell_snapshot\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.144313Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"Failed to create shell snapshot for powershell: Shell snapshot not supported yet for PowerShell\"},\"target\":\"codex_core::shell_snapshot\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.169455Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.195654Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.defaultPrompt: maximum of 3 prompts is supported\",\"path\":\"file:///C:/Users/f7212/.codex/plugins/cache/chatcut-inc/chatcut/0.2.22/.codex-plugin/plugin.json\"},\"target\":\"codex_core_plugins::manifest\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.437962Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_small: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.438025Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring interface.icon_large: icon path with '..' must resolve under plugin assets/\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.536801Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring C:\\\\Users\\\\f7212\\\\.codex\\\\skills\\\\select-best-model\\\\agents\\\\openai.yaml: failed to read openai.yaml: invalid utf-8 sequence of 1 bytes from index 29\"},\"target\":\"codex_core_skills::loader\"}\n",
+    "{\"timestamp\":\"2026-08-26T00:24:12.538073Z\",\"level\":\"WARN\",\"fields\":{\"message\":\"ignoring C:\\\\Users\\\\f7212\\\\.codex\\\\skills\\\\select-best-model\\\\agents\\\\openai.yaml: failed to read openai.yaml: invalid utf-8 sequence of 1 bytes from index 29\"},\"target\":\"codex_core_skills::loader\"}\n"
+  ],
+  "error": {
+    "name": "Error",
+    "message": "no active turn to interrupt",
+    "stack": [
+      "Error: no active turn to interrupt",
+      "    at #receive (file:///C:/Users/f7212/Documents/Codex/2026-07-29/lattice-worktrees/lattice-control-product-deploy/apps/lattice-control/src/codex-app-server.mjs:168:24)",
+      "    at Interface.<anonymous> (file:///C:/Users/f7212/Documents/Codex/2026-07-29/lattice-worktrees/lattice-control-product-deploy/apps/lattice-control/src/codex-app-server.mjs:59:50)",
+      "    at Interface.emit (node:events:509:28)",
+      "    at [_onLine] [as _onLine] (node:internal/readline/interface:465:12)",
+      "    at [_normalWrite] [as _normalWrite] (node:internal/readline/interface:647:22)",
+      "    at Socket.ondata (node:internal/readline/interface:263:23)",
+      "    at Socket.emit (node:events:509:28)"
+    ]
+  }
+}
