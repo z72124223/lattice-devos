@@ -25,7 +25,7 @@ LATTICE DevOS 是一套**本機優先的 AI 開發工作控制台與耐久執行
 | 能力 | 狀態 | 說明 |
 |---|---|---|
 | 本機 Control 網頁 | 可用 | 專案、工作、優先度、Codex 工作視窗續接、驗證與封存 |
-| Control 重開恢復 | 已驗證 | 工作、視窗對應與安裝觀察收據可由 SQLite 恢復 |
+| Control 重開恢復 | 已驗證 | Control 本機專案目錄 locator、Git／規則觀察、工作、視窗對應與安裝觀察收據可由 SQLite 恢復 |
 | PostgreSQL 耐久工作狀態 | 已驗證 | Runtime 使用 PostgreSQL 作為權威事實與收據來源 |
 | 唯一工頭 checkpoint | 已驗證 | active／blocked／completed／next action 可在新程序重播 |
 | GitHub CI | 啟用 | PR 與正式產品分支執行 Node 專案驗證 |
@@ -59,6 +59,37 @@ Control 資料預設保存在：
 
 這個快速開始只啟動 Control 網頁，不會自行安裝 PostgreSQL、啟動完整 Runtime、
 呼叫模型或重開 Codex App。Codex 只在使用者按下「開始」或「續接」時連線。
+
+### 登記與刷新本機專案
+
+Control 啟動後，可用同一個通用 CLI 登記其他專案、刷新 Git／規則觀察，或讀回
+已保存資料：
+
+```powershell
+npm.cmd run control:project -- register --name "My Project" --path "C:\absolute\project"
+npm.cmd run control:project -- refresh --project-name "My Project"
+npm.cmd run control:project -- read --project-name "My Project"
+```
+
+登記保存的是 `CONTROL_LOCAL_CATALOG` 目錄項目：穩定的 Control project ID、經觀察的
+本機 Windows 路徑 locator，以及最近確認的 repository 根目錄。它固定回報
+`registry_authority: NONE`，不是 Rust Project Registry 身分，不能供 Policy、approval、
+lease 或 Runtime authority 使用，也不會產生 `ProjectAuthorityReceipt` 或 PostgreSQL
+persistence receipt。
+
+Git branch、HEAD、dirty、remote、upstream/ahead/behind 和規則文件 SHA-256 都是帶觀察
+時間、可重跑且只保留最新一次已完成檢查（可能是 partial）的 observation；Control 不保存規則文件全文，
+remote URL 會先移除 credential。掃描只接受本機 drive-letter 路徑，不跟隨 symlink／
+junction、`.git` metadata redirect 或 repository-local config include，並有檔案、總位元組、
+文件數與時間上限。這代表 linked worktree 目前會得到可解釋的 partial Git observation，
+而不是跨出登記路徑讀取外部 metadata。加上 `--json` 可取得帶固定 schema version 的
+機器可讀輸出。
+
+這個流程使用 Control loopback HTTP/CLI，不代表 Runtime MCP 已有通用 project/task
+submit；目前 MCP task submit 仍只接受 `CONTROLLED_CODEX_CANARY`。Control schema 會在
+任何寫入前拒絕較新或漂移的資料庫。舊 binary 不支援直接開啟 v1 資料庫；若要
+downgrade，應還原 migration 前備份。舊程式留下的半登記 row 會顯示為
+`LEGACY_CONTROL_PROJECT`，重新登記同一路徑後才會被採用為 catalog locator。
 
 ## 架構
 

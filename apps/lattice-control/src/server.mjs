@@ -10,6 +10,15 @@ import { LatticeStore } from "./store.mjs";
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicDirectory = path.resolve(sourceDirectory, "..", "public");
 
+class HttpRequestError extends Error {
+  constructor(status, code, message) {
+    super(message);
+    this.name = "HttpRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 function sendJson(response, status, value) {
   const body = JSON.stringify(value);
   response.writeHead(status, {
@@ -31,6 +40,49 @@ async function readJson(request) {
   return chunks.length === 0 ? {} : JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function validateLoopbackRequest(request) {
+  const host = request.headers.host;
+  let hostUrl;
+  try {
+    if (typeof host !== "string" || /[\u0000-\u0020\u007f-\u009f]/u.test(host)) {
+      throw new Error("invalid Host");
+    }
+    hostUrl = new URL(`http://${host}`);
+    if (
+      hostUrl.hostname !== "127.0.0.1"
+      || hostUrl.username
+      || hostUrl.password
+      || hostUrl.pathname !== "/"
+    ) {
+      throw new Error("non-loopback Host");
+    }
+  } catch {
+    throw new HttpRequestError(403, "CONTROL_LOOPBACK_REQUIRED", "Control requires its loopback Host");
+  }
+  const origin = request.headers.origin;
+  if (origin != null) {
+    let parsedOrigin;
+    try {
+      parsedOrigin = new URL(origin);
+    } catch {
+      throw new HttpRequestError(403, "CONTROL_ORIGIN_REJECTED", "Control rejected the request Origin");
+    }
+    if (parsedOrigin.origin !== hostUrl.origin) {
+      throw new HttpRequestError(403, "CONTROL_ORIGIN_REJECTED", "Control rejected the request Origin");
+    }
+  }
+  if (request.method === "POST") {
+    const contentType = request.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+    if (contentType !== "application/json") {
+      throw new HttpRequestError(
+        415,
+        "CONTROL_JSON_REQUIRED",
+        "Control mutations require application/json",
+      );
+    }
+  }
+}
+
 function routeId(pathname, action) {
   const match = pathname.match(new RegExp(`^/api/work-items/([^/]+)/${action}$`, "u"));
   return match ? decodeURIComponent(match[1]) : null;
@@ -41,12 +93,27 @@ function installationReceiptRouteId(pathname) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-export function createLatticeServer({ databasePath, codex = new CodexAppServer() }) {
+function projectRouteId(pathname, action = null) {
+  const suffix = action ? `/${action}` : "";
+  const match = pathname.match(new RegExp(`^/api/projects/([^/]+)${suffix}$`, "u"));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+export function createLatticeServer({
+  databasePath,
+  codex = new CodexAppServer(),
+  projectInspector,
+}) {
   const store = new LatticeStore(databasePath);
-  const service = new LatticeControlService({ store, codex });
+  const service = new LatticeControlService({
+    store,
+    codex,
+    ...(projectInspector ? { projectInspector } : {}),
+  });
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, "http://127.0.0.1");
     try {
+      validateLoopbackRequest(request);
       if (request.method === "GET" && url.pathname === "/") {
         const body = await readFile(path.join(publicDirectory, "index.html"));
         response.writeHead(200, {
@@ -59,6 +126,22 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
         sendJson(response, 200, service.state());
+        return;
+      }
+      const refreshProjectId = projectRouteId(url.pathname, "refresh");
+      if (request.method === "POST" && refreshProjectId) {
+        await readJson(request);
+        sendJson(response, 200, await service.refreshProject(refreshProjectId));
+        return;
+      }
+      const projectId = projectRouteId(url.pathname);
+      if (request.method === "GET" && projectId) {
+        const project = store.getProjectRegistration(projectId);
+        if (!project) {
+          sendJson(response, 404, { error: "registered project not found" });
+          return;
+        }
+        sendJson(response, 200, project);
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/installation-receipts") {
@@ -89,7 +172,11 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
       }
       if (request.method === "POST" && url.pathname === "/api/projects") {
         const body = await readJson(request);
-        sendJson(response, 201, service.createProject({ name: body.name, rootPath: body.rootPath }));
+        const result = await service.registerProject({ name: body.name, rootPath: body.rootPath });
+        sendJson(response, result.created ? 201 : 200, {
+          ...result.project,
+          created: result.created,
+        });
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/work-items") {
@@ -141,7 +228,14 @@ export function createLatticeServer({ databasePath, codex = new CodexAppServer()
 
       sendJson(response, 404, { error: "not found" });
     } catch (error) {
-      sendJson(response, 400, { error: error.message });
+      sendJson(response, Number.isInteger(error?.status) ? error.status : 400, {
+        error: error.message,
+        code: typeof error.code === "string"
+          ? error.code
+          : error instanceof TypeError
+            ? "INVALID_REQUEST"
+            : "CONTROL_REQUEST_FAILED",
+      });
     }
   });
 

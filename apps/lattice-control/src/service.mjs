@@ -1,3 +1,10 @@
+import {
+  canonicalizeProjectPath,
+  inspectProject,
+  ProjectInspectionError,
+} from "./project-inspector.mjs";
+import { normalizeProjectDisplayName } from "./store.mjs";
+
 const approvalMethods = new Set([
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
@@ -53,6 +60,7 @@ export class LatticeControlService {
     threadOptions = {},
     lifecycleTimeoutMs = 30_000,
     approvalTimeoutMs = 300_000,
+    projectInspector = inspectProject,
   }) {
     this.store = store;
     this.codex = codex;
@@ -60,6 +68,7 @@ export class LatticeControlService {
     this.threadOptions = { ...threadOptions };
     this.lifecycleTimeoutMs = lifecycleTimeoutMs;
     this.approvalTimeoutMs = approvalTimeoutMs;
+    this.projectInspector = projectInspector;
     this.requestOwners = new Map();
     this.operations = new Map();
     this.onNotification = (message) => this.#onNotification(message);
@@ -99,7 +108,54 @@ export class LatticeControlService {
   }
 
   createProject(input) {
+    // Compatibility-only harness path. The HTTP project route uses registerProject
+    // and exposes legacy rows as LEGACY_CONTROL_PROJECT until they are adopted.
     return this.store.createProject(input);
+  }
+
+  async registerProject({ name, rootPath }) {
+    const normalizedName = normalizeProjectDisplayName(name);
+    const canonicalPath = await canonicalizeProjectPath(rootPath);
+    const registrationClaim = this.store.beginProjectRegistration(canonicalPath);
+    const inspection = await this.projectInspector(canonicalPath);
+    return this.store.registerProject({
+      name: normalizedName,
+      inspection,
+      registrationGeneration: registrationClaim.registration_generation,
+      projectRefreshGeneration: registrationClaim.project_refresh_generation,
+      claimedCanonicalPath: canonicalPath,
+    });
+  }
+
+  project(id) {
+    const project = this.store.getProjectRegistration(id);
+    if (!project) throw new Error("registered project not found");
+    return project;
+  }
+
+  async refreshProject(id) {
+    const project = this.project(id);
+    const attemptStartedAt = new Date().toISOString();
+    const attemptGeneration = this.store.beginProjectRefresh(project.id);
+    try {
+      const inspection = await this.projectInspector(project.canonical_path);
+      return this.store.refreshProject({
+        projectId: project.id,
+        inspection,
+        attemptGeneration,
+      });
+    } catch (error) {
+      if (error instanceof ProjectInspectionError) {
+        this.store.recordProjectRefreshFailure({
+          projectId: project.id,
+          code: error.code,
+          message: error.message,
+          observedAt: attemptStartedAt,
+          attemptGeneration,
+        });
+      }
+      throw error;
+    }
   }
 
   createWorkItem(input) {
