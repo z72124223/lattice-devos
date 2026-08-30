@@ -35,7 +35,7 @@ fn catalog_profile_pins_are_closed_and_live_measurement_is_coordinator_owned() {
     assert!(setup.contains("const EXPECTED_FUNCTION_COUNT: i64 = 43;"));
     assert!(setup.contains("const EXPECTED_RUNTIME_FUNCTION_COUNT: i64 = 39;"));
     assert!(setup.contains("7b249bf8416f734a34b6e1b9e7b407d17b00771139ac71a12294a3b0543e6120"));
-    assert!(setup.contains("e440592c3d6dcc44ae70cabf9e4c8bf76cf98e2ad4836ace81270b7b51d4ad82"));
+    assert!(setup.contains("e772c3041a4c30908c555c5b96f6705f48011634e47db8f562410371705ce807"));
     assert!(setup.contains("function_digest != EXPECTED_FUNCTION_CATALOG_SHA256"));
     assert!(setup.contains("table_digest != EXPECTED_TABLE_CATALOG_SHA256"));
     assert!(!setup.contains("LATTICE_FOREMAN_CATALOG_DEBUG"));

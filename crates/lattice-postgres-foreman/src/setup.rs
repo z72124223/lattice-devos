@@ -21,7 +21,7 @@ const TABLE_CATALOG_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_TABLE_CATALOG_V1\
 const EXPECTED_FUNCTION_CATALOG_SHA256: &str =
     "7b249bf8416f734a34b6e1b9e7b407d17b00771139ac71a12294a3b0543e6120";
 const EXPECTED_TABLE_CATALOG_SHA256: &str =
-    "e440592c3d6dcc44ae70cabf9e4c8bf76cf98e2ad4836ace81270b7b51d4ad82";
+    "e772c3041a4c30908c555c5b96f6705f48011634e47db8f562410371705ce807";
 
 /// Closed administrative/runtime database roles for the extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
