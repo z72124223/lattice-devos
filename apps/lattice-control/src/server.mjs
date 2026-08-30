@@ -128,6 +128,10 @@ export function createLatticeServer({
         sendJson(response, 200, service.state());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/development-radar") {
+        sendJson(response, 200, service.developmentRadar());
+        return;
+      }
       const refreshProjectId = projectRouteId(url.pathname, "refresh");
       if (request.method === "POST" && refreshProjectId) {
         await readJson(request);
@@ -199,6 +203,11 @@ export function createLatticeServer({
           artifactSha256: body.artifactSha256,
         });
         sendJson(response, result.created ? 201 : 200, result.receipt);
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/development-radar") {
+        const body = await readJson(request);
+        sendJson(response, 200, service.replaceDevelopmentRadar(body));
         return;
       }
 

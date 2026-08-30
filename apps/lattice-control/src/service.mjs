@@ -174,12 +174,21 @@ export class LatticeControlService {
     return this.store.getInstallationReceipt(id);
   }
 
+  replaceDevelopmentRadar(input) {
+    return this.store.replaceDevelopmentRadar(input);
+  }
+
+  developmentRadar() {
+    return this.store.getDevelopmentRadar();
+  }
+
   state() {
     return {
       codexConnected: this.codex.connected,
       projects: this.store.listProjects(),
       workItems: this.store.listWorkItems(),
       installationReceiptCount: this.store.countInstallationReceipts(),
+      developmentRadar: this.developmentRadar(),
     };
   }
 
