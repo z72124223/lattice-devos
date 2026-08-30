@@ -61,6 +61,7 @@ const redirectedGitMetadataFiles = new Set([
   "objects/info/alternates",
   "objects/info/http-alternates",
 ]);
+const WSL2_PROJECT_PATH_SCHEMA = "lattice.wsl2-project-path/1.0";
 
 export class ProjectInspectionError extends Error {
   constructor(code, message, options = {}) {
@@ -96,6 +97,31 @@ function hasUnsafeControlCharacters(value) {
   return /[\u0000-\u001f\u007f-\u009f]/u.test(value);
 }
 
+function projectPathDigest(value) {
+  return `wsl2-project-path:sha256:${createHash("sha256")
+    .update(JSON.stringify(value), "utf8").digest("hex")}`;
+}
+
+export function parseWsl2ProjectPath(value) {
+  if (process.platform !== "win32" || typeof value !== "string"
+    || hasUnsafeControlCharacters(value) || value.length > 32_767) return null;
+  const normalized = path.win32.normalize(value);
+  const match = /^\\\\wsl\.localhost\\([A-Za-z0-9._-]{1,128})\\(.+)$/iu.exec(normalized);
+  if (match === null) return null;
+  const components = match[2].split("\\");
+  if (components.length < 3 || components[0] !== "home"
+    || components.some((component) => component.length === 0 || component === "."
+      || component === ".." || /[\\/\0]/u.test(component))) return null;
+  const linuxPath = `/${components.join("/")}`;
+  const subject = {
+    schema: WSL2_PROJECT_PATH_SCHEMA,
+    distribution: match[1],
+    linux_path: linuxPath,
+    windows_path: `\\\\wsl.localhost\\${match[1]}\\${components.join("\\")}`,
+  };
+  return Object.freeze({ ...subject, identity_ref: projectPathDigest(subject) });
+}
+
 function boundedFailures(failures, stage) {
   if (failures.length <= maximumObservationFailures) return failures;
   return [
@@ -129,6 +155,8 @@ export function normalizeRequestedProjectPath(value) {
     inspectionFailure("PROJECT_PATH_INVALID", "project path must be a safe absolute path");
   }
   if (process.platform === "win32") {
+    const wsl2 = parseWsl2ProjectPath(value);
+    if (wsl2 !== null) return wsl2.windows_path;
     if (
       value.startsWith("\\\\")
       || value.startsWith("\\\\?\\")
@@ -792,6 +820,107 @@ export async function defaultGitExecutor({ cwd, args, timeoutMs = maximumGitObse
       stderr: typeof error?.stderr === "string" ? error.stderr : "",
     };
   }
+}
+
+function containedLinuxPath(parent, candidate) {
+  const relative = path.posix.relative(parent, candidate);
+  return relative === "" || (!relative.startsWith("../") && relative !== ".."
+    && !path.posix.isAbsolute(relative));
+}
+
+function canonicalLinuxProjectPath(value) {
+  return typeof value === "string" && value.startsWith("/home/")
+    && path.posix.normalize(value) === value && !value.includes("\\")
+    && !value.includes("\0") && !value.includes("/../") && !value.endsWith("/..")
+    && !value.includes("/./") && !value.endsWith("/.");
+}
+
+function wsl2UncFromLinux(distribution, linuxPath) {
+  return `\\\\wsl.localhost\\${distribution}${linuxPath.replaceAll("/", "\\")}`;
+}
+
+function closedWindowsGatewayEnvironment() {
+  return Object.fromEntries(["SystemRoot", "WINDIR"].flatMap((key) => (
+    process.env[key] === undefined ? [] : [[key, process.env[key]]]
+  )));
+}
+
+export function createWsl2ProjectGitExecutor(untrusted, {
+  executeFile = execFileAsync,
+  systemRoot = process.env.SystemRoot ?? process.env.WINDIR,
+} = {}) {
+  const parsed = parseWsl2ProjectPath(untrusted?.windows_path);
+  if (parsed === null || parsed.schema !== untrusted?.schema
+    || parsed.distribution !== untrusted.distribution
+    || parsed.linux_path !== untrusted.linux_path
+    || parsed.identity_ref !== untrusted.identity_ref
+    || typeof executeFile !== "function" || typeof systemRoot !== "string"
+    || !/^[A-Za-z]:[\\/]Windows$/iu.test(path.win32.normalize(systemRoot))) {
+    throw new TypeError("WSL2 project Git execution requires an exact local path identity");
+  }
+  const gateway = path.win32.join(systemRoot, "System32", "wsl.exe");
+  const linuxHome = parsed.linux_path.split("/").slice(0, 3).join("/");
+  return async ({ cwd, args, timeoutMs = maximumGitObservationMs }) => {
+    if (typeof cwd !== "string" || !Array.isArray(args)
+      || args.some((argument) => typeof argument !== "string" || argument.includes("\0"))
+      || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1
+      || timeoutMs > maximumGitObservationMs) {
+      throw new TypeError("Git execution requires an explicit cwd and argument array");
+    }
+    const cwdIdentity = parseWsl2ProjectPath(cwd);
+    if (cwdIdentity === null
+      || cwdIdentity.distribution.toLowerCase() !== parsed.distribution.toLowerCase()
+      || !containedLinuxPath(cwdIdentity.linux_path, parsed.linux_path)
+      || !containedLinuxPath(linuxHome, cwdIdentity.linux_path)) {
+      throw new TypeError("WSL2 Git cwd must remain in the bound Linux project domain");
+    }
+    try {
+      const result = await executeFile(gateway, [
+        "-d", parsed.distribution, "--exec", "/usr/bin/env", "-i",
+        `HOME=${linuxHome}`, "PATH=/usr/bin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+        "GCM_INTERACTIVE=Never", "GIT_ATTR_NOSYSTEM=1", "GIT_ALLOW_PROTOCOL=",
+        "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+        "GIT_CONFIG_SYSTEM=/dev/null", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
+        "GIT_TERMINAL_PROMPT=0", "/usr/bin/git", "--no-optional-locks",
+        "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "core.untrackedCache=false", "-c", "core.attributesFile=/dev/null",
+        "-c", "core.excludesFile=/dev/null", "-c", "status.submoduleSummary=false",
+        "-C", cwdIdentity.linux_path, ...args,
+      ], {
+        cwd: trustedGitWorkingDirectory,
+        encoding: "utf8",
+        env: closedWindowsGatewayEnvironment(),
+        maxBuffer: maximumGitOutputBytes,
+        timeout: timeoutMs,
+        windowsHide: true,
+      });
+      let stdout = result.stdout ?? "";
+      if (args.length === 2 && args[0] === "rev-parse" && args[1] === "--show-toplevel") {
+        const lines = stdout.replaceAll("\r", "").split("\n").filter(Boolean);
+        if (lines.length !== 1 || !canonicalLinuxProjectPath(lines[0])
+          || !containedLinuxPath(lines[0], cwdIdentity.linux_path)
+          || !containedLinuxPath(linuxHome, lines[0])) {
+          return {
+            exit_code: 1,
+            error_code: "GIT_REPOSITORY_ROOT_INVALID",
+            stdout: "",
+            stderr: "",
+          };
+        }
+        stdout = `${wsl2UncFromLinux(parsed.distribution, lines[0])}\n`;
+      }
+      return { exit_code: 0, stdout, stderr: result.stderr ?? "" };
+    } catch (error) {
+      return {
+        exit_code: Number.isInteger(error?.code) ? error.code : 1,
+        error_code: error?.killed
+          ? "GIT_COMMAND_TIMEOUT"
+          : typeof error?.code === "string" ? error.code : error?.code ?? null,
+        stdout: typeof error?.stdout === "string" ? error.stdout : "",
+        stderr: typeof error?.stderr === "string" ? error.stderr : "",
+      };
+    }
+  };
 }
 
 function gitObservationBudget({
@@ -1725,7 +1854,7 @@ async function inspectRules(root, observedAt, {
 }
 
 export async function inspectProject(rootPath, {
-  gitExecutor = defaultGitExecutor,
+  gitExecutor = null,
   clock = () => new Date(),
   ruleLimits = {},
   monotonicClock = () => performance.now(),
@@ -1736,11 +1865,16 @@ export async function inspectProject(rootPath, {
   const observedAt = safeObservationTime(clock);
   const projectDirectory = await canonicalProjectDirectory(rootPath);
   const canonicalPath = projectDirectory.canonical_path;
+  const wsl2ProjectPath = parseWsl2ProjectPath(canonicalPath);
+  const effectiveGitExecutor = gitExecutor
+    ?? (wsl2ProjectPath === null
+      ? defaultGitExecutor
+      : createWsl2ProjectGitExecutor(wsl2ProjectPath));
   const budget = gitObservationBudget({
     maximumDurationMs: maximumGitDurationMs,
     monotonicClock: gitMonotonicClock,
   });
-  const boundedGitExecutor = gitObservationExecutor(gitExecutor, budget);
+  const boundedGitExecutor = gitObservationExecutor(effectiveGitExecutor, budget);
   const [gitResult, rules] = await Promise.all([
     inspectGit(canonicalPath, boundedGitExecutor, observedAt, budget),
     inspectRules(canonicalPath, observedAt, {

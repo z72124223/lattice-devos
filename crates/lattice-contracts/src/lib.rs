@@ -522,6 +522,7 @@ pub fn task_ingress_text_contains_recognized_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     if lower.contains("bearer ")
         || (lower.contains("-----begin ") && lower.contains("private key-----"))
+        || contains_url_userinfo(&lower)
         || TASK_INGRESS_ANYWHERE_SECRET_PREFIXES
             .iter()
             .any(|prefix| lower.contains(prefix))
@@ -580,6 +581,27 @@ pub fn task_ingress_text_contains_recognized_secret(value: &str) -> bool {
                 && (start + candidate.len() == value.len()
                     || !value.as_bytes()[start + candidate.len()].is_ascii_alphanumeric())
         })
+}
+
+fn contains_url_userinfo(value: &str) -> bool {
+    value.match_indices("://").any(|(separator, _)| {
+        let authority = value[separator + 3..]
+            .split(|character: char| {
+                character.is_ascii_whitespace() || matches!(character, '/' | '?' | '#')
+            })
+            .next()
+            .unwrap_or_default();
+        let Some(separator) = authority.rfind('@') else {
+            return false;
+        };
+        let userinfo = &authority[..separator];
+        let host = &authority[separator + 1..];
+        !userinfo.is_empty()
+            && !host.is_empty()
+            && !userinfo
+                .bytes()
+                .any(|byte| matches!(byte, b'"' | b'\'' | b'<' | b'>' | b'{' | b'}'))
+    })
 }
 
 fn contains_bounded_secret_prefix(value: &str, prefix: &str) -> bool {

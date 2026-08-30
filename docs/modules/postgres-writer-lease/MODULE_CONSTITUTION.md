@@ -1,15 +1,15 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 2.0
+version: 2.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 
 ## Mission
 
-Persist and independently replay Writer Lease 1.1 commands, transitions,
+Persist and independently replay Writer Lease 1.2 commands, transitions,
 current authority, monotonic fencing high-water, and checkpoints in PostgreSQL
 through one exact extension and repository implementation, without acquiring
 lease semantic ownership.
@@ -45,6 +45,10 @@ append-only v4 successor for exact Store schema v7. It exposes the closed
 `V6V4Bridge` / `V7V4Current` bootstrap states, the fixed
 `writer_lease_rebind_v4` boundary, and a version-closed `new_v4_v7` runtime
 constructor without relabelling v3 or changing Writer Lease 1.1 semantics.
+Version 2.1 preserves every v1-v4 SQL/rebind byte and appends Writer v5 on the
+same exact Store-v7 generation. V5 adds the physical `PROCESS_HANDOFF` kind,
+version-closed v5 runtime procedures, and read-only replay-backed historical
+authority lookup needed for managed-foreman restart recovery.
 
 ## Non-Goals
 
@@ -62,10 +66,10 @@ constructor without relabelling v3 or changing Writer Lease 1.1 semantics.
 ## Owned Data
 
 - The exact `db/extensions/writer-lease/v1.sql` and append-only
-  `db/extensions/writer-lease/v2.sql`, `v3.sql`, `v4.sql`, and corresponding
-  fixed rebind bytes, extension identities, checksums, explicit administrative
-  state transitions, and read-only verifiers. Every predecessor file is
-  immutable once the successor is introduced.
+  `db/extensions/writer-lease/v2.sql`, `v3.sql`, `v4.sql`, `v5.sql`, and
+  corresponding fixed rebind bytes, extension identities, checksums, explicit
+  administrative state transitions, and read-only verifiers. Every predecessor
+  file is immutable once the successor is introduced.
 - Physical PostgreSQL tables, indexes, constraints, fixed functions, roles,
   ownership, ACLs, transactions, and bounded retry/poison state used only for
   Writer Lease persistence.
@@ -75,12 +79,12 @@ constructor without relabelling v3 or changing Writer Lease 1.1 semantics.
   fenced writers; a copied digest/fence cannot authorize another Task binding.
 - Adapter-level database/schema/extension persistence evidence.
 
-Writer Lease 1.1 owns every semantic request, terminal receipt, authority
+Writer Lease 1.2 owns every semantic request, terminal receipt, authority
 receipt/head, transition, snapshot, checkpoint, and recovery decision.
 
 ## Public Contracts
 
-- Implement the Writer Lease 1.1 repository trait for exact command execution,
+- Implement the Writer Lease 1.2 repository trait for exact command execution,
   replay-verified current-authority observation, and durable current-head
   assertion.
 - Inspect one existing project in a repeatable-read read-only transaction and
@@ -92,7 +96,7 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   exact verified target; read no environment, DSN, password, or credential
   source.
 - Delegate all construction, transition, replay, exact retry, and checkpoint
-  verification to Writer Lease 1.1.
+  verification to Writer Lease 1.2.
 - Commit the semantic command/receipt, optional transition, aggregate snapshot,
   independently retained checkpoint, and fencing high-water atomically in one
   bounded serializable transaction.
@@ -112,8 +116,9 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 - Expose one repeatable-read, read-only bootstrap profile that returns only
   `V5FallbackRequired`, `V5Bridge`, `V6BridgePending`, or `V6Current` after
   exact Writer-owned verification, plus `V6V4Bridge` and `V7V4Current` for the
-  append-only v4 successor. Partial/corrupt Writer evidence never maps to
-  fallback, and the session apply gate creates no durable row or ACL change.
+  append-only v4 successor and `V7V5Current` for the v5 successor.
+  Partial/corrupt Writer evidence never maps to fallback, and the session apply
+  gate creates no durable row or ACL change.
 - Construct schema-v6 runtime repositories only through the explicit v3
   constructor and exact `bind_runtime_v3`/`load_for_update_v3` procedures.
   The v2 constructor remains version-closed to its historical profile.
@@ -122,6 +127,14 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   `load_for_update_v4` procedures. The frozen v3 constructor remains
   version-closed to schema v6, so neither generation can be silently
   relabelled as the other.
+- Apply Writer v5 only from an exact replay-verified `V7V4Current` profile while
+  runtime admission is `STOPPED`. The append-only upgrade may retain an
+  `ACTIVE` or `SUSPECT` aggregate; it changes no semantic row or fencing value,
+  appends one exact `UPGRADED` ledger row, and exact retry is read-only.
+- Construct the Writer-v5/Store-v7 runtime only through `new_v5_v7` and the
+  exact v5 bind/load-for-update procedures. Query historical authority only by
+  project plus receipt digest after complete owner replay; released history is
+  queryable, but historical evidence grants no currentness.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -136,7 +149,7 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
    aggregate snapshot, and independent checkpoint advance atomically or not at
    all.
 4. The adapter cannot construct or reinterpret a lease transition, receipt,
-   authority head, snapshot, or checkpoint outside Writer Lease 1.1 public
+   authority head, snapshot, or checkpoint outside Writer Lease 1.2 public
    APIs.
 5. An untrusted row set becomes usable only after context-free replay, an
    independent checkpoint/current-head match, and byte-exact comparison of
@@ -150,7 +163,7 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
 8. Unknown commit outcome never reports success or denial; exact retry or
    reconciliation is required.
 9. Expiry is an observation, not proof of holder death. Revoke requires the
-   exact Writer Lease 1.1 recovery evidence.
+   exact Writer Lease 1.2 recovery evidence.
 10. No secret, DSN, password, raw SQL, process output, or arbitrary diagnostic
     is persisted in semantic rows, receipts, errors, or `Debug`.
 11. The extension does not alter global migrations, Store physical receipts,
@@ -190,10 +203,19 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     three retained predecessor histories. Skipped generations, schema v8+,
     arbitrary future manifests, and any edit to frozen v3 SQL/rebind bytes fail
     closed.
+21. Writer v5 accepts exactly one Store-v7 v4-current predecessor history and
+    appends `UPGRADED` only at ordinal 4, 6, or 8. It preserves v1-v4 bytes,
+    project aggregates, checkpoints, high-waters, active/suspect authority, and
+    fences while replacing only the closed runtime procedure generation and
+    transition-kind constraint.
+22. Historical authority lookup is repeatable-read, read-only, and available
+    only after byte-exact physical replay plus domain snapshot/checkpoint
+    verification. Zero, duplicate, malformed, truncated, or substituted
+    history fails closed; absent and released history remain distinct.
 
 ## Allowed Dependencies
 
-- `lattice-writer-lease` 1.1 public planner, repository, snapshot, checkpoint,
+- `lattice-writer-lease` 1.2 public planner, repository, snapshot, checkpoint,
   and replay APIs.
 - `lattice-contracts` immutable project, authority, and persistence evidence.
 - Exact pinned synchronous PostgreSQL, hashing, and bounded error libraries.
@@ -279,12 +301,19 @@ Writer identity, and appends the matching `REBOUND` row atomically. Runtime
 construction uses only `new_v4_v7`. The classifier enumerates exact versions
 5, 6, and 7 rather than accepting a future range.
 
+Version 2.1 is a same-global-generation append-only upgrade from exact
+`V7V4Current` to `V7V5Current`. Migration requires `STOPPED` admission but does
+not require releasing the retained aggregate, because v5 changes only the
+closed catalog/ACL and enables the Writer-owned process-handoff semantics. A
+fresh runtime must use only `new_v5_v7`; v4 remains historical and cannot
+silently execute against the v5 profile.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
 | Extension closure | exact bytes/checksum, install/no-op, partial/drift/collision, columns/defaults/tombstones, constraints/indexes, function body/result/proconfig, namespace objects, and all-principal ACL matrices | Security review | yes |
-| Planner parity | PostgreSQL adapter uses Writer Lease 1.1 planner/replay/checkpoint without duplicate semantic builders | Architecture review | yes |
+| Planner parity | PostgreSQL adapter uses Writer Lease 1.2 planner/replay/checkpoint without duplicate semantic builders | Architecture review | yes |
 | Concurrent authority | two concurrent acquire attempts yield one current writer and durable exact denial/retry evidence | Engineering | yes |
 | Fence safety | release/reacquire, reconnect, process/database restart, max/overflow, and stale-fence rejection prove monotonic non-reuse | Security review | yes |
 | Atomic durability | command/transition/snapshot/checkpoint/high-water commit together; physical rows replay exactly; real commit-response interruption reconciles safely | Engineering | yes |
@@ -294,6 +323,8 @@ construction uses only `new_v4_v7`. The classifier enumerates exact versions
 | Strict v6 bootstrap | absent Writer v3 fingerprint is unchanged; bridge-pending rebinds; current retry is read-only | Integration review | yes |
 | Append-only v4 successor | frozen v3 byte/hash equality; exact v4 apply and `V6V4Bridge`; same-transaction v7 rebind; ordinal 2/3, 4/5, 6/7 histories; partial/substituted/future rejection | Compatibility and security review | yes |
 | Strict v7 runtime | exact `V7V4Current` plus Store-v7/Memory-v3 manifest binding; only `new_v4_v7` and v4 runtime procedures are reachable | Architecture and integration review | yes |
+| Append-only v5 successor | frozen v1-v4 byte/hash equality; exact v4-current predecessor; stopped apply with retained ACTIVE/SUSPECT; ordinal 4/6/8 histories; substitution and future rejection | Compatibility and security review | yes |
+| Strict v5 runtime and history | exact `V7V5Current`; only `new_v5_v7` and v5 runtime procedures; process-handoff replay and released historical-authority lookup fail closed on zero/duplicate/tamper | Architecture and integration review | yes |
 | Full verification | format, strict lint, focused/workspace Rust tests, repository checks, and diff check | Engineering | yes |
 
 ## Change Policy
@@ -320,3 +351,4 @@ synthetic evidence as production authority.
 | 1.7 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed rebind boundary to Store 1.18's PostgreSQL-valid equivalent foreman scalar bounds | TASK-105 bounded implementation authority |
 | 1.9 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial proposal to extend Writer v3 through Store v7; superseded before release because deployed predecessor bytes must remain immutable | User Phase 3 authorization |
 | 2.0 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Freeze v3 at schema v6 and add append-only Writer v4, exact `V6V4Bridge`/`V7V4Current`, fixed v4 rebind, and `new_v4_v7` runtime construction | User Phase 3 authorization |
+| 2.1 | 2026-08-27 | SPEC-011 v1.2, ADR-012 Phase 4 amendment, ADR-028 | Preserve v1-v4 and append Writer v5 process-handoff profile, strict v5 runtime construction, and replay-backed historical authority lookup | User Phase 4 delegation |

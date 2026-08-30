@@ -1,10 +1,10 @@
 ---
 module_id: policy-engine
 name: Policy Engine
-version: 2.6
+version: 2.8
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-07-29
+last_reviewed: 2026-08-28
 ---
 
 ## Mission
@@ -98,6 +98,21 @@ approval, lease, capability, memory, artifact, or release data.
 - Admit guardian canary/recovery only for a Registry-classified LATTICE system
   project and reserved system stream.
 - Return `PolicyDecision { allowed, reason, evidence }` with no partial success.
+- For managed local execution, `evaluate_execution_gate_with_evidence` must use
+  the existing `ExecutionGate` evaluation and return opaque Policy-owned
+  evidence that captures the exact Task Spec digest, project binding, Registry
+  receipt/current head, task state, and runtime admission evaluated. Downstream
+  consumers may inspect but cannot construct or broaden that evidence.
+- Provider-dispatch-capable managed evaluation must use
+  `evaluate_managed_execution_gate_with_evidence` and capture the exact
+  Task-Ledger task reference, successor stream, Task Spec, approval subject,
+  and budget. Legacy evidence without that binding is diagnostic-only and
+  fails closed as execution authority.
+- An allowed managed-execution decision is bounded evaluation evidence, not a
+  durable or current execution credential. The final provider-dispatch owner
+  must still atomically revalidate the exact persisted Approval evidence,
+  validity interval, task/spec/budget binding, and current Project Registry
+  authority before admitting a new external effect.
 
 ## Invariants
 
@@ -161,6 +176,14 @@ approval, lease, capability, memory, artifact, or release data.
     nondeterministic collection ordering.
 11. V1 characterization is namespaced and cannot add V1-only actions or unsafe
     behavior to the active V2 contract.
+12. Substituting any managed-execution gate input changes its opaque evidence;
+    an allowed decision detached from those captured inputs is not reusable
+    execution authority.
+13. Policy evidence cannot make a historical Approval receipt or Registry head
+    current. Exact replay may reproduce prior evidence, but every new provider
+    claim independently proves owner currentness at that claim boundary.
+14. Substituting task reference, successor stream, Task Spec, approval subject,
+    or budget after managed Policy evaluation cannot reuse its opaque evidence.
 
 ## Allowed Dependencies
 
@@ -265,3 +288,5 @@ authorization.
 | 2.4 | 2026-07-29 | SPEC-002 v9, ADR-009/011, TASK-013 | Replace caller-owned resource owner/producer/freshness fields with a fixed-producer Task Ledger receipt plus independent full current owner head | User MVP-3 execution directive |
 | 2.5 | 2026-07-29 | SPEC-002 v10, ADR-009/012, TASK-014 | Replace caller-owned lease active/current/role/epoch/fence/count fields with a fixed-producer Writer Lease receipt plus independent full current owner head | User MVP-3 execution directive |
 | 2.6 | 2026-07-29 | SPEC-002 v11, ADR-009/013, TASK-015 | Replace caller-owned approval and review verdict Booleans with complete Approval Verifier receipt/current-head authority; R3 fails closed pending Review Runtime | User MVP-3 execution directive |
+| 2.7 | 2026-08-27 | SPEC-011, ADR-028 durable-core review | Clarify that managed Policy decision evidence is not current execution authority and require owner-current Approval and Registry revalidation at new provider dispatch | Delegated product owner |
+| 2.8 | 2026-08-28 | SPEC-011, ADR-028 execution-authority security repair | Seal the exact Task-Ledger execution binding into managed Policy evidence and fail closed for legacy unbound evidence | Delegated product owner |

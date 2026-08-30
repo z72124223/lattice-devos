@@ -1,0 +1,14 @@
+cli_auth_credentials_store = "keyring"
+approval_policy = "never"
+sandbox_mode = "workspace-write"
+model = "gpt-5.6-sol"
+model_reasoning_effort = "ultra"
+
+[shell_environment_policy]
+inherit = "all"
+ignore_default_excludes = false
+include_only = ["HOME", "PATH", "LANG", "LC_ALL", "TERM", "COLORTERM"]
+experimental_use_profile = false
+
+[features]
+plugins = false

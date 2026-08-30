@@ -1,15 +1,17 @@
 //! Sole concrete composition root for the bounded TASK-032 delivery lane.
 
+use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
-use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{self, BufRead, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -41,10 +43,10 @@ use lattice_contracts::{
     GitCommitEvidence, GitObjectId, GraphMemoryReceipt, GraphMemoryRunRequest, HermesEvidence,
     HermesReflectionCandidate, HermesReflectionContent, HermesReflectionFinding,
     HermesReflectionReceipt, HermesResearchRequest, HolderProcessId, Invocation, MemoryQuery,
-    PreparedWorkspaceEvidence, ProjectAuthorityReceipt, ProjectId, ProjectSnapshotId, RequestId,
-    RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead, StoreAuthorityRevision,
-    StoreDaemonInstanceId, SubjectBinding, TaskId, TaskIngressPeerEvidence, TaskIntakeBinding,
-    TaskSpecSubmission, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
+    PreparedWorkspaceEvidence, ProjectAuthorityReceipt, ProjectClass, ProjectId, ProjectLifecycle,
+    ProjectSnapshotId, RequestId, RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead,
+    StoreAuthorityRevision, StoreDaemonInstanceId, SubjectBinding, TaskId, TaskIngressPeerEvidence,
+    TaskIntakeBinding, TaskSpecSubmission, WorkspaceChangeEvidence, WriterLeaseAuthorityHead,
 };
 #[cfg(test)]
 use lattice_foreman_state::ForemanSnapshot;
@@ -86,9 +88,9 @@ use lattice_ports::TaskLifecycleAutonomyEvidence;
 use lattice_ports::{
     ControlledTaskExecutionError, ControlledTaskExecutionErrorKind, ControlledTaskExecutionPort,
     DeliveryCodexPort, DeliveryFailureCertainty, DeliveryLedgerPort, DeliveryPortError,
-    DeliveryPortResult, ForemanCoordinationPort, GatewayService, GatewayServiceError,
-    GatewayServiceResult, GraphMemoryFailureCertainty, GraphMemoryPortError, GraphMemoryStage,
-    HermesPort, HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
+    DeliveryPortResult, ForemanCoordinationPort, ForemanRuntimeStatus, GatewayService,
+    GatewayServiceError, GatewayServiceResult, GraphMemoryFailureCertainty, GraphMemoryPortError,
+    GraphMemoryStage, HermesPort, HermesReflectionMemoryPort, PortError, PortErrorKind, PortResult,
     TaskIntakeLifecycleEvidence, TaskIntakeLifecyclePort, TaskLifecycleError,
     TaskLifecycleErrorKind, TaskLifecycleEvidence, TaskLifecyclePort, TaskLifecycleResult,
     TestRunnerPort, WorkspaceGitPort, WriterAuthorityGuardPort,
@@ -99,18 +101,25 @@ use lattice_postgres_codebase_memory::{
     apply_extension as apply_postgres_memory_extension, inspect_bootstrap_profile,
     verify_embedded_extension_manifest, verify_extension as verify_memory_extension,
 };
+use lattice_postgres_foreman::{
+    ExecutionEnvironmentDescriptor, ExtensionDatabaseRole as ForemanExtensionDatabaseRole,
+    ExtensionTarget as ForemanExtensionTarget, PostgresForeman, RestartTaskKind,
+    apply_extension as apply_postgres_foreman_extension,
+    verify_extension as verify_postgres_foreman_extension,
+};
 use lattice_postgres_store::{
     DatabaseRole as StoreDatabaseRole, MigrationBootstrapProfile,
-    MigrationTarget as StoreMigrationTarget, PostgresForemanCoordination, PostgresTaskLedger,
-    PostgresTaskLedgerErrorKind, apply_migrations as apply_store_migrations,
+    MigrationTarget as StoreMigrationTarget, PostgresForemanCoordination, PostgresProjectRegistry,
+    PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations as apply_store_migrations,
     inspect_migration_profile, verify_postgres_schema as verify_store_schema,
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome as WriterExtensionApplyOutcome,
     ExtensionTarget as WriterLeaseExtensionTarget, PostgresWriterLease, V3BootstrapProfile,
-    V3ExtensionTarget, V4ExtensionTarget, apply_extension as apply_postgres_writer_extension,
-    apply_v3_extension, apply_v4_extension, inspect_v3_bootstrap_profile,
-    rebind_existing_v3_extension, verify_extension as verify_writer_extension,
+    V3ExtensionTarget, V4ExtensionTarget, V5ExtensionTarget,
+    apply_extension as apply_postgres_writer_extension, apply_v3_extension, apply_v4_extension,
+    apply_v5_extension, inspect_v3_bootstrap_profile, rebind_existing_v3_extension,
+    verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -139,10 +148,19 @@ use crate::delivery_ledger::{
 use crate::git_delivery::{
     BASELINE_COMMIT_SHA, DeliveryWorkspaceGitAdapter, DeliveryWorkspaceGitAdapterConfig,
 };
+use crate::managed_file_identity::ManagedEffectBundleGuard;
+use crate::managed_foreman_service::{
+    FormalForemanIdentity, MANAGED_GRACEFUL_SHUTDOWN_COMPLETE, MANAGED_GRACEFUL_SHUTDOWN_IDLE,
+    MANAGED_STATUS_MAX_DURATION, MANAGED_STATUS_TIMEOUT, ManagedForemanServiceConfig,
+    ManagedRestartProjectBlockerOutcome, ManagedRestartWriterBlockerOutcome,
+    managed_task_public_status, record_managed_restart_project_blocker,
+    record_managed_restart_writer_blocker, run_managed_task,
+};
+use crate::managed_worker_adapter::ManagedWorkerCancellation;
 use crate::mcp::{
     self, DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
-    ObservedEffectKind, TaskStatusArguments, TaskSubmitArguments, ToolExecutionError,
-    record_observed_effect,
+    ObservedEffectKind, TASK_PUBLIC_OBJECTIVE_SUMMARY, TaskStatusArguments, TaskSubmitArguments,
+    ToolExecutionError, record_observed_effect, task_public_objective_digest,
 };
 use crate::project_bridge::{ProjectSelector, ResolvedProjectAuthority, resolve_project_authority};
 use crate::task_control::{
@@ -155,6 +173,27 @@ const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const FINALIZATION_RESERVE: Duration = Duration::from_secs(30);
 const CONTROLLED_TASK_MAX_RUNTIME: Duration = Duration::from_mins(5);
 const GENERAL_TASK_INGRESS_ID: &str = "lattice_task_submit.v1";
+const MANAGED_FOREMAN_MODE_ENV: &str = "LATTICE_MANAGED_FOREMAN_MODE";
+const MANAGED_FOREMAN_NODE_ENV: &str = "LATTICE_MANAGED_NODE_EXE";
+const MANAGED_FOREMAN_BRIDGE_ENV: &str = "LATTICE_MANAGED_WORKER_BRIDGE";
+const MANAGED_FOREMAN_WORKTREE_ROOT_ENV: &str = "LATTICE_MANAGED_WORKTREE_ROOT";
+const MANAGED_FOREMAN_NPM_ENV: &str = "LATTICE_MANAGED_NPM_EXE";
+const MANAGED_FOREMAN_CARGO_ENV: &str = "LATTICE_MANAGED_CARGO_EXE";
+const MANAGED_FOREMAN_EXECUTION_ENVIRONMENT_ENV: &str =
+    "LATTICE_MANAGED_EXECUTION_ENVIRONMENT_JSON";
+const DELIVERY_CODEX_HOME_ENV: &str = "LATTICE_DELIVERY_CODEX_HOME";
+const MANAGED_SUPERVISOR_WORKERS: usize = 4;
+const OPENCLAW_PUMP_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+const OPENCLAW_PUMP_WAKE_TIMEOUT: Duration = Duration::from_millis(250);
+const FULL_CHAIN_STDIN_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const FULL_CHAIN_STDIN_CHUNK_BYTES: usize = 8 * 1024;
+const MANAGED_SCHEDULER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
+const MANAGED_SCHEDULER_QUEUE_CAPACITY: usize = 64;
+const MANAGED_RESTART_TASK_LIMIT: usize = 1_024;
+const MANAGED_CAPACITY_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MANAGED_DURABLE_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
+const MANAGED_RECOVERY_RETRY_MAX_EXPONENT: u8 = 4;
+const MANAGED_FOREMAN_NOT_ACTIVE: &str = "LATTICE_MANAGED_FOREMAN_NOT_ACTIVE";
 const TASK_ID: &str = "TASK-032";
 const PROJECT_SNAPSHOT_ID: &str = "task032-delivery:snapshot:1";
 const CONTROLLED_TASK_ID: &str = "TASK-038-CANARY";
@@ -174,6 +213,11 @@ const CONTROLLED_WRITER_TRANSITION_HIGH_WATER: u64 = 2;
 const CONTROLLED_WRITER_COMMAND_HIGH_WATER: u64 = 2;
 const SCRIPTED_FIXTURE_MARKER_NAME: &str = ".lattice-delivery-fixture-v1.json";
 const SCRIPTED_FIXTURE_KIND: &str = "LATTICE_DELIVERY_SCRIPTED_ACCEPTANCE_V1";
+const MANAGED_SCRIPTED_ACTIVE_RESTART_ENV: &str = "LATTICE_MANAGED_SCRIPTED_ACTIVE_RESTART";
+const MANAGED_SCRIPTED_OWNER_MARKER_ENV: &str = "LATTICE_MANAGED_SCRIPTED_OWNER_MARKER";
+const MANAGED_SCRIPTED_ACTIVE_MARKER_NAME: &str = ".lattice-managed-active-restart-v1";
+const MANAGED_SCRIPTED_ACTIVE_MARKER_BYTES: &[u8] = b"lattice.phase4.scripted-active-restart.v1\n";
+const MANAGED_SCRIPTED_OWNER_KIND: &str = "LATTICE_PHASE4_MANAGED_FOREMAN_ACCEPTANCE_V1";
 const MAX_SCRIPTED_MARKER_BYTES: u64 = 4 * 1024;
 const MAX_SCRIPTED_LAUNCHER_BYTES: u64 = 64 * 1024;
 const MAX_SCRIPTED_SERVER_BYTES: u64 = 64 * 1024;
@@ -363,6 +407,7 @@ pub enum LatticedErrorKind {
     ForemanReplayUnsupported,
     ForemanReplayUnavailable,
     WriterLease,
+    ManagedTeardownRejected,
     Transport,
 }
 
@@ -417,6 +462,7 @@ impl LatticedErrorKind {
             Self::ForemanReplayUnsupported => "FOREMAN_REPLAY_UNSUPPORTED",
             Self::ForemanReplayUnavailable => "FOREMAN_REPLAY_UNAVAILABLE",
             Self::WriterLease => "LATTICE_WRITER_LEASE_REJECTED",
+            Self::ManagedTeardownRejected => "LATTICE_MANAGED_SCHEDULER_TEARDOWN_REJECTED",
             Self::Transport => "LATTICED_STDIO_REJECTED",
         }
     }
@@ -1075,6 +1121,7 @@ struct ValidatedOfficialBundleFacts;
 struct LaunchReadyOfficialBundle {
     resources: PinnedCodexResources,
     real_bundle: RealPinnedOfficialBundle,
+    managed_effect_guard: ManagedEffectBundleGuard,
     _validated: ValidatedOfficialBundleFacts,
 }
 
@@ -1289,9 +1336,20 @@ impl LaunchReadyOfficialBundle {
             .map_err(|_| OfficialIdentityRejection::Layout)?,
         )
         .map_err(|_| OfficialIdentityRejection::Layout)?;
+        let managed_effect_guard =
+            ManagedEffectBundleGuard::capture(real_bundle.facts.files.iter().map(|file| {
+                (
+                    file.declared_path.clone(),
+                    policy.file_policy(file.role).max_bytes,
+                )
+            }))
+            .map_err(|()| {
+                OfficialIdentityRejection::FileIdentityChanged(OfficialBundleFileRole::Launcher)
+            })?;
         Ok(Self {
             resources,
             real_bundle,
+            managed_effect_guard,
             _validated: validated,
         })
     }
@@ -1301,7 +1359,14 @@ impl LaunchReadyOfficialBundle {
     }
 
     fn ensure_current(&self) -> Result<(), OfficialIdentityRejection> {
-        self.real_bundle.ensure_current()
+        self.real_bundle.ensure_current()?;
+        self.managed_effect_guard.verify().map_err(|()| {
+            OfficialIdentityRejection::FileIdentityChanged(OfficialBundleFileRole::Launcher)
+        })
+    }
+
+    fn managed_effect_guard(&self) -> ManagedEffectBundleGuard {
+        self.managed_effect_guard.clone()
     }
 }
 
@@ -1812,11 +1877,20 @@ impl LatticedDeliveryService {
     /// Fails closed for a substituted Task Spec or any invalid, missing, or
     /// cross-bound durable delivery evidence.
     pub fn status_task_json(&mut self, binding: &SubjectBinding) -> Result<Value, LatticedError> {
+        self.status_task_json_at(binding, deadline(self.timeout)?)
+    }
+
+    fn status_task_json_at(
+        &mut self,
+        binding: &SubjectBinding,
+        operation_deadline: Instant,
+    ) -> Result<Value, LatticedError> {
         let invocation = invocation_for_task(self.database.run_id(), binding)?;
-        self.status_request_json(
+        self.status_request_json_at(
             &invocation,
             Some(task_ledger_identity(binding)?),
             DeliveryContinuation::WriterOnly,
+            operation_deadline,
         )
     }
 
@@ -1924,6 +1998,21 @@ impl LatticedDeliveryService {
         identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
         continuation: DeliveryContinuation,
     ) -> Result<Value, LatticedError> {
+        self.status_request_json_at(
+            expected_invocation,
+            identity,
+            continuation,
+            deadline(self.timeout)?,
+        )
+    }
+
+    fn status_request_json_at(
+        &mut self,
+        expected_invocation: &Invocation,
+        identity: Option<lattice_contracts::TaskLedgerStreamIdentity>,
+        continuation: DeliveryContinuation,
+        operation_deadline: Instant,
+    ) -> Result<Value, LatticedError> {
         record_observed_effect(ObservedEffectKind::Database)
             .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
             .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
@@ -1931,12 +2020,10 @@ impl LatticedDeliveryService {
             Some(identity) => DeliveryLedger::connect_for_identity(
                 &self.database,
                 &self.password,
-                deadline(self.timeout)?,
+                operation_deadline,
                 identity,
             ),
-            None => {
-                DeliveryLedger::connect(&self.database, &self.password, deadline(self.timeout)?)
-            }
+            None => DeliveryLedger::connect(&self.database, &self.password, operation_deadline),
         }
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
         match PostgresDeliveryLedgerAdapter::for_status(
@@ -1961,7 +2048,7 @@ impl LatticedDeliveryService {
                         let graph_receipt = load_delivery_graph_receipt(
                             &self.database,
                             &self.password,
-                            deadline(self.timeout)?,
+                            operation_deadline,
                             &graph_request,
                         )?;
                         composed_receipt_json(&receipt, "delivery-ledger", &graph_receipt)
@@ -2056,7 +2143,15 @@ fn delivery_environment_for_mode(
     run_mode: FullChainRunMode,
 ) -> Result<(LatticedDeliveryConfig, DeliveryDatabaseBinding, String), LatticedError> {
     if run_mode == FullChainRunMode::Fresh {
-        return delivery_environment();
+        let environment = delivery_environment()?;
+        if environment.0.runtime == DeliveryRuntime::ScriptedAcceptance {
+            validate_managed_scripted_active_restart_admission(
+                run_mode,
+                &environment.0,
+                &environment.1,
+            )?;
+        }
+        return Ok(environment);
     }
     let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
         Ok(value) => parse_timeout(&value)?,
@@ -2065,7 +2160,17 @@ fn delivery_environment_for_mode(
             return Err(LatticedError::new(LatticedErrorKind::Configuration));
         }
     };
-    if required_environment("LATTICE_DELIVERY_CODEX_MODE")? != "OFFICIAL_CODEX_APP_SERVER" {
+    let runtime = required_environment("LATTICE_DELIVERY_CODEX_MODE")?;
+    if runtime == "SCRIPTED_ACCEPTANCE" {
+        let environment = delivery_environment()?;
+        validate_managed_scripted_active_restart_admission(
+            run_mode,
+            &environment.0,
+            &environment.1,
+        )?;
+        return Ok(environment);
+    }
+    if runtime != "OFFICIAL_CODEX_APP_SERVER" {
         return Err(LatticedError::new(LatticedErrorKind::Configuration));
     }
     let port = required_environment("LATTICE_TASK019_PORT")?
@@ -2090,6 +2195,7 @@ enum PostgresBootstrapAction {
     V6Rebind,
     V4Apply,
     V7Apply,
+    WriterV5Apply,
     V7VerifyOnly,
 }
 
@@ -2128,6 +2234,11 @@ const fn postgres_bootstrap_action(
             MigrationBootstrapProfile::V7,
             MemoryBootstrapProfile::V3,
             V3BootstrapProfile::V7V4Current,
+        ) => Some(PostgresBootstrapAction::WriterV5Apply),
+        (
+            MigrationBootstrapProfile::V7,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V7V5Current,
         ) => Some(PostgresBootstrapAction::V7VerifyOnly),
         _ => None,
     }
@@ -2158,6 +2269,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let writer_v3 = V3ExtensionTarget::new(database.database_name(), database_identity.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
     let writer_v4 = V4ExtensionTarget::new(database.database_name(), database_identity.clone())
+        .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
+    let writer_v5 = V5ExtensionTarget::new(database.database_name(), database_identity.clone())
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?;
 
     // Classify only exact history before mutation. Product bootstrap does not
@@ -2218,7 +2331,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         let setup = (|| {
             let mut next_action = action;
             let mut next_writer_profile = writer_profile;
-            for _ in 0..4 {
+            for _ in 0..5 {
                 match next_action {
                     PostgresBootstrapAction::V5Apply => {
                         match next_writer_profile {
@@ -2293,7 +2406,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             V3BootstrapProfile::V6BridgePending
                             | V3BootstrapProfile::V6Current
                             | V3BootstrapProfile::V6V4Bridge
-                            | V3BootstrapProfile::V7V4Current => {
+                            | V3BootstrapProfile::V7V4Current
+                            | V3BootstrapProfile::V7V5Current => {
                                 return Err(LatticedError::new(LatticedErrorKind::WriterLease));
                             }
                         }
@@ -2321,6 +2435,14 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                         apply_store_migrations(&mut migrator, &store_target).map_err(|_| {
                             LatticedError::new(LatticedErrorKind::RuntimePostgresMigration)
                         })?;
+                    }
+                    PostgresBootstrapAction::WriterV5Apply => {
+                        if apply_v5_extension(&mut migrator, &writer_v5)
+                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+                            != WriterExtensionApplyOutcome::Activated
+                        {
+                            return Err(LatticedError::new(LatticedErrorKind::WriterLease));
+                        }
                     }
                     PostgresBootstrapAction::V7VerifyOnly => {}
                 }
@@ -2376,6 +2498,33 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             }
         }
     }
+
+    #[cfg(test)]
+    if tests::foreman_catalog_measurement_requested() {
+        return tests::measure_foreman_catalog_profile(
+            &mut migrator,
+            &database,
+            &configured_admission,
+        );
+    }
+
+    // The managed foreman is a same-database extension of the already
+    // verified Store-v7 profile. Explicit bootstrap is its only installation
+    // path; ordinary Runtime startup remains verify-only.
+    let foreman_target =
+        ForemanExtensionTarget::new(database.database_name(), database.run_id())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+    admission.stop(&mut migrator)?;
+    match apply_postgres_foreman_extension(&mut migrator, &foreman_target) {
+        Ok(_) => configured_admission.restore(&mut migrator)?,
+        Err(_) => {
+            admission.restore(&mut migrator)?;
+            return Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresMigration,
+            ));
+        }
+    }
     drop(migrator);
 
     // Migrator credentials are gone before any Runtime-role verification.
@@ -2391,6 +2540,18 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     coordination
         .load_runtime_status()
         .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+    let mut foreman_runtime = connect_fixed_runtime_client(
+        &database,
+        &password,
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    verify_postgres_foreman_extension(
+        &mut foreman_runtime,
+        &foreman_target,
+        ForemanExtensionDatabaseRole::Runtime,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     Ok(())
 }
 
@@ -4014,6 +4175,211 @@ enum FullChainRunMode {
     ResumeExisting,
 }
 
+#[derive(Clone, Copy)]
+struct ManagedScriptedRestartSelectorInput<'a> {
+    run_mode: FullChainRunMode,
+    runtime: DeliveryRuntime,
+    enabled: Option<&'a str>,
+    foreman_mode: Option<&'a str>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedScriptedAcceptanceBinding {
+    owner_root: PathBuf,
+    control_origin: String,
+    project_root: PathBuf,
+    managed_worktree_root: PathBuf,
+}
+
+#[derive(Clone, Copy)]
+struct ManagedScriptedAcceptanceBindingInput<'a> {
+    owner_root: &'a Path,
+    control_port: u16,
+    control_origin: &'a str,
+    marker_project_root: &'a Path,
+    configured_project_root: &'a Path,
+    configured_worktree_root: &'a Path,
+}
+
+fn select_managed_scripted_acceptance_binding(
+    input: ManagedScriptedAcceptanceBindingInput<'_>,
+) -> Result<ManagedScriptedAcceptanceBinding, LatticedErrorKind> {
+    let expected_origin = format!("http://127.0.0.1:{}", input.control_port);
+    let expected_worktree_root = input.owner_root.join("managed-worktrees");
+    if input.control_port == 0
+        || input.control_origin != expected_origin
+        || !same_declared_path(input.marker_project_root, input.configured_project_root)
+        || !same_declared_path(
+            input.configured_project_root,
+            &input.owner_root.join("repository"),
+        )
+        || !same_declared_path(input.configured_worktree_root, &expected_worktree_root)
+    {
+        return Err(LatticedErrorKind::ScriptedFixtureRejected);
+    }
+    Ok(ManagedScriptedAcceptanceBinding {
+        owner_root: input.owner_root.to_path_buf(),
+        control_origin: expected_origin,
+        project_root: input.configured_project_root.to_path_buf(),
+        managed_worktree_root: input.configured_worktree_root.to_path_buf(),
+    })
+}
+
+fn select_managed_scripted_active_restart(
+    input: ManagedScriptedRestartSelectorInput<'_>,
+) -> Result<bool, LatticedErrorKind> {
+    if input.runtime != DeliveryRuntime::ScriptedAcceptance {
+        return Ok(false);
+    }
+    match (input.enabled, input.foreman_mode) {
+        (None, _) => Ok(false),
+        (Some("1"), Some("ACTIVE")) if input.run_mode == FullChainRunMode::ResumeExisting => {
+            Ok(true)
+        }
+        _ => Err(LatticedErrorKind::Configuration),
+    }
+}
+
+fn validate_managed_scripted_active_restart_admission(
+    run_mode: FullChainRunMode,
+    config: &LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+) -> Result<ManagedScriptedAcceptanceBinding, LatticedError> {
+    let enabled = optional_unicode_environment(MANAGED_SCRIPTED_ACTIVE_RESTART_ENV)?;
+    let foreman_mode = optional_unicode_environment(MANAGED_FOREMAN_MODE_ENV)?;
+    if !select_managed_scripted_active_restart(ManagedScriptedRestartSelectorInput {
+        run_mode,
+        runtime: config.runtime,
+        enabled: enabled.as_deref(),
+        foreman_mode: foreman_mode.as_deref(),
+    })
+    .map_err(LatticedError::new)?
+    {
+        return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
+    }
+
+    let fixture_root = canonical_directory(
+        config
+            .delivery_root
+            .parent()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?,
+    )?;
+    let active_marker = canonical_regular_file(
+        &fixture_root.join(MANAGED_SCRIPTED_ACTIVE_MARKER_NAME),
+        MAX_SCRIPTED_MARKER_BYTES,
+    )?;
+    if active_marker != fixture_root.join(MANAGED_SCRIPTED_ACTIVE_MARKER_NAME)
+        || read_regular_file(&active_marker, MAX_SCRIPTED_MARKER_BYTES)?
+            != MANAGED_SCRIPTED_ACTIVE_MARKER_BYTES
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::ScriptedFixtureRejected,
+        ));
+    }
+
+    let owner_marker_configured =
+        PathBuf::from(required_environment(MANAGED_SCRIPTED_OWNER_MARKER_ENV)?);
+    if !owner_marker_configured.is_absolute() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::ScriptedFixtureRejected,
+        ));
+    }
+    let owner_marker = canonical_regular_file(&owner_marker_configured, MAX_SCRIPTED_MARKER_BYTES)?;
+    let owner_root = canonical_directory(
+        owner_marker
+            .parent()
+            .ok_or_else(|| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?,
+    )?;
+    let temporary_root = canonical_directory(&env::temp_dir())?;
+    let expected_root_name = format!("lattice-phase4-managed-foreman-{}", database.run_id());
+    if owner_marker != owner_root.join(".phase4-owner.json")
+        || owner_root.parent() != Some(temporary_root.as_path())
+        || owner_root.file_name() != Some(OsStr::new(&expected_root_name))
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::ScriptedFixtureRejected,
+        ));
+    }
+
+    let marker_bytes = read_regular_file(&owner_marker, MAX_SCRIPTED_MARKER_BYTES)?;
+    let marker: Value = serde_json::from_slice(&marker_bytes)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?;
+    let object = marker
+        .as_object()
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?;
+    let expected_keys = [
+        "codex_sha256",
+        "control_home",
+        "control_port",
+        "data_root",
+        "latticed_sha256",
+        "owner",
+        "postgres_executable",
+        "postgres_port",
+        "postgres_sha256",
+        "project_root",
+        "root",
+        "run_id",
+    ];
+    let postgres_port = required_environment("LATTICE_TASK019_PORT")?
+        .parse::<u16>()
+        .map_err(|_| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?;
+    let control_port = object
+        .get("control_port")
+        .and_then(Value::as_u64)
+        .and_then(|value| u16::try_from(value).ok())
+        .filter(|value| *value != 0 && *value != postgres_port)
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?;
+    let postgres_executable = canonical_regular_file(
+        Path::new(marker_string(object, "postgres_executable")?),
+        MAX_LATTICED_EXECUTABLE_BYTES,
+    )?;
+    let current_executable = canonical_regular_file(
+        &env::current_exe()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ScriptedFixtureRejected))?,
+        MAX_LATTICED_EXECUTABLE_BYTES,
+    )?;
+    let data_root = canonical_directory(Path::new(marker_string(object, "data_root")?))?;
+    let control_home = canonical_directory(Path::new(marker_string(object, "control_home")?))?;
+    let project_root = canonical_directory(Path::new(marker_string(object, "project_root")?))?;
+    if object.len() != expected_keys.len()
+        || expected_keys.iter().any(|key| !object.contains_key(*key))
+        || marker_string(object, "owner")? != MANAGED_SCRIPTED_OWNER_KIND
+        || marker_string(object, "run_id")? != database.run_id()
+        || canonical_directory(Path::new(marker_string(object, "root")?))? != owner_root
+        || data_root != owner_root.join("postgres-data")
+        || control_home != owner_root.join("control-home")
+        || project_root != owner_root.join("repository")
+        || object.get("postgres_port").and_then(Value::as_u64) != Some(u64::from(postgres_port))
+        || control_port == postgres_port
+        || marker_string(object, "codex_sha256")? != config.launcher_sha256
+        || marker_string(object, "postgres_sha256")?
+            != file_sha256(&postgres_executable, MAX_LATTICED_EXECUTABLE_BYTES)?
+        || marker_string(object, "latticed_sha256")?
+            != file_sha256(&current_executable, MAX_LATTICED_EXECUTABLE_BYTES)?
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::ScriptedFixtureRejected,
+        ));
+    }
+    let configured_project_root = canonical_directory(Path::new(&required_environment(
+        "LATTICE_GRAPHIFY_SOURCE_ROOT",
+    )?))?;
+    let configured_worktree_root = canonical_directory(Path::new(&required_environment(
+        MANAGED_FOREMAN_WORKTREE_ROOT_ENV,
+    )?))?;
+    let control_origin = required_environment("LATTICE_CONTROL_ORIGIN")?;
+    select_managed_scripted_acceptance_binding(ManagedScriptedAcceptanceBindingInput {
+        owner_root: &owner_root,
+        control_port,
+        control_origin: &control_origin,
+        marker_project_root: &project_root,
+        configured_project_root: &configured_project_root,
+        configured_worktree_root: &configured_worktree_root,
+    })
+    .map_err(LatticedError::new)
+}
+
 /// Process-owned choice between ordinary Runtime work and an explicit
 /// cross-module integration run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4109,6 +4475,149 @@ fn optional_unicode_environment(name: &str) -> Result<Option<String>, LatticedEr
         Err(env::VarError::NotPresent) => Ok(None),
         Err(env::VarError::NotUnicode(_)) => {
             Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    }
+}
+
+fn optional_absolute_path_environment(name: &str) -> Result<Option<PathBuf>, LatticedError> {
+    optional_unicode_environment(name)?.map_or(Ok(None), |value| {
+        let path = PathBuf::from(value);
+        if path.is_absolute() {
+            Ok(Some(path))
+        } else {
+            Err(LatticedError::new(LatticedErrorKind::Configuration))
+        }
+    })
+}
+
+fn managed_foreman_service_from_environment(
+    config: &LatticedDeliveryConfig,
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    store_authority: &StoreAuthorityHead,
+    task_ingress_peer: &TaskIngressPeerEvidence,
+    process_start_identity: &ContentDigest,
+) -> Result<Option<ManagedForemanServiceConfig>, LatticedError> {
+    match optional_unicode_environment(MANAGED_FOREMAN_MODE_ENV)?.as_deref() {
+        None | Some("DISABLED") => return Ok(None),
+        Some("ACTIVE") => {}
+        Some(_) => return Err(LatticedError::new(LatticedErrorKind::Configuration)),
+    }
+
+    // Resume/status-only composition intentionally omits delivery executables.
+    // An active managed foreman therefore reloads the same process-owned paths
+    // from the closed environment; no MCP argument can choose an executable.
+    let codex_executable = if config.launcher.as_os_str().is_empty() {
+        PathBuf::from(required_environment("LATTICE_DELIVERY_LAUNCHER")?)
+    } else {
+        config.launcher.clone()
+    };
+    let git_executable = if config.git_executable.as_os_str().is_empty() {
+        PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?)
+    } else {
+        config.git_executable.clone()
+    };
+    let codex_home = if config.codex_home.as_os_str().is_empty() {
+        PathBuf::from(required_environment(DELIVERY_CODEX_HOME_ENV)?)
+    } else {
+        config.codex_home.clone()
+    };
+    let node_executable = PathBuf::from(required_environment(MANAGED_FOREMAN_NODE_ENV)?);
+    let bridge_path = PathBuf::from(required_environment(MANAGED_FOREMAN_BRIDGE_ENV)?);
+    let worktree_bridge_path = bridge_path.with_file_name("managed-worktree-bridge.mjs");
+    let worktree_root = PathBuf::from(required_environment(MANAGED_FOREMAN_WORKTREE_ROOT_ENV)?);
+    if [
+        &codex_executable,
+        &codex_home,
+        &git_executable,
+        &node_executable,
+        &bridge_path,
+        &worktree_bridge_path,
+        &worktree_root,
+    ]
+    .into_iter()
+    .any(|path| !path.is_absolute())
+    {
+        return Err(LatticedError::new(LatticedErrorKind::Configuration));
+    }
+
+    let effect_bundle_guard = managed_foreman_effect_bundle_guard(config, &codex_executable)?;
+
+    let mut service = ManagedForemanServiceConfig::new(
+        database.clone(),
+        password.to_owned(),
+        config.timeout,
+        store_authority.clone(),
+        task_ingress_peer.clone(),
+        process_start_identity.clone(),
+        codex_executable,
+        codex_home,
+        node_executable,
+        bridge_path,
+        worktree_bridge_path,
+        worktree_root,
+        git_executable,
+        optional_absolute_path_environment(MANAGED_FOREMAN_NPM_ENV)?,
+        optional_absolute_path_environment(MANAGED_FOREMAN_CARGO_ENV)?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    if let Some(descriptor) =
+        optional_unicode_environment(MANAGED_FOREMAN_EXECUTION_ENVIRONMENT_ENV)?
+    {
+        service = service
+            .with_execution_environment_template(&descriptor)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+    }
+    service
+        .with_effect_bundle_guard(effect_bundle_guard)
+        .map(Some)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))
+}
+
+fn managed_foreman_effect_bundle_guard(
+    config: &LatticedDeliveryConfig,
+    codex_executable: &Path,
+) -> Result<ManagedEffectBundleGuard, LatticedError> {
+    let rejected = || LatticedError::new(LatticedErrorKind::OfficialLiveBlocked);
+    match config.runtime {
+        DeliveryRuntime::OfficialCodexAppServer => {
+            let reloaded;
+            let bundle = if let Some(bundle) = config.official_bundle.as_ref() {
+                bundle
+            } else {
+                reloaded = validate_official_codex_identity(
+                    codex_executable,
+                    &required_environment("LATTICE_DELIVERY_LAUNCHER_VERSION")?,
+                    &required_environment("LATTICE_DELIVERY_LAUNCHER_SHA256")?,
+                )?;
+                &reloaded
+            };
+            bundle.ensure_current().map_err(|_| rejected())?;
+            Ok(bundle.managed_effect_guard())
+        }
+        DeliveryRuntime::ScriptedAcceptance => {
+            if codex_executable.file_name() != Some(OsStr::new("scripted-codex.cmd")) {
+                return Err(rejected());
+            }
+            let server = codex_executable.with_file_name("scripted-codex.ps1");
+            // Capture both path-loaded scripts in one process-lifetime bundle
+            // before comparing either file. Reading the launcher or its
+            // PowerShell dependency before the shared deny-write/delete seal
+            // would leave a good-read -> malicious-open substitution window.
+            let guard = ManagedEffectBundleGuard::capture([
+                (codex_executable.to_path_buf(), MAX_SCRIPTED_LAUNCHER_BYTES),
+                (server.clone(), MAX_SCRIPTED_SERVER_BYTES),
+            ])
+            .map_err(|()| rejected())?;
+            let server_sha256 = file_sha256(&server, MAX_SCRIPTED_SERVER_BYTES)?;
+            if read_regular_file(&server, MAX_SCRIPTED_SERVER_BYTES)? != SCRIPTED_SERVER_BYTES
+                || read_regular_file(codex_executable, MAX_SCRIPTED_LAUNCHER_BYTES)?
+                    != scripted_launcher_bytes(&server_sha256)
+                || guard.verify().is_err()
+            {
+                return Err(rejected());
+            }
+            Ok(guard)
         }
     }
 }
@@ -4212,7 +4721,7 @@ fn parse_runtime_integration_mode(
         Some("GRAPHIFY") => Ok(RuntimeIntegrationMode::Graphify),
         // Keep the legacy spelling readable, but express the new composition
         // in terms of the independently degradable components.
-        Some("GRAPHIFY_HERMES") | Some("FULL_CHAIN") => Ok(RuntimeIntegrationMode::GraphifyHermes),
+        Some("GRAPHIFY_HERMES" | "FULL_CHAIN") => Ok(RuntimeIntegrationMode::GraphifyHermes),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -4278,6 +4787,153 @@ struct FullChainCore<H> {
     integration_mode: RuntimeIntegrationMode,
     process_start_identity: ContentDigest,
     task_ingress_peer: TaskIngressPeerEvidence,
+    store_authority: StoreAuthorityHead,
+    managed_scripted_acceptance: Option<ManagedScriptedAcceptanceBinding>,
+    managed_foreman: Option<ManagedForemanServiceConfig>,
+    managed_tasks: Arc<Mutex<BTreeSet<String>>>,
+    managed_scheduler: Option<ManagedSchedulerOwner>,
+}
+
+struct ManagedScheduledTask {
+    submission: TaskSubmissionEnvelope,
+    repository_path: PathBuf,
+}
+
+struct ManagedSchedulerOwner {
+    sender: Option<mpsc::SyncSender<ManagedScheduledTask>>,
+    cancellation: ManagedWorkerCancellation,
+    workers: Vec<ManagedSchedulerWorker>,
+    rescan_requested: Arc<AtomicBool>,
+    armed: bool,
+}
+
+struct ManagedSchedulerWorker {
+    completion: mpsc::Receiver<()>,
+    handle: Option<thread::JoinHandle<Result<(), &'static str>>>,
+}
+
+struct ManagedSchedulerCompletion(Option<mpsc::SyncSender<()>>);
+
+impl Drop for ManagedSchedulerCompletion {
+    fn drop(&mut self) {
+        if let Some(sender) = self.0.take() {
+            let _ = sender.send(());
+        }
+    }
+}
+
+impl ManagedSchedulerOwner {
+    fn sender(&self) -> Option<&mpsc::SyncSender<ManagedScheduledTask>> {
+        self.sender.as_ref()
+    }
+
+    fn request_rescan(&self) {
+        self.rescan_requested.store(true, AtomicOrdering::Release);
+    }
+
+    fn shutdown(&mut self) -> Result<(), LatticedError> {
+        self.shutdown_with_deadline(MANAGED_SCHEDULER_SHUTDOWN_DEADLINE)
+    }
+
+    fn shutdown_with_deadline(&mut self, timeout: Duration) -> Result<(), LatticedError> {
+        if !self.armed {
+            return Ok(());
+        }
+        self.cancellation.request();
+        self.sender.take();
+        // Exact provider interruption/reaping and the durable terminal write
+        // are distinct shutdown phases.  Giving both phases the same absolute
+        // deadline can reject a healthy worker after the bridge consumed the
+        // window while producing its exact terminal receipt.
+        let bridges_drained = self.cancellation.wait_for_no_active_bridges(timeout);
+        let deadline = Instant::now().checked_add(timeout);
+        let mut rejected = !bridges_drained;
+        while !self.workers.is_empty() {
+            let Some(remaining) =
+                deadline.and_then(|value| value.checked_duration_since(Instant::now()))
+            else {
+                rejected = true;
+                break;
+            };
+            match self.workers[0].completion.recv_timeout(remaining) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let mut worker = self.workers.remove(0);
+                    match worker
+                        .handle
+                        .take()
+                        .expect("managed scheduler handle")
+                        .join()
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) | Err(_) => rejected = true,
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Keep the JoinHandle owned by this guard. Returning a
+                    // teardown failure is bounded; a later retry can join a
+                    // now-complete worker, and Drop performs the final
+                    // non-detaching join during process teardown.
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+        if rejected && !self.cancellation.wait_for_no_active_bridges(Duration::ZERO) {
+            // Every managed bridge is a kill-on-close Job and must reap within
+            // its five-second adapter deadline after cancellation. Continuing
+            // with a live subtree would violate fencing; fail-stop closes all
+            // Job handles instead of returning an unsafe teardown receipt.
+            process::abort();
+        }
+        self.armed = !self.workers.is_empty();
+        if rejected {
+            Err(LatticedError::new(
+                LatticedErrorKind::ManagedTeardownRejected,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl Drop for ManagedSchedulerOwner {
+    fn drop(&mut self) {
+        if self.armed {
+            // A partially assembled runtime must never detach scheduler
+            // threads or their owned worker Jobs. Drop cannot report the
+            // teardown error, but it still cancels and joins every worker.
+            self.cancellation.request();
+            self.sender.take();
+            let deadline = Instant::now()
+                .checked_add(MANAGED_SCHEDULER_SHUTDOWN_DEADLINE)
+                .unwrap_or_else(|| process::abort());
+            while !self.workers.is_empty() {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    process::abort();
+                };
+                match self.workers[0].completion.recv_timeout(remaining) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let mut worker = self.workers.remove(0);
+                        if let Some(handle) = worker.handle.take() {
+                            match handle.join() {
+                                Ok(Ok(())) => {}
+                                Ok(Err(_)) | Err(_) => process::abort(),
+                            }
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => process::abort(),
+                }
+            }
+            self.armed = false;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ManagedForemanIdentitySource {
+    database: DeliveryDatabaseBinding,
+    password: String,
+    timeout: Duration,
     store_authority: StoreAuthorityHead,
 }
 
@@ -4478,6 +5134,15 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         self.delivery.status_task_json(binding)
     }
 
+    fn status_task_json_at(
+        &mut self,
+        binding: &SubjectBinding,
+        operation_deadline: Instant,
+    ) -> Result<Value, LatticedError> {
+        self.delivery
+            .status_task_json_at(binding, operation_deadline)
+    }
+
     fn run_task_downstream_json(
         &mut self,
         entry: FullChainEntry,
@@ -4666,6 +5331,20 @@ fn task_lifecycle<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     binding: &SubjectBinding,
 ) -> TaskLifecycleResult<PostgresTaskLifecycle> {
+    let operation_deadline = deadline(core.delivery.timeout).map_err(|_| {
+        TaskLifecycleError::new(
+            TaskLifecycleErrorKind::Unavailable,
+            "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
+        )
+    })?;
+    task_lifecycle_at(core, binding, operation_deadline)
+}
+
+fn task_lifecycle_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    binding: &SubjectBinding,
+    operation_deadline: Instant,
+) -> TaskLifecycleResult<PostgresTaskLifecycle> {
     record_observed_effect(ObservedEffectKind::Database)
         .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
         .map_err(|_| {
@@ -4677,12 +5356,7 @@ fn task_lifecycle<H: FullChainHermesPort>(
     PostgresTaskLifecycle::connect_with_ingress_peer(
         &core.delivery.database,
         &core.delivery.password,
-        deadline(core.delivery.timeout).map_err(|_| {
-            TaskLifecycleError::new(
-                TaskLifecycleErrorKind::Unavailable,
-                "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
-            )
-        })?,
+        operation_deadline,
         task_ledger_identity(binding).map_err(|_| {
             TaskLifecycleError::new(
                 TaskLifecycleErrorKind::Corrupt,
@@ -4698,6 +5372,20 @@ fn general_task_lifecycle<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     submission: &TaskSubmissionEnvelope,
 ) -> TaskLifecycleResult<PostgresTaskLifecycle> {
+    let operation_deadline = deadline(core.delivery.timeout).map_err(|_| {
+        TaskLifecycleError::new(
+            TaskLifecycleErrorKind::Unavailable,
+            "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
+        )
+    })?;
+    general_task_lifecycle_at(core, submission, operation_deadline)
+}
+
+fn general_task_lifecycle_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    submission: &TaskSubmissionEnvelope,
+    operation_deadline: Instant,
+) -> TaskLifecycleResult<PostgresTaskLifecycle> {
     record_observed_effect(ObservedEffectKind::Database)
         .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
         .map_err(|_| {
@@ -4709,12 +5397,7 @@ fn general_task_lifecycle<H: FullChainHermesPort>(
     PostgresTaskLifecycle::connect_with_ingress_peer_and_admission_profile(
         &core.delivery.database,
         &core.delivery.password,
-        deadline(core.delivery.timeout).map_err(|_| {
-            TaskLifecycleError::new(
-                TaskLifecycleErrorKind::Unavailable,
-                "LATTICE_TASK_LEDGER_DEADLINE_REJECTED",
-            )
-        })?,
+        operation_deadline,
         submission.identity().clone(),
         core.store_authority.clone(),
         core.task_ingress_peer.clone(),
@@ -4760,13 +5443,23 @@ fn load_general_submission_by_task_ref<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     task_ref: &ContentDigest,
 ) -> Result<Option<TaskSubmissionEnvelope>, ToolExecutionError> {
+    let operation_deadline =
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?;
+    load_general_submission_by_task_ref_at(core, task_ref, operation_deadline)
+}
+
+fn load_general_submission_by_task_ref_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    task_ref: &ContentDigest,
+    operation_deadline: Instant,
+) -> Result<Option<TaskSubmissionEnvelope>, ToolExecutionError> {
     record_observed_effect(ObservedEffectKind::Database)
         .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
         .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
     PostgresTaskLifecycle::load_submission_by_task_ref(
         &core.delivery.database,
         &core.delivery.password,
-        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        operation_deadline,
         task_ref,
     )
     .map_err(|error| ToolExecutionError::new(error.code()))
@@ -4859,7 +5552,15 @@ fn task_writer_lease<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     foundation: &TaskPersistenceFoundation,
 ) -> Result<PostgresWriterLease, LatticedError> {
-    let target = V4ExtensionTarget::new(
+    task_writer_lease_at(core, foundation, deadline(core.delivery.timeout)?)
+}
+
+fn task_writer_lease_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    foundation: &TaskPersistenceFoundation,
+    operation_deadline: Instant,
+) -> Result<PostgresWriterLease, LatticedError> {
+    let target = V5ExtensionTarget::new(
         core.delivery.database.database_name(),
         foundation.database_identity_digest().clone(),
     )
@@ -4870,15 +5571,24 @@ fn task_writer_lease<H: FullChainHermesPort>(
     let client = connect_fixed_runtime_client(
         &core.delivery.database,
         &core.delivery.password,
-        deadline(core.delivery.timeout)?,
+        operation_deadline,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    PostgresWriterLease::new_v4_v7(client, &target, &core.store_authority, 600)
+    PostgresWriterLease::new_v5_v7(client, &target, &core.store_authority, 600)
         .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))
 }
 
 fn foreman_coordination<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
+) -> Result<PostgresForemanCoordination, ToolExecutionError> {
+    let operation_deadline = deadline(core.delivery.timeout)
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    foreman_coordination_at(core, operation_deadline)
+}
+
+fn foreman_coordination_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    operation_deadline: Instant,
 ) -> Result<PostgresForemanCoordination, ToolExecutionError> {
     record_observed_effect(ObservedEffectKind::Database)
         .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
@@ -4891,8 +5601,7 @@ fn foreman_coordination<H: FullChainHermesPort>(
     let client = connect_fixed_runtime_client(
         &core.delivery.database,
         &core.delivery.password,
-        deadline(core.delivery.timeout)
-            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+        operation_deadline,
     )
     .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
     let ledger = PostgresTaskLedger::new(client, &target).map_err(|error| {
@@ -4952,7 +5661,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
     let database_identity =
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
-    let target = V4ExtensionTarget::new(core.delivery.database.database_name(), database_identity)
+    let target = V5ExtensionTarget::new(core.delivery.database.database_name(), database_identity)
         .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
     drop(foundation_ledger);
     let client = connect_fixed_runtime_client(
@@ -4962,7 +5671,7 @@ fn foreman_writer_lease<H: FullChainHermesPort>(
             .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
     )
     .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
-    PostgresWriterLease::new_v4_v7(client, &target, &core.store_authority, 600)
+    PostgresWriterLease::new_v5_v7(client, &target, &core.store_authority, 600)
         .map_err(foreman_writer_observation_error)
 }
 
@@ -4987,6 +5696,14 @@ const fn foreman_writer_observation_error(error: WriterLeaseRepositoryError) -> 
 }
 
 fn foreman_observation_from_environment() -> Result<ForemanServerObservation, &'static str> {
+    if let Some(descriptor_json) = env::var_os(MANAGED_FOREMAN_EXECUTION_ENVIRONMENT_ENV) {
+        let descriptor_json = descriptor_json
+            .into_string()
+            .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+        let descriptor = ExecutionEnvironmentDescriptor::from_json(&descriptor_json)
+            .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
+        return foreman_wsl2_observation_from_environment(&descriptor);
+    }
     let root = required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
         .map(PathBuf::from)
         .and_then(|path| graph_canonical_directory(&path))
@@ -5008,6 +5725,126 @@ fn foreman_observation_from_environment() -> Result<ForemanServerObservation, &'
         .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")?;
     SoleForemanBinding::observe_git(branch, root.to_string_lossy(), head)
         .map_err(|_| "FOREMAN_CHECKPOINT_OBSERVATION_FAILED")
+}
+
+fn normalized_wsl_unc_path(path: &Path) -> String {
+    let normalized = path.as_os_str().to_string_lossy().replace('/', "\\");
+    let ordinary = normalized
+        .strip_prefix(r"\\?\UNC\")
+        .map_or_else(|| normalized.clone(), |tail| format!(r"\\{tail}"));
+    ordinary.to_lowercase()
+}
+
+fn foreman_wsl2_git_line(
+    descriptor: &ExecutionEnvironmentDescriptor,
+    arguments: &[&str],
+) -> Result<String, &'static str> {
+    let rejected = || "FOREMAN_CHECKPOINT_OBSERVATION_FAILED";
+    let linux_root = descriptor.linux_repository_path();
+    let mut components = linux_root.split('/');
+    if components.next() != Some("") || components.next() != Some("home") {
+        return Err(rejected());
+    }
+    let user = components
+        .next()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(rejected)?;
+    let linux_home = format!("/home/{user}");
+    let gateway = PathBuf::from(descriptor.gateway().path());
+    if graph_executable_sha256(&gateway).map_err(|_| rejected())?
+        != descriptor.gateway().digest().as_str()
+    {
+        return Err(rejected());
+    }
+    let mut command = process::Command::new(&gateway);
+    command.env_clear();
+    for key in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    let output = command
+        .args([
+            "-d",
+            descriptor.distribution(),
+            "--exec",
+            "/usr/bin/env",
+            "-i",
+            &format!("HOME={linux_home}"),
+            "PATH=/usr/bin:/bin",
+            "LANG=C.UTF-8",
+            "LC_ALL=C.UTF-8",
+            "GCM_INTERACTIVE=Never",
+            "GIT_ATTR_NOSYSTEM=1",
+            "GIT_ALLOW_PROTOCOL=",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_SYSTEM=/dev/null",
+            "GIT_OPTIONAL_LOCKS=0",
+            "GIT_PAGER=",
+            "GIT_TERMINAL_PROMPT=0",
+            descriptor.git().path(),
+            "--no-optional-locks",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.untrackedCache=false",
+            "-c",
+            "core.attributesFile=/dev/null",
+            "-c",
+            "core.excludesFile=/dev/null",
+            "-c",
+            "status.submoduleSummary=false",
+            "-C",
+            linux_root,
+        ])
+        .args(arguments)
+        .output()
+        .map_err(|_| rejected())?;
+    if !output.status.success()
+        || !output.stderr.is_empty()
+        || output.stdout.is_empty()
+        || output.stdout.len() > 65_536
+    {
+        return Err(rejected());
+    }
+    let line = std::str::from_utf8(&output.stdout).map_err(|_| rejected())?;
+    let line = line.strip_suffix('\n').ok_or_else(rejected)?;
+    if line.is_empty() || line.contains(['\0', '\r', '\n']) {
+        return Err(rejected());
+    }
+    Ok(line.to_owned())
+}
+
+fn foreman_wsl2_observation_from_environment(
+    descriptor: &ExecutionEnvironmentDescriptor,
+) -> Result<ForemanServerObservation, &'static str> {
+    let rejected = || "FOREMAN_CHECKPOINT_OBSERVATION_FAILED";
+    let configured_root = PathBuf::from(
+        required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT").map_err(|_| rejected())?,
+    );
+    let canonical_root = graph_canonical_directory(&configured_root).map_err(|_| rejected())?;
+    let mapped_root = PathBuf::from(descriptor.path_mapping_windows_path());
+    if normalized_wsl_unc_path(&configured_root) != normalized_wsl_unc_path(&mapped_root)
+        || normalized_wsl_unc_path(&canonical_root) != normalized_wsl_unc_path(&mapped_root)
+        || descriptor.path_mapping_linux_path() != descriptor.linux_repository_path()
+    {
+        return Err(rejected());
+    }
+    let version = foreman_wsl2_git_line(descriptor, &["--version"])?;
+    if version != descriptor.git().version() {
+        return Err(rejected());
+    }
+    let top_level = foreman_wsl2_git_line(descriptor, &["rev-parse", "--show-toplevel"])?;
+    let branch = foreman_wsl2_git_line(descriptor, &["symbolic-ref", "--short", "HEAD"])?;
+    let head = foreman_wsl2_git_line(descriptor, &["rev-parse", "HEAD"])?;
+    if top_level != descriptor.linux_repository_path() || head != descriptor.repository_head() {
+        return Err(rejected());
+    }
+    SoleForemanBinding::observe_git(branch, descriptor.linux_repository_path(), head)
+        .map_err(|_| rejected())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5707,6 +6544,96 @@ fn resolve_registered_project_for_general_submit<H: FullChainHermesPort>(
     Ok(resolved)
 }
 
+fn resolve_registered_project_for_general_submission<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<ResolvedProjectAuthority, ToolExecutionError> {
+    let selector = ProjectSelector::new(Some(submission.identity().project_id().as_str()), None)
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    record_observed_effect(ObservedEffectKind::Filesystem)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Process))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Database))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    let resolved = resolve_project_authority(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        &core.store_authority,
+        &selector,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))?;
+    if !registered_project_matches_general_submission(&resolved, submission) {
+        return Err(ToolExecutionError::new(
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+        ));
+    }
+    Ok(resolved)
+}
+
+struct ManagedStatusProjectLookup {
+    canonical_path: PathBuf,
+    project_current: bool,
+}
+
+fn load_registered_project_for_general_status<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    submission: &TaskSubmissionEnvelope,
+    operation_deadline: Instant,
+) -> Result<ManagedStatusProjectLookup, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Network)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Database))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    let target = StoreMigrationTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        operation_deadline,
+    )
+    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let mut registry = PostgresProjectRegistry::new(client, &target)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let loaded = registry
+        .load()
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let project = loaded
+        .state()
+        .project(submission.identity().project_id())
+        .ok_or_else(|| ToolExecutionError::new("PROJECT_IS_NOT_REGISTERED"))?;
+    let canonical_root = project.observation().canonical_root();
+    let canonical_path = PathBuf::from(canonical_root);
+    if !canonical_path.is_absolute() || canonical_path.to_str() != Some(canonical_root) {
+        return Err(ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"));
+    }
+    let authority = project.authority();
+    let project_current = project.project_class() == ProjectClass::UserProject
+        && authority.lifecycle() == ProjectLifecycle::Active
+        && project.pending_observation().is_none()
+        && project.drift().is_empty()
+        && authority.project_id() == submission.identity().project_id()
+        && authority.project_snapshot_id() == submission.identity().project_snapshot_id()
+        && authority.receipt_digest() == submission.project_authority_receipt_digest();
+    Ok(ManagedStatusProjectLookup {
+        canonical_path,
+        project_current,
+    })
+}
+
+fn registered_project_matches_general_submission(
+    resolved: &ResolvedProjectAuthority,
+    submission: &TaskSubmissionEnvelope,
+) -> bool {
+    &resolved.authority().head() == resolved.current_head()
+        && resolved.authority().project_id() == submission.identity().project_id()
+        && resolved.authority().project_snapshot_id() == submission.identity().project_snapshot_id()
+        && resolved.authority().receipt_digest() == submission.project_authority_receipt_digest()
+        && resolved.display_name() == submission.project_display_name()
+}
+
 fn replay_general_submission<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     arguments: &TaskSubmitArguments,
@@ -5727,6 +6654,21 @@ fn replay_general_submission<H: FullChainHermesPort>(
         .map_err(|error| ToolExecutionError::new(error.code()))
 }
 
+fn replay_general_submission_and_schedule<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    existing: &TaskSubmissionEnvelope,
+) -> Result<Value, ToolExecutionError> {
+    let status = replay_general_submission(core, arguments, existing)?;
+    let resolved = resolve_registered_project_for_general_submission(core, existing)?;
+    schedule_managed_general_task(
+        core,
+        existing.clone(),
+        resolved.canonical_path().to_path_buf(),
+    )?;
+    Ok(status)
+}
+
 enum GeneralWinnerReplay {
     Absent,
     Conflict,
@@ -5745,7 +6687,8 @@ fn replay_general_winner_after_admission_failure<H: FullChainHermesPort>(
     if !general_submission_matches_effective_project(&winner, arguments, effective_project_id) {
         return Ok(GeneralWinnerReplay::Conflict);
     }
-    replay_general_submission(core, arguments, &winner).map(GeneralWinnerReplay::Replayed)
+    replay_general_submission_and_schedule(core, arguments, &winner)
+        .map(GeneralWinnerReplay::Replayed)
 }
 
 fn admit_general_submission<H: FullChainHermesPort>(
@@ -5783,8 +6726,10 @@ fn general_task_public_status(
     if evidence.binding() != &binding {
         return Err(LatticedError::new(LatticedErrorKind::TaskControl));
     }
+    let objective_digest = task_public_objective_digest(submission.objective())
+        .ok_or_else(|| LatticedError::new(LatticedErrorKind::TaskControl))?;
     Ok(json!({
-        "schema_version": "lattice.task.status.v3",
+        "schema_version": "lattice.task.status.v5",
         "status": "SUBMITTED",
         "task_state": evidence.state().as_str(),
         "task_ref": submission.task_ref().as_str(),
@@ -5792,11 +6737,1106 @@ fn general_task_public_status(
         "result_digest": Value::Null,
         "failure_stage": Value::Null,
         "failure_code": Value::Null,
-        "objective": submission.objective(),
+        "objective_summary": TASK_PUBLIC_OBJECTIVE_SUMMARY,
+        "objective_digest": objective_digest.as_str(),
         "project_id": submission.identity().project_id().as_str(),
         "project_name": submission.project_display_name(),
         "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
     }))
+}
+
+fn formal_managed_foreman_identity<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> Result<FormalForemanIdentity, ToolExecutionError> {
+    let foreman = {
+        let mut coordination = foreman_coordination(core)?;
+        coordination
+            .load_runtime_status()
+            .map_err(|failure| ToolExecutionError::new(failure.code()))?
+    };
+    formal_managed_foreman_identity_from_status(&foreman)
+}
+
+fn formal_managed_foreman_identity_at<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    operation_deadline: Instant,
+) -> Result<FormalForemanIdentity, ToolExecutionError> {
+    let foreman = {
+        let mut coordination = foreman_coordination_at(core, operation_deadline)?;
+        coordination
+            .load_runtime_status()
+            .map_err(|failure| ToolExecutionError::new(failure.code()))?
+    };
+    formal_managed_foreman_identity_from_status(&foreman)
+}
+
+fn formal_managed_foreman_identity_from_status(
+    foreman: &ForemanRuntimeStatus,
+) -> Result<FormalForemanIdentity, ToolExecutionError> {
+    if foreman.latest_generation() == 0
+        || foreman.active_count() != 1
+        || foreman.blocked_count() != 0
+        || foreman.completed_count() != 0
+        || foreman.next_action() != "CONTINUE"
+    {
+        return Err(ToolExecutionError::new(MANAGED_FOREMAN_NOT_ACTIVE));
+    }
+    FormalForemanIdentity::new(
+        foreman.latest_generation(),
+        foreman.checkpoint_digest().clone(),
+    )
+    .map_err(|failure| ToolExecutionError::new(failure.code()))
+}
+
+fn reload_managed_foreman_identity(
+    source: &ManagedForemanIdentitySource,
+) -> Result<FormalForemanIdentity, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let target =
+        StoreMigrationTarget::new(source.database.database_name(), source.database.run_id())
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let client = connect_fixed_runtime_client(
+        &source.database,
+        &source.password,
+        deadline(source.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let ledger = PostgresTaskLedger::new(client, &target).map_err(|error| {
+        ToolExecutionError::new(match error.kind() {
+            PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema => "FOREMAN_REPLAY_UNSUPPORTED",
+            PostgresTaskLedgerErrorKind::Unavailable
+            | PostgresTaskLedgerErrorKind::TransactionFailed
+            | PostgresTaskLedgerErrorKind::CommitOutcomeUnknown => "FOREMAN_REPLAY_UNAVAILABLE",
+            _ => "FOREMAN_REPLAY_CORRUPT",
+        })
+    })?;
+    let mut coordination = PostgresForemanCoordination::new(ledger, source.store_authority.clone());
+    let foreman = coordination
+        .load_runtime_status()
+        .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+    formal_managed_foreman_identity_from_status(&foreman)
+}
+
+fn managed_status_tool_error(
+    operation_deadline: Instant,
+    fallback_code: &'static str,
+) -> ToolExecutionError {
+    ToolExecutionError::new(if Instant::now() >= operation_deadline {
+        MANAGED_STATUS_TIMEOUT
+    } else {
+        fallback_code
+    })
+}
+
+fn managed_general_task_public_status<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    evidence: &TaskIntakeLifecycleEvidence,
+    submission: &TaskSubmissionEnvelope,
+    status_config: Option<&ManagedForemanServiceConfig>,
+) -> Result<Value, ToolExecutionError> {
+    let Some(config) = status_config else {
+        return general_task_public_status(evidence, submission)
+            .map_err(|error| ToolExecutionError::new(error.code()));
+    };
+    let operation_deadline = config
+        .status_request_deadline()
+        .ok_or_else(|| ToolExecutionError::new(MANAGED_STATUS_TIMEOUT))?;
+    let identity = formal_managed_foreman_identity_at(core, operation_deadline)
+        .map_err(|error| managed_status_tool_error(operation_deadline, error.code()))?;
+    let project = load_registered_project_for_general_status(core, submission, operation_deadline)
+        .map_err(|error| managed_status_tool_error(operation_deadline, error.code()))?;
+    let managed_status = managed_task_public_status(
+        config,
+        submission.clone(),
+        &project.canonical_path,
+        &identity,
+    )
+    .map_err(|failure| managed_status_tool_error(operation_deadline, failure.code()))?;
+    if Instant::now() >= operation_deadline {
+        return Err(ToolExecutionError::new(MANAGED_STATUS_TIMEOUT));
+    }
+    match managed_status {
+        Some(status) => {
+            require_managed_project_status_projection(project.project_current, submission, status)
+        }
+        None if project.project_current => general_task_public_status(evidence, submission)
+            .map_err(|error| ToolExecutionError::new(error.code())),
+        None => Err(ToolExecutionError::new(
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+        )),
+    }
+}
+
+fn require_managed_project_status_projection(
+    project_current: bool,
+    submission: &TaskSubmissionEnvelope,
+    status: Value,
+) -> Result<Value, ToolExecutionError> {
+    if status.get("schema_version").and_then(Value::as_str) != Some("lattice.task.status.v4")
+        || status.get("task_ref").and_then(Value::as_str) != Some(submission.task_ref().as_str())
+        || status.get("project_id").and_then(Value::as_str)
+            != Some(submission.identity().project_id().as_str())
+        || status.get("project_snapshot_id").and_then(Value::as_str)
+            != Some(submission.identity().project_snapshot_id().as_str())
+    {
+        return Err(ToolExecutionError::new(
+            "LATTICE_MANAGED_STATUS_SUBSTITUTION_REJECTED",
+        ));
+    }
+    if project_current {
+        return Ok(status);
+    }
+    let project_blocker_exact = status.get("blocker").and_then(Value::as_str)
+        == Some("PROJECT_REGISTRY_CURRENTNESS_CONFLICT")
+        && status.get("failure_code").and_then(Value::as_str)
+            == Some("PROJECT_REGISTRY_CURRENTNESS_CONFLICT")
+        && status.get("next_action").and_then(Value::as_str)
+            == Some("Refresh the registered project authority, then retry this task.");
+    if !project_blocker_exact && !managed_project_drift_has_stronger_durable_status(&status) {
+        return Err(ToolExecutionError::new(
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+        ));
+    }
+    Ok(status)
+}
+
+fn managed_project_drift_has_stronger_durable_status(status: &Value) -> bool {
+    let blocker = status.get("blocker").and_then(Value::as_str);
+    let failure_code = status.get("failure_code").and_then(Value::as_str);
+    if blocker != failure_code {
+        return false;
+    }
+    if managed_status_requires_exact_provider_reconciliation(status) {
+        return true;
+    }
+    if status.get("task_state").and_then(Value::as_str) == Some("VERIFYING")
+        && status.get("verification_status").and_then(Value::as_str) == Some("RUNNING")
+        && matches!(blocker, None | Some("EXECUTION_AUTHORITY_NOT_CURRENT"))
+    {
+        return true;
+    }
+    if status.get("task_state").and_then(Value::as_str) == Some("REVIEWING")
+        && status.get("status").and_then(Value::as_str) == Some("RUNNING")
+        && status.get("verification_status").and_then(Value::as_str) == Some("PASSED")
+        && blocker.is_none()
+    {
+        return true;
+    }
+    if blocker.is_some_and(|code| !managed_status_has_known_closed_blocker(code)) {
+        return false;
+    }
+    managed_status_is_durably_closed(status)
+}
+
+fn schedule_managed_general_task<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    submission: TaskSubmissionEnvelope,
+    mut repository_path: PathBuf,
+) -> Result<(), ToolExecutionError> {
+    if core.managed_foreman.is_none() {
+        return Ok(());
+    }
+    if let Some(binding) = core.managed_scripted_acceptance.as_ref() {
+        let canonical_repository = canonical_directory(&repository_path).map_err(|_| {
+            ToolExecutionError::new("LATTICE_MANAGED_SCRIPTED_PROJECT_SUBSTITUTION_REJECTED")
+        })?;
+        if !same_declared_path(&canonical_repository, &binding.project_root) {
+            return Err(ToolExecutionError::new(
+                "LATTICE_MANAGED_SCRIPTED_PROJECT_SUBSTITUTION_REJECTED",
+            ));
+        }
+        repository_path = canonical_repository;
+    }
+    // General intake is already durable PostgreSQL truth. Admission to this
+    // bounded local queue must not synchronously run Git/policy/promotion or
+    // turn a durable submit into an RPC failure. The supervisor is the sole
+    // owner of prepare/promote; a crash or full queue is recovered through the
+    // formal DRAFT restart-discovery row for this exact task_ref.
+    let scheduler = core
+        .managed_scheduler
+        .as_ref()
+        .ok_or_else(|| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))?;
+    let sender = scheduler
+        .sender()
+        .ok_or_else(|| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))?;
+    let task_ref = submission.task_ref().as_str().to_owned();
+    match accept_durable_scheduler_task(
+        sender,
+        &core.managed_tasks,
+        &scheduler.rescan_requested,
+        &task_ref,
+        ManagedScheduledTask {
+            submission,
+            repository_path,
+        },
+    )? {
+        ManagedDurableEnqueueOutcome::Enqueued | ManagedDurableEnqueueOutcome::AlreadyScheduled => {
+        }
+        ManagedDurableEnqueueOutcome::DeferredCapacity => {
+            scheduler.request_rescan();
+        }
+    }
+    Ok(())
+}
+
+fn load_managed_scheduled_task_from_durable(
+    source: &ManagedForemanIdentitySource,
+    task_ref: &ContentDigest,
+) -> Result<ManagedScheduledTask, ToolExecutionError> {
+    let submission = load_managed_submission_from_durable(source, task_ref)?;
+    let selector = ProjectSelector::new(Some(submission.identity().project_id().as_str()), None)
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    record_observed_effect(ObservedEffectKind::Filesystem)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Process))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Database))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    let resolved = resolve_project_authority(
+        &source.database,
+        &source.password,
+        deadline(source.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        &source.store_authority,
+        &selector,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))?;
+    if &resolved.authority().head() != resolved.current_head()
+        || resolved.authority().project_id() != submission.identity().project_id()
+        || resolved.authority().project_snapshot_id() != submission.identity().project_snapshot_id()
+        || resolved.authority().receipt_digest() != submission.project_authority_receipt_digest()
+        || resolved.display_name() != submission.project_display_name()
+    {
+        return Err(ToolExecutionError::new(
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+        ));
+    }
+    Ok(ManagedScheduledTask {
+        submission,
+        repository_path: resolved.canonical_path().to_path_buf(),
+    })
+}
+
+fn load_managed_submission_from_durable(
+    source: &ManagedForemanIdentitySource,
+    task_ref: &ContentDigest,
+) -> Result<TaskSubmissionEnvelope, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    PostgresTaskLifecycle::load_submission_by_task_ref(
+        &source.database,
+        &source.password,
+        deadline(source.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        task_ref,
+    )
+    .map_err(|error| ToolExecutionError::new(error.code()))?
+    .ok_or_else(|| ToolExecutionError::new("LATTICE_MANAGED_INTAKE_REPLAY_REQUIRED"))
+}
+
+fn refill_managed_scheduler_from_durable(
+    config: &ManagedForemanServiceConfig,
+    source: &ManagedForemanIdentitySource,
+    sender: &mpsc::SyncSender<ManagedScheduledTask>,
+    scheduled: &Mutex<BTreeSet<String>>,
+    rescan_requested: &AtomicBool,
+) -> Result<(), ToolExecutionError> {
+    let target =
+        ForemanExtensionTarget::new(source.database.database_name(), source.database.run_id())
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let client = connect_fixed_runtime_client(
+        &source.database,
+        &source.password,
+        deadline(source.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let mut foreman = PostgresForeman::new(client, &target)
+        .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+    let identity = reload_managed_foreman_identity(source)?;
+    let mut observed = 0_usize;
+    let mut capacity_deferred = false;
+    let scan = walk_restart_keyset_pages(
+        256,
+        |cursor, page_limit| {
+            foreman
+                .list_restart_task_refs_page(cursor, page_limit)
+                .map_err(|failure| ToolExecutionError::new(failure.code()))
+        },
+        |retained| retained.cursor(),
+        |retained| {
+            observed = observed.saturating_add(1);
+            if observed > MANAGED_RESTART_TASK_LIMIT {
+                return Err(ToolExecutionError::new(
+                    "FOREMAN_RESTART_BACKLOG_LIMIT_EXCEEDED",
+                ));
+            }
+            match retained.restart_kind() {
+                RestartTaskKind::DraftPendingPromotion
+                | RestartTaskKind::DraftProjectReconciliationRequired
+                | RestartTaskKind::PromotedNoAttempt
+                | RestartTaskKind::CapacityWait
+                | RestartTaskKind::ProjectReconciliationRequired
+                | RestartTaskKind::AttemptReconcileRequired
+                | RestartTaskKind::WriterReconciliationRequired
+                | RestartTaskKind::TerminalPendingVerification
+                | RestartTaskKind::VerificationReconcileRequired
+                | RestartTaskKind::AttemptClosedPendingRelease => {}
+            }
+            let mut durable_evidence_ready =
+                managed_restart_kind_has_durable_evidence(retained.restart_kind());
+            let task_ref = retained.task_ref().as_str().to_owned();
+            if capacity_deferred {
+                return Ok(());
+            }
+            if scheduled
+                .lock()
+                .map_err(|_| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))?
+                .contains(&task_ref)
+            {
+                return Ok(());
+            }
+            if managed_restart_kind_requires_project_reconciliation(retained.restart_kind()) {
+                let submission = load_managed_submission_from_durable(source, retained.task_ref())?;
+                if record_managed_restart_project_blocker(config, &submission)
+                    .map_err(|failure| ToolExecutionError::new(failure.code()))?
+                    == ManagedRestartProjectBlockerOutcome::Persisted
+                {
+                    return Ok(());
+                }
+            }
+            let task = match load_managed_scheduled_task_from_durable(source, retained.task_ref()) {
+                Ok(task) => task,
+                Err(failure) if failure.code() == "PROJECT_REGISTRY_CURRENTNESS_CONFLICT" => {
+                    let submission =
+                        load_managed_submission_from_durable(source, retained.task_ref())?;
+                    record_managed_restart_project_blocker(config, &submission)
+                        .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+                    return Ok(());
+                }
+                Err(failure) => {
+                    let Some(task) = isolate_managed_restart_dependency(Err(failure))? else {
+                        return Ok(());
+                    };
+                    task
+                }
+            };
+            if retained.restart_kind() == RestartTaskKind::WriterReconciliationRequired {
+                match record_managed_restart_writer_blocker(
+                    config,
+                    &task.submission,
+                    &task.repository_path,
+                    &identity,
+                )
+                .map_err(|failure| ToolExecutionError::new(failure.code()))?
+                {
+                    ManagedRestartWriterBlockerOutcome::Persisted
+                    | ManagedRestartWriterBlockerOutcome::NoLongerActive => return Ok(()),
+                    ManagedRestartWriterBlockerOutcome::AlreadyCurrent => {}
+                    ManagedRestartWriterBlockerOutcome::DurableEvidenceReady => {
+                        durable_evidence_ready = true;
+                    }
+                }
+            }
+            let Some(status) = isolate_managed_restart_dependency(
+                managed_task_public_status(
+                    config,
+                    task.submission.clone(),
+                    &task.repository_path,
+                    &identity,
+                )
+                .map_err(|failure| ToolExecutionError::new(failure.code())),
+            )?
+            else {
+                return Ok(());
+            };
+            if status.as_ref().is_some_and(|status| {
+                managed_restart_status_should_skip(durable_evidence_ready, status)
+            }) {
+                return Ok(());
+            }
+            match accept_durable_scheduler_task(
+                sender,
+                scheduled,
+                rescan_requested,
+                &task_ref,
+                task,
+            )? {
+                ManagedDurableEnqueueOutcome::Enqueued
+                | ManagedDurableEnqueueOutcome::AlreadyScheduled => Ok(()),
+                ManagedDurableEnqueueOutcome::DeferredCapacity => {
+                    capacity_deferred = true;
+                    Ok(())
+                }
+            }
+        },
+    );
+    scan
+}
+
+fn managed_scheduler(
+    config: ManagedForemanServiceConfig,
+    identity_source: ManagedForemanIdentitySource,
+    scheduled: Arc<Mutex<BTreeSet<String>>>,
+    initial_tasks: Vec<ManagedScheduledTask>,
+) -> Result<ManagedSchedulerOwner, LatticedError> {
+    let (sender, receiver) =
+        mpsc::sync_channel::<ManagedScheduledTask>(MANAGED_SCHEDULER_QUEUE_CAPACITY);
+    let receiver = Arc::new(Mutex::new(receiver));
+    let cancellation = ManagedWorkerCancellation::default();
+    let rescan_requested = Arc::new(AtomicBool::new(false));
+    let next_durable_rescan = Arc::new(Mutex::new(
+        Instant::now()
+            .checked_add(MANAGED_DURABLE_RESCAN_INTERVAL)
+            .unwrap_or_else(Instant::now),
+    ));
+    let config = config.with_cancellation(cancellation.clone());
+    // The complete restart scan has already succeeded before this function is
+    // entered. Fill the bounded queue before any supervisor exists, so a slow
+    // or corrupt startup scan can never race the periodic durable refill.
+    for task in initial_tasks {
+        let task_ref = task.submission.task_ref().as_str().to_owned();
+        match accept_durable_scheduler_task(&sender, &scheduled, &rescan_requested, &task_ref, task)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ManagedTeardownRejected))?
+        {
+            ManagedDurableEnqueueOutcome::Enqueued
+            | ManagedDurableEnqueueOutcome::AlreadyScheduled => {}
+            ManagedDurableEnqueueOutcome::DeferredCapacity => {
+                rescan_requested.store(true, AtomicOrdering::Release);
+            }
+        }
+    }
+    let mut owner = ManagedSchedulerOwner {
+        sender: Some(sender),
+        cancellation: cancellation.clone(),
+        workers: Vec::with_capacity(MANAGED_SUPERVISOR_WORKERS),
+        rescan_requested: Arc::clone(&rescan_requested),
+        armed: true,
+    };
+    for worker in 0..MANAGED_SUPERVISOR_WORKERS {
+        let receiver = Arc::clone(&receiver);
+        let scheduled = Arc::clone(&scheduled);
+        let config = config.clone();
+        let identity_source = identity_source.clone();
+        let cancellation = cancellation.clone();
+        let cancellable_wait = cancellation.clone();
+        let requeue_sender = owner
+            .sender
+            .as_ref()
+            .expect("managed scheduler sender")
+            .clone();
+        let rescan_requested = Arc::clone(&rescan_requested);
+        let next_durable_rescan = Arc::clone(&next_durable_rescan);
+        let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
+        let handle = thread::Builder::new()
+            .name(format!("lattice-managed-supervisor-{}", worker + 1))
+            .spawn(move || -> Result<(), &'static str> {
+                let _completion = ManagedSchedulerCompletion(Some(completion_sender));
+                loop {
+                    if cancellation.is_requested() {
+                        return Ok(());
+                    }
+                    let task = {
+                        let Ok(receiver) = receiver.lock() else {
+                            return Err("LATTICE_MANAGED_SCHEDULER_RECEIVER_REJECTED");
+                        };
+                        match receiver.recv_timeout(MANAGED_CAPACITY_RETRY_DELAY) {
+                            Ok(task) => task,
+                            Err(mpsc::RecvTimeoutError::Timeout) => {
+                                drop(receiver);
+                                let should_rescan = claim_managed_durable_rescan(
+                                    &rescan_requested,
+                                    &next_durable_rescan,
+                                    Instant::now(),
+                                )
+                                .map_err(ToolExecutionError::code)?;
+                                if should_rescan {
+                                    if let Err(failure) = refill_managed_scheduler_from_durable(
+                                        &config,
+                                        &identity_source,
+                                        &requeue_sender,
+                                        &scheduled,
+                                        &rescan_requested,
+                                    ) {
+                                        if !managed_restart_rescan_is_retryable(failure.code()) {
+                                            cancellation.request();
+                                            return Err(failure.code());
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+                        }
+                    };
+                    let task_ref = task.submission.task_ref().as_str().to_owned();
+                    let exit = supervise_managed_task(
+                        &cancellation,
+                        || {
+                            reload_managed_foreman_identity(&identity_source)
+                                .map_err(ToolExecutionError::code)
+                        },
+                        |identity| {
+                            run_managed_task(
+                                &config,
+                                task.submission.clone(),
+                                &task.repository_path,
+                                identity,
+                            )
+                            .map(|_| ())
+                            .map_err(|failure| failure.code())
+                        },
+                        |identity| {
+                            managed_task_public_status(
+                                &config,
+                                task.submission.clone(),
+                                &task.repository_path,
+                                identity,
+                            )
+                            .map_err(|failure| failure.code())
+                        },
+                        |duration| cancellable_wait.wait_timeout(duration),
+                    );
+                    release_managed_schedule(&scheduled, &task_ref);
+                    match exit {
+                        ManagedSupervisorExit::ShutdownFailed(code) => return Err(code),
+                        ManagedSupervisorExit::ShutdownComplete
+                        | ManagedSupervisorExit::ShutdownIdle => return Ok(()),
+                        ManagedSupervisorExit::RunCompleted
+                        | ManagedSupervisorExit::DurablyClosed
+                        | ManagedSupervisorExit::DurablyDeferred => {
+                            if cancellation.is_requested() {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    let should_rescan = claim_managed_durable_rescan(
+                        &rescan_requested,
+                        &next_durable_rescan,
+                        Instant::now(),
+                    )
+                    .map_err(ToolExecutionError::code)?;
+                    if should_rescan {
+                        if let Err(failure) = refill_managed_scheduler_from_durable(
+                            &config,
+                            &identity_source,
+                            &requeue_sender,
+                            &scheduled,
+                            &rescan_requested,
+                        ) {
+                            if !managed_restart_rescan_is_retryable(failure.code()) {
+                                cancellation.request();
+                                return Err(failure.code());
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Configuration))?;
+        owner.workers.push(ManagedSchedulerWorker {
+            completion: completion_receiver,
+            handle: Some(handle),
+        });
+    }
+    Ok(owner)
+}
+
+fn claim_managed_durable_rescan(
+    requested: &AtomicBool,
+    next_rescan: &Mutex<Instant>,
+    now: Instant,
+) -> Result<bool, ToolExecutionError> {
+    let explicit = requested.swap(false, AtomicOrdering::AcqRel);
+    let mut next = next_rescan
+        .lock()
+        .map_err(|_| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))?;
+    if !explicit && now < *next {
+        return Ok(false);
+    }
+    *next = now
+        .checked_add(MANAGED_DURABLE_RESCAN_INTERVAL)
+        .ok_or_else(|| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))?;
+    Ok(true)
+}
+
+fn managed_restart_rescan_is_retryable(code: &str) -> bool {
+    matches!(
+        code,
+        "FOREMAN_REPLAY_UNAVAILABLE" | "FOREMAN_ADAPTER_DATABASE_FAILED"
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedSupervisorExit {
+    RunCompleted,
+    DurablyClosed,
+    DurablyDeferred,
+    ShutdownIdle,
+    ShutdownComplete,
+    ShutdownFailed(&'static str),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ManagedRecoveryBackoff {
+    exponent: u8,
+}
+
+impl ManagedRecoveryBackoff {
+    fn next_delay(&mut self) -> Duration {
+        let exponent = self.exponent.min(MANAGED_RECOVERY_RETRY_MAX_EXPONENT);
+        self.exponent = self
+            .exponent
+            .saturating_add(1)
+            .min(MANAGED_RECOVERY_RETRY_MAX_EXPONENT);
+        Duration::from_secs(1_u64 << exponent)
+    }
+}
+
+fn retain_managed_schedule(
+    scheduled: &Mutex<BTreeSet<String>>,
+    task_ref: &str,
+) -> Result<bool, ToolExecutionError> {
+    scheduled
+        .lock()
+        .map(|mut scheduled| scheduled.insert(task_ref.to_owned()))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))
+}
+
+fn release_managed_schedule(scheduled: &Mutex<BTreeSet<String>>, task_ref: &str) {
+    if let Ok(mut scheduled) = scheduled.lock() {
+        scheduled.remove(task_ref);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManagedDurableEnqueueOutcome {
+    Enqueued,
+    AlreadyScheduled,
+    DeferredCapacity,
+}
+
+fn accept_durable_scheduler_task<T>(
+    sender: &mpsc::SyncSender<T>,
+    scheduled: &Mutex<BTreeSet<String>>,
+    rescan_requested: &AtomicBool,
+    task_ref: &str,
+    task: T,
+) -> Result<ManagedDurableEnqueueOutcome, ToolExecutionError> {
+    // The general intake already exists in the formal PostgreSQL Task Ledger.
+    // Queue pressure is a deferred local observation, not a failed submit: the
+    // bounded durable rescan reloads this exact task_ref after capacity drains.
+    try_enqueue_durable(sender, scheduled, rescan_requested, task_ref, task)
+        .map_err(|()| ToolExecutionError::new("LATTICE_MANAGED_SCHEDULER_UNAVAILABLE"))
+}
+
+fn try_enqueue_durable<T>(
+    sender: &mpsc::SyncSender<T>,
+    scheduled: &Mutex<BTreeSet<String>>,
+    rescan_requested: &AtomicBool,
+    task_ref: &str,
+    task: T,
+) -> Result<ManagedDurableEnqueueOutcome, ()> {
+    if !retain_managed_schedule(scheduled, task_ref).map_err(|_| ())? {
+        return Ok(ManagedDurableEnqueueOutcome::AlreadyScheduled);
+    }
+    match sender.try_send(task) {
+        Ok(()) => Ok(ManagedDurableEnqueueOutcome::Enqueued),
+        Err(mpsc::TrySendError::Full(_)) => {
+            release_managed_schedule(scheduled, task_ref);
+            rescan_requested.store(true, AtomicOrdering::Release);
+            Ok(ManagedDurableEnqueueOutcome::DeferredCapacity)
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            release_managed_schedule(scheduled, task_ref);
+            Err(())
+        }
+    }
+}
+
+fn supervise_managed_task<I, LoadIdentity, RunTask, LoadStatus, Wait>(
+    cancellation: &ManagedWorkerCancellation,
+    mut load_identity: LoadIdentity,
+    mut run_task: RunTask,
+    mut load_status: LoadStatus,
+    mut wait: Wait,
+) -> ManagedSupervisorExit
+where
+    LoadIdentity: FnMut() -> Result<I, &'static str>,
+    RunTask: FnMut(&I) -> Result<(), &'static str>,
+    LoadStatus: FnMut(&I) -> Result<Option<Value>, &'static str>,
+    Wait: FnMut(Duration),
+{
+    let mut recovery_backoff = ManagedRecoveryBackoff::default();
+    loop {
+        if cancellation.is_requested() {
+            return ManagedSupervisorExit::ShutdownIdle;
+        }
+        let identity = match load_identity() {
+            Ok(identity) => identity,
+            Err(_) => {
+                wait(recovery_backoff.next_delay());
+                continue;
+            }
+        };
+        match run_task(&identity) {
+            Ok(()) => return ManagedSupervisorExit::RunCompleted,
+            Err(MANAGED_GRACEFUL_SHUTDOWN_COMPLETE) if cancellation.is_requested() => {
+                return ManagedSupervisorExit::ShutdownComplete;
+            }
+            Err(MANAGED_GRACEFUL_SHUTDOWN_IDLE) if cancellation.is_requested() => {
+                return ManagedSupervisorExit::ShutdownIdle;
+            }
+            Err(code) if cancellation.is_requested() => {
+                return ManagedSupervisorExit::ShutdownFailed(code);
+            }
+            Err("FOREMAN_GLOBAL_CAPACITY_EXHAUSTED" | "FOREMAN_TASK_CAPACITY_EXHAUSTED") => {
+                wait(MANAGED_CAPACITY_RETRY_DELAY)
+            }
+            // A service error is not terminal evidence. Re-read the exact
+            // PostgreSQL-backed managed projection before releasing this
+            // process-owned de-duplication key; every unavailable, missing,
+            // pending, runnable, or active projection stays in reconciliation.
+            Err(code) => match load_status(&identity) {
+                Ok(Some(status)) if managed_status_is_durably_closed(&status) => {
+                    return ManagedSupervisorExit::DurablyClosed;
+                }
+                Ok(Some(status)) if managed_status_is_durably_deferred(&status) => {
+                    return ManagedSupervisorExit::DurablyDeferred;
+                }
+                Ok(Some(status)) if managed_status_confirms_dependency_deferred(&status, code) => {
+                    return ManagedSupervisorExit::DurablyDeferred;
+                }
+                Ok(Some(_) | None) | Err(_) => wait(recovery_backoff.next_delay()),
+            },
+        }
+    }
+}
+
+fn managed_status_is_durably_closed(status: &Value) -> bool {
+    if status.get("schema_version").and_then(Value::as_str) != Some("lattice.task.status.v4") {
+        return false;
+    }
+    let Some(task_state) = status.get("task_state").and_then(Value::as_str) else {
+        return false;
+    };
+    if matches!(
+        status
+            .get("blocker")
+            .and_then(Value::as_str)
+            .or_else(|| status.get("failure_code").and_then(Value::as_str)),
+        Some("LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED")
+    ) {
+        return false;
+    }
+    if task_state == "BLOCKED" && managed_status_requires_exact_provider_reconciliation(status) {
+        return false;
+    }
+    matches!(
+        task_state,
+        "AWAITING_MERGE_APPROVAL" | "COMPLETED" | "FAILED" | "BLOCKED" | "REJECTED" | "CANCELLED"
+    )
+}
+
+fn managed_status_has_known_closed_blocker(code: &str) -> bool {
+    matches!(
+        code,
+        "LATTICE_MANAGED_EXECUTION_AUTHORITY_NOT_CURRENT"
+            | "LATTICE_MANAGED_PRESTART_CONFIGURATION_REJECTED"
+            | "LATTICE_MANAGED_MODEL_PROBE_TIMEOUT_RECONCILIATION_REQUIRED"
+            | "LATTICE_MANAGED_REVIEW_MODEL_PROBE_TIMEOUT_NO_PROVIDER_EFFECT"
+            | "LATTICE_MANAGED_HEARTBEAT_TIMEOUT_WHILE_IN_PROGRESS"
+            | "LATTICE_MANAGED_DEADLINE_EXCEEDED"
+            | "LATTICE_MANAGED_REVIEW_TIMEOUT"
+            | "LATTICE_MANAGED_MODEL_UNAVAILABLE"
+            | "MANAGED_CODEX_MODEL_UNAVAILABLE"
+            | "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED"
+            | "LATTICE_MANAGED_VERIFICATION_FAILED"
+            | "LATTICE_MANAGED_TOKEN_BUDGET_EXHAUSTED"
+            | "LATTICE_MANAGED_REVIEW_TOKEN_BUDGET_EXCEEDED"
+            | "LATTICE_MANAGED_MODEL_CALL_BUDGET_EXHAUSTED"
+            | "LATTICE_MANAGED_REVIEW_BUDGET_EXHAUSTED"
+            | "LATTICE_MANAGED_MODEL_USAGE_RECONCILIATION_REQUIRED"
+            | "LATTICE_MANAGED_REVIEW_RESOURCE_OBSERVATION_MISSING"
+            | "LATTICE_MANAGED_REVIEW_RESULT_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_FINAL_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_FINAL_DIGEST_MISMATCH"
+            | "LATTICE_MANAGED_REVIEW_OUTPUT_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_IDENTITY_MISMATCH"
+            | "LATTICE_MANAGED_REVIEW_LIFECYCLE_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_EVIDENCE_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_RESOURCE_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_RESULT_LIMIT"
+            | "LATTICE_MANAGED_REVIEW_CONFIG_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_SUBJECT_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_PROMPT_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_PATH_REJECTED"
+            | "LATTICE_MANAGED_REVIEW_DIGEST_FAILED"
+            | "LATTICE_MANAGED_REPOSITORY_LINEAGE_MISMATCH"
+            | "LATTICE_MANAGED_WORKTREE_NOT_CLEAN"
+            | "LATTICE_MANAGED_BASE_COMMIT_DRIFT"
+            | "LATTICE_MANAGED_DISPATCH_BASE_COMMIT_DRIFT"
+            | "LATTICE_MANAGED_WORKTREE_BASELINE_REQUIRED"
+            | "LATTICE_MANAGED_WORKTREE_BASELINE_REPLAY_REJECTED"
+            | "LATTICE_MANAGED_WORKTREE_BASELINE_DRIFT"
+            | "LATTICE_MANAGED_WORKTREE_CONTROL_DRIFT"
+            | "LATTICE_MANAGED_PROTECTED_REF_REJECTED"
+    )
+}
+
+const fn managed_restart_kind_has_durable_evidence(kind: RestartTaskKind) -> bool {
+    matches!(
+        kind,
+        RestartTaskKind::AttemptClosedPendingRelease
+            | RestartTaskKind::VerificationReconcileRequired
+            | RestartTaskKind::TerminalPendingVerification
+    )
+}
+
+const fn managed_restart_kind_requires_project_reconciliation(kind: RestartTaskKind) -> bool {
+    matches!(
+        kind,
+        RestartTaskKind::DraftProjectReconciliationRequired
+            | RestartTaskKind::ProjectReconciliationRequired
+    )
+}
+
+fn managed_restart_status_should_skip(durable_evidence_ready: bool, status: &Value) -> bool {
+    managed_status_is_durably_closed(status)
+        || (!durable_evidence_ready && managed_status_is_durably_deferred(status))
+}
+
+fn managed_status_requires_exact_provider_reconciliation(status: &Value) -> bool {
+    matches!(
+        status
+            .get("blocker")
+            .and_then(Value::as_str)
+            .or_else(|| status.get("failure_code").and_then(Value::as_str)),
+        Some(
+            "LATTICE_MANAGED_PROCESS_EXIT_WITHOUT_TERMINAL"
+                | "LATTICE_MANAGED_RPC_DISCONNECT_RECONCILIATION_EXHAUSTED"
+                | "LATTICE_MANAGED_BRIDGE_HEARTBEAT_TIMEOUT_RECONCILIATION_REQUIRED"
+                | "LATTICE_MANAGED_THREAD_START_RPC_INVALID_PARAMS"
+                | "LATTICE_MANAGED_THREAD_START_RPC_REJECTED"
+                | "LATTICE_MANAGED_TURN_START_RPC_INVALID_PARAMS"
+                | "LATTICE_MANAGED_TURN_START_RPC_REJECTED"
+                | "LATTICE_MANAGED_REVIEW_MODEL_UNAVAILABLE"
+                | "LATTICE_MANAGED_REVIEW_THREAD_START_RPC_INVALID_PARAMS"
+                | "LATTICE_MANAGED_REVIEW_THREAD_START_RPC_REJECTED"
+                | "LATTICE_MANAGED_REVIEW_TURN_START_RPC_INVALID_PARAMS"
+                | "LATTICE_MANAGED_REVIEW_TURN_START_RPC_REJECTED"
+                | "LATTICE_MANAGED_REVIEW_RECONCILIATION_REQUIRED"
+        )
+    )
+}
+
+fn managed_status_is_durably_deferred(status: &Value) -> bool {
+    if status.get("schema_version").and_then(Value::as_str) != Some("lattice.task.status.v4") {
+        return false;
+    }
+    let task_state = status.get("task_state").and_then(Value::as_str);
+    let blocker = status
+        .get("blocker")
+        .and_then(Value::as_str)
+        .or_else(|| status.get("failure_code").and_then(Value::as_str));
+    (task_state == Some("AWAITING_EXECUTION_APPROVAL")
+        && blocker == Some("LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED"))
+        || (matches!(task_state, Some("PREPARING" | "EXECUTING"))
+            && blocker == Some("LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED"))
+}
+
+fn managed_dependency_not_ready(code: &str) -> bool {
+    matches!(
+        code,
+        "LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED"
+            | "LATTICE_MANAGED_WORKTREE_NOT_CLEAN"
+            | "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+            | "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED"
+    )
+}
+
+fn managed_status_confirms_dependency_deferred(status: &Value, code: &str) -> bool {
+    status.get("schema_version").and_then(Value::as_str) == Some("lattice.task.status.v4")
+        && managed_dependency_not_ready(code)
+        && (status.get("blocker").and_then(Value::as_str) == Some(code)
+            || status.get("failure_code").and_then(Value::as_str) == Some(code))
+}
+
+fn isolate_managed_restart_dependency<T>(
+    result: Result<T, ToolExecutionError>,
+) -> Result<Option<T>, ToolExecutionError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(failure)
+            if failure.code() != "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+                && managed_dependency_not_ready(failure.code()) =>
+        {
+            Ok(None)
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+fn walk_restart_keyset_pages<T, Cursor, Fetch, CursorFor, Handle>(
+    page_limit: u16,
+    mut fetch_page: Fetch,
+    mut cursor_for: CursorFor,
+    mut handle: Handle,
+) -> Result<(), ToolExecutionError>
+where
+    Cursor: Clone + Ord,
+    Fetch: FnMut(Option<&Cursor>, u16) -> Result<Vec<T>, ToolExecutionError>,
+    CursorFor: FnMut(&T) -> Cursor,
+    Handle: FnMut(T) -> Result<(), ToolExecutionError>,
+{
+    if page_limit == 0 || page_limit > 256 {
+        return Err(ToolExecutionError::new(
+            "FOREMAN_RESTART_PAGE_LIMIT_INVALID",
+        ));
+    }
+    let mut cursor = None;
+    let mut seen = BTreeSet::new();
+    loop {
+        let page = fetch_page(cursor.as_ref(), page_limit)?;
+        let page_len = page.len();
+        if page_len > usize::from(page_limit) {
+            return Err(ToolExecutionError::new(
+                "FOREMAN_RESTART_PAGE_LIMIT_EXCEEDED",
+            ));
+        }
+        if page.is_empty() {
+            return Ok(());
+        }
+
+        let mut last = cursor.clone();
+        for item in page {
+            let next = cursor_for(&item);
+            if last.as_ref().is_some_and(|previous| next <= *previous) || !seen.insert(next.clone())
+            {
+                return Err(ToolExecutionError::new("FOREMAN_RESTART_SCAN_NOT_STRICT"));
+            }
+            handle(item)?;
+            last = Some(next);
+        }
+        cursor = last;
+        if page_len < usize::from(page_limit) {
+            return Ok(());
+        }
+    }
+}
+
+fn stage_managed_restart_tasks<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> Result<Vec<ManagedScheduledTask>, ToolExecutionError> {
+    if core.managed_foreman.is_none() {
+        return Ok(Vec::new());
+    }
+    let managed_config = core
+        .managed_foreman
+        .as_ref()
+        .ok_or_else(|| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let target = ForemanExtensionTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_CORRUPT"))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout)
+            .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?,
+    )
+    .map_err(|_| ToolExecutionError::new("FOREMAN_REPLAY_UNAVAILABLE"))?;
+    let mut foreman = PostgresForeman::new(client, &target)
+        .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+    let foreman_identity = formal_managed_foreman_identity(core)?;
+    let mut retained_tasks = Vec::new();
+    walk_restart_keyset_pages(
+        256,
+        |cursor, page_limit| {
+            foreman
+                .list_restart_task_refs_page(cursor, page_limit)
+                .map_err(|failure| ToolExecutionError::new(failure.code()))
+        },
+        |retained| retained.cursor(),
+        |retained| {
+            let submission = load_general_submission_by_task_ref(core, retained.task_ref())?
+                .ok_or_else(|| ToolExecutionError::new("LATTICE_MANAGED_INTAKE_REPLAY_REQUIRED"))?;
+            if managed_restart_kind_requires_project_reconciliation(retained.restart_kind()) {
+                if record_managed_restart_project_blocker(managed_config, &submission)
+                    .map_err(|failure| ToolExecutionError::new(failure.code()))?
+                    == ManagedRestartProjectBlockerOutcome::Persisted
+                {
+                    return Ok(());
+                }
+            }
+            let resolved =
+                match resolve_registered_project_for_general_submission(core, &submission) {
+                    Ok(resolved) => resolved,
+                    Err(failure) if failure.code() == "PROJECT_REGISTRY_CURRENTNESS_CONFLICT" => {
+                        record_managed_restart_project_blocker(managed_config, &submission)
+                            .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+                        return Ok(());
+                    }
+                    Err(failure) => {
+                        let Some(resolved) = isolate_managed_restart_dependency(Err(failure))?
+                        else {
+                            return Ok(());
+                        };
+                        resolved
+                    }
+                };
+            if retained.restart_kind() == RestartTaskKind::WriterReconciliationRequired {
+                match record_managed_restart_writer_blocker(
+                    managed_config,
+                    &submission,
+                    resolved.canonical_path(),
+                    &foreman_identity,
+                )
+                .map_err(|failure| ToolExecutionError::new(failure.code()))?
+                {
+                    ManagedRestartWriterBlockerOutcome::Persisted
+                    | ManagedRestartWriterBlockerOutcome::NoLongerActive => return Ok(()),
+                    ManagedRestartWriterBlockerOutcome::AlreadyCurrent
+                    | ManagedRestartWriterBlockerOutcome::DurableEvidenceReady => {}
+                }
+            }
+            push_managed_restart_task(
+                &mut retained_tasks,
+                ManagedScheduledTask {
+                    submission,
+                    repository_path: resolved.canonical_path().to_path_buf(),
+                },
+                MANAGED_RESTART_TASK_LIMIT,
+            )
+        },
+    )?;
+    // The caller starts supervisors only after this complete bounded scan has
+    // returned. A corrupt later row therefore leaves the effect count at zero.
+    Ok(retained_tasks)
+}
+
+fn push_managed_restart_task<T>(
+    retained_tasks: &mut Vec<T>,
+    task: T,
+    limit: usize,
+) -> Result<(), ToolExecutionError> {
+    if limit == 0 || retained_tasks.len() >= limit {
+        return Err(ToolExecutionError::new(
+            "FOREMAN_RESTART_BACKLOG_LIMIT_EXCEEDED",
+        ));
+    }
+    retained_tasks.push(task);
+    Ok(())
+}
+
+fn start_after_complete_stage<T, U, E, Stage, Start>(stage: Stage, start: Start) -> Result<U, E>
+where
+    Stage: FnOnce() -> Result<T, E>,
+    Start: FnOnce(T) -> Result<U, E>,
+{
+    let staged = stage()?;
+    start(staged)
 }
 
 const fn general_task_error_code(error: &GeneralTaskIntakeError) -> &'static str {
@@ -5985,32 +8025,65 @@ fn verified_task_status<H: FullChainHermesPort>(
     evidence: &TaskLifecycleEvidence,
     task_ref: &ContentDigest,
 ) -> Result<Value, LatticedError> {
+    verified_task_status_at(core, evidence, task_ref, None)
+}
+
+fn verified_task_status_at<H: FullChainHermesPort>(
+    core: &mut FullChainCore<H>,
+    evidence: &TaskLifecycleEvidence,
+    task_ref: &ContentDigest,
+    operation_deadline: Option<Instant>,
+) -> Result<Value, LatticedError> {
     let mut failure_stage = None;
     let mut failure_code = None;
     if evidence.state() == TaskState::Completed {
-        let mut lifecycle = task_lifecycle(core, evidence.binding())
-            .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
+        let mut lifecycle = match operation_deadline {
+            Some(operation_deadline) => {
+                task_lifecycle_at(core, evidence.binding(), operation_deadline)
+            }
+            None => task_lifecycle(core, evidence.binding()),
+        }
+        .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
         let foundation = lifecycle
             .persistence_foundation(evidence.binding())
             .map_err(|_| LatticedError::new(LatticedErrorKind::TaskControl))?;
-        let mut writer_lease = task_writer_lease(core, &foundation)?;
+        let mut writer_lease = match operation_deadline {
+            Some(operation_deadline) => {
+                task_writer_lease_at(core, &foundation, operation_deadline)?
+            }
+            None => task_writer_lease(core, &foundation)?,
+        };
         verify_completed_writer_history(&mut writer_lease, evidence)?;
         let expected = evidence
             .result_digest()
             .ok_or_else(|| LatticedError::new(LatticedErrorKind::ReceiptMismatch))?;
-        let receipt = core.status_task_json(evidence.binding())?;
+        let receipt = match operation_deadline {
+            Some(operation_deadline) => {
+                core.status_task_json_at(evidence.binding(), operation_deadline)?
+            }
+            None => core.status_task_json(evidence.binding())?,
+        };
         if &delivery_receipt_digest(&receipt)? != expected {
             return Err(LatticedError::new(LatticedErrorKind::ReceiptMismatch));
         }
     } else if evidence.state() == TaskState::Failed {
         // Failures before Delivery have no durable delivery receipt. When a
         // receipt exists, expose only its closed, payload-free stage and code.
-        if let Ok(receipt) = core.status_task_json(evidence.binding()) {
+        let receipt = match operation_deadline {
+            Some(operation_deadline) => {
+                core.status_task_json_at(evidence.binding(), operation_deadline)
+            }
+            None => core.status_task_json(evidence.binding()),
+        };
+        if let Ok(receipt) = receipt {
             if let Some((stage, code)) = delivery_failure_projection(&receipt) {
                 failure_stage = Some(stage);
                 failure_code = Some(code);
             }
         }
+    }
+    if operation_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        return Err(LatticedError::new(LatticedErrorKind::DatabaseConnect));
     }
     Ok(task_public_status(
         evidence,
@@ -6056,6 +8129,7 @@ const fn controlled_task_error_code(error: &ControlledTaskOrchestratorError) -> 
 /// Shared service used by both typed MCP tools and typed `OpenClaw` ingress.
 pub struct FullChainService<H> {
     inner: Arc<Mutex<FullChainCore<H>>>,
+    managed_status_timeout: Option<Duration>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6108,6 +8182,37 @@ impl<H> Clone for FullChainService<H> {
     fn clone(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+            managed_status_timeout: self.managed_status_timeout,
+        }
+    }
+}
+
+fn lock_task_status_core_until<T>(
+    core: &Mutex<T>,
+    operation_deadline: Option<Instant>,
+) -> Result<MutexGuard<'_, T>, ToolExecutionError> {
+    let Some(operation_deadline) = operation_deadline else {
+        return core
+            .lock()
+            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()));
+    };
+    loop {
+        match core.try_lock() {
+            Ok(core) => return Ok(core),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(ToolExecutionError::new(LatticedErrorKind::Transport.code()));
+            }
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= operation_deadline {
+                    return Err(ToolExecutionError::new(MANAGED_STATUS_TIMEOUT));
+                }
+                thread::sleep(
+                    operation_deadline
+                        .saturating_duration_since(now)
+                        .min(Duration::from_millis(2)),
+                );
+            }
         }
     }
 }
@@ -6121,7 +8226,15 @@ impl<H: FullChainHermesPort> FullChainService<H> {
             .inner
             .lock()
             .map_err(|_| LatticedError::new(LatticedErrorKind::HermesTeardownRejected))?;
-        finish_hermes_owner(serve_result, &mut core.hermes)
+        let managed_result = core
+            .managed_scheduler
+            .as_mut()
+            .map_or(Ok(()), ManagedSchedulerOwner::shutdown);
+        let hermes_result = finish_hermes_owner(serve_result, &mut core.hermes);
+        match managed_result {
+            Ok(()) => hermes_result,
+            Err(managed) => Err(managed),
+        }
     }
 }
 
@@ -6543,7 +8656,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         }
         if !arguments.is_controlled_canary() {
             if let Some(existing) = existing_general {
-                return replay_general_submission(&core, arguments, &existing);
+                return replay_general_submission_and_schedule(&core, arguments, &existing);
             }
 
             let retained_request_kind =
@@ -6553,12 +8666,22 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                     load_general_submission_by_request(&core, arguments.client_request_id())
                 })?;
             if let Some(existing) = raced_submission {
-                return replay_general_submission(&core, arguments, &existing);
+                return replay_general_submission_and_schedule(&core, arguments, &existing);
             }
             let resolved = resolve_registered_project_for_general_submit(&core, arguments)?;
             let effective_project_id = resolved.authority().project_id().clone();
             match admit_general_submission(&core, arguments, &resolved) {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    let submission =
+                        load_general_submission_by_request(&core, arguments.client_request_id())?
+                            .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_LEDGER_CORRUPT"))?;
+                    schedule_managed_general_task(
+                        &core,
+                        submission,
+                        resolved.canonical_path().to_path_buf(),
+                    )?;
+                    return Ok(value);
+                }
                 Err(error)
                     if matches!(
                         error.code(),
@@ -6590,7 +8713,21 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                         return Err(error);
                     }
                     match admit_general_submission(&core, arguments, &refreshed) {
-                        Ok(value) => return Ok(value),
+                        Ok(value) => {
+                            let submission = load_general_submission_by_request(
+                                &core,
+                                arguments.client_request_id(),
+                            )?
+                            .ok_or_else(|| {
+                                ToolExecutionError::new("LATTICE_TASK_LEDGER_CORRUPT")
+                            })?;
+                            schedule_managed_general_task(
+                                &core,
+                                submission,
+                                refreshed.canonical_path().to_path_buf(),
+                            )?;
+                            return Ok(value);
+                        }
                         Err(retry_error)
                             if matches!(
                                 retry_error.code(),
@@ -6652,10 +8789,28 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         &mut self,
         arguments: &TaskStatusArguments,
     ) -> Result<Value, ToolExecutionError> {
-        let mut core = self
-            .inner
-            .lock()
-            .map_err(|_| ToolExecutionError::new(LatticedErrorKind::Transport.code()))?;
+        let request_started = Instant::now();
+        let status_deadline = self
+            .managed_status_timeout
+            .map(|timeout| {
+                request_started
+                    .checked_add(timeout)
+                    .ok_or_else(|| ToolExecutionError::new(MANAGED_STATUS_TIMEOUT))
+            })
+            .transpose()?;
+        let mut core = lock_task_status_core_until(&self.inner, status_deadline)?;
+        let status_config = core
+            .managed_foreman
+            .as_ref()
+            .map(|config| config.begin_status_request_at(request_started))
+            .transpose()
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let configured_status_deadline = status_config
+            .as_ref()
+            .and_then(ManagedForemanServiceConfig::status_request_deadline);
+        if configured_status_deadline != status_deadline {
+            return Err(ToolExecutionError::new(MANAGED_STATUS_TIMEOUT));
+        }
         let run_id = core.delivery.database.run_id().to_owned();
         apply_canonical_hermes_tool_policy(
             &mut core.hermes,
@@ -6664,7 +8819,14 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         )?;
         let parsed_task_ref = ContentDigest::from_sha256(arguments.task_ref())
             .map_err(|_| ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"))?;
-        if let Some(submission) = load_general_submission_by_task_ref(&core, &parsed_task_ref)? {
+        let general_submission = match configured_status_deadline {
+            Some(operation_deadline) => {
+                load_general_submission_by_task_ref_at(&core, &parsed_task_ref, operation_deadline)
+                    .map_err(|error| managed_status_tool_error(operation_deadline, error.code()))?
+            }
+            None => load_general_submission_by_task_ref(&core, &parsed_task_ref)?,
+        };
+        if let Some(submission) = general_submission {
             if arguments
                 .client_request_id()
                 .is_some_and(|client_request_id| {
@@ -6675,12 +8837,30 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             }
             let binding = general_task_binding(&submission)
                 .map_err(|error| ToolExecutionError::new(error.code()))?;
-            let mut lifecycle = general_task_lifecycle(&core, &submission)
-                .map_err(|error| ToolExecutionError::new(error.code()))?;
-            let evidence = TaskIntakeLifecyclePort::load(&mut lifecycle, &binding)
-                .map_err(|error| ToolExecutionError::new(error.code()))?;
-            return general_task_public_status(&evidence, &submission)
-                .map_err(|error| ToolExecutionError::new(error.code()));
+            let mut lifecycle = match configured_status_deadline {
+                Some(operation_deadline) => {
+                    general_task_lifecycle_at(&core, &submission, operation_deadline).map_err(
+                        |error| managed_status_tool_error(operation_deadline, error.code()),
+                    )?
+                }
+                None => general_task_lifecycle(&core, &submission)
+                    .map_err(|error| ToolExecutionError::new(error.code()))?,
+            };
+            let evidence =
+                TaskIntakeLifecyclePort::load(&mut lifecycle, &binding).map_err(|error| {
+                    match configured_status_deadline {
+                        Some(operation_deadline) => {
+                            managed_status_tool_error(operation_deadline, error.code())
+                        }
+                        None => ToolExecutionError::new(error.code()),
+                    }
+                })?;
+            return managed_general_task_public_status(
+                &core,
+                &evidence,
+                &submission,
+                status_config.as_ref(),
+            );
         }
         let client_request_id = arguments
             .client_request_id()
@@ -6688,8 +8868,14 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         let submission = mcp_gateway_submission(client_request_id)
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         let binding = submission.binding().clone();
-        let mut lifecycle = task_lifecycle(&core, &binding)
-            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut lifecycle = match configured_status_deadline {
+            Some(operation_deadline) => task_lifecycle_at(&core, &binding, operation_deadline),
+            None => task_lifecycle(&core, &binding),
+        }
+        .map_err(|error| match configured_status_deadline {
+            Some(operation_deadline) => managed_status_tool_error(operation_deadline, error.code()),
+            None => ToolExecutionError::new(error.code()),
+        })?;
         let (evidence, historical_admission_command_id) =
             match TaskLifecyclePort::load(&mut lifecycle, &binding) {
                 Ok(evidence) => (evidence, None),
@@ -6698,16 +8884,33 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
                 {
                     let (evidence, admission_command_id) = lifecycle
                         .load_historical_terminal_status(&binding)
-                        .map_err(|error| ToolExecutionError::new(error.code()))?;
+                        .map_err(|error| match configured_status_deadline {
+                            Some(operation_deadline) => {
+                                managed_status_tool_error(operation_deadline, error.code())
+                            }
+                            None => ToolExecutionError::new(error.code()),
+                        })?;
                     (evidence, Some(admission_command_id))
                 }
-                Err(error) => return Err(ToolExecutionError::new(error.code())),
+                Err(error) => {
+                    return Err(match configured_status_deadline {
+                        Some(operation_deadline) => {
+                            managed_status_tool_error(operation_deadline, error.code())
+                        }
+                        None => ToolExecutionError::new(error.code()),
+                    });
+                }
             };
         let admission_command_id = match historical_admission_command_id {
             Some(command_id) => command_id,
             None => lifecycle
                 .verified_admission_command_id(&binding)
-                .map_err(|error| ToolExecutionError::new(error.code()))?,
+                .map_err(|error| match configured_status_deadline {
+                    Some(operation_deadline) => {
+                        managed_status_tool_error(operation_deadline, error.code())
+                    }
+                    None => ToolExecutionError::new(error.code()),
+                })?,
         };
         let task_ref = controlled_task_reference(
             &binding,
@@ -6719,8 +8922,13 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
         if arguments.task_ref() != task_ref.as_str() {
             return Err(ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"));
         }
-        verified_task_status(&mut core, &evidence, &task_ref)
-            .map_err(|error| ToolExecutionError::new(error.code()))
+        verified_task_status_at(&mut core, &evidence, &task_ref, configured_status_deadline)
+            .map_err(|error| match configured_status_deadline {
+                Some(operation_deadline) => {
+                    managed_status_tool_error(operation_deadline, error.code())
+                }
+                None => ToolExecutionError::new(error.code()),
+            })
     }
 }
 
@@ -7002,41 +9210,245 @@ where
     }
 }
 
+enum FullChainInputChunk {
+    Bytes(Vec<u8>),
+    Eof,
+    Failed,
+}
+
+/// Process-lifetime, input-only stdin reader for the full-chain binary.
+///
+/// This thread receives no service, database, provider, scheduler, guard, or
+/// credential capability. That narrow boundary is intentional: a fatal
+/// `OpenClaw` result can interrupt the channel-backed MCP reader without waiting
+/// for external stdin EOF. After the unique service teardown completes, an OS
+/// process return may leave only this blocked input syscall for process exit to
+/// discard; no product effect can outlive the returned error.
+struct ProcessLifetimeStdinReader {
+    receiver: mpsc::Receiver<FullChainInputChunk>,
+    handle: Option<thread::JoinHandle<()>>,
+    fatal_surface: Arc<AtomicBool>,
+    buffer: Vec<u8>,
+    offset: usize,
+    eof: bool,
+    terminal_received: bool,
+    detached_after_surfaces: bool,
+}
+
+impl ProcessLifetimeStdinReader {
+    fn spawn<R>(mut input: R, fatal_surface: Arc<AtomicBool>) -> Result<Self, LatticedError>
+    where
+        R: Read + Send + 'static,
+    {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let handle = thread::Builder::new()
+            .name("lattice-full-chain-stdin".to_owned())
+            .spawn(move || {
+                let mut buffer = [0_u8; FULL_CHAIN_STDIN_CHUNK_BYTES];
+                loop {
+                    match input.read(&mut buffer) {
+                        Ok(0) => {
+                            let _ = sender.send(FullChainInputChunk::Eof);
+                            return;
+                        }
+                        Ok(length) => {
+                            if sender
+                                .send(FullChainInputChunk::Bytes(buffer[..length].to_vec()))
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        Err(_) => {
+                            let _ = sender.send(FullChainInputChunk::Failed);
+                            return;
+                        }
+                    }
+                }
+            })
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        Ok(Self {
+            receiver,
+            handle: Some(handle),
+            fatal_surface,
+            buffer: Vec::new(),
+            offset: 0,
+            eof: false,
+            terminal_received: false,
+            detached_after_surfaces: false,
+        })
+    }
+
+    fn refill(&mut self) -> io::Result<()> {
+        while !self.eof && self.offset == self.buffer.len() {
+            self.buffer.clear();
+            self.offset = 0;
+            if self.fatal_surface.load(AtomicOrdering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "full-chain surface terminated",
+                ));
+            }
+            match self.receiver.recv_timeout(FULL_CHAIN_STDIN_POLL_INTERVAL) {
+                Ok(FullChainInputChunk::Bytes(bytes)) => self.buffer = bytes,
+                Ok(FullChainInputChunk::Eof) => {
+                    self.eof = true;
+                    self.terminal_received = true;
+                }
+                Ok(FullChainInputChunk::Failed) => {
+                    self.terminal_received = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "full-chain stdin failed",
+                    ));
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.terminal_received = true;
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "full-chain stdin disconnected",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn finish_after_surfaces(&mut self) -> Result<(), LatticedError> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        if self.terminal_received || handle.is_finished() {
+            return handle
+                .join()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::ManagedTeardownRejected));
+        }
+        // This is the sole deliberate process-lifetime detach. It happens only
+        // after listener join and scheduler/Hermes teardown; the thread owns an
+        // input handle and a bounded sender, and therefore cannot perform or
+        // retain any provider effect while the binary returns its typed error.
+        self.detached_after_surfaces = true;
+        drop(handle);
+        Ok(())
+    }
+}
+
+impl Read for ProcessLifetimeStdinReader {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        let available = self.fill_buf()?;
+        let length = output.len().min(available.len());
+        output[..length].copy_from_slice(&available[..length]);
+        self.consume(length);
+        Ok(length)
+    }
+}
+
+impl BufRead for ProcessLifetimeStdinReader {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.fatal_surface.load(AtomicOrdering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "full-chain surface terminated",
+            ));
+        }
+        self.refill()?;
+        if self.fatal_surface.load(AtomicOrdering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "full-chain surface terminated",
+            ));
+        }
+        Ok(&self.buffer[self.offset..])
+    }
+
+    fn consume(&mut self, amount: usize) {
+        self.offset = self.buffer.len().min(self.offset.saturating_add(amount));
+    }
+}
+
+fn serve_full_chain_stdio<Serve, StopPump, FinishService>(
+    stdin_owner: &mut ProcessLifetimeStdinReader,
+    serve: Serve,
+    stop_pump: StopPump,
+    finish_service: FinishService,
+) -> Result<(), LatticedError>
+where
+    Serve: FnOnce(&mut ProcessLifetimeStdinReader) -> Result<(), LatticedError>,
+    StopPump: FnOnce() -> Result<OpenClawPumpExit, LatticedError>,
+    FinishService: FnOnce(Result<(), LatticedError>) -> Result<(), LatticedError>,
+{
+    let serve_result = serve(stdin_owner);
+    let surface_result = finish_full_chain_surfaces(serve_result, stop_pump, finish_service);
+    let input_result = stdin_owner.finish_after_surfaces();
+    match input_result {
+        Ok(()) => surface_result,
+        Err(input) => Err(input),
+    }
+}
+
 /// Serves MCP stdio and continuously pumps the authenticated `OpenClaw` listener.
 ///
 /// Both surfaces hold clones of the same [`FullChainService`], so they serialize
-/// through one coordinator and share `PostgreSQL` receipts. Process lifetime is the
-/// shutdown policy for this bounded entrypoint.
+/// through one coordinator and share `PostgreSQL` receipts. Stdin EOF and fatal
+/// listener failures both use the same typed listener-join, managed-scheduler,
+/// and Hermes teardown path.
 ///
 /// # Errors
 ///
-/// Returns a bounded MCP startup or stdio transport failure. A fatal `OpenClaw`
-/// listener failure terminates the executable with exit code 2 rather than
-/// leaving a falsely healthy MCP-only process.
+/// Returns a bounded MCP startup, stdio transport, listener, or teardown failure.
 pub fn serve_full_chain_runtime<H>(runtime: FullChainRuntime<H>) -> Result<(), LatticedError>
 where
     H: FullChainHermesPort + 'static,
 {
     let (mcp_service, mcp_binding, openclaw_server) = runtime.into_parts();
-    openclaw_server
+    let openclaw_endpoint = openclaw_server
         .local_addr()
         .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
-    thread::Builder::new()
-        .name("lattice-openclaw-full-chain".to_owned())
-        .spawn(move || {
-            run_openclaw_pump(openclaw_server, |failure| {
-                if fatal_openclaw_pump_error(failure.kind) {
-                    eprintln!("{}", LatticedErrorKind::Transport.code());
-                    process::exit(2);
-                }
+    let shutdown = mcp_service.clone();
+    let fatal_shutdown = shutdown.clone();
+    let fatal_surface = Arc::new(AtomicBool::new(false));
+    let pump_fatal_surface = Arc::clone(&fatal_surface);
+    let mut openclaw_owner =
+        match OpenClawPumpOwner::spawn(openclaw_server, openclaw_endpoint, move |failure| {
+            if fatal_openclaw_pump_error(failure.kind) {
+                eprintln!("{}", LatticedErrorKind::Transport.code());
+                // Stop admitting new stdin frames immediately. The main owner
+                // cannot return until this callback completes the exact service
+                // teardown and publishes its typed pump terminal below.
+                pump_fatal_surface.store(true, AtomicOrdering::Release);
+                let terminal = fatal_shutdown
+                    .finish_hermes_session(Err(LatticedError::new(LatticedErrorKind::Transport)))
+                    .expect_err("fatal listener shutdown preserves a terminal failure")
+                    .kind();
+                OpenClawPumpControl::Stop(terminal)
+            } else {
                 OpenClawPumpControl::Continue
-            });
-        })
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
-    let input = io::stdin();
-    let output = io::stdout();
-    mcp::serve_legacy_delivery_observer(mcp_service, mcp_binding, input.lock(), output.lock())
-        .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+            }
+        }) {
+            Ok(owner) => owner,
+            Err(failure) => return shutdown.finish_hermes_session(Err(failure)),
+        };
+    let mut stdin_owner = match ProcessLifetimeStdinReader::spawn(io::stdin(), fatal_surface) {
+        Ok(owner) => owner,
+        Err(failure) => {
+            return finish_full_chain_surfaces(
+                Err(failure),
+                || openclaw_owner.shutdown(),
+                |result| shutdown.finish_hermes_session(result),
+            );
+        }
+    };
+    serve_full_chain_stdio(
+        &mut stdin_owner,
+        |input| {
+            let output = io::stdout();
+            mcp::serve_legacy_delivery_observer(mcp_service, mcp_binding, input, output.lock())
+                .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+        },
+        || openclaw_owner.shutdown(),
+        |result| shutdown.finish_hermes_session(result),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -7061,21 +9473,143 @@ where
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenClawPumpControl {
     Continue,
-    Stop,
+    Stop(LatticedErrorKind),
 }
 
-fn run_openclaw_pump<P, F>(mut pump: P, mut on_failure: F)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenClawPumpExit {
+    Cancelled,
+    Fatal(LatticedErrorKind),
+}
+
+struct OpenClawPumpOwner {
+    cancellation: Arc<AtomicBool>,
+    wake_endpoint: SocketAddr,
+    completion: mpsc::Receiver<OpenClawPumpExit>,
+    handle: Option<thread::JoinHandle<OpenClawPumpExit>>,
+    armed: bool,
+}
+
+impl OpenClawPumpOwner {
+    fn spawn<P, F>(pump: P, wake_endpoint: SocketAddr, on_failure: F) -> Result<Self, LatticedError>
+    where
+        P: FullChainOpenClawPump,
+        F: FnMut(OpenClawPumpFailure) -> OpenClawPumpControl + Send + 'static,
+    {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let thread_cancellation = Arc::clone(&cancellation);
+        let (completion_sender, completion) = mpsc::sync_channel(1);
+        let handle = thread::Builder::new()
+            .name("lattice-openclaw-full-chain".to_owned())
+            .spawn(move || {
+                let exit = run_openclaw_pump(pump, &thread_cancellation, on_failure);
+                let _ = completion_sender.send(exit);
+                exit
+            })
+            .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))?;
+        Ok(Self {
+            cancellation,
+            wake_endpoint,
+            completion,
+            handle: Some(handle),
+            armed: true,
+        })
+    }
+
+    fn shutdown(&mut self) -> Result<OpenClawPumpExit, LatticedError> {
+        if !self.armed {
+            return Err(LatticedError::new(
+                LatticedErrorKind::ManagedTeardownRejected,
+            ));
+        }
+        self.cancellation.store(true, AtomicOrdering::Release);
+        // `serve_once` blocks in its nonblocking-listener polling loop. A local
+        // connection that is immediately closed gives it a bounded wakeup; the
+        // cancellation check consumes that transport result before any callback.
+        let _ = TcpStream::connect_timeout(&self.wake_endpoint, OPENCLAW_PUMP_WAKE_TIMEOUT);
+        let observed = match self
+            .completion
+            .recv_timeout(OPENCLAW_PUMP_SHUTDOWN_DEADLINE)
+        {
+            Ok(exit) => exit,
+            Err(mpsc::RecvTimeoutError::Timeout) => process::abort(),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let joined = self
+                    .handle
+                    .take()
+                    .expect("armed OpenClaw pump owns its join handle")
+                    .join();
+                self.armed = false;
+                return joined
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::ManagedTeardownRejected));
+            }
+        };
+        let joined = self
+            .handle
+            .take()
+            .expect("armed OpenClaw pump owns its join handle")
+            .join()
+            .map_err(|_| LatticedError::new(LatticedErrorKind::ManagedTeardownRejected))?;
+        self.armed = false;
+        if joined != observed {
+            return Err(LatticedError::new(
+                LatticedErrorKind::ManagedTeardownRejected,
+            ));
+        }
+        Ok(joined)
+    }
+}
+
+impl Drop for OpenClawPumpOwner {
+    fn drop(&mut self) {
+        if self.armed && self.shutdown().is_err() {
+            // A Rust thread cannot be detached safely while it still owns the
+            // listener/service clone. Fail-stop is the bounded last resort.
+            process::abort();
+        }
+    }
+}
+
+fn run_openclaw_pump<P, F>(
+    mut pump: P,
+    cancellation: &AtomicBool,
+    mut on_failure: F,
+) -> OpenClawPumpExit
 where
     P: FullChainOpenClawPump,
     F: FnMut(OpenClawPumpFailure) -> OpenClawPumpControl,
 {
     loop {
-        if let Err(failure) = pump.pump_once()
-            && on_failure(failure) == OpenClawPumpControl::Stop
-        {
-            return;
+        if cancellation.load(AtomicOrdering::Acquire) {
+            return OpenClawPumpExit::Cancelled;
+        }
+        if let Err(failure) = pump.pump_once() {
+            if cancellation.load(AtomicOrdering::Acquire) {
+                return OpenClawPumpExit::Cancelled;
+            }
+            match on_failure(failure) {
+                OpenClawPumpControl::Continue => {}
+                OpenClawPumpControl::Stop(kind) => return OpenClawPumpExit::Fatal(kind),
+            }
         }
     }
+}
+
+fn finish_full_chain_surfaces<StopPump, FinishService>(
+    serve_result: Result<(), LatticedError>,
+    stop_pump: StopPump,
+    finish_service: FinishService,
+) -> Result<(), LatticedError>
+where
+    StopPump: FnOnce() -> Result<OpenClawPumpExit, LatticedError>,
+    FinishService: FnOnce(Result<(), LatticedError>) -> Result<(), LatticedError>,
+{
+    let joined_result = match stop_pump() {
+        Ok(OpenClawPumpExit::Cancelled) => serve_result,
+        Ok(OpenClawPumpExit::Fatal(kind)) => Err(LatticedError::new(kind)),
+        Err(listener) => Err(listener),
+    };
+    finish_service(joined_result)
 }
 
 const fn fatal_openclaw_pump_error(kind: GatewayTransportErrorKind) -> bool {
@@ -7199,9 +9733,16 @@ where
     H: FullChainHermesPort + 'static,
 {
     validate_controlled_task_timeout(config.timeout, run_mode)?;
-    if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
+    let managed_scripted_acceptance = if config.runtime == DeliveryRuntime::ScriptedAcceptance {
+        let binding =
+            validate_managed_scripted_active_restart_admission(run_mode, &config, database)?;
+        validate_scripted_fixture(&config)?;
+        Some(binding)
+    } else if config.runtime != DeliveryRuntime::OfficialCodexAppServer {
         return Err(LatticedError::new(LatticedErrorKind::OfficialLiveBlocked));
-    }
+    } else {
+        None
+    };
     let is_production_configured =
         production_hermes_sealed::Sealed::is_production_configured(&hermes);
     if require_production_hermes != is_production_configured {
@@ -7210,11 +9751,29 @@ where
         ));
     }
     let store_authority = configured_store_authority()?;
-    let mcp_binding = submission.binding().clone();
-    let delivery = full_chain_delivery_service(config, database, password, run_mode)?;
     let process_start_identity = daemon_process_start_identity()?;
     let task_ingress_peer = configured_task_ingress_peer(&process_start_identity)?;
-    let core = FullChainCore {
+    let mcp_binding = submission.binding().clone();
+    let managed_foreman = managed_foreman_service_from_environment(
+        &config,
+        database,
+        password,
+        &store_authority,
+        &task_ingress_peer,
+        &process_start_identity,
+    )?;
+    let managed_status_timeout = managed_foreman
+        .as_ref()
+        .map(|_| config.timeout.min(MANAGED_STATUS_MAX_DURATION));
+    let managed_tasks = Arc::new(Mutex::new(BTreeSet::new()));
+    let managed_identity_source = ManagedForemanIdentitySource {
+        database: database.clone(),
+        password: password.to_owned(),
+        timeout: config.timeout,
+        store_authority: store_authority.clone(),
+    };
+    let delivery = full_chain_delivery_service(config, database, password, run_mode)?;
+    let mut core = FullChainCore {
         delivery,
         hermes,
         submission,
@@ -7223,16 +9782,41 @@ where
         process_start_identity,
         task_ingress_peer,
         store_authority,
+        managed_scripted_acceptance,
+        managed_foreman,
+        managed_tasks,
+        managed_scheduler: None,
     };
     // Ordinary serving never migrates. It must verify the fixed durable
     // foreman replay before either MCP or OpenClaw can accept a request.
     let mut coordination = foreman_coordination(&core).map_err(foreman_replay_latticed)?;
-    coordination
+    let foreman_status = coordination
         .load_runtime_status()
         .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+    drop(coordination);
+    if core.managed_foreman.is_some() {
+        formal_managed_foreman_identity_from_status(&foreman_status)
+            .map_err(foreman_replay_latticed)?;
+        let scheduler = start_after_complete_stage(
+            || stage_managed_restart_tasks(&core).map_err(foreman_replay_latticed),
+            |initial_tasks| {
+                managed_scheduler(
+                    core.managed_foreman
+                        .as_ref()
+                        .expect("managed foreman checked")
+                        .clone(),
+                    managed_identity_source,
+                    Arc::clone(&core.managed_tasks),
+                    initial_tasks,
+                )
+            },
+        )?;
+        core.managed_scheduler = Some(scheduler);
+    }
     Ok((
         FullChainService {
             inner: Arc::new(Mutex::new(core)),
+            managed_status_timeout,
         },
         mcp_binding,
     ))
@@ -7973,7 +10557,8 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
     match kind {
         LatticedErrorKind::ReconciliationRequired
         | LatticedErrorKind::TaskReconciliationRequired
-        | LatticedErrorKind::HermesTeardownRejected => PortErrorKind::Ambiguous,
+        | LatticedErrorKind::HermesTeardownRejected
+        | LatticedErrorKind::ManagedTeardownRejected => PortErrorKind::Ambiguous,
         LatticedErrorKind::DatabaseConnect
         | LatticedErrorKind::GraphReceiptRead
         | LatticedErrorKind::HermesReceiptRead
@@ -8937,6 +11522,7 @@ fn scripted_launcher_bytes(server_sha256: &str) -> Vec<u8> {
             "if \"%~1\"==\"--version\" if \"%~2\"==\"\" goto version\r\n",
             "if \"%~1\"==\"app-server\" if \"%~2\"==\"generate-json-schema\" if \"%~3\"==\"--out\" if \"%~4\" NEQ \"\" if \"%~5\"==\"\" goto schema\r\n",
             "if \"%~1\"==\"app-server\" if \"%~2\"==\"--listen\" if \"%~3\"==\"stdio://\" if \"%~4\"==\"\" goto server\r\n",
+            "if \"%~1\"==\"app-server\" if \"%~2\"==\"--stdio\" if \"%~3\"==\"\" goto server\r\n",
             "exit /b 11\r\n",
             ":version\r\n",
             "echo codex-cli 0.144.6\r\n",
@@ -8945,6 +11531,7 @@ fn scripted_launcher_bytes(server_sha256: &str) -> Vec<u8> {
             "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0scripted-codex.ps1\" -ExpectedSelfSha256 \"{server_sha256}\" -Mode Schema -SchemaRoot \"%~4\"\r\n",
             "exit /b %ERRORLEVEL%\r\n",
             ":server\r\n",
+            "set LATTICE_DELIVERY_CODEX_MODE=SCRIPTED_ACCEPTANCE\r\n",
             "\"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"%~dp0scripted-codex.ps1\" -ExpectedSelfSha256 \"{server_sha256}\" -Mode Server\r\n",
             "exit /b %ERRORLEVEL%\r\n"
         ),
@@ -9468,6 +12055,347 @@ mod tests {
     }
 
     #[test]
+    fn foreman_catalog_measurement_is_test_only_marker_owned_and_reuses_foundation() {
+        let source = include_str!("composition.rs").replace("\r\n", "\n");
+        let production = source
+            .split("#[cfg(test)]\nmod tests")
+            .next()
+            .expect("production composition");
+        assert!(
+            production
+                .contains("#[cfg(test)]\n    if tests::foreman_catalog_measurement_requested()")
+        );
+        assert!(production.contains("return tests::measure_foreman_catalog_profile("));
+        assert!(!production.contains("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_V1"));
+        assert!(!production.contains("MEASURE_CATALOG_PINS"));
+
+        let tests = source
+            .split("#[cfg(test)]\nmod tests")
+            .nth(1)
+            .expect("test-only composition");
+        assert!(tests.contains("fn disposable_store_v7_foreman_catalog_measurement_profile()"));
+        assert!(tests.contains(
+            "#[ignore = \"requires a coordinator-owned disposable PostgreSQL 17 profile\"]"
+        ));
+        assert!(tests.contains("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_V1"));
+        assert!(tests.contains("bootstrap_postgres_extensions_from_environment()"));
+
+        let script =
+            include_str!("../../../scripts/test-phase4-postgres-foreman.ps1").replace("\r\n", "\n");
+        assert!(script.contains("[switch]$MeasureCatalogPins"));
+        assert!(script.contains("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_V1"));
+        assert!(script.contains("disposable_store_v7_foreman_catalog_measurement_profile"));
+
+        let latticed = include_str!("bin/latticed.rs");
+        assert!(!latticed.contains("catalog-measure"));
+        assert!(!latticed.contains("foundation-only"));
+    }
+
+    #[cfg(windows)]
+    fn measurement_comparable_path(path: &Path) -> String {
+        let value = path.to_string_lossy().replace('/', "\\");
+        let value = if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{rest}")
+        } else {
+            value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
+        };
+        value.trim_end_matches('\\').to_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    fn measurement_comparable_path(path: &Path) -> String {
+        path.to_string_lossy().trim_end_matches('/').to_owned()
+    }
+
+    fn measurement_same_path(left: &Path, right: &Path) -> bool {
+        measurement_comparable_path(left) == measurement_comparable_path(right)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn foreman_catalog_measurement_path_identity_accepts_windows_equivalents_only() {
+        let ordinary = Path::new(r"C:\Users\Lattice\Temp\catalog-measurement");
+        let extended = Path::new(r"\\?\C:\Users\Lattice\Temp\catalog-measurement");
+        let case_and_separator = Path::new(r"c:/users/lattice/temp/catalog-measurement/");
+        assert!(measurement_same_path(ordinary, extended));
+        assert!(measurement_same_path(ordinary, case_and_separator));
+        assert!(!measurement_same_path(
+            ordinary,
+            Path::new(r"C:\Users\Lattice\Temp\catalog-measurement-other")
+        ));
+        assert!(!measurement_same_path(
+            ordinary,
+            Path::new(r"C:\Users\Lattice\Elsewhere\catalog-measurement")
+        ));
+    }
+
+    #[test]
+    fn foreman_catalog_measurement_database_identity_comes_from_delivery_binding() {
+        let source = include_str!("composition.rs").replace("\r\n", "\n");
+        let tests = source
+            .split("#[cfg(test)]\nmod tests")
+            .nth(1)
+            .expect("test-only composition");
+        assert!(tests.contains("let database_name = database.database_name();"));
+        assert!(tests.contains(
+            "marker_object.insert(\"database\".to_owned(), Value::String(database_name.clone()));"
+        ));
+        assert!(tests.contains("FOREMAN_CATALOG_DATABASE={database_name}"));
+
+        let script =
+            include_str!("../../../scripts/test-phase4-postgres-foreman.ps1").replace("\r\n", "\n");
+        assert!(!script.contains("'phase4_catalog_'"));
+        assert!(script.contains("FOREMAN_CATALOG_DATABASE=([a-z0-9_]{3,63})"));
+        assert!(script.contains("$measurementMarker.database -cne $measuredDatabase"));
+    }
+
+    #[test]
+    fn phase4_postgres_script_pins_cargo_and_closes_password_cleanup() {
+        let script =
+            include_str!("../../../scripts/test-phase4-postgres-foreman.ps1").replace("\r\n", "\n");
+        assert!(script.contains("$requiredRustToolchain = '1.97.1-x86_64-pc-windows-msvc'"));
+        assert!(script.contains(
+            "$requiredCargoSha256 = 'ddfbad20b31b918d3439d070945ec59bbfe037a6ec0ab5b584459e69c8b37d1b'"
+        ));
+        assert!(script.contains("which cargo --toolchain $requiredRustToolchain"));
+        assert!(script.contains("& $cargo -Vv"));
+        assert!(script.contains("PHASE4_POSTGRES_CARGO_IDENTITY_REJECTED"));
+
+        let cleanup = script
+            .split("function Remove-InitdbPassword")
+            .nth(1)
+            .expect("password cleanup helper")
+            .split("function ")
+            .next()
+            .expect("password cleanup body");
+        assert!(cleanup.contains("$script:passwordPath"));
+        assert!(cleanup.contains("[IO.File]::Delete($resolvedPasswordPath)"));
+        assert!(cleanup.contains("PHASE4_POSTGRES_PASSWORD_PATH_REJECTED"));
+        assert!(cleanup.contains("PHASE4_POSTGRES_PASSWORD_CLEANUP_FAILED"));
+        let cleanup_self_test = script
+            .split("function Test-InitdbPasswordCleanup")
+            .nth(1)
+            .expect("password cleanup self-test")
+            .split("function ")
+            .next()
+            .expect("password cleanup self-test body");
+        assert!(cleanup_self_test.contains("PHASE4_POSTGRES_PASSWORD_NEGATIVE_SELF_TEST_FAILED"));
+        assert!(cleanup_self_test.contains("-not [IO.File]::Exists($foreignPasswordPath)"));
+        assert!(script.contains("if ($StaticPreflight) {"));
+        let finally = script.rsplit("\nfinally {").next().expect("script finally");
+        assert!(finally.contains("Remove-InitdbPassword"));
+        assert!(!script.contains("Remove-Item -LiteralPath $passwordPath"));
+    }
+
+    #[test]
+    fn phase4_catalog_measurement_receipt_is_distinct_and_shape_is_sql_derived() {
+        let script =
+            include_str!("../../../scripts/test-phase4-postgres-foreman.ps1").replace("\r\n", "\n");
+        assert!(script.contains(
+            "$measurementReceiptSchema = 'lattice.phase4-foreman-catalog-measurement.v1'"
+        ));
+        assert!(script.contains("schema = $receiptSchema"));
+        assert!(script.contains("$expectedMeasurementShape = [ordered]@{"));
+        assert!(script.contains("CREATE TABLE foreman_execution\\."));
+        assert!(script.contains("CREATE FUNCTION foreman_execution\\."));
+        assert!(script.contains("GRANT EXECUTE ON FUNCTION foreman_execution\\."));
+        assert!(script.contains("$expectedMeasurementShape.function"));
+        assert!(script.contains("$expectedMeasurementShape.runtime_execute"));
+        assert!(!script.contains("function = 40"));
+        assert!(!script.contains("runtime_execute = 37"));
+        assert!(!script.contains("$functionCount -ne 38"));
+        assert!(!script.contains("$runtimeExecuteCount -ne 35"));
+    }
+
+    pub(super) fn foreman_catalog_measurement_requested() -> bool {
+        env::var("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_LIVE").as_deref() == Ok("1")
+    }
+
+    fn measurement_error() -> LatticedError {
+        LatticedError::new(LatticedErrorKind::RuntimePostgresVerification)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(super) fn measure_foreman_catalog_profile(
+        migrator: &mut Client,
+        database: &DeliveryDatabaseBinding,
+        configured_admission: &RuntimeAdmissionSnapshot,
+    ) -> Result<(), LatticedError> {
+        let root = env::var("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_ROOT")
+            .map(PathBuf::from)
+            .map_err(|_| measurement_error())?;
+        let root = fs::canonicalize(root).map_err(|_| measurement_error())?;
+        let temp = fs::canonicalize(env::temp_dir()).map_err(|_| measurement_error())?;
+        let run_id = database.run_id();
+        let expected_name = format!("lattice-phase4-catalog-measure-{run_id}");
+        if root.parent() != Some(temp.as_path())
+            || root.file_name().and_then(OsStr::to_str) != Some(expected_name.as_str())
+        {
+            return Err(measurement_error());
+        }
+
+        let marker_path = root.join(".phase4-catalog-measure-owner.json");
+        let mut marker = fs::read_to_string(&marker_path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .ok_or_else(measurement_error)?;
+        let marker_root = marker
+            .get("root")
+            .and_then(Value::as_str)
+            .ok_or_else(measurement_error)?;
+        let port = env::var("LATTICE_TASK019_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(measurement_error)?;
+        let database_name = database.database_name();
+        if marker.get("owner").and_then(Value::as_str)
+            != Some("LATTICE_PHASE4_FOREMAN_CATALOG_MEASUREMENT_V1")
+            || marker.get("run_id").and_then(Value::as_str) != Some(run_id)
+            || !measurement_same_path(Path::new(marker_root), &root)
+            || marker.get("port").and_then(Value::as_u64) != Some(port)
+        {
+            return Err(measurement_error());
+        }
+        let marker_object = marker.as_object_mut().ok_or_else(measurement_error)?;
+        marker_object.insert("database".to_owned(), Value::String(database_name.clone()));
+        fs::write(
+            &marker_path,
+            serde_json::to_vec(&marker).map_err(|_| measurement_error())?,
+        )
+        .map_err(|_| measurement_error())?;
+
+        let manifest = lattice_postgres_foreman::verify_embedded_extension()
+            .map_err(|_| measurement_error())?;
+        let sql = std::str::from_utf8(manifest.bytes()).map_err(|_| measurement_error())?;
+        let admission = RuntimeAdmissionSnapshot::load(migrator)?;
+        admission.stop(migrator)?;
+        let applied = (|| {
+            let mut transaction = migrator
+                .build_transaction()
+                .isolation_level(postgres::IsolationLevel::Serializable)
+                .start()
+                .map_err(|_| measurement_error())?;
+            transaction
+                .batch_execute(
+                    "SET LOCAL search_path = pg_catalog; \
+                     SET LOCAL row_security = on; \
+                     SET LOCAL lock_timeout = '5s'; \
+                     SET LOCAL statement_timeout = '30s'",
+                )
+                .map_err(|_| measurement_error())?;
+            transaction
+                .batch_execute(sql)
+                .map_err(|_| measurement_error())?;
+            transaction.commit().map_err(|_| measurement_error())
+        })();
+        match applied {
+            Ok(()) => configured_admission.restore(migrator)?,
+            Err(error) => {
+                admission.restore(migrator)?;
+                return Err(error);
+            }
+        }
+
+        let shape = migrator
+            .query_one(
+                "SELECT \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class AS c \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='foreman_execution' AND c.relkind='r'), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc AS p \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='foreman_execution'), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class AS c \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+                      JOIN pg_catalog.pg_roles AS r ON r.oid=c.relowner \
+                     WHERE n.nspname='foreman_execution' AND c.relkind='r' \
+                       AND r.rolname='lattice_migrator'), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc AS p \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+                      JOIN pg_catalog.pg_roles AS r ON r.oid=p.proowner \
+                     WHERE n.nspname='foreman_execution' \
+                       AND r.rolname='lattice_migrator' AND p.prosecdef \
+                       AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class AS c \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='foreman_execution' AND c.relkind='r' \
+                       AND pg_catalog.has_table_privilege( \
+                           'lattice_runtime',c.oid, \
+                           'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc AS p \
+                      JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='foreman_execution' \
+                       AND pg_catalog.has_function_privilege( \
+                           'lattice_runtime',p.oid,'EXECUTE')), \
+                    (SELECT EXISTS ( \
+                        SELECT 1 FROM pg_catalog.pg_namespace AS n \
+                        CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                            COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) AS a \
+                        WHERE n.nspname='foreman_execution' AND a.grantee=0 \
+                          AND a.privilege_type='USAGE')), \
+                    pg_catalog.has_schema_privilege( \
+                        'lattice_runtime','foreman_execution','USAGE'), \
+                    pg_catalog.has_schema_privilege( \
+                        'lattice_runtime','foreman_execution','CREATE')",
+                &[],
+            )
+            .map_err(|_| measurement_error())?;
+        let tables = shape.get::<_, i64>(0);
+        let functions = shape.get::<_, i64>(1);
+        let owned_tables = shape.get::<_, i64>(2);
+        let hardened_functions = shape.get::<_, i64>(3);
+        let runtime_tables = shape.get::<_, i64>(4);
+        let runtime_functions = shape.get::<_, i64>(5);
+        let public_usage = shape.get::<_, bool>(6);
+        let runtime_usage = shape.get::<_, bool>(7);
+        let runtime_create = shape.get::<_, bool>(8);
+        if tables != owned_tables
+            || functions != hardened_functions
+            || runtime_tables != 0
+            || public_usage
+            || !runtime_usage
+            || runtime_create
+        {
+            return Err(measurement_error());
+        }
+
+        let result = json!({
+            "schema": "lattice.phase4-foreman-catalog-measurement.v1",
+            "run_id": run_id,
+            "database": database_name,
+            "sql_bytes": manifest.byte_length(),
+            "sql_sha256": manifest.sql_sha256().as_str(),
+            "manifest_sha256": manifest.manifest_sha256().as_str(),
+            "table_count": tables,
+            "function_count": functions,
+            "hardened_function_count": hardened_functions,
+            "runtime_execute_count": runtime_functions,
+        });
+        fs::write(
+            root.join("catalog-measurement.json"),
+            serde_json::to_vec_pretty(&result).map_err(|_| measurement_error())?,
+        )
+        .map_err(|_| measurement_error())?;
+        println!("FOREMAN_CATALOG_TABLE_COUNT={tables}");
+        println!("FOREMAN_CATALOG_DATABASE={database_name}");
+        println!("FOREMAN_CATALOG_FUNCTION_COUNT={functions}");
+        println!("FOREMAN_CATALOG_HARDENED_FUNCTION_COUNT={hardened_functions}");
+        println!("FOREMAN_CATALOG_RUNTIME_EXECUTE_COUNT={runtime_functions}");
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a coordinator-owned disposable PostgreSQL 17 profile"]
+    fn disposable_store_v7_foreman_catalog_measurement_profile() {
+        assert!(
+            foreman_catalog_measurement_requested(),
+            "coordinator measurement admission"
+        );
+        bootstrap_postgres_extensions_from_environment()
+            .expect("verified Store/Memory/Writer-v7 foundation and raw Foreman SQL measurement");
+    }
+
+    #[test]
     fn official_launcher_runs_provision_then_explicit_bootstrap_and_avoids_live_ports() {
         let launcher = include_str!("../../../scripts/start-lattice-runtime-postgres.ps1")
             .replace("\r\n", "\n");
@@ -9945,9 +12873,12 @@ mod tests {
     fn postgres_bootstrap_cross_product_is_closed_before_effects() {
         use MemoryBootstrapProfile::{Empty, V2 as MemoryV2, V3 as MemoryV3};
         use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6, V7};
-        use PostgresBootstrapAction::{V4Apply, V5Apply, V6Rebind, V7Apply, V7VerifyOnly};
+        use PostgresBootstrapAction::{
+            V4Apply, V5Apply, V6Rebind, V7Apply, V7VerifyOnly, WriterV5Apply,
+        };
         use V3BootstrapProfile::{
             V5Bridge, V5FallbackRequired, V6BridgePending, V6Current, V6V4Bridge, V7V4Current,
+            V7V5Current,
         };
 
         let accepted = [
@@ -9958,7 +12889,8 @@ mod tests {
             ((V6, MemoryV3, V6BridgePending), V6Rebind),
             ((V6, MemoryV3, V6Current), V4Apply),
             ((V6, MemoryV3, V6V4Bridge), V7Apply),
-            ((V7, MemoryV3, V7V4Current), V7VerifyOnly),
+            ((V7, MemoryV3, V7V4Current), WriterV5Apply),
+            ((V7, MemoryV3, V7V5Current), V7VerifyOnly),
         ];
         for store in [Fresh, LegacyPrefix, V5, V6, V7] {
             for memory in [Empty, MemoryV2, MemoryV3] {
@@ -9969,6 +12901,7 @@ mod tests {
                     V6Current,
                     V6V4Bridge,
                     V7V4Current,
+                    V7V5Current,
                 ] {
                     let expected = accepted.iter().find_map(
                         |((left_store, left_memory, left_writer), action)| {
@@ -10024,6 +12957,9 @@ mod tests {
         let writer_v4 = bootstrap
             .find("apply_v4_extension")
             .expect("Writer v4 bridge");
+        let writer_v5 = bootstrap
+            .find("apply_v5_extension")
+            .expect("Writer v5 process-handoff bridge");
         let generic_v5_verifier = bootstrap
             .find("verify_store_schema")
             .expect("generic Store v5 fallback verifier");
@@ -10043,7 +12979,7 @@ mod tests {
         assert!(legacy_rejection < writer_absence && writer_absence < first_store);
         assert!(first_store < memory_inspection && memory_inspection < writer_inspection);
         assert!(writer_inspection < writer_v3);
-        assert!(writer_v3 < writer_v4 && writer_v4 < final_store);
+        assert!(writer_v3 < writer_v4 && writer_v4 < final_store && final_store < writer_v5);
         assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < memory_fallback);
         assert!(memory_fallback < writer_v2_fallback);
         assert!(writer_v2_fallback < memory_fallback_verify);
@@ -10053,12 +12989,14 @@ mod tests {
         assert!(bootstrap.contains("V3BootstrapProfile::V6Current"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6V4Bridge"));
         assert!(bootstrap.contains("V3BootstrapProfile::V7V4Current"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V7V5Current"));
         assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V7"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V7Apply"));
+        assert!(bootstrap.contains("PostgresBootstrapAction::WriterV5Apply"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V7VerifyOnly"));
         assert!(bootstrap.contains("final_store.schema_version() != 7"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V4Apply"));
-        assert!(bootstrap.contains("for _ in 0..4"));
+        assert!(bootstrap.contains("for _ in 0..5"));
         assert!(bootstrap.contains("!= WriterExtensionApplyOutcome::Bridged"));
         assert!(bootstrap.contains("persisted_admission != configured_admission"));
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
@@ -10077,7 +13015,7 @@ mod tests {
             .next()
             .expect("production composition");
         assert_eq!(
-            production.matches("PostgresWriterLease::new_v4_v7").count(),
+            production.matches("PostgresWriterLease::new_v5_v7").count(),
             2
         );
 
@@ -10458,6 +13396,351 @@ mod tests {
     }
 
     #[test]
+    fn managed_scripted_restart_selector_is_resume_active_and_exact_only() {
+        let exact = ManagedScriptedRestartSelectorInput {
+            run_mode: FullChainRunMode::ResumeExisting,
+            runtime: DeliveryRuntime::ScriptedAcceptance,
+            enabled: Some("1"),
+            foreman_mode: Some("ACTIVE"),
+        };
+        assert_eq!(select_managed_scripted_active_restart(exact), Ok(true));
+        assert_eq!(
+            select_managed_scripted_active_restart(ManagedScriptedRestartSelectorInput {
+                runtime: DeliveryRuntime::OfficialCodexAppServer,
+                ..exact
+            }),
+            Ok(false)
+        );
+        assert_eq!(
+            select_managed_scripted_active_restart(ManagedScriptedRestartSelectorInput {
+                enabled: None,
+                ..exact
+            }),
+            Ok(false)
+        );
+        for rejected in [
+            ManagedScriptedRestartSelectorInput {
+                run_mode: FullChainRunMode::Fresh,
+                ..exact
+            },
+            ManagedScriptedRestartSelectorInput {
+                enabled: Some("true"),
+                ..exact
+            },
+            ManagedScriptedRestartSelectorInput {
+                foreman_mode: Some("DISABLED"),
+                ..exact
+            },
+            ManagedScriptedRestartSelectorInput {
+                foreman_mode: None,
+                ..exact
+            },
+        ] {
+            assert_eq!(
+                select_managed_scripted_active_restart(rejected),
+                Err(LatticedErrorKind::Configuration)
+            );
+        }
+    }
+
+    #[test]
+    fn managed_scripted_acceptance_binding_rejects_origin_project_and_worktree_substitution_before_effect()
+     {
+        use std::cell::Cell;
+
+        let owner_root = Path::new("/phase4-owner");
+        let project_root = owner_root.join("repository");
+        let worktree_root = owner_root.join("managed-worktrees");
+        let exact = ManagedScriptedAcceptanceBindingInput {
+            owner_root,
+            control_port: 31_337,
+            control_origin: "http://127.0.0.1:31337",
+            marker_project_root: &project_root,
+            configured_project_root: &project_root,
+            configured_worktree_root: &worktree_root,
+        };
+        let binding = select_managed_scripted_acceptance_binding(exact).expect("exact binding");
+        assert_eq!(binding.owner_root, owner_root);
+        assert_eq!(binding.control_origin, "http://127.0.0.1:31337");
+        assert_eq!(binding.project_root, project_root);
+        assert_eq!(binding.managed_worktree_root, worktree_root);
+
+        let foreign_project = Path::new("/foreign/repository");
+        let foreign_worktrees = Path::new("/foreign/managed-worktrees");
+        for substituted in [
+            ManagedScriptedAcceptanceBindingInput {
+                control_origin: "http://127.0.0.1:31338",
+                ..exact
+            },
+            ManagedScriptedAcceptanceBindingInput {
+                configured_project_root: foreign_project,
+                ..exact
+            },
+            ManagedScriptedAcceptanceBindingInput {
+                configured_worktree_root: foreign_worktrees,
+                ..exact
+            },
+        ] {
+            let mutations = Cell::new(0_u8);
+            let result = select_managed_scripted_acceptance_binding(substituted).map(|_| {
+                mutations.set(mutations.get() + 1);
+            });
+            assert_eq!(result, Err(LatticedErrorKind::ScriptedFixtureRejected));
+            assert_eq!(mutations.get(), 0);
+        }
+    }
+
+    #[test]
+    fn managed_scripted_admission_wires_actual_run_mode_and_precedes_task_mutation() {
+        let source = include_str!("composition.rs");
+        let environment = source
+            .split("fn delivery_environment_for_mode")
+            .nth(1)
+            .expect("delivery environment")
+            .split("enum PostgresBootstrapAction")
+            .next()
+            .expect("delivery environment body");
+        assert!(environment.contains(
+            "validate_managed_scripted_active_restart_admission(\n                run_mode,"
+        ));
+
+        let validator = source
+            .split("fn validate_managed_scripted_active_restart_admission")
+            .nth(1)
+            .expect("scripted validator")
+            .split("enum RuntimeIntegrationMode")
+            .next()
+            .expect("scripted validator body");
+        assert!(validator.contains("run_mode,"));
+        assert!(!validator.contains("run_mode: FullChainRunMode::ResumeExisting"));
+
+        let schedule = source
+            .split("fn schedule_managed_general_task")
+            .nth(1)
+            .expect("managed schedule")
+            .split("fn load_managed_scheduled_task_from_durable")
+            .next()
+            .expect("managed schedule body");
+        let binding = schedule
+            .find("managed_scripted_acceptance")
+            .expect("scripted path binding");
+        let enqueue = schedule
+            .find("accept_durable_scheduler_task(")
+            .expect("bounded durable intake enqueue");
+        assert!(binding < enqueue);
+        assert!(!schedule.contains("promote_managed_task("));
+    }
+
+    #[cfg(windows)]
+    fn scripted_effect_bundle_fixture(
+        label: &str,
+    ) -> (PathBuf, PathBuf, PathBuf, ManagedEffectBundleGuard) {
+        static NEXT_SCRIPT_SEAL: AtomicUsize = AtomicUsize::new(0);
+        let root = env::temp_dir().join(format!(
+            "lattice-scripted-effect-seal-{label}-{}-{}",
+            process::id(),
+            NEXT_SCRIPT_SEAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("script seal fixture");
+        let launcher = root.join("scripted-codex.cmd");
+        let server = root.join("scripted-codex.ps1");
+        fs::write(&server, SCRIPTED_SERVER_BYTES).expect("scripted server");
+        let server_sha256 = file_sha256(&server, MAX_SCRIPTED_SERVER_BYTES)
+            .expect("embedded scripted server digest");
+        fs::write(&launcher, scripted_launcher_bytes(&server_sha256))
+            .expect("exact scripted launcher");
+        let config = LatticedDeliveryConfig {
+            launcher: launcher.clone(),
+            version: "scripted".to_owned(),
+            launcher_sha256: file_sha256(&launcher, MAX_SCRIPTED_LAUNCHER_BYTES)
+                .expect("scripted launcher digest"),
+            schema_directory: root.join("schema"),
+            codex_home: root.join("codex-home"),
+            delivery_root: root.join("delivery"),
+            git_executable: root.join("git.exe"),
+            timeout: Duration::from_secs(30),
+            runtime: DeliveryRuntime::ScriptedAcceptance,
+            official_bundle: None,
+        };
+        let guard = managed_foreman_effect_bundle_guard(&config, &launcher)
+            .expect("sealed scripted launcher and server bundle");
+        (root, launcher, server, guard)
+    }
+
+    #[cfg(windows)]
+    fn mark_provider_effect_if_substitution_survived(
+        mutation_succeeded: bool,
+        guard: &ManagedEffectBundleGuard,
+        marker: &Path,
+        provider_effects: &AtomicUsize,
+    ) {
+        if mutation_succeeded && guard.verify().is_ok() {
+            provider_effects.fetch_add(1, Ordering::SeqCst);
+            fs::write(marker, b"provider-effect").expect("record unsafe provider effect");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_scripted_server_is_sealed_from_assembly_through_provider_lifetime() {
+        let (root, _launcher, server, guard) = scripted_effect_bundle_fixture("server");
+        let marker = root.join("substitution-effect.txt");
+        let replacement = fs::write(&server, b"malicious provider effect\n");
+        if replacement.is_ok() {
+            fs::write(&marker, b"effect").expect("record unsafe replacement");
+        }
+        assert!(replacement.is_err(), "held server handle must deny write");
+        assert!(
+            fs::remove_file(&server).is_err(),
+            "held server handle must deny delete"
+        );
+        assert!(
+            !marker.exists(),
+            "substituted PowerShell effect must be absent"
+        );
+        guard.verify().expect("scripted dependency remains exact");
+        drop(guard);
+        fs::remove_dir_all(root).expect("remove script seal fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_scripted_launcher_replace_is_denied_before_provider_effect() {
+        let (root, launcher, _server, guard) = scripted_effect_bundle_fixture("cmd-replace");
+        let marker = root.join("provider-effect.txt");
+        let provider_effects = AtomicUsize::new(0);
+        let replacement = fs::write(&launcher, b"@echo malicious provider effect\r\n");
+        mark_provider_effect_if_substitution_survived(
+            replacement.is_ok(),
+            &guard,
+            &marker,
+            &provider_effects,
+        );
+
+        assert!(
+            replacement.is_err(),
+            "held launcher handle must deny replacement writes"
+        );
+        assert_eq!(provider_effects.load(Ordering::SeqCst), 0);
+        assert!(!marker.exists(), "substituted launcher must have no effect");
+        guard.verify().expect("scripted bundle remains exact");
+        drop(guard);
+        fs::remove_dir_all(root).expect("remove launcher replace fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_scripted_launcher_delete_is_denied_before_provider_effect() {
+        let (root, launcher, _server, guard) = scripted_effect_bundle_fixture("cmd-delete");
+        let marker = root.join("provider-effect.txt");
+        let provider_effects = AtomicUsize::new(0);
+        let deletion = fs::remove_file(&launcher);
+        mark_provider_effect_if_substitution_survived(
+            deletion.is_ok(),
+            &guard,
+            &marker,
+            &provider_effects,
+        );
+
+        assert!(deletion.is_err(), "held launcher handle must deny deletion");
+        assert_eq!(provider_effects.load(Ordering::SeqCst), 0);
+        assert!(!marker.exists(), "deleted launcher must have no effect");
+        guard.verify().expect("scripted bundle remains exact");
+        drop(guard);
+        fs::remove_dir_all(root).expect("remove launcher delete fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_scripted_launcher_rename_is_denied_before_provider_effect() {
+        let (root, launcher, _server, guard) = scripted_effect_bundle_fixture("cmd-rename");
+        let renamed = root.join("renamed-scripted-codex.cmd");
+        let marker = root.join("provider-effect.txt");
+        let provider_effects = AtomicUsize::new(0);
+        let rename = fs::rename(&launcher, &renamed);
+        mark_provider_effect_if_substitution_survived(
+            rename.is_ok(),
+            &guard,
+            &marker,
+            &provider_effects,
+        );
+
+        assert!(rename.is_err(), "held launcher ancestry must deny rename");
+        assert_eq!(provider_effects.load(Ordering::SeqCst), 0);
+        assert!(!marker.exists(), "renamed launcher must have no effect");
+        assert!(!renamed.exists(), "rename target must not be created");
+        guard.verify().expect("scripted bundle remains exact");
+        drop(guard);
+        fs::remove_dir_all(root).expect("remove launcher rename fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn managed_scripted_launcher_aba_is_denied_before_provider_effect() {
+        let (root, launcher, _server, guard) = scripted_effect_bundle_fixture("cmd-aba");
+        let retained = root.join("retained-scripted-codex.cmd");
+        let malicious = root.join("malicious-scripted-codex.cmd");
+        let marker = root.join("provider-effect.txt");
+        fs::write(&malicious, b"@echo malicious provider effect\r\n")
+            .expect("malicious ABA candidate");
+        let provider_effects = AtomicUsize::new(0);
+        let aba = fs::rename(&launcher, &retained)
+            .and_then(|()| fs::rename(&malicious, &launcher))
+            .and_then(|()| fs::rename(&retained, &launcher));
+        mark_provider_effect_if_substitution_survived(
+            aba.is_ok(),
+            &guard,
+            &marker,
+            &provider_effects,
+        );
+
+        assert!(
+            aba.is_err(),
+            "held launcher ancestry must close the ABA lane"
+        );
+        assert_eq!(provider_effects.load(Ordering::SeqCst), 0);
+        assert!(!marker.exists(), "ABA launcher must have no effect");
+        assert!(launcher.exists(), "original launcher path remains bound");
+        assert!(!retained.exists(), "original launcher was never displaced");
+        guard.verify().expect("scripted bundle remains exact");
+        drop(guard);
+        fs::remove_dir_all(root).expect("remove launcher ABA fixture");
+    }
+
+    #[test]
+    fn managed_resume_reloads_official_bundle_and_binds_it_into_service_effects() {
+        let source = include_str!("composition.rs");
+        let helper = source
+            .split("fn managed_foreman_effect_bundle_guard")
+            .nth(1)
+            .expect("managed effect helper")
+            .split("fn gateway_submission_from_environment")
+            .next()
+            .expect("managed effect helper body");
+        assert!(helper.contains("validate_official_codex_identity("));
+        assert!(helper.contains("LATTICE_DELIVERY_LAUNCHER_VERSION"));
+        assert!(helper.contains("LATTICE_DELIVERY_LAUNCHER_SHA256"));
+        assert!(helper.contains("bundle.managed_effect_guard()"));
+        let assembly = source
+            .split("fn managed_foreman_service_from_environment")
+            .nth(1)
+            .expect("managed service assembly")
+            .split("fn managed_foreman_effect_bundle_guard")
+            .next()
+            .expect("managed service assembly body");
+        let capture = assembly
+            .find("managed_foreman_effect_bundle_guard")
+            .expect("effect guard capture");
+        let service = assembly
+            .find("ManagedForemanServiceConfig::new")
+            .expect("service config construction");
+        let bind = assembly
+            .find("with_effect_bundle_guard")
+            .expect("service guard binding");
+        assert!(capture < service && service < bind);
+    }
+
+    #[test]
     #[ignore = "requires the coordinated marker-owned TASK-019 PostgreSQL fixture"]
     fn task050_canonical_latticed_profiles_when_provisioned() {
         if env::var("LATTICE_TASK050_LIVE").ok().as_deref() != Some("1") {
@@ -10619,6 +13902,32 @@ mod tests {
         }
     }
 
+    struct IdleOpenClawPump;
+
+    impl FullChainOpenClawPump for IdleOpenClawPump {
+        fn pump_once(&mut self) -> Result<(), OpenClawPumpFailure> {
+            thread::yield_now();
+            Ok(())
+        }
+    }
+
+    struct NeverEofTestInput {
+        started: Option<mpsc::SyncSender<()>>,
+        release: mpsc::Receiver<()>,
+        completed: mpsc::SyncSender<()>,
+    }
+
+    impl Read for NeverEofTestInput {
+        fn read(&mut self, _output: &mut [u8]) -> io::Result<usize> {
+            if let Some(started) = self.started.take() {
+                started.send(()).expect("announce blocked stdin");
+            }
+            self.release.recv().expect("release blocked stdin");
+            self.completed.send(()).expect("announce stdin exit");
+            Ok(0)
+        }
+    }
+
     #[test]
     fn production_composition_stderr_uses_only_fixed_public_diagnostics() {
         let source = include_str!("composition.rs");
@@ -10636,6 +13945,7 @@ mod tests {
         .concat();
         let direct_stderr = ["io::", "stderr"].concat();
         let inherited_stdio = ["Stdio", "::inherit"].concat();
+        let immediate_exit = ["process", "::exit(2)"].concat();
 
         assert_eq!(source.matches(&stderr_macro).count(), 1);
         assert!(source.contains(&fixed_emission));
@@ -10647,6 +13957,7 @@ mod tests {
         assert!(!source.contains(&stderr_inline_macro));
         assert_eq!(source.matches(&direct_stderr).count(), 2);
         assert!(!source.contains(&inherited_stdio));
+        assert!(!source.contains(&immediate_exit));
     }
 
     #[test]
@@ -10940,6 +14251,1593 @@ mod tests {
                 && guarded_resolution < envelope_lookups[1]
                 && envelope_lookups[1] < project_resolver
         );
+    }
+
+    #[test]
+    fn managed_status_core_lock_wait_is_bounded_by_the_request_deadline() {
+        let core = Mutex::new(());
+        let _held = core.lock().expect("test lock");
+        let started = Instant::now();
+        let error = lock_task_status_core_until(&core, Some(started + Duration::from_millis(50)))
+            .expect_err("a held core lock must fail closed at the managed status deadline");
+
+        assert_eq!(error.code(), MANAGED_STATUS_TIMEOUT);
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn managed_status_is_read_only_and_dispatch_uses_a_fixed_four_worker_pool() {
+        assert_eq!(MANAGED_SUPERVISOR_WORKERS, 4);
+        let source = include_str!("composition.rs");
+        let task_status = source
+            .split("    fn task_status(")
+            .nth(1)
+            .expect("Task Status composition")
+            .split("impl<H: FullChainHermesPort> GatewayService")
+            .next()
+            .expect("Task Status body");
+        let request_start = task_status
+            .find("let request_started = Instant::now()")
+            .expect("status request starts before lock acquisition");
+        let bounded_lock = task_status
+            .find("lock_task_status_core_until")
+            .expect("deadline-bound core lock");
+        let deadline = task_status
+            .find("begin_status_request_at(request_started)")
+            .expect("one managed status deadline");
+        let intake = task_status
+            .find("load_general_submission_by_task_ref_at")
+            .expect("deadline-bound intake lookup");
+        assert!(request_start < bounded_lock && bounded_lock < deadline && deadline < intake);
+        assert!(task_status.contains("general_task_lifecycle_at"));
+        assert!(task_status.contains("Some(operation_deadline) => task_lifecycle_at"));
+        assert!(task_status.contains("verified_task_status_at"));
+        assert!(task_status.contains("status_config.as_ref()"));
+        let status = source
+            .split("fn managed_general_task_public_status")
+            .nth(1)
+            .expect("managed status")
+            .split("fn schedule_managed_general_task")
+            .next()
+            .expect("managed status body");
+        assert!(!status.contains("schedule_managed_general_task("));
+        assert!(!status.contains("run_managed_task("));
+        let project = status
+            .find("load_registered_project_for_general_status")
+            .expect("read-only durable Project Registry lookup for pinned scope replay");
+        let replay = status
+            .find("managed_task_public_status(")
+            .expect("read-only managed status replay");
+        assert!(project < replay);
+        assert!(status.contains("require_managed_project_status_projection"));
+
+        let schedule = source
+            .split("fn schedule_managed_general_task")
+            .nth(1)
+            .expect("managed scheduler entry")
+            .split("fn load_managed_scheduled_task_from_durable")
+            .next()
+            .expect("scheduler entry body");
+        assert!(schedule.contains("managed_scheduler"));
+        let enqueue = schedule
+            .find("accept_durable_scheduler_task(")
+            .expect("bounded supervisor enqueue");
+        assert!(enqueue > 0);
+        assert!(!schedule.contains("promote_managed_task("));
+        assert!(!schedule.contains("thread::Builder::new"));
+        let replay_schedule = source
+            .split("fn replay_general_submission_and_schedule")
+            .nth(1)
+            .expect("execution replay schedule")
+            .split("enum GeneralWinnerReplay")
+            .next()
+            .expect("execution replay schedule body");
+        assert!(replay_schedule.contains("resolve_registered_project_for_general_submission"));
+        let execution_resolver = source
+            .split("fn resolve_registered_project_for_general_submission")
+            .nth(1)
+            .expect("execution Project resolver")
+            .split("fn load_registered_project_for_general_status")
+            .next()
+            .expect("execution Project resolver body");
+        assert!(execution_resolver.contains("resolve_project_authority("));
+        assert!(execution_resolver.contains("ProjectSelector::new"));
+        assert!(execution_resolver.contains("registered_project_matches_general_submission"));
+        assert!(execution_resolver.contains("PROJECT_REGISTRY_CURRENTNESS_CONFLICT"));
+        let status_lookup = source
+            .split("fn load_registered_project_for_general_status")
+            .nth(1)
+            .expect("status-only Project Registry lookup")
+            .split("fn registered_project_matches_general_submission")
+            .next()
+            .expect("status-only Project Registry lookup body");
+        assert!(status_lookup.contains("PostgresProjectRegistry::new"));
+        assert!(status_lookup.contains("let loaded = registry"));
+        assert!(status_lookup.contains(".load()"));
+        assert!(!status_lookup.contains("resolve_project_authority("));
+        assert!(!status_lookup.contains("ProjectSelector::new"));
+        assert!(!status_lookup.contains("RegistryCommand"));
+        assert!(!status_lookup.contains("ObservedEffectKind::Filesystem"));
+        assert!(!status_lookup.contains("ObservedEffectKind::Process"));
+        assert!(!status_lookup.contains("fs::canonicalize"));
+
+        let supervisor = source
+            .split("fn managed_scheduler")
+            .nth(1)
+            .expect("managed fixed supervisor")
+            .split("fn stage_managed_restart_tasks")
+            .next()
+            .expect("managed supervisor body");
+        assert!(supervisor.contains("0..MANAGED_SUPERVISOR_WORKERS"));
+        assert!(supervisor.contains("mpsc::sync_channel::<ManagedScheduledTask>("));
+        assert_eq!(MANAGED_SCHEDULER_QUEUE_CAPACITY, 64);
+        let reload = supervisor
+            .find("reload_managed_foreman_identity(&identity_source)")
+            .expect("latest durable foreman identity reload before claim");
+        let claim = supervisor
+            .find("run_managed_task(")
+            .expect("managed claim and dispatch");
+        let durable_status = supervisor
+            .find("managed_task_public_status(")
+            .expect("fresh PostgreSQL disposition after a run failure");
+        let release = supervisor
+            .find("release_managed_schedule(&scheduled, &task_ref)")
+            .expect("scheduled key release after supervised recovery");
+        let after_release = &supervisor[release..];
+        let shutdown_disposition = after_release
+            .find("match exit")
+            .expect("shutdown disposition before any post-run refill");
+        let post_run_rescan = after_release
+            .find("claim_managed_durable_rescan(")
+            .expect("post-run durable rescan");
+        assert!(reload < claim);
+        assert!(claim < durable_status && durable_status < release);
+        assert!(shutdown_disposition < post_run_rescan);
+        assert!(!schedule.contains("foreman_identity"));
+        assert!(supervisor.contains("FOREMAN_GLOBAL_CAPACITY_EXHAUSTED"));
+        assert!(supervisor.contains("FOREMAN_TASK_CAPACITY_EXHAUSTED"));
+        assert!(supervisor.contains("managed_status_is_durably_closed"));
+        assert!(supervisor.contains("managed_status_is_durably_deferred"));
+        assert!(supervisor.contains("ManagedSchedulerOwner"));
+        assert!(supervisor.contains("workers.push("));
+        assert!(supervisor.contains("cancellation.is_requested()"));
+        assert!(supervisor.contains("claim_managed_durable_rescan("));
+        assert!(supervisor.contains("next_durable_rescan"));
+        assert!(supervisor.contains("refill_managed_scheduler_from_durable("));
+        assert!(!supervisor.contains("_ => break"));
+
+        let owner = source
+            .split("impl ManagedSchedulerOwner")
+            .nth(1)
+            .expect("scheduler owner")
+            .split("struct ManagedForemanIdentitySource")
+            .next()
+            .expect("scheduler owner body");
+        assert!(owner.contains("if !self.armed"));
+        assert!(owner.contains("MANAGED_SCHEDULER_SHUTDOWN_DEADLINE"));
+        assert!(owner.contains("impl Drop for ManagedSchedulerOwner"));
+        assert!(owner.contains("completion.recv_timeout(remaining)"));
+        assert!(owner.contains("process::abort()"));
+        let cancel = owner
+            .find("self.cancellation.request()")
+            .expect("scheduler cancellation");
+        let close = owner.find("self.sender.take()").expect("queue close");
+        let join = owner.find("handle.join()").expect("worker join");
+        assert!(cancel < close && close < join);
+
+        let restart = source
+            .split("fn stage_managed_restart_tasks")
+            .nth(1)
+            .expect("managed restart discovery")
+            .split("fn push_managed_restart_task")
+            .next()
+            .expect("managed restart discovery body");
+        assert!(restart.contains("walk_restart_keyset_pages("));
+        assert!(restart.contains("list_restart_task_refs_page(cursor, page_limit)"));
+        assert!(restart.contains("MANAGED_RESTART_TASK_LIMIT"));
+        assert!(restart.contains("push_managed_restart_task("));
+        assert!(restart.contains("Ok(retained_tasks)"));
+        assert!(!restart.contains("managed_scheduler("));
+        assert!(!restart.contains("thread::Builder::new"));
+        assert!(!restart.contains("FOREMAN_RESTART_SCAN_LIMIT_REACHED"));
+        assert!(!restart.contains("list_active_task_refs(256)"));
+
+        let assembly = source
+            .split("fn assemble_full_chain_service_with_mode")
+            .nth(1)
+            .expect("full-chain assembly")
+            .split("fn validate_controlled_task_timeout")
+            .next()
+            .expect("full-chain assembly body");
+        let stage = assembly
+            .find("stage_managed_restart_tasks(&core)")
+            .expect("complete durable stage");
+        let start = assembly
+            .find("managed_scheduler(")
+            .expect("scheduler starts after stage");
+        assert!(assembly.contains("start_after_complete_stage("));
+        assert!(stage < start);
+
+        let refill = source
+            .split("fn refill_managed_scheduler_from_durable")
+            .nth(1)
+            .expect("durable rescan")
+            .split("fn managed_scheduler")
+            .next()
+            .expect("durable rescan body");
+        assert!(refill.contains("RestartTaskKind::DraftPendingPromotion"));
+        assert!(!refill.contains("promote_managed_task("));
+        assert!(refill.contains("isolate_managed_restart_dependency"));
+        assert!(refill.contains("managed_restart_status_should_skip"));
+        let status_gate = source
+            .split("fn managed_restart_status_should_skip")
+            .nth(1)
+            .expect("durable restart status gate")
+            .split("fn managed_status_requires_exact_provider_reconciliation")
+            .next()
+            .expect("durable restart status gate boundary");
+        assert!(status_gate.contains("managed_status_is_durably_closed"));
+        assert!(status_gate.contains("managed_status_is_durably_deferred"));
+        assert!(!refill.contains("LATTICE_MANAGED_SCHEDULER_CAPACITY_EXHAUSTED"));
+    }
+
+    #[test]
+    fn outer_managed_status_accepts_only_exact_durable_project_drift_projection() {
+        let authority = ProjectAuthorityReceipt::new(
+            CONTRACT_VERSION,
+            PROJECT_AUTHORITY_PRODUCER_ID,
+            PROJECT_AUTHORITY_PRODUCER_VERSION,
+            RuntimeKind::Live,
+            ProjectId::new("status-project").expect("project"),
+            ProjectSnapshotId::new("status-project:snapshot:1").expect("snapshot"),
+            1,
+            ProjectLifecycle::Active,
+            ProjectClass::UserProject,
+            GitRefIdentity::new("refs/heads/main", test_content_digest('1')).expect("primary ref"),
+            test_content_digest('a'),
+            test_content_digest('b'),
+        )
+        .expect("project authority");
+        let submission = general_task_submission(
+            "outer-status-project-drift",
+            "status only",
+            "Status Project",
+            &authority,
+        )
+        .expect("general submission");
+        let drift = json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_ref": submission.task_ref().as_str(),
+            "project_id": submission.identity().project_id().as_str(),
+            "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+            "blocker": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+            "failure_code": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+            "next_action": "Refresh the registered project authority, then retry this task.",
+        });
+        assert_eq!(
+            require_managed_project_status_projection(false, &submission, drift.clone())
+                .expect("persisted drift projection"),
+            drift
+        );
+
+        for stronger in [
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED",
+                "failure_code": "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED",
+                "next_action": "The bounded repair budget is exhausted; inspect retained evidence.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "LATTICE_MANAGED_PROCESS_EXIT_WITHOUT_TERMINAL",
+                "failure_code": "LATTICE_MANAGED_PROCESS_EXIT_WITHOUT_TERMINAL",
+                "next_action": "Reconcile the retained exact provider effect.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "AWAITING_MERGE_APPROVAL",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": Value::Null,
+                "failure_code": Value::Null,
+                "verification_status": "PASSED",
+                "next_action": "Approve the verified result for merge.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "VERIFYING",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "EXECUTION_AUTHORITY_NOT_CURRENT",
+                "failure_code": "EXECUTION_AUTHORITY_NOT_CURRENT",
+                "verification_status": "RUNNING",
+                "next_action": "Wait for independent verification to finish.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "LATTICE_MANAGED_VERIFICATION_FAILED",
+                "failure_code": "LATTICE_MANAGED_VERIFICATION_FAILED",
+                "verification_status": "FAILED",
+                "next_action": "Inspect the retained verification evidence.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "status": "RUNNING",
+                "task_state": "REVIEWING",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": Value::Null,
+                "failure_code": Value::Null,
+                "verification_status": "PASSED",
+                "next_action": "Wait for independent semantic review to finish.",
+            }),
+        ] {
+            assert_eq!(
+                require_managed_project_status_projection(false, &submission, stronger.clone())
+                    .expect("stronger durable managed evidence wins over Project drift"),
+                stronger
+            );
+        }
+
+        let cleared = json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_ref": submission.task_ref().as_str(),
+            "project_id": submission.identity().project_id().as_str(),
+            "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+            "blocker": Value::Null,
+            "failure_code": Value::Null,
+            "next_action": "Wait for the foreman to reconcile the retained exact worker turn.",
+        });
+        assert!(
+            require_managed_project_status_projection(true, &submission, cleared.clone()).is_ok()
+        );
+        assert_eq!(
+            require_managed_project_status_projection(false, &submission, cleared)
+                .expect_err("drift without its durable blocker must fail closed")
+                .code(),
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+        );
+
+        for arbitrary in [
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "ARBITRARY_BLOCKER",
+                "failure_code": "ARBITRARY_BLOCKER",
+                "next_action": "Trust an unknown projection.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "AWAITING_MERGE_APPROVAL",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "ARBITRARY_BLOCKER",
+                "failure_code": "ARBITRARY_BLOCKER",
+                "next_action": "Trust an unknown projection.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "status": "RUNNING",
+                "task_state": "REVIEWING",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "ARBITRARY_BLOCKER",
+                "failure_code": "ARBITRARY_BLOCKER",
+                "verification_status": "PASSED",
+                "next_action": "Trust an unknown review projection.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED",
+                "failure_code": "LATTICE_MANAGED_VERIFICATION_FAILED",
+                "next_action": "Trust mismatched durable evidence.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "status": "SUBMITTED",
+                "task_state": "REVIEWING",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": Value::Null,
+                "failure_code": Value::Null,
+                "verification_status": "PASSED",
+                "next_action": "Trust an invalid review phase.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "status": "RUNNING",
+                "task_state": "REVIEWING",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": Value::Null,
+                "failure_code": Value::Null,
+                "verification_status": "NOT_STARTED",
+                "next_action": "Trust review before verification.",
+            }),
+        ] {
+            assert_eq!(
+                require_managed_project_status_projection(false, &submission, arbitrary)
+                    .expect_err("unknown blocker must not bypass Project drift")
+                    .code(),
+                "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+            );
+        }
+
+        for tampered in [
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_ref": test_content_digest('f').as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+                "failure_code": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+                "next_action": "Refresh the registered project authority, then retry this task.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": "foreign-project",
+                "project_snapshot_id": submission.identity().project_snapshot_id().as_str(),
+                "blocker": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+                "failure_code": "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+                "next_action": "Refresh the registered project authority, then retry this task.",
+            }),
+            json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_ref": submission.task_ref().as_str(),
+                "project_id": submission.identity().project_id().as_str(),
+                "project_snapshot_id": "status-project:foreign-snapshot",
+                "blocker": "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED",
+                "failure_code": "LATTICE_MANAGED_RETRY_BUDGET_EXHAUSTED",
+                "next_action": "The bounded repair budget is exhausted.",
+            }),
+        ] {
+            assert_eq!(
+                require_managed_project_status_projection(false, &submission, tampered)
+                    .expect_err("cross-task and cross-project status must fail closed")
+                    .code(),
+                "LATTICE_MANAGED_STATUS_SUBSTITUTION_REJECTED"
+            );
+        }
+    }
+
+    #[test]
+    fn project_drift_restart_candidate_records_a_durable_preparation_blocker() {
+        let source = include_str!("composition.rs");
+        let stage = source
+            .split("fn stage_managed_restart_tasks")
+            .nth(1)
+            .expect("restart stage")
+            .split("fn push_managed_restart_task")
+            .next()
+            .expect("restart stage body");
+        let refill = source
+            .split("fn refill_managed_scheduler_from_durable")
+            .nth(1)
+            .expect("restart refill")
+            .split("fn managed_scheduler")
+            .next()
+            .expect("restart refill body");
+        for (body, dispatch) in [
+            (stage, "push_managed_restart_task("),
+            (refill, "accept_durable_scheduler_task("),
+        ] {
+            assert!(body.contains("managed_restart_kind_requires_project_reconciliation"));
+            assert!(body.contains("record_managed_restart_project_blocker"));
+            let persist = body
+                .find("PROJECT_REGISTRY_CURRENTNESS_CONFLICT")
+                .expect("scan/resolve race persists a typed project blocker");
+            let isolate = body
+                .find("isolate_managed_restart_dependency")
+                .expect("other known gates remain isolated");
+            assert!(persist < isolate);
+            let race_lane = &body[persist..];
+            let recorded = race_lane
+                .find("record_managed_restart_project_blocker")
+                .expect("race blocker is retained");
+            let skipped = race_lane[recorded..]
+                .find("return Ok(())")
+                .expect("race candidate stops before provider dispatch");
+            let dispatch = race_lane
+                .find(dispatch)
+                .expect("normal current candidate may reach dispatch");
+            assert!(skipped > 0 && recorded + skipped < dispatch);
+        }
+        for kind in [
+            RestartTaskKind::DraftProjectReconciliationRequired,
+            RestartTaskKind::ProjectReconciliationRequired,
+        ] {
+            assert!(managed_restart_kind_requires_project_reconciliation(kind));
+        }
+    }
+
+    #[test]
+    fn writer_drift_restart_is_durably_deferred_without_restarting_a_provider() {
+        let status = serde_json::json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_state": "EXECUTING",
+            "blocker": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+            "failure_code": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+        });
+        assert!(managed_status_is_durably_deferred(&status));
+        assert!(managed_dependency_not_ready(
+            "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED"
+        ));
+
+        let source = include_str!("composition.rs");
+        let stage = source
+            .split("fn stage_managed_restart_tasks")
+            .nth(1)
+            .expect("restart stage")
+            .split("fn push_managed_restart_task")
+            .next()
+            .expect("restart stage body");
+        let refill = source
+            .split("fn refill_managed_scheduler_from_durable")
+            .nth(1)
+            .expect("restart refill")
+            .split("fn managed_scheduler")
+            .next()
+            .expect("restart refill body");
+        for body in [stage, refill] {
+            assert!(body.contains("RestartTaskKind::WriterReconciliationRequired"));
+            assert!(body.contains("record_managed_restart_writer_blocker"));
+        }
+    }
+
+    #[test]
+    fn durable_restart_evidence_bypasses_writer_defer_but_not_a_closed_result() {
+        for kind in [
+            RestartTaskKind::AttemptClosedPendingRelease,
+            RestartTaskKind::VerificationReconcileRequired,
+            RestartTaskKind::TerminalPendingVerification,
+        ] {
+            assert!(managed_restart_kind_has_durable_evidence(kind));
+        }
+        for kind in [
+            RestartTaskKind::DraftPendingPromotion,
+            RestartTaskKind::DraftProjectReconciliationRequired,
+            RestartTaskKind::ProjectReconciliationRequired,
+            RestartTaskKind::PromotedNoAttempt,
+            RestartTaskKind::CapacityWait,
+            RestartTaskKind::AttemptReconcileRequired,
+            RestartTaskKind::WriterReconciliationRequired,
+        ] {
+            assert!(!managed_restart_kind_has_durable_evidence(kind));
+        }
+        let writer_deferred = serde_json::json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_state": "PREPARING",
+            "blocker": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+            "failure_code": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+        });
+        assert!(managed_restart_status_should_skip(false, &writer_deferred));
+        assert!(
+            !managed_restart_status_should_skip(true, &writer_deferred),
+            "a closure/verification/terminal discovered ahead of Writer health must enter recovery"
+        );
+
+        let closed = serde_json::json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_state": "AWAITING_MERGE_APPROVAL",
+            "blocker": null,
+            "failure_code": null,
+        });
+        assert!(
+            managed_restart_status_should_skip(true, &closed),
+            "a promoted result with no Writer cleanup must remain closed"
+        );
+    }
+
+    #[test]
+    fn blocked_retained_provider_effect_remains_restart_reconcilable() {
+        for blocker in [
+            "LATTICE_MANAGED_PROCESS_EXIT_WITHOUT_TERMINAL",
+            "LATTICE_MANAGED_RPC_DISCONNECT_RECONCILIATION_EXHAUSTED",
+            "LATTICE_MANAGED_THREAD_START_RPC_REJECTED",
+            "LATTICE_MANAGED_REVIEW_RECONCILIATION_REQUIRED",
+        ] {
+            let status = serde_json::json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": "BLOCKED",
+                "blocker": blocker,
+                "failure_code": blocker,
+            });
+            assert!(managed_status_requires_exact_provider_reconciliation(
+                &status
+            ));
+            assert!(!managed_status_is_durably_closed(&status));
+        }
+        for task_state in ["BLOCKED", "AWAITING_MERGE_APPROVAL"] {
+            let writer_cleanup = serde_json::json!({
+                "schema_version": "lattice.task.status.v4",
+                "task_state": task_state,
+                "blocker": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+                "failure_code": "LATTICE_MANAGED_WRITER_RECONCILIATION_REQUIRED",
+            });
+            assert!(
+                !managed_status_is_durably_closed(&writer_cleanup),
+                "durable task result does not suppress pending Writer cleanup"
+            );
+        }
+        let closed = serde_json::json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_state": "BLOCKED",
+            "blocker": "LATTICE_MANAGED_VERIFICATION_FAILED",
+        });
+        assert!(!managed_status_requires_exact_provider_reconciliation(
+            &closed
+        ));
+        assert!(managed_status_is_durably_closed(&closed));
+    }
+
+    #[test]
+    fn managed_status_catalog_accepts_both_closed_model_probe_timeouts() {
+        for code in [
+            "LATTICE_MANAGED_MODEL_PROBE_TIMEOUT_RECONCILIATION_REQUIRED",
+            "LATTICE_MANAGED_REVIEW_MODEL_PROBE_TIMEOUT_NO_PROVIDER_EFFECT",
+        ] {
+            assert!(
+                managed_status_has_known_closed_blocker(code),
+                "missing durable closed blocker {code}"
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_shutdown_timeout_retains_the_join_handle_until_cleanup_completes() {
+        let (task_sender, _task_receiver) = mpsc::sync_channel(1);
+        let cancellation = ManagedWorkerCancellation::default();
+        let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let handle = thread::spawn(move || {
+            let _completion = ManagedSchedulerCompletion(Some(completion_sender));
+            release_receiver.recv().expect("release blocked worker");
+            Ok(())
+        });
+        let mut owner = ManagedSchedulerOwner {
+            sender: Some(task_sender),
+            cancellation: cancellation.clone(),
+            workers: vec![ManagedSchedulerWorker {
+                completion: completion_receiver,
+                handle: Some(handle),
+            }],
+            rescan_requested: Arc::new(AtomicBool::new(false)),
+            armed: true,
+        };
+
+        let started = Instant::now();
+        assert_eq!(
+            owner
+                .shutdown_with_deadline(Duration::from_millis(20))
+                .expect_err("blocked worker must exceed total deadline")
+                .kind(),
+            LatticedErrorKind::ManagedTeardownRejected
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(cancellation.is_requested());
+        assert!(owner.armed);
+        assert_eq!(owner.workers.len(), 1);
+
+        release_sender.send(()).expect("release blocked worker");
+        owner
+            .shutdown_with_deadline(Duration::from_secs(1))
+            .expect("second teardown joins the retained handle");
+        assert!(!owner.armed);
+        assert!(owner.workers.is_empty());
+    }
+
+    #[test]
+    fn scheduler_shutdown_gives_terminal_persistence_its_own_bounded_join_window() {
+        let (task_sender, _task_receiver) = mpsc::sync_channel(1);
+        let cancellation = ManagedWorkerCancellation::default();
+        let mut bridge = cancellation.register_managed_bridge();
+        let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
+        let (started_sender, started_receiver) = mpsc::sync_channel(0);
+        let handle = thread::spawn(move || {
+            let _completion = ManagedSchedulerCompletion(Some(completion_sender));
+            started_sender.send(()).expect("announce worker start");
+            thread::sleep(Duration::from_millis(60));
+            bridge.record_reaped();
+            thread::sleep(Duration::from_millis(60));
+            Ok(())
+        });
+        let mut owner = ManagedSchedulerOwner {
+            sender: Some(task_sender),
+            cancellation,
+            workers: vec![ManagedSchedulerWorker {
+                completion: completion_receiver,
+                handle: Some(handle),
+            }],
+            rescan_requested: Arc::new(AtomicBool::new(false)),
+            armed: true,
+        };
+        started_receiver.recv().expect("observe worker start");
+
+        owner
+            .shutdown_with_deadline(Duration::from_millis(80))
+            .expect("exact bridge drain and durable terminal join have separate deadlines");
+        assert!(!owner.armed);
+        assert!(owner.workers.is_empty());
+    }
+
+    #[test]
+    fn scheduler_drop_fail_stops_when_a_worker_terminal_is_rejected() {
+        const CHILD_ENV: &str = "LATTICE_TEST_SCHEDULER_DROP_WORKER_FAILURE";
+        if env::var_os(CHILD_ENV).is_some() {
+            let (task_sender, _task_receiver) = mpsc::sync_channel(1);
+            let (completion_sender, completion_receiver) = mpsc::sync_channel(1);
+            let handle = thread::spawn(move || {
+                let _completion = ManagedSchedulerCompletion(Some(completion_sender));
+                Err("TEST_WORKER_TERMINAL_REJECTED")
+            });
+            let owner = ManagedSchedulerOwner {
+                sender: Some(task_sender),
+                cancellation: ManagedWorkerCancellation::default(),
+                workers: vec![ManagedSchedulerWorker {
+                    completion: completion_receiver,
+                    handle: Some(handle),
+                }],
+                rescan_requested: Arc::new(AtomicBool::new(false)),
+                armed: true,
+            };
+            drop(owner);
+            panic!("worker failure was detached instead of fail-stopping");
+        }
+
+        let status = process::Command::new(env::current_exe().expect("current test executable"))
+            .args([
+                "--exact",
+                "composition::tests::scheduler_drop_fail_stops_when_a_worker_terminal_is_rejected",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .status()
+            .expect("run isolated scheduler Drop child");
+        assert!(
+            !status.success(),
+            "Drop swallowed a rejected worker terminal"
+        );
+    }
+
+    #[test]
+    fn restart_backlog_over_limit_fails_before_any_dispatch() {
+        let mut retained = Vec::new();
+        let mut dispatch_count = 0;
+        let result = (|| -> Result<(), ToolExecutionError> {
+            for task in 0..3 {
+                push_managed_restart_task(&mut retained, task, 2)?;
+            }
+            for _task in retained {
+                dispatch_count += 1;
+            }
+            Ok(())
+        })();
+
+        assert_eq!(
+            result.expect_err("bounded restart backlog").code(),
+            "FOREMAN_RESTART_BACKLOG_LIMIT_EXCEEDED"
+        );
+        assert_eq!(dispatch_count, 0);
+    }
+
+    #[test]
+    fn scheduler_start_is_barriered_on_the_complete_restart_stage() {
+        let effects = Arc::new(AtomicUsize::new(0));
+        let (early_sender, early_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let thread_effects = Arc::clone(&effects);
+        let owner = thread::spawn(move || {
+            start_after_complete_stage(
+                || -> Result<Vec<&'static str>, &'static str> {
+                    let staged = vec!["valid-early"];
+                    early_sender.send(()).expect("announce early valid row");
+                    release_receiver.recv().expect("release late corrupt row");
+                    let _ = staged;
+                    Err("FOREMAN_REPLAY_CORRUPT")
+                },
+                |tasks| {
+                    thread_effects.fetch_add(tasks.len(), Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+
+        early_receiver.recv().expect("early row staged");
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+        release_sender.send(()).expect("release full scan");
+        assert_eq!(
+            owner
+                .join()
+                .expect("barrier test thread")
+                .expect_err("late corrupt row rejects assembly"),
+            "FOREMAN_REPLAY_CORRUPT"
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 0);
+
+        let mut starts = 0;
+        let accepted = start_after_complete_stage(
+            || Ok::<_, &'static str>(vec!["first", "second"]),
+            |tasks| {
+                starts += 1;
+                Ok(tasks.len())
+            },
+        )
+        .expect("complete valid stage starts once");
+        assert_eq!(accepted, 2);
+        assert_eq!(starts, 1);
+    }
+
+    #[test]
+    fn bounded_scheduler_queue_accepts_then_refills_the_same_durable_task_once() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender.try_send("queue-occupant").expect("fill queue");
+        let scheduled = Mutex::new(BTreeSet::new());
+        let rescan_requested = AtomicBool::new(false);
+        assert_eq!(
+            accept_durable_scheduler_task(
+                &sender,
+                &scheduled,
+                &rescan_requested,
+                "task-ref-retry",
+                "task-ref-retry",
+            )
+            .expect("durable submit remains accepted while capacity is deferred"),
+            ManagedDurableEnqueueOutcome::DeferredCapacity
+        );
+        assert!(rescan_requested.load(AtomicOrdering::Acquire));
+        assert!(
+            !scheduled
+                .lock()
+                .expect("scheduled set")
+                .contains("task-ref-retry")
+        );
+        assert_eq!(receiver.try_recv().expect("drain queue"), "queue-occupant");
+
+        assert!(rescan_requested.swap(false, AtomicOrdering::AcqRel));
+        assert_eq!(
+            try_enqueue_durable(
+                &sender,
+                &scheduled,
+                &rescan_requested,
+                "task-ref-retry",
+                "task-ref-retry",
+            )
+            .expect("durable refill"),
+            ManagedDurableEnqueueOutcome::Enqueued
+        );
+        assert_eq!(
+            try_enqueue_durable(
+                &sender,
+                &scheduled,
+                &rescan_requested,
+                "task-ref-retry",
+                "duplicate",
+            )
+            .expect("duplicate suppression"),
+            ManagedDurableEnqueueOutcome::AlreadyScheduled
+        );
+        assert_eq!(
+            receiver.try_recv().expect("refilled durable task"),
+            "task-ref-retry"
+        );
+        assert!(receiver.try_recv().is_err());
+
+        let source = include_str!("composition.rs");
+        let schedule = source
+            .split("fn schedule_managed_general_task")
+            .nth(1)
+            .expect("managed enqueue")
+            .split("fn load_managed_scheduled_task_from_durable")
+            .next()
+            .expect("managed enqueue body");
+        assert!(schedule.contains("ManagedDurableEnqueueOutcome::DeferredCapacity"));
+        assert!(schedule.contains("request_rescan"));
+        let deferred = schedule
+            .split("ManagedDurableEnqueueOutcome::DeferredCapacity =>")
+            .nth(1)
+            .expect("durable accepted deferral")
+            .split("}\n")
+            .next()
+            .expect("deferred branch");
+        assert!(deferred.contains("request_rescan"));
+        assert!(!deferred.contains("return Err"));
+    }
+
+    #[test]
+    fn durable_intake_queue_full_is_accepted_without_synchronous_promotion() {
+        let source = include_str!("composition.rs");
+        let schedule = source
+            .split("fn schedule_managed_general_task")
+            .nth(1)
+            .expect("managed schedule")
+            .split("fn load_managed_scheduled_task_from_durable")
+            .next()
+            .expect("managed schedule body");
+        assert!(schedule.contains("accept_durable_scheduler_task("));
+        let accepted = schedule
+            .find("accept_durable_scheduler_task(")
+            .expect("accepted/deferred admission");
+        assert!(accepted > 0);
+        assert!(!schedule.contains("promote_managed_task("));
+        assert!(!schedule.contains("LATTICE_MANAGED_SCHEDULER_CAPACITY_EXHAUSTED"));
+    }
+
+    fn managed_foreman_runtime_status(
+        latest_generation: u64,
+        active_count: usize,
+        blocked_count: usize,
+        completed_count: usize,
+        next_action: &'static str,
+    ) -> ForemanRuntimeStatus {
+        ForemanRuntimeStatus::new(
+            test_content_digest('1'),
+            test_content_digest('2'),
+            latest_generation,
+            active_count,
+            blocked_count,
+            completed_count,
+            next_action,
+            None,
+        )
+    }
+
+    #[test]
+    fn managed_foreman_identity_accepts_only_one_active_continuing_generation() {
+        let identity = formal_managed_foreman_identity_from_status(
+            &managed_foreman_runtime_status(7, 1, 0, 0, "CONTINUE"),
+        )
+        .expect("one replay-verified active foreman may dispatch");
+
+        assert_eq!(identity.generation(), 7);
+        assert_eq!(identity.checkpoint_digest(), &test_content_digest('2'));
+    }
+
+    #[test]
+    fn managed_foreman_identity_rejects_empty_blocked_and_completed_replay() {
+        for status in [
+            managed_foreman_runtime_status(0, 0, 0, 0, "NO_DURABLE_SNAPSHOT"),
+            managed_foreman_runtime_status(7, 0, 1, 0, "RESOLVE_BLOCKERS"),
+            managed_foreman_runtime_status(7, 0, 0, 1, "ALL_COMPLETED"),
+        ] {
+            let failure = formal_managed_foreman_identity_from_status(&status)
+                .expect_err("non-active foreman replay must stop before claim");
+            assert_eq!(failure.code(), MANAGED_FOREMAN_NOT_ACTIVE);
+        }
+    }
+
+    #[test]
+    fn managed_foreman_identity_rejects_multiple_active_or_wrong_next_action() {
+        for status in [
+            managed_foreman_runtime_status(7, 2, 0, 0, "CONTINUE"),
+            managed_foreman_runtime_status(7, 1, 0, 0, "RESOLVE_BLOCKERS"),
+        ] {
+            let failure = formal_managed_foreman_identity_from_status(&status)
+                .expect_err("ambiguous active foreman replay must stop before claim");
+            assert_eq!(failure.code(), MANAGED_FOREMAN_NOT_ACTIVE);
+        }
+    }
+
+    #[test]
+    fn managed_foreman_identity_loaders_gate_replay_before_formal_identity() {
+        let source = include_str!("composition.rs");
+        let initial = source
+            .split("fn formal_managed_foreman_identity<H")
+            .nth(1)
+            .expect("initial managed foreman identity loader")
+            .split("fn formal_managed_foreman_identity_from_status")
+            .next()
+            .expect("initial loader body");
+        let reload = source
+            .split("fn reload_managed_foreman_identity")
+            .nth(1)
+            .expect("restart managed foreman identity loader")
+            .split("fn managed_general_task_public_status")
+            .next()
+            .expect("restart loader body");
+
+        for loader in [initial, reload] {
+            let replay = loader
+                .find("load_runtime_status()")
+                .expect("replay-verified runtime status");
+            let active_gate = loader
+                .find("formal_managed_foreman_identity_from_status(&foreman)")
+                .expect("sole-active preclaim gate");
+            assert!(replay < active_gate);
+            assert!(!loader.contains("FormalForemanIdentity::new("));
+        }
+    }
+
+    #[test]
+    fn restart_keyset_pages_cover_exact_256_257_and_513_without_duplicates_or_starvation() {
+        for total in [256_usize, 257, 513] {
+            let rows = (0..total)
+                .map(|index| ((index / 100).min(5) as u8, index as u16))
+                .collect::<Vec<_>>();
+            let mut page_sizes = Vec::new();
+            let mut scheduled = Vec::new();
+            walk_restart_keyset_pages(
+                256,
+                |cursor, page_limit| {
+                    let start = cursor
+                        .map(|cursor| rows.partition_point(|row| row <= cursor))
+                        .unwrap_or(0);
+                    let end = (start + usize::from(page_limit)).min(rows.len());
+                    let page = rows[start..end].to_vec();
+                    page_sizes.push(page.len());
+                    Ok(page)
+                },
+                |row| *row,
+                |row| {
+                    scheduled.push(row);
+                    Ok(())
+                },
+            )
+            .expect("stable keyset walk");
+
+            assert_eq!(scheduled, rows, "all restart candidates must be scheduled");
+            assert_eq!(scheduled.iter().collect::<BTreeSet<_>>().len(), total);
+            assert!(page_sizes.iter().all(|size| *size <= 256));
+            assert_eq!(
+                page_sizes,
+                match total {
+                    256 => vec![256, 0],
+                    257 => vec![256, 1],
+                    513 => vec![256, 256, 1],
+                    _ => unreachable!(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn restart_keyset_pages_reject_cross_page_duplicate_and_nonprogress() {
+        let mut pages = VecDeque::from([vec![(0_u8, 1_u16), (0, 2)], vec![(0, 2)]]);
+        let failure = walk_restart_keyset_pages(
+            2,
+            |_cursor, _page_limit| Ok(pages.pop_front().unwrap_or_default()),
+            |row| *row,
+            |_row| Ok(()),
+        )
+        .expect_err("duplicate cursor must fail closed");
+        assert_eq!(failure.code(), "FOREMAN_RESTART_SCAN_NOT_STRICT");
+    }
+
+    #[test]
+    fn restart_scan_persists_project_drift_and_isolates_other_known_dependency_gates() {
+        let mut admitted = Vec::new();
+        for candidate in [
+            Err(ToolExecutionError::new(
+                "LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED",
+            )),
+            Ok("ready-task"),
+        ] {
+            if let Some(task) =
+                isolate_managed_restart_dependency(candidate).expect("known gate is isolated")
+            {
+                admitted.push(task);
+            }
+        }
+        assert_eq!(admitted, vec!["ready-task"]);
+        for code in [
+            "LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED",
+            "LATTICE_MANAGED_WORKTREE_NOT_CLEAN",
+        ] {
+            assert_eq!(
+                isolate_managed_restart_dependency::<()>(Err(ToolExecutionError::new(code)))
+                    .expect("known dependency gate"),
+                None
+            );
+        }
+        assert_eq!(
+            isolate_managed_restart_dependency::<()>(Err(ToolExecutionError::new(
+                "PROJECT_REGISTRY_CURRENTNESS_CONFLICT",
+            )))
+            .expect_err("project drift must be persisted before it can be deferred")
+            .code(),
+            "PROJECT_REGISTRY_CURRENTNESS_CONFLICT"
+        );
+        assert_eq!(
+            isolate_managed_restart_dependency::<()>(Err(ToolExecutionError::new(
+                "LATTICE_MANAGED_PROMOTION_REPLAY_REJECTED",
+            )))
+            .expect_err("unknown lineage error must fail closed")
+            .code(),
+            "LATTICE_MANAGED_PROMOTION_REPLAY_REJECTED"
+        );
+    }
+
+    #[test]
+    fn managed_scheduler_retries_one_transient_preclaim_failure_without_a_new_queue_entry() {
+        let scheduled = Mutex::new(BTreeSet::new());
+        assert!(retain_managed_schedule(&scheduled, "task-ref").expect("initial queue entry"));
+        let mut identity_reads = 0_u8;
+        let mut run_calls = 0_u8;
+        let mut status_reads = 0_u8;
+        let mut waits = Vec::new();
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || {
+                identity_reads += 1;
+                Ok::<_, &'static str>(())
+            },
+            |_| {
+                run_calls += 1;
+                if run_calls == 1 {
+                    Err("LATTICE_MANAGED_GIT_OBSERVATION_REJECTED")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                status_reads += 1;
+                Ok(Some(managed_scheduler_test_status("PREPARING", None)))
+            },
+            |delay| {
+                assert!(
+                    !retain_managed_schedule(&scheduled, "task-ref")
+                        .expect("recovery-time duplicate queue check")
+                );
+                waits.push(delay);
+            },
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::RunCompleted);
+        assert_eq!(identity_reads, 2);
+        assert_eq!(run_calls, 2);
+        assert_eq!(status_reads, 1);
+        assert_eq!(waits, vec![Duration::from_secs(1)]);
+        assert_eq!(scheduled.lock().expect("retained task key").len(), 1);
+        release_managed_schedule(&scheduled, "task-ref");
+        assert!(scheduled.lock().expect("released task key").is_empty());
+    }
+
+    #[test]
+    fn current_execution_authority_does_not_defer_an_awaiting_state_after_transient_setup_failure()
+    {
+        let cancellation = ManagedWorkerCancellation::default();
+        let mut run_calls = 0_u8;
+        let mut status_reads = 0_u8;
+        let mut waits = Vec::new();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                run_calls += 1;
+                if run_calls == 1 {
+                    Err("LATTICE_MANAGED_WORKTREE_BRIDGE_REJECTED")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                status_reads += 1;
+                Ok(Some(managed_scheduler_test_status(
+                    "AWAITING_EXECUTION_APPROVAL",
+                    None,
+                )))
+            },
+            |delay| waits.push(delay),
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::RunCompleted);
+        assert_eq!(run_calls, 2);
+        assert_eq!(status_reads, 1);
+        assert_eq!(waits, vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn awaiting_execution_approval_releases_each_worker_without_busy_retry() {
+        let cancellation = ManagedWorkerCancellation::default();
+        let mut total_runs = 0_u8;
+        let mut total_status_reads = 0_u8;
+        for _ in 0..MANAGED_SUPERVISOR_WORKERS {
+            let exit = supervise_managed_task(
+                &cancellation,
+                || Ok::<_, &'static str>(()),
+                |_| {
+                    total_runs += 1;
+                    Err("LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED")
+                },
+                |_| {
+                    total_status_reads += 1;
+                    Ok(Some(managed_scheduler_test_status(
+                        "AWAITING_EXECUTION_APPROVAL",
+                        Some("LATTICE_MANAGED_EXECUTION_APPROVAL_REQUIRED"),
+                    )))
+                },
+                |_| panic!("durable approval gate must release capacity without backoff"),
+            );
+            assert_eq!(exit, ManagedSupervisorExit::DurablyDeferred);
+        }
+        assert_eq!(
+            total_runs,
+            u8::try_from(MANAGED_SUPERVISOR_WORKERS).unwrap()
+        );
+        assert_eq!(
+            total_status_reads,
+            u8::try_from(MANAGED_SUPERVISOR_WORKERS).unwrap()
+        );
+
+        let mut authorized_runs = 0_u8;
+        assert_eq!(
+            supervise_managed_task(
+                &cancellation,
+                || Ok::<_, &'static str>(()),
+                |_| {
+                    authorized_runs += 1;
+                    Ok(())
+                },
+                |_| panic!("authorized task completes without a status retry"),
+                |_| panic!("authorized task must not be starved by approval waiters"),
+            ),
+            ManagedSupervisorExit::RunCompleted
+        );
+        assert_eq!(authorized_runs, 1);
+    }
+
+    #[test]
+    fn durably_deferred_task_is_automatically_redispatched_once_after_dependency_ready() {
+        let cancellation = ManagedWorkerCancellation::default();
+        let scheduled = Mutex::new(BTreeSet::new());
+        assert!(retain_managed_schedule(&scheduled, "task-deferred").unwrap());
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| Err("LATTICE_MANAGED_WORKTREE_NOT_CLEAN"),
+            |_| {
+                Ok(Some(managed_scheduler_test_status(
+                    "DRAFT",
+                    Some("LATTICE_MANAGED_WORKTREE_NOT_CLEAN"),
+                )))
+            },
+            |_| panic!("durably visible dependency gate must not hot-loop"),
+        );
+        assert_eq!(exit, ManagedSupervisorExit::DurablyDeferred);
+        release_managed_schedule(&scheduled, "task-deferred");
+
+        let requested = AtomicBool::new(false);
+        let now = Instant::now();
+        let due = now.checked_add(MANAGED_DURABLE_RESCAN_INTERVAL).unwrap();
+        let next = Mutex::new(due);
+        assert!(!claim_managed_durable_rescan(&requested, &next, now).unwrap());
+        assert!(claim_managed_durable_rescan(&requested, &next, due).unwrap());
+        assert!(!claim_managed_durable_rescan(&requested, &next, due).unwrap());
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        assert_eq!(
+            try_enqueue_durable(
+                &sender,
+                &scheduled,
+                &requested,
+                "task-deferred",
+                "task-deferred",
+            )
+            .unwrap(),
+            ManagedDurableEnqueueOutcome::Enqueued
+        );
+        assert_eq!(receiver.try_recv().unwrap(), "task-deferred");
+        assert!(receiver.try_recv().is_err());
+
+        let mut ready_runs = 0_u8;
+        assert_eq!(
+            supervise_managed_task(
+                &cancellation,
+                || Ok::<_, &'static str>(()),
+                |_| {
+                    ready_runs += 1;
+                    Ok(())
+                },
+                |_| panic!("ready dependency must dispatch without recovery read"),
+                |_| panic!("ready dependency must not back off"),
+            ),
+            ManagedSupervisorExit::RunCompleted
+        );
+        assert_eq!(ready_runs, 1);
+        release_managed_schedule(&scheduled, "task-deferred");
+    }
+
+    #[test]
+    fn managed_scheduler_stops_on_fresh_durable_terminal_without_spinning() {
+        let mut run_calls = 0_u8;
+        let mut status_reads = 0_u8;
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                run_calls += 1;
+                Err("LATTICE_MANAGED_WRITER_RELEASE_REJECTED")
+            },
+            |_| {
+                status_reads += 1;
+                Ok(Some(managed_scheduler_test_status(
+                    "AWAITING_MERGE_APPROVAL",
+                    None,
+                )))
+            },
+            |_| panic!("durable terminal must not back off or spin"),
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::DurablyClosed);
+        assert_eq!(run_calls, 1);
+        assert_eq!(status_reads, 1);
+    }
+
+    #[test]
+    fn managed_scheduler_keeps_reconciling_an_active_state_even_with_a_closed_reason_code() {
+        let mut run_calls = 0_u8;
+        let mut waits = Vec::new();
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                run_calls += 1;
+                if run_calls == 1 {
+                    Err("LATTICE_MANAGED_VERIFICATION_FAILED")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                Ok(Some(managed_scheduler_test_status(
+                    "VERIFYING",
+                    Some("LATTICE_MANAGED_VERIFICATION_FAILED"),
+                )))
+            },
+            |delay| waits.push(delay),
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::RunCompleted);
+        assert_eq!(run_calls, 2);
+        assert_eq!(waits, vec![Duration::from_secs(1)]);
+    }
+
+    #[test]
+    fn managed_scheduler_does_not_release_for_an_unknown_uppercase_blocker() {
+        let scheduled = Mutex::new(BTreeSet::new());
+        assert!(retain_managed_schedule(&scheduled, "task-ref").expect("initial queue entry"));
+        let mut run_calls = 0_u8;
+        let mut status_reads = 0_u8;
+        let mut waits = Vec::new();
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                run_calls += 1;
+                if run_calls == 1 {
+                    Err("LATTICE_MANAGED_DATABASE_CONNECT_REJECTED")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                status_reads += 1;
+                Ok(Some(managed_scheduler_test_status(
+                    "VERIFYING",
+                    Some("UNKNOWN_UPPERCASE_BLOCKER"),
+                )))
+            },
+            |delay| {
+                assert!(
+                    !retain_managed_schedule(&scheduled, "task-ref")
+                        .expect("recovery-time duplicate queue check")
+                );
+                waits.push(delay);
+            },
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::RunCompleted);
+        assert_eq!(run_calls, 2);
+        assert_eq!(status_reads, 1);
+        assert_eq!(waits, vec![Duration::from_secs(1)]);
+        assert_eq!(scheduled.lock().expect("retained task key").len(), 1);
+        release_managed_schedule(&scheduled, "task-ref");
+        assert!(scheduled.lock().expect("released task key").is_empty());
+    }
+
+    #[test]
+    fn managed_scheduler_retains_work_across_status_and_identity_read_failures() {
+        let mut identity_reads = 0_u8;
+        let mut run_calls = 0_u8;
+        let mut status_reads = 0_u8;
+        let mut waits = Vec::new();
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || {
+                identity_reads += 1;
+                if identity_reads == 1 {
+                    Err("FOREMAN_REPLAY_UNAVAILABLE")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                run_calls += 1;
+                if run_calls <= 2 {
+                    Err("LATTICE_MANAGED_DATABASE_CONNECT_REJECTED")
+                } else {
+                    Ok(())
+                }
+            },
+            |_| {
+                status_reads += 1;
+                if status_reads == 1 {
+                    Err("LATTICE_MANAGED_STATUS_REPLAY_UNAVAILABLE")
+                } else {
+                    Ok(Some(managed_scheduler_test_status("PREPARING", None)))
+                }
+            },
+            |delay| waits.push(delay),
+        );
+
+        assert_eq!(exit, ManagedSupervisorExit::RunCompleted);
+        assert_eq!(identity_reads, 4);
+        assert_eq!(run_calls, 3);
+        assert_eq!(status_reads, 2);
+        assert_eq!(
+            waits,
+            vec![
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn managed_scheduler_keeps_one_task_key_and_caps_recovery_backoff() {
+        let scheduled = Mutex::new(BTreeSet::new());
+        assert!(retain_managed_schedule(&scheduled, "task-ref").expect("first queue entry"));
+        assert!(!retain_managed_schedule(&scheduled, "task-ref").expect("duplicate queue entry"));
+        assert_eq!(scheduled.lock().expect("scheduled set").len(), 1);
+
+        let mut backoff = ManagedRecoveryBackoff::default();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(4));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(8));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(16));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn managed_scheduler_surfaces_graceful_shutdown_receipt_and_failure_without_status_retry() {
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                cancellation.request();
+                Err(MANAGED_GRACEFUL_SHUTDOWN_COMPLETE)
+            },
+            |_| panic!("exact shutdown receipt must not enter status recovery"),
+            |_| panic!("exact shutdown receipt must not back off"),
+        );
+        assert_eq!(exit, ManagedSupervisorExit::ShutdownComplete);
+
+        let cancellation = ManagedWorkerCancellation::default();
+        let exit = supervise_managed_task(
+            &cancellation,
+            || Ok::<_, &'static str>(()),
+            |_| {
+                cancellation.request();
+                Err("LATTICE_MANAGED_INTERRUPT_AMBIGUOUS")
+            },
+            |_| panic!("failed graceful teardown must not be hidden by status"),
+            |_| panic!("failed graceful teardown must not back off"),
+        );
+        assert_eq!(
+            exit,
+            ManagedSupervisorExit::ShutdownFailed("LATTICE_MANAGED_INTERRUPT_AMBIGUOUS")
+        );
+    }
+
+    fn managed_scheduler_test_status(state: &str, blocker: Option<&str>) -> Value {
+        json!({
+            "schema_version": "lattice.task.status.v4",
+            "task_state": state,
+            "blocker": blocker,
+        })
+    }
+
+    #[test]
+    fn create_only_general_status_redacts_arbitrary_sensitive_objective_on_submit_and_replay() {
+        let authority = ProjectAuthorityReceipt::new(
+            CONTRACT_VERSION,
+            PROJECT_AUTHORITY_PRODUCER_ID,
+            PROJECT_AUTHORITY_PRODUCER_VERSION,
+            RuntimeKind::Live,
+            ProjectId::new("private-project").expect("project"),
+            ProjectSnapshotId::new("private-project:snapshot:1").expect("snapshot"),
+            1,
+            ProjectLifecycle::Active,
+            ProjectClass::UserProject,
+            GitRefIdentity::new("refs/heads/main", test_content_digest('1')).expect("primary ref"),
+            test_content_digest('a'),
+            test_content_digest('b'),
+        )
+        .expect("project authority");
+        let objectives = [
+            "Internal acquisition codename Quiet Orchard",
+            "Private staffing plan for candidate Juniper",
+        ];
+
+        for (index, objective) in objectives.into_iter().enumerate() {
+            let submission = general_task_submission(
+                &format!("redacted-status-{index}"),
+                objective,
+                "Confidential Planning",
+                &authority,
+            )
+            .expect("general submission");
+            let evidence = TaskIntakeLifecycleEvidence::new(
+                general_task_binding(&submission).expect("binding"),
+                test_content_digest(if index == 0 { 'c' } else { 'd' }),
+            )
+            .expect("intake evidence");
+            let submitted =
+                general_task_public_status(&evidence, &submission).expect("submitted projection");
+            let replayed = general_task_public_status(&evidence, &submission)
+                .expect("fresh replay projection");
+
+            assert_eq!(submitted, replayed);
+            assert_eq!(submitted["schema_version"], "lattice.task.status.v5");
+            assert_eq!(
+                submitted["objective_summary"],
+                TASK_PUBLIC_OBJECTIVE_SUMMARY
+            );
+            assert_eq!(
+                submitted["objective_digest"],
+                task_public_objective_digest(objective)
+                    .expect("objective digest")
+                    .as_str()
+            );
+            assert!(submitted.get("objective").is_none());
+            assert!(!submitted.to_string().contains(objective));
+        }
+
+        let source = include_str!("composition.rs");
+        let producer = source
+            .split("fn general_task_public_status")
+            .nth(1)
+            .expect("create-only status producer")
+            .split("fn formal_managed_foreman_identity")
+            .next()
+            .expect("create-only producer body");
+        assert!(!producer.contains("lattice.task.status.v3"));
+        assert!(!producer.contains("submission.objective(),"));
     }
 
     #[test]
@@ -12937,16 +17835,18 @@ mod tests {
             ]),
         };
         let mut observed = Vec::new();
-        run_openclaw_pump(pump, |failure| {
+        let cancellation = AtomicBool::new(false);
+        let exit = run_openclaw_pump(pump, &cancellation, |failure| {
             observed.push(failure);
             if fatal_openclaw_pump_error(failure.kind) {
-                OpenClawPumpControl::Stop
+                OpenClawPumpControl::Stop(LatticedErrorKind::Transport)
             } else {
                 OpenClawPumpControl::Continue
             }
         });
 
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(exit, OpenClawPumpExit::Fatal(LatticedErrorKind::Transport));
         assert_eq!(
             observed,
             vec![
@@ -12958,6 +17858,182 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn full_chain_eof_joins_listener_before_service_teardown() {
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let stop_order = Arc::clone(&order);
+        let finish_order = Arc::clone(&order);
+        let active_subtree = Arc::new(AtomicUsize::new(1));
+        let finish_active_subtree = Arc::clone(&active_subtree);
+
+        finish_full_chain_surfaces(
+            Ok(()),
+            move || {
+                stop_order.lock().expect("shutdown order").push("listener");
+                Ok(OpenClawPumpExit::Cancelled)
+            },
+            move |result| {
+                assert_eq!(
+                    finish_order.lock().expect("shutdown order").as_slice(),
+                    &["listener"]
+                );
+                finish_order.lock().expect("shutdown order").push("service");
+                finish_active_subtree.store(0, Ordering::SeqCst);
+                result
+            },
+        )
+        .expect("idle EOF teardown");
+
+        assert_eq!(active_subtree.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            order.lock().expect("shutdown order").as_slice(),
+            &["listener", "service"]
+        );
+    }
+
+    #[test]
+    fn fatal_openclaw_exit_uses_the_same_service_teardown_path() {
+        let teardown_calls = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::clone(&teardown_calls);
+        let failure = finish_full_chain_surfaces(
+            Ok(()),
+            || Ok(OpenClawPumpExit::Fatal(LatticedErrorKind::Transport)),
+            move |result| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                result
+            },
+        )
+        .expect_err("fatal listener failure remains terminal after teardown");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::Transport);
+        assert_eq!(teardown_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn openclaw_pump_owner_cancels_and_joins_without_detaching() {
+        let mut owner = OpenClawPumpOwner::spawn(
+            IdleOpenClawPump,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
+            |_| panic!("idle pump has no transport failure"),
+        )
+        .expect("spawn typed pump owner");
+
+        assert_eq!(
+            owner.shutdown().expect("cancel and join pump"),
+            OpenClawPumpExit::Cancelled
+        );
+        assert!(!owner.armed);
+        assert!(owner.handle.is_none());
+    }
+
+    #[test]
+    fn fatal_surface_without_stdin_eof_returns_after_exact_teardown() {
+        let (started_sender, started_receiver) = mpsc::sync_channel(1);
+        let (release_sender, release_receiver) = mpsc::sync_channel(1);
+        let (completed_sender, completed_receiver) = mpsc::sync_channel(1);
+        let (teardown_sender, teardown_receiver) = mpsc::sync_channel(1);
+        let fatal_surface = Arc::new(AtomicBool::new(false));
+        let mut stdin_owner = ProcessLifetimeStdinReader::spawn(
+            NeverEofTestInput {
+                started: Some(started_sender),
+                release: release_receiver,
+                completed: completed_sender,
+            },
+            Arc::clone(&fatal_surface),
+        )
+        .expect("spawn input-only reader");
+        let active_provider = Arc::new(AtomicUsize::new(1));
+        let active_subtree = Arc::new(AtomicUsize::new(1));
+        let trigger_provider = Arc::clone(&active_provider);
+        let trigger_subtree = Arc::clone(&active_subtree);
+        let trigger_fatal = Arc::clone(&fatal_surface);
+        let order = Arc::new(Mutex::new(Vec::new()));
+        let trigger_order = Arc::clone(&order);
+        let stop_order = Arc::clone(&order);
+        let finish_order = Arc::clone(&order);
+        let trigger = thread::spawn(move || {
+            started_receiver.recv().expect("stdin is blocked");
+            // This mirrors the production fatal callback: exact provider and
+            // subtree teardown is completed by the pump before its terminal can
+            // satisfy the main owner's join. Stdin may unblock earlier, but main
+            // cannot return until `teardown_receiver` proves the exact terminal.
+            trigger_fatal.store(true, AtomicOrdering::Release);
+            trigger_provider.store(0, Ordering::SeqCst);
+            trigger_subtree.store(0, Ordering::SeqCst);
+            trigger_order
+                .lock()
+                .expect("fatal order")
+                .push("exact-teardown");
+            teardown_sender.send(()).expect("publish exact teardown");
+        });
+
+        let failure = serve_full_chain_stdio(
+            &mut stdin_owner,
+            |input| {
+                let mut byte = [0_u8; 1];
+                input
+                    .read(&mut byte)
+                    .map(|_| ())
+                    .map_err(|_| LatticedError::new(LatticedErrorKind::Transport))
+            },
+            move || {
+                teardown_receiver
+                    .recv()
+                    .expect("pump terminal follows exact teardown");
+                stop_order
+                    .lock()
+                    .expect("fatal order")
+                    .push("listener-joined");
+                Ok(OpenClawPumpExit::Fatal(LatticedErrorKind::Transport))
+            },
+            move |result| {
+                assert_eq!(active_provider.load(Ordering::SeqCst), 0);
+                assert_eq!(active_subtree.load(Ordering::SeqCst), 0);
+                finish_order
+                    .lock()
+                    .expect("fatal order")
+                    .push("service-finished");
+                result
+            },
+        )
+        .expect_err("fatal surface returns without stdin EOF");
+        trigger.join().expect("fatal trigger");
+
+        assert_eq!(failure.kind(), LatticedErrorKind::Transport);
+        assert!(stdin_owner.detached_after_surfaces);
+        assert_eq!(
+            order.lock().expect("fatal order").as_slice(),
+            &["exact-teardown", "listener-joined", "service-finished"]
+        );
+        release_sender.send(()).expect("release input-only thread");
+        completed_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("input-only thread exits after test release");
+    }
+
+    #[test]
+    fn stdin_eof_joins_input_reader_after_surface_teardown() {
+        let fatal_surface = Arc::new(AtomicBool::new(false));
+        let mut stdin_owner =
+            ProcessLifetimeStdinReader::spawn(io::Cursor::new(Vec::<u8>::new()), fatal_surface)
+                .expect("spawn EOF reader");
+
+        serve_full_chain_stdio(
+            &mut stdin_owner,
+            |input| {
+                let mut byte = [0_u8; 1];
+                assert_eq!(input.read(&mut byte).expect("read EOF"), 0);
+                Ok(())
+            },
+            || Ok(OpenClawPumpExit::Cancelled),
+            |result| result,
+        )
+        .expect("EOF joins all owned surfaces");
+
+        assert!(!stdin_owner.detached_after_surfaces);
+        assert!(stdin_owner.handle.is_none());
     }
 
     #[test]

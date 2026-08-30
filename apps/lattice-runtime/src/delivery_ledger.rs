@@ -177,7 +177,7 @@ fn fixed_runtime_config(
         .unwrap_or(u64::MAX)
         .clamp(1, u64::from(u32::MAX));
     let database_timeouts = format!(
-        "-c statement_timeout={statement_timeout_ms} -c lock_timeout={statement_timeout_ms} -c idle_in_transaction_session_timeout={statement_timeout_ms}"
+        "-c role=lattice_runtime -c statement_timeout={statement_timeout_ms} -c lock_timeout={statement_timeout_ms} -c idle_in_transaction_session_timeout={statement_timeout_ms}"
     );
     let mut config = Config::new();
     config
@@ -203,12 +203,21 @@ pub(crate) fn connect_fixed_runtime_client(
     password: &str,
     deadline: Instant,
 ) -> Result<Client, DeliveryLedgerError> {
-    let mut client = fixed_runtime_config(binding, password, deadline)?
-        .connect(NoTls)
-        .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
-    client
-        .batch_execute("SET ROLE lattice_runtime")
-        .map_err(|_| delivery_error(DeliveryLedgerErrorKind::ConnectFailed))?;
+    let config = fixed_runtime_config(binding, password, deadline)?;
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(deadline_error)?;
+    let client = config
+        .connect_with_startup_timeout(NoTls, remaining)
+        .map_err(|_| {
+            if Instant::now() >= deadline {
+                deadline_error()
+            } else {
+                delivery_error(DeliveryLedgerErrorKind::ConnectFailed)
+            }
+        })?
+        .ok_or_else(deadline_error)?;
     ensure_before_deadline(deadline)?;
     Ok(client)
 }
@@ -3028,6 +3037,7 @@ mod tests {
         assert_eq!(config.get_ssl_mode(), SslMode::Disable);
         let options = config.get_options().expect("fixed timeout options");
         for option in [
+            "role=lattice_runtime",
             "statement_timeout=",
             "lock_timeout=",
             "idle_in_transaction_session_timeout=",
@@ -3039,6 +3049,100 @@ mod tests {
             &str,
             Instant,
         ) -> Result<postgres::Client, DeliveryLedgerError> = connect_fixed_runtime_client;
+    }
+
+    #[test]
+    fn fixed_runtime_deadline_cancels_blackholed_startup_and_closes_socket() {
+        use std::io::{ErrorKind, Read};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("blackhole listener");
+        let port = listener.local_addr().expect("listener address").port();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().expect("accepted connection");
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .expect("bounded server read");
+            let mut saw_startup = false;
+            let mut buffer = [0_u8; 512];
+            let peer_closed = loop {
+                match socket.read(&mut buffer) {
+                    Ok(0) => break true,
+                    Ok(_) => saw_startup = true,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::ConnectionReset
+                                | ErrorKind::ConnectionAborted
+                                | ErrorKind::UnexpectedEof
+                        ) =>
+                    {
+                        break true;
+                    }
+                    Err(error)
+                        if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
+                    {
+                        break false;
+                    }
+                    Err(_) => break false,
+                }
+            };
+            (saw_startup, peer_closed)
+        });
+
+        let binding =
+            DeliveryDatabaseBinding::new("127.0.0.1", port, "0123456789abcdef0123456789abcdef")
+                .expect("fixed database binding");
+        let started = Instant::now();
+        let result = connect_fixed_runtime_client(
+            &binding,
+            "test-password",
+            started + Duration::from_millis(100),
+        );
+        let elapsed = started.elapsed();
+        let peer = server.join().expect("blackhole server joined");
+        let error = match result {
+            Ok(_) => panic!("blackholed startup must fail closed"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), DeliveryLedgerErrorKind::DeadlineExpired);
+        assert!(elapsed < Duration::from_millis(500));
+        assert_eq!(peer, (true, true));
+    }
+
+    #[test]
+    fn fixed_runtime_startup_selects_runtime_role_when_provisioned() {
+        let (Ok(host), Ok(port), Ok(run_id), Ok(password)) = (
+            std::env::var("LATTICE_TASK019_HOST"),
+            std::env::var("LATTICE_TASK019_PORT"),
+            std::env::var("LATTICE_TASK019_RUN_ID"),
+            std::env::var("LATTICE_TASK019_PASSWORD"),
+        ) else {
+            return;
+        };
+        let binding = DeliveryDatabaseBinding::new(
+            &host,
+            port.parse::<u16>().expect("fixed runtime port"),
+            &run_id,
+        )
+        .expect("fixed runtime binding");
+        let deadline = Instant::now()
+            .checked_add(std::time::Duration::from_secs(5))
+            .expect("fixed runtime live deadline");
+        let mut client = connect_fixed_runtime_client(&binding, &password, deadline)
+            .expect("fixed runtime live startup");
+        let row = client
+            .query_one(
+                "SELECT session_user::text,current_user::text,pg_catalog.current_setting('role')::text",
+                &[],
+            )
+            .expect("fixed runtime live identity query");
+        assert_eq!(row.get::<_, String>(0), "lattice_runtime_login");
+        assert_eq!(row.get::<_, String>(1), "lattice_runtime");
+        assert_eq!(row.get::<_, String>(2), "lattice_runtime");
     }
 
     #[test]

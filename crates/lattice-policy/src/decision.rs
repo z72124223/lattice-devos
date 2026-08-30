@@ -1,4 +1,9 @@
-use crate::POLICY_CONTRACT_VERSION;
+use lattice_contracts::{
+    ContentDigest, ProjectAuthorityHead, ProjectAuthorityReceipt, SubjectBinding,
+};
+use lattice_task_domain::TaskState;
+
+use crate::{Boundary, ManagedExecutionBindingFact, POLICY_CONTRACT_VERSION, RuntimeAdmission};
 
 /// Closed policy subject classes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,5 +320,96 @@ impl PolicyDecision {
     #[must_use]
     pub const fn evidence(self) -> PolicyEvidence {
         self.evidence
+    }
+}
+
+/// Opaque owned evidence captured from the exact `ExecutionGate` passed to
+/// [`crate::evaluate`]. Only Policy can construct this value; downstream
+/// verifiers can therefore bind an authority to the decision's actual input
+/// facts rather than trusting caller-selected hashes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionGateDecisionEvidence {
+    decision: PolicyDecision,
+    task_spec_digest: Option<ContentDigest>,
+    project_binding: Option<SubjectBinding>,
+    project_receipt: Option<ProjectAuthorityReceipt>,
+    current_project_head: Option<ProjectAuthorityHead>,
+    managed_execution_binding: Option<ManagedExecutionBindingFact>,
+    state: Boundary<TaskState>,
+    runtime_admission: Boundary<RuntimeAdmission>,
+}
+
+impl ExecutionGateDecisionEvidence {
+    pub(crate) const fn new(
+        decision: PolicyDecision,
+        task_spec_digest: Option<ContentDigest>,
+        project_binding: Option<SubjectBinding>,
+        project_receipt: Option<ProjectAuthorityReceipt>,
+        current_project_head: Option<ProjectAuthorityHead>,
+        managed_execution_binding: Option<ManagedExecutionBindingFact>,
+        state: Boundary<TaskState>,
+        runtime_admission: Boundary<RuntimeAdmission>,
+    ) -> Self {
+        Self {
+            decision,
+            task_spec_digest,
+            project_binding,
+            project_receipt,
+            current_project_head,
+            managed_execution_binding,
+            state,
+            runtime_admission,
+        }
+    }
+
+    #[must_use]
+    pub const fn decision(&self) -> PolicyDecision {
+        self.decision
+    }
+
+    #[must_use]
+    pub const fn task_spec_digest(&self) -> Option<&ContentDigest> {
+        self.task_spec_digest.as_ref()
+    }
+
+    #[must_use]
+    pub const fn project_binding(&self) -> Option<&SubjectBinding> {
+        self.project_binding.as_ref()
+    }
+
+    #[must_use]
+    pub const fn project_receipt(&self) -> Option<&ProjectAuthorityReceipt> {
+        self.project_receipt.as_ref()
+    }
+
+    #[must_use]
+    pub const fn current_project_head(&self) -> Option<&ProjectAuthorityHead> {
+        self.current_project_head.as_ref()
+    }
+
+    /// Returns the exact Task-Ledger execution binding evaluated by the
+    /// managed Policy lane. `None` identifies legacy unbound evidence and must
+    /// fail closed at any execution-authority consumer.
+    #[must_use]
+    pub const fn managed_execution_binding(&self) -> Option<&ManagedExecutionBindingFact> {
+        self.managed_execution_binding.as_ref()
+    }
+
+    /// The Phase-4 closed lane is issued only from this exact Task state.
+    #[must_use]
+    pub const fn is_awaiting_execution_approval(&self) -> bool {
+        matches!(
+            self.state,
+            Boundary::Known(TaskState::AwaitingExecutionApproval)
+        )
+    }
+
+    /// The Phase-4 closed lane is issued only while Runtime is exactly active.
+    #[must_use]
+    pub const fn is_runtime_active(&self) -> bool {
+        matches!(
+            self.runtime_admission,
+            Boundary::Known(RuntimeAdmission::Active)
+        )
     }
 }

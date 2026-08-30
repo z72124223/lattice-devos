@@ -4733,6 +4733,54 @@ REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_runtime;
 REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_guardian;
 REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_readonly;
 
+-- A pre-v7 controlled-canary command key was not globally unique across Task
+-- Ledger streams. Preserve every such durable identity when two or more
+-- historical streams map to the same v7 ingress key. This relation is a
+-- migration-owned deny/lineage index: it never selects a winning task and no
+-- runtime role may read or write its physical rows directly.
+CREATE TABLE control.task_ingress_historical_ambiguities (
+    schema_version varchar(64) NOT NULL,
+    ingress_id varchar(64) NOT NULL,
+    client_request_id varchar(64) NOT NULL,
+    request_kind varchar(32) NOT NULL,
+    ingress_request_digest bytea NOT NULL,
+    stream_id bytea NOT NULL,
+    event_sequence numeric(20,0) NOT NULL,
+    event_digest bytea NOT NULL,
+    command_id varchar(128) NOT NULL,
+    command_request_digest bytea NOT NULL,
+    PRIMARY KEY (ingress_id, client_request_id, stream_id),
+    UNIQUE (stream_id),
+    FOREIGN KEY (stream_id) REFERENCES control.task_ledger_streams (stream_id),
+    FOREIGN KEY (stream_id, event_sequence)
+        REFERENCES control.task_ledger_events (stream_id, sequence),
+    FOREIGN KEY (stream_id, command_id)
+        REFERENCES control.task_ledger_commands (stream_id, command_id),
+    CHECK (schema_version = 'lattice.task-ledger.task-ingress-historical-ambiguity/1.0'),
+    CHECK (ingress_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+        AND client_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+        AND (client_request_id COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+        AND NOT ((client_request_id COLLATE pg_catalog."C") ~* '-----begin '
+            AND (client_request_id COLLATE pg_catalog."C") ~* 'private key-----')
+        AND (pg_catalog.translate(client_request_id, U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+        AND (client_request_id COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'),
+    CHECK (request_kind = 'CONTROLLED_CODEX_CANARY'),
+    CHECK (pg_catalog.octet_length(ingress_request_digest) = 32
+        AND ingress_request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND pg_catalog.octet_length(stream_id) = 32
+        AND stream_id <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND event_sequence = 1
+        AND pg_catalog.octet_length(event_digest) = 32
+        AND event_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND pg_catalog.octet_length(command_request_digest) = 32
+        AND command_request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'))
+);
+
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM PUBLIC;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_runtime;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_guardian;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_readonly;
+
 -- Existing controlled-canary task identities predate the shared ingress
 -- locator. Preserve them without rewriting Ledger history: their complete
 -- canonical stream ID is the semantic request digest for the fixed canary
@@ -4769,29 +4817,83 @@ BEGIN
 END
 $lattice_task_ingress_historical_client_request_guard_v1$;
 
+WITH historical AS (
+    SELECT 'lattice.task-ledger.task-ingress-claim/1.0'::varchar(64) AS schema_version,
+           'lattice_task_submit.v1'::varchar(64) AS ingress_id,
+           pg_catalog.substring(e.command_id::text, 12)::varchar(64) AS client_request_id,
+           'CONTROLLED_CODEX_CANARY'::varchar(32) AS request_kind,
+           e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence,
+           e.event_digest,e.command_id,e.request_digest AS command_request_digest
+      FROM control.task_ledger_events AS e
+      JOIN control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+       AND c.request_digest=e.request_digest
+     WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+       AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
+           AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
+       AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
+), classified AS (
+    SELECT historical.*,
+           count(*) OVER (
+            PARTITION BY historical.ingress_id, historical.client_request_id
+        ) AS historical_identity_count
+      FROM historical
+)
 INSERT INTO control.task_ingress_claims (
     schema_version,ingress_id,client_request_id,request_kind,
     ingress_request_digest,stream_id,event_sequence,event_digest,command_id,
     command_request_digest
 )
-SELECT 'lattice.task-ledger.task-ingress-claim/1.0',
-       'lattice_task_submit.v1',
-       pg_catalog.substring(e.command_id::text, 12),
-       'CONTROLLED_CODEX_CANARY',e.stream_id,e.stream_id,e.sequence,
-       e.event_digest,e.command_id,e.request_digest
-  FROM control.task_ledger_events AS e
-  JOIN control.task_ledger_commands AS c
-    ON c.stream_id=e.stream_id AND c.command_id=e.command_id
-   AND c.request_digest=e.request_digest
- WHERE e.sequence=1
-   AND e.event_kind='TASK_CREATED'
-   AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
-   AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
-   AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
-   AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
-       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
-   AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
-   AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)';
+SELECT classified.schema_version,classified.ingress_id,classified.client_request_id,
+       classified.request_kind,classified.ingress_request_digest,classified.stream_id,
+       classified.event_sequence,classified.event_digest,classified.command_id,
+       classified.command_request_digest
+  FROM classified
+ WHERE classified.historical_identity_count = 1;
+
+WITH historical AS (
+    SELECT 'lattice.task-ledger.task-ingress-historical-ambiguity/1.0'::varchar(64) AS schema_version,
+           'lattice_task_submit.v1'::varchar(64) AS ingress_id,
+           pg_catalog.substring(e.command_id::text, 12)::varchar(64) AS client_request_id,
+           'CONTROLLED_CODEX_CANARY'::varchar(32) AS request_kind,
+           e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence,
+           e.event_digest,e.command_id,e.request_digest AS command_request_digest
+      FROM control.task_ledger_events AS e
+      JOIN control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+       AND c.request_digest=e.request_digest
+     WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+       AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
+           AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
+       AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
+), classified AS (
+    SELECT historical.*,
+           count(*) OVER (
+            PARTITION BY historical.ingress_id, historical.client_request_id
+        ) AS historical_identity_count
+      FROM historical
+)
+INSERT INTO control.task_ingress_historical_ambiguities (
+    schema_version,ingress_id,client_request_id,request_kind,
+    ingress_request_digest,stream_id,event_sequence,event_digest,command_id,
+    command_request_digest
+)
+SELECT classified.schema_version,classified.ingress_id,classified.client_request_id,
+       classified.request_kind,classified.ingress_request_digest,classified.stream_id,
+       classified.event_sequence,classified.event_digest,classified.command_id,
+       classified.command_request_digest
+  FROM classified
+ WHERE classified.historical_identity_count > 1;
 
 CREATE FUNCTION control.task_ingress_prepare_v1(
     p_ingress_id text,
@@ -4857,6 +4959,15 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_ingress_id || ':' || p_client_request_id, 0)
     );
+    IF EXISTS (
+        SELECT 1
+          FROM ONLY control.task_ingress_historical_ambiguities AS a
+         WHERE a.ingress_id=p_ingress_id
+           AND a.client_request_id=p_client_request_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
     SELECT * INTO v_existing
       FROM ONLY control.task_ingress_claims AS c
      WHERE c.ingress_id=p_ingress_id
@@ -4961,6 +5072,15 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_ingress_id || ':' || p_client_request_id, 0)
     );
+    IF EXISTS (
+        SELECT 1
+          FROM ONLY control.task_ingress_historical_ambiguities AS a
+         WHERE a.ingress_id=p_ingress_id
+           AND a.client_request_id=p_client_request_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
     SELECT * INTO v_existing
       FROM ONLY control.task_ingress_claims AS c
      WHERE c.ingress_id=p_ingress_id
@@ -5024,15 +5144,29 @@ RETURNS TABLE (
     event_digest bytea,command_id text,command_request_digest bytea,
     event_kind text,event_action text,event_audit_outcome text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
-PARALLEL SAFE
+PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog
 SET row_security = on
 SET lock_timeout = '5s'
 SET statement_timeout = '30s'
 AS $lattice_task_ingress_read_by_request_v1$
+BEGIN
+    IF session_user='lattice_runtime_login'
+       AND pg_catalog.current_setting('role')='lattice_runtime'
+       AND EXISTS (
+           SELECT 1
+             FROM ONLY control.task_ingress_historical_ambiguities AS a
+            WHERE a.ingress_id=p_ingress_id
+              AND a.client_request_id=p_client_request_id
+       )
+    THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
+    RETURN QUERY
     SELECT c.schema_version::text,c.ingress_id::text,c.client_request_id::text,
            c.request_kind::text,c.ingress_request_digest,c.stream_id,
            c.event_sequence::text,c.event_digest,c.command_id::text,
@@ -5053,7 +5187,8 @@ AS $lattice_task_ingress_read_by_request_v1$
        AND (pg_catalog.translate(p_client_request_id, U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
        AND (p_client_request_id COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
        AND session_user='lattice_runtime_login'
-       AND pg_catalog.current_setting('role')='lattice_runtime'
+       AND pg_catalog.current_setting('role')='lattice_runtime';
+END
 $lattice_task_ingress_read_by_request_v1$;
 
 REVOKE ALL ON FUNCTION control.task_ingress_prepare_v1(text,text,text,bytea,bytea)

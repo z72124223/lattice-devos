@@ -5,16 +5,18 @@ use lattice_contracts::{
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget, PostgresWriterLease,
-    WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_V1_EXTENSION_PATH, apply_extension,
+    V4ExtensionTarget, V5ExtensionTarget, WRITER_LEASE_EXTENSION_ID,
+    WRITER_LEASE_V1_EXTENSION_PATH, apply_extension, apply_v5_extension,
     verify_embedded_v1_extension_manifest, verify_extension,
 };
 use lattice_writer_lease::{
     AcquireClaim, AcquireCommand, CommandOutcome, LeaseDenial, LeaseObservation,
-    MarkSuspectCommand, ReleaseCommand, UntrustedWriterLeaseSnapshot, VerifiedWriterLeaseAggregate,
-    WriterLeaseAcquireRequest, WriterLeaseCheckpoint, WriterLeaseCommand,
-    WriterLeaseCommandReceipt, WriterLeaseHeartbeatRequest, WriterLeaseMarkSuspectRequest,
-    WriterLeaseReleaseRequest, WriterLeaseRepository, WriterLeaseRepositoryCommand,
-    WriterLeaseRepositoryErrorKind, apply_plan, plan_command, verify_snapshot_against_checkpoint,
+    MarkSuspectCommand, RecoveryEvidence, ReleaseCommand, UntrustedWriterLeaseSnapshot,
+    VerifiedWriterLeaseAggregate, WriterLeaseAcquireRequest, WriterLeaseCheckpoint,
+    WriterLeaseCommand, WriterLeaseCommandReceipt, WriterLeaseHeartbeatRequest,
+    WriterLeaseMarkSuspectRequest, WriterLeaseProcessHandoffRequest, WriterLeaseReleaseRequest,
+    WriterLeaseRepository, WriterLeaseRepositoryCommand, WriterLeaseRepositoryErrorKind,
+    apply_plan, plan_command, verify_snapshot_against_checkpoint,
 };
 use postgres::{Client, IsolationLevel, NoTls, Row, Transaction};
 use sha2::{Digest, Sha256};
@@ -2792,4 +2794,159 @@ fn live_postgres_acquire_restarts_and_replays_authority_when_provisioned() {
     assert_profile_restored(&mut migrator, &target);
     assert_task076_fresh_current_profile(&mut migrator);
     println!("TASK076_WRITER_FRESH_NOOP_PASS");
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn live_v5_process_handoff_preserves_active_lineage_when_provisioned() {
+    let Ok(migrator_url) = std::env::var("LATTICE_WRITER_LEASE_V5_MIGRATOR_URL") else {
+        eprintln!("SKIP: LATTICE_WRITER_LEASE_V5_MIGRATOR_URL is not configured");
+        return;
+    };
+    let runtime_url = std::env::var("LATTICE_WRITER_LEASE_V5_RUNTIME_URL")
+        .expect("v5 runtime URL is required when the live test is enabled");
+    let database_name = std::env::var("LATTICE_WRITER_LEASE_V5_DATABASE_NAME")
+        .expect("v5 database name is required when the live test is enabled");
+    let database_identity = digest_env("LATTICE_WRITER_LEASE_V5_DATABASE_IDENTITY_SHA256");
+    let v4_target = V4ExtensionTarget::new(database_name.clone(), database_identity.clone())
+        .expect("v4 predecessor target");
+    let v5_target =
+        V5ExtensionTarget::new(database_name, database_identity).expect("v5 successor target");
+    let store_authority = authority_env();
+    let mut migrator = Client::connect(&migrator_url, NoTls).expect("v5 migrator connection");
+    let run_suffix = format!(
+        "{:x}-{:x}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos()
+    );
+    let project_id = ProjectId::new(format!("writer-v5-{run_suffix}")).expect("unique v5 project");
+    let predecessor_process_id = HolderProcessId::new(75_001).expect("predecessor pid");
+    let predecessor_process_start = digest('e');
+
+    let runtime = Client::connect(&runtime_url, NoTls).expect("v4 runtime connection");
+    let mut v4 = PostgresWriterLease::new_v4_v7(runtime, &v4_target, &store_authority, 600)
+        .expect("v4 predecessor adapter");
+    let acquire = WriterLeaseRepositoryCommand::Acquire(WriterLeaseAcquireRequest {
+        command_id: format!("v5-{run_suffix}-acquire"),
+        expected_head: None,
+        project_id: project_id.clone(),
+        project_snapshot_id: ProjectSnapshotId::new("snapshot-v5").expect("snapshot"),
+        task_id: TaskId::new("task-v5-handoff").expect("task"),
+        task_revision: "1".to_owned(),
+        task_spec_digest: digest('d'),
+        attempt_id: AttemptId::new("attempt-v5-retained").expect("attempt"),
+        lease_id: "lease-v5-retained".to_owned(),
+        lease_holder_id: "foreman-v5".to_owned(),
+        worktree_id: "worktree-v5-retained".to_owned(),
+        holder_process_id: predecessor_process_id,
+        holder_process_start_identity: predecessor_process_start.clone(),
+    });
+    let acquired = v4.execute(acquire).expect("v4 acquire");
+    assert_eq!(acquired.outcome, CommandOutcome::Applied);
+    let predecessor_head = acquired.after.clone().expect("predecessor head");
+    let predecessor_fence = predecessor_head.identity().fencing_token();
+    drop(v4);
+
+    task076_fixture_stop_admission(&mut migrator, &store_authority);
+    assert_eq!(
+        apply_v5_extension(&mut migrator, &v5_target).expect("v4 to v5 upgrade"),
+        ExtensionApplyOutcome::Activated
+    );
+    assert_eq!(
+        apply_v5_extension(&mut migrator, &v5_target).expect("exact v5 setup retry"),
+        ExtensionApplyOutcome::AlreadyCurrent
+    );
+    task076_fixture_restore_admission(&mut migrator, &store_authority);
+
+    let runtime = Client::connect(&runtime_url, NoTls).expect("v5 runtime connection");
+    let mut v5 = PostgresWriterLease::new_v5_v7(runtime, &v5_target, &store_authority, 600)
+        .expect("v5 adapter");
+    assert_eq!(
+        v5.current_authority(&project_id)
+            .expect("replayed predecessor")
+            .expect("retained authority")
+            .independent_head(),
+        &predecessor_head
+    );
+    let handoff_request =
+        WriterLeaseRepositoryCommand::ProcessHandoff(WriterLeaseProcessHandoffRequest {
+            command_id: format!("v5-{run_suffix}-handoff"),
+            project_id: project_id.clone(),
+            expected_head: predecessor_head.clone(),
+            successor_holder_process_id: predecessor_process_id,
+            successor_holder_process_start_identity: digest('f'),
+            evidence: RecoveryEvidence::ProcessDeath {
+                holder_process_id: predecessor_process_id,
+                holder_process_start_identity: predecessor_process_start,
+                holder_daemon_instance_id: store_authority.daemon_instance_id().as_str().to_owned(),
+                evidence_digest: digest('a'),
+            },
+        });
+    let handed_off = v5
+        .execute(handoff_request.clone())
+        .expect("v5 process handoff");
+    assert_eq!(handed_off.outcome, CommandOutcome::Applied);
+    let successor_head = handed_off.after.clone().expect("successor head");
+    assert_eq!(
+        successor_head.identity().attempt_id(),
+        predecessor_head.identity().attempt_id()
+    );
+    assert_eq!(
+        successor_head.identity().lease_id(),
+        predecessor_head.identity().lease_id()
+    );
+    assert_eq!(successor_head.identity().fencing_token(), predecessor_fence);
+    assert_eq!(
+        successor_head.identity().holder_process_id(),
+        predecessor_process_id
+    );
+    assert_eq!(
+        v5.execute(handoff_request.clone())
+            .expect("exact handoff replay"),
+        handed_off
+    );
+    let mut substituted = handoff_request;
+    let WriterLeaseRepositoryCommand::ProcessHandoff(request) = &mut substituted else {
+        unreachable!();
+    };
+    request.successor_holder_process_start_identity = digest('9');
+    let substitution = v5
+        .execute(substituted)
+        .expect_err("same command id cannot substitute successor");
+    assert_eq!(substitution.kind(), WriterLeaseRepositoryErrorKind::Domain);
+    assert_eq!(
+        substitution.domain(),
+        Some(lattice_writer_lease::WriterLeaseError::CommandIdReuse)
+    );
+
+    let release = WriterLeaseRepositoryCommand::Release(WriterLeaseReleaseRequest {
+        command_id: format!("v5-{run_suffix}-release"),
+        project_id: project_id.clone(),
+        expected_head: successor_head.clone(),
+    });
+    assert_eq!(
+        v5.execute(release).expect("release successor").outcome,
+        CommandOutcome::Applied
+    );
+    let historical = v5
+        .inspect_historical_authority(&project_id, predecessor_head.receipt_digest())
+        .expect("released historical lookup")
+        .expect("historical predecessor receipt");
+    assert_eq!(historical.head(), predecessor_head);
+    drop(v5);
+
+    let runtime = Client::connect(&runtime_url, NoTls).expect("fresh v5 runtime connection");
+    let mut restarted = PostgresWriterLease::new_v5_v7(runtime, &v5_target, &store_authority, 600)
+        .expect("fresh v5 adapter");
+    assert_eq!(
+        restarted
+            .inspect_historical_authority(&project_id, successor_head.receipt_digest())
+            .expect("fresh historical lookup")
+            .expect("historical successor")
+            .head(),
+        successor_head
+    );
 }

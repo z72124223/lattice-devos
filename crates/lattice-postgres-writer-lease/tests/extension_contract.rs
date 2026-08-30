@@ -1,16 +1,74 @@
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupError, V3BootstrapProfile, V3ExtensionTarget,
-    V4ExtensionTarget, WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH,
+    V4ExtensionTarget, V5ExtensionTarget, WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH,
     WRITER_LEASE_EXTENSION_SCHEMA_VERSION, WRITER_LEASE_V1_EXTENSION_PATH,
     WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH, WRITER_LEASE_V3_REBIND_PATH,
-    WRITER_LEASE_V4_EXTENSION_PATH, WRITER_LEASE_V4_REBIND_PATH, WriterLeaseV3BridgeState,
-    WriterLeaseV4BridgeState, apply_v3_extension, apply_v4_extension, inspect_v3_bootstrap_profile,
+    WRITER_LEASE_V4_EXTENSION_PATH, WRITER_LEASE_V4_REBIND_PATH, WRITER_LEASE_V5_EXTENSION_PATH,
+    WriterLeaseV3BridgeState, WriterLeaseV4BridgeState, WriterLeaseV5State, apply_v3_extension,
+    apply_v4_extension, apply_v5_extension, inspect_v3_bootstrap_profile,
     rebind_existing_v3_extension, rebind_v3_extension, verify_embedded_extension_manifest,
     verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
     verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
     verify_embedded_v4_extension_manifest, verify_embedded_v4_rebind_manifest,
-    verify_writer_lease_v3_transition, verify_writer_lease_v4_transition,
+    verify_embedded_v5_extension_manifest, verify_writer_lease_v3_transition,
+    verify_writer_lease_v4_transition, verify_writer_lease_v5_transition,
 };
+
+#[test]
+fn v5_process_handoff_profile_is_append_only_and_explicit() {
+    let _: fn(
+        &mut postgres::Client,
+        &V5ExtensionTarget,
+    ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> = apply_v5_extension;
+    let manifest = verify_embedded_v5_extension_manifest().expect("Writer v5 manifest");
+    assert_eq!(manifest.path(), WRITER_LEASE_V5_EXTENSION_PATH);
+    assert_eq!(manifest.schema_version(), 5);
+    let sql = std::str::from_utf8(manifest.bytes()).expect("UTF-8 v5 SQL");
+    for required in [
+        "PROCESS_HANDOFF",
+        "writer_lease_transitions_identity_v5",
+        "writer_lease_bind_runtime_v5",
+        "writer_lease_load_for_update_v5",
+        "extension_schema_version = 5",
+        "global_schema_version = 7",
+        "ledger_ordinal = 8",
+        "LATTICE_WRITER_LEASE_SCHEMA_V5",
+    ] {
+        assert!(sql.contains(required), "missing v5 boundary: {required}");
+    }
+    assert_eq!(sql.matches("CREATE FUNCTION writer_lease.").count(), 2);
+    assert!(!sql.contains("CREATE OR REPLACE"));
+    assert!(!sql.contains("DROP TABLE"));
+    assert_eq!(
+        verify_writer_lease_v5_transition(
+            WriterLeaseV5State::V4Current,
+            7,
+            "1:INSTALLED,2:UPGRADED,3:REBOUND",
+        )
+        .expect("v4 to v5"),
+        WriterLeaseV5State::Current
+    );
+    assert_eq!(
+        verify_writer_lease_v5_transition(
+            WriterLeaseV5State::Current,
+            7,
+            "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED",
+        )
+        .expect("exact v5 retry"),
+        WriterLeaseV5State::Current
+    );
+    for (generation, history) in [
+        (8, "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED"),
+        (7, "1:INSTALLED,2:UPGRADED,3:UPGRADED"),
+        (7, "1:INSTALLED,2:UPGRADED,3:REBOUND,4:REBOUND"),
+    ] {
+        assert!(
+            verify_writer_lease_v5_transition(WriterLeaseV5State::Current, generation, history,)
+                .is_err(),
+            "future or substituted v5 history must fail"
+        );
+    }
+}
 
 #[test]
 fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
@@ -67,7 +125,7 @@ fn v4_profile_names_exact_store_v7_without_future_wildcards() {
     let rebind = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
     for required in [
         "const V7_GLOBAL_MANIFEST_SHA256: &str",
-        "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c",
+        "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078",
         "G7MemoryV3WriterV4Current",
         "V3BootstrapProfile::V7V4Current",
     ] {
@@ -88,7 +146,7 @@ fn v4_profile_names_exact_store_v7_without_future_wildcards() {
             "missing v7 extension constraint {required}"
         );
     }
-    assert!(rebind.contains("7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c"));
+    assert!(rebind.contains("ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078"));
     assert!(rebind.contains("writer_lease_rebind_v4"));
     assert_eq!(extension.matches(")) IS NOT TRUE THEN").count(), 2);
     assert_eq!(rebind.matches(") IS NOT TRUE THEN").count(), 2);

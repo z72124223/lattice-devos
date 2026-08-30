@@ -1,10 +1,14 @@
 //! Pure Approval Verifier 1.0 semantics and a deterministic non-durable fake.
 
+mod execution_authority;
+
+pub use execution_authority::*;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256, canonicalize};
 use lattice_contracts::{
     APPROVAL_VERIFIER_PRODUCER_ID, APPROVAL_VERIFIER_PRODUCER_VERSION, ApprovalAuthority,
     ApprovalAuthorityHead, ApprovalAuthorityReceipt, ApprovalIdentity, ApprovalLane,
@@ -19,6 +23,7 @@ use time::{OffsetDateTime, UtcOffset};
 
 const SCHEMA_VERSION: &str = "1.0";
 const MAX_SIGNED_BIGINT: u64 = i64::MAX as u64;
+const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 
 /// One stable terminal approval denial.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -875,6 +880,18 @@ pub struct VerifyApprovalCommand {
     pub proof: FakeApprovalProof,
 }
 
+/// Append-only owner command binding one verified available normal approval
+/// to an exact task, successor stream, Task Spec, and budget.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BindExecutionApprovalCommand {
+    pub command_id: String,
+    pub approval_id: String,
+    pub expected_head: ApprovalStateHead,
+    pub observed_at: String,
+    pub execution_challenge: ExecutionApprovalChallenge,
+    pub execution_proof: FakeExecutionApprovalProof,
+}
+
 /// Claim one exact available normal approval.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConsumeNormalApprovalCommand {
@@ -903,6 +920,7 @@ pub struct RevokeApprovalCommand {
 pub enum ApprovalCommand {
     Issue(IssueApprovalCommand),
     Verify(VerifyApprovalCommand),
+    BindExecution(BindExecutionApprovalCommand),
     ConsumeNormal(ConsumeNormalApprovalCommand),
     Revoke(RevokeApprovalCommand),
 }
@@ -912,6 +930,7 @@ impl ApprovalCommand {
         match self {
             Self::Issue(command) => &command.command_id,
             Self::Verify(command) => &command.command_id,
+            Self::BindExecution(command) => &command.command_id,
             Self::ConsumeNormal(command) => &command.command_id,
             Self::Revoke(command) => &command.command_id,
         }
@@ -921,6 +940,7 @@ impl ApprovalCommand {
         match self {
             Self::Issue(command) => command.identity.approval_id(),
             Self::Verify(command) => &command.approval_id,
+            Self::BindExecution(command) => &command.approval_id,
             Self::ConsumeNormal(command) => &command.approval_id,
             Self::Revoke(command) => &command.approval_id,
         }
@@ -930,6 +950,7 @@ impl ApprovalCommand {
         match self {
             Self::Issue(command) => command.expected_head.as_ref(),
             Self::Verify(command) => Some(&command.expected_head),
+            Self::BindExecution(command) => Some(&command.expected_head),
             Self::ConsumeNormal(command) => Some(&command.expected_head),
             Self::Revoke(command) => Some(&command.expected_head),
         }
@@ -956,6 +977,7 @@ pub struct ApprovalCommandReceipt {
     pub outcome: ApprovalCommandOutcome,
     pub challenge: Option<ApprovalChallenge>,
     pub authority_receipt: Option<ApprovalAuthorityReceipt>,
+    pub execution_binding_receipt: Option<ExecutionApprovalBindingReceipt>,
     pub revocation: Option<ApprovalRevocation>,
     pub receipt_digest: ContentDigest,
 }
@@ -973,6 +995,48 @@ impl fmt::Debug for UntrustedApprovalSnapshot {
             .debug_struct("UntrustedApprovalSnapshot")
             .field("raw_fields", &"[ELIDED]")
             .finish_non_exhaustive()
+    }
+}
+
+impl UntrustedApprovalSnapshot {
+    /// Encodes the raw snapshot as exact canonical UTF-8 JSON bytes for a
+    /// persistence adapter. This does not make an untrusted snapshot verified.
+    ///
+    /// # Errors
+    ///
+    /// Rejects duplicate normalized keys or snapshots above the closed byte
+    /// limit.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        let bytes = canonicalize(&self.payload)
+            .map_err(|_| ApprovalVerifierError::Canonical)?
+            .into_vec();
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        Ok(bytes)
+    }
+
+    /// Parses exact canonical UTF-8 JSON bytes, strictly replays the Approval
+    /// owner history, and returns its normalized raw snapshot projection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects oversized, malformed, numeric, duplicate-key, non-canonical,
+    /// or trailing input.
+    pub fn from_canonical_bytes(bytes: &[u8]) -> Result<Self, ApprovalVerifierError> {
+        if bytes.len() > MAX_SNAPSHOT_BYTES {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        let json: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+        let payload = canonical_value_from_json(json)?;
+        let canonical =
+            canonicalize(&payload).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+        if canonical.as_slice() != bytes {
+            return Err(ApprovalVerifierError::CorruptSnapshot);
+        }
+        let parsed = Self { payload };
+        verify_snapshot_internal(&parsed, false).map(|verified| verified.export_untrusted())
     }
 }
 
@@ -1051,6 +1115,7 @@ struct ApprovalRecord {
     phase: ApprovalPhase,
     revision: u64,
     authority_receipt: Option<ApprovalAuthorityReceipt>,
+    execution_binding_receipt: Option<ExecutionApprovalBindingReceipt>,
     claim_digest: Option<ContentDigest>,
     revocation: Option<ApprovalRevocation>,
 }
@@ -1094,6 +1159,18 @@ impl VerifiedApprovalAggregate {
         self.approvals
             .get(approval_id)
             .and_then(|record| record.revocation.as_ref())
+    }
+
+    /// Returns the immutable execution-specific binding receipt retained by
+    /// the Approval owner, if the verified approval was bound.
+    #[must_use]
+    pub fn execution_binding_receipt(
+        &self,
+        approval_id: &str,
+    ) -> Option<&ExecutionApprovalBindingReceipt> {
+        self.approvals
+            .get(approval_id)
+            .and_then(|record| record.execution_binding_receipt.as_ref())
     }
 
     /// Returns immutable terminal command history.
@@ -1204,6 +1281,7 @@ pub fn plan_command(
         transition.outcome,
         transition.challenge.as_ref(),
         transition.authority_receipt.as_ref(),
+        transition.execution_binding_receipt.as_ref(),
         transition.revocation.as_ref(),
     )?;
     let receipt = ApprovalCommandReceipt {
@@ -1216,6 +1294,7 @@ pub fn plan_command(
         outcome: transition.outcome,
         challenge: transition.challenge,
         authority_receipt: transition.authority_receipt,
+        execution_binding_receipt: transition.execution_binding_receipt,
         revocation: transition.revocation,
         receipt_digest,
     };
@@ -1253,6 +1332,13 @@ pub fn apply_plan(
 pub fn verify_snapshot(
     snapshot: &UntrustedApprovalSnapshot,
 ) -> Result<VerifiedApprovalAggregate, ApprovalVerifierError> {
+    verify_snapshot_internal(snapshot, true)
+}
+
+fn verify_snapshot_internal(
+    snapshot: &UntrustedApprovalSnapshot,
+    require_owner_projection_order: bool,
+) -> Result<VerifiedApprovalAggregate, ApprovalVerifierError> {
     let decoded = decode_snapshot(&snapshot.payload)?;
     if decoded.command_high_water > MAX_SIGNED_BIGINT {
         return Err(ApprovalVerifierError::CorruptSnapshot);
@@ -1286,7 +1372,11 @@ pub fn verify_snapshot(
             .map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
         if plan.is_exact_retry()
             || plan.receipt.receipt_digest != raw.receipt_digest
-            || terminal_receipt_value(plan.receipt()) != raw.raw
+            || !snapshot_values_match(
+                &terminal_receipt_value(plan.receipt()),
+                &raw.raw,
+                require_owner_projection_order,
+            )?
         {
             return Err(ApprovalVerifierError::CorruptSnapshot);
         }
@@ -1294,11 +1384,28 @@ pub fn verify_snapshot(
             apply_plan(&replayed, plan).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
     }
     if nonce_bindings_digest(&replayed)? != decoded.nonce_bindings_digest
-        || replayed.export_untrusted() != *snapshot
+        || !snapshot_values_match(
+            &replayed.export_untrusted().payload,
+            &snapshot.payload,
+            require_owner_projection_order,
+        )?
     {
         return Err(ApprovalVerifierError::CorruptSnapshot);
     }
     Ok(replayed)
+}
+
+fn snapshot_values_match(
+    expected: &CanonicalValue,
+    actual: &CanonicalValue,
+    require_owner_projection_order: bool,
+) -> Result<bool, ApprovalVerifierError> {
+    if require_owner_projection_order {
+        return Ok(expected == actual);
+    }
+    let expected = canonicalize(expected).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+    let actual = canonicalize(actual).map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+    Ok(expected == actual)
 }
 
 /// Verifies a raw snapshot against an independently retained current
@@ -1372,6 +1479,18 @@ impl FakeApprovalVerifier {
         self.execute(ApprovalCommand::Verify(command))
     }
 
+    /// Binds one exact verified available execution approval append-only.
+    ///
+    /// # Errors
+    ///
+    /// Returns planner or apply errors without partial mutation.
+    pub fn bind_execution(
+        &mut self,
+        command: BindExecutionApprovalCommand,
+    ) -> Result<ApprovalCommandReceipt, ApprovalVerifierError> {
+        self.execute(ApprovalCommand::BindExecution(command))
+    }
+
     /// Claims one available normal approval.
     ///
     /// # Errors
@@ -1412,6 +1531,15 @@ impl FakeApprovalVerifier {
     #[must_use]
     pub fn revocation(&self, approval_id: &str) -> Option<&ApprovalRevocation> {
         self.aggregate.revocation(approval_id)
+    }
+
+    /// Returns one retained execution-specific owner binding receipt.
+    #[must_use]
+    pub fn execution_binding_receipt(
+        &self,
+        approval_id: &str,
+    ) -> Option<&ExecutionApprovalBindingReceipt> {
+        self.aggregate.execution_binding_receipt(approval_id)
     }
 
     /// Returns an independently queried complete authority head only while the
@@ -1458,6 +1586,16 @@ impl FakeApprovalVerifier {
         self.aggregate.export_untrusted()
     }
 
+    /// Exports the complete owner snapshot as exact canonical persistence
+    /// bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns canonicalization or closed size-limit failures.
+    pub fn export_snapshot_bytes(&self) -> Result<Vec<u8>, ApprovalVerifierError> {
+        self.export_snapshot().canonical_bytes()
+    }
+
     /// Returns the independently retained checkpoint for current fake state.
     ///
     /// # Errors
@@ -1487,12 +1625,50 @@ impl FakeApprovalVerifier {
         self.aggregate = verify_snapshot_against_checkpoint(snapshot, expected)?;
         Ok(())
     }
+
+    /// Strictly parses and restores canonical snapshot bytes against one
+    /// independently retained checkpoint.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed/non-canonical bytes, corruption, rollback,
+    /// substitution, or overwrite.
+    pub fn restore_snapshot_bytes(
+        &mut self,
+        bytes: &[u8],
+        expected: &ApprovalVerifierCheckpoint,
+    ) -> Result<(), ApprovalVerifierError> {
+        let snapshot = UntrustedApprovalSnapshot::from_canonical_bytes(bytes)?;
+        self.restore_snapshot(&snapshot, expected)
+    }
+}
+
+fn canonical_value_from_json(
+    value: serde_json::Value,
+) -> Result<CanonicalValue, ApprovalVerifierError> {
+    match value {
+        serde_json::Value::Null => Ok(CanonicalValue::Null),
+        serde_json::Value::Bool(value) => Ok(CanonicalValue::Bool(value)),
+        serde_json::Value::String(value) => Ok(CanonicalValue::String(value)),
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .map(canonical_value_from_json)
+            .collect::<Result<Vec<_>, _>>()
+            .map(CanonicalValue::Array),
+        serde_json::Value::Object(entries) => entries
+            .into_iter()
+            .map(|(key, value)| canonical_value_from_json(value).map(|value| (key, value)))
+            .collect::<Result<Vec<_>, _>>()
+            .map(CanonicalValue::Object),
+        serde_json::Value::Number(_) => Err(ApprovalVerifierError::CorruptSnapshot),
+    }
 }
 
 struct TransitionResult {
     outcome: ApprovalCommandOutcome,
     challenge: Option<ApprovalChallenge>,
     authority_receipt: Option<ApprovalAuthorityReceipt>,
+    execution_binding_receipt: Option<ExecutionApprovalBindingReceipt>,
     revocation: Option<ApprovalRevocation>,
 }
 
@@ -1502,6 +1678,7 @@ impl TransitionResult {
             outcome: ApprovalCommandOutcome::Denied(denial),
             challenge: None,
             authority_receipt: None,
+            execution_binding_receipt: None,
             revocation: None,
         }
     }
@@ -1511,6 +1688,7 @@ impl TransitionResult {
             outcome: ApprovalCommandOutcome::Applied,
             challenge: None,
             authority_receipt: None,
+            execution_binding_receipt: None,
             revocation: None,
         }
     }
@@ -1528,6 +1706,7 @@ fn transition_for(
     match command {
         ApprovalCommand::Issue(command) => issue_transition(next, command),
         ApprovalCommand::Verify(command) => verify_transition(next, command, ordinal),
+        ApprovalCommand::BindExecution(command) => bind_execution_transition(next, command),
         ApprovalCommand::ConsumeNormal(command) => consume_transition(next, command),
         ApprovalCommand::Revoke(command) => revoke_transition(next, command),
     }
@@ -1572,12 +1751,59 @@ fn issue_transition(
             phase: ApprovalPhase::Challenged,
             revision: 1,
             authority_receipt: None,
+            execution_binding_receipt: None,
             claim_digest: None,
             revocation: None,
         },
     );
     Ok(TransitionResult {
         challenge: Some(challenge),
+        ..TransitionResult::applied()
+    })
+}
+
+fn bind_execution_transition(
+    next: &mut VerifiedApprovalAggregate,
+    command: &BindExecutionApprovalCommand,
+) -> Result<TransitionResult, ApprovalVerifierError> {
+    let Some(record) = next.approvals.get_mut(&command.approval_id) else {
+        return Ok(TransitionResult::denied(ApprovalDenial::ApprovalMissing));
+    };
+    if record.phase != ApprovalPhase::VerifiedAvailable
+        || record.execution_binding_receipt.is_some()
+    {
+        return Ok(TransitionResult::denied(ApprovalDenial::InvalidState));
+    }
+    if let Some(denial) = observe_window(
+        &record.challenge.issued_at,
+        &record.challenge.expires_at,
+        &command.observed_at,
+    )? {
+        return Ok(TransitionResult::denied(denial));
+    }
+    let authority_receipt = record
+        .authority_receipt
+        .as_ref()
+        .ok_or(ApprovalVerifierError::Contract)?;
+    let current_head = authority_receipt.head();
+    let Ok(execution_binding_receipt) = issue_execution_approval_binding_receipt(
+        &command.execution_challenge,
+        &command.execution_proof,
+        authority_receipt,
+        &current_head,
+    ) else {
+        return Ok(TransitionResult::denied(ApprovalDenial::ProofMismatch));
+    };
+    let Some(revision) = record.revision.checked_add(1) else {
+        return Ok(TransitionResult::denied(ApprovalDenial::CounterExhausted));
+    };
+    if revision > MAX_SIGNED_BIGINT {
+        return Ok(TransitionResult::denied(ApprovalDenial::CounterExhausted));
+    }
+    record.revision = revision;
+    record.execution_binding_receipt = Some(execution_binding_receipt.clone());
+    Ok(TransitionResult {
+        execution_binding_receipt: Some(execution_binding_receipt),
         ..TransitionResult::applied()
     })
 }
@@ -1813,6 +2039,20 @@ fn validate_command(command: &ApprovalCommand) -> Result<(), ApprovalVerifierErr
                 {
                     return Err(ApprovalVerifierError::InvalidIdentifier);
                 }
+            }
+        }
+        ApprovalCommand::BindExecution(command) => {
+            parse_canonical_utc(&command.observed_at)?;
+            if command
+                .execution_challenge
+                .approval_challenge()
+                .identity()
+                .approval_id()
+                != command.approval_id
+                || is_zero_digest(command.execution_challenge.challenge_digest())
+                || is_zero_digest(command.execution_proof.proof_digest())
+            {
+                return Err(ApprovalVerifierError::ChallengeIntegrity);
             }
         }
         ApprovalCommand::ConsumeNormal(command) => {
@@ -2171,34 +2411,42 @@ fn terminal_receipt_digest(
     outcome: ApprovalCommandOutcome,
     challenge: Option<&ApprovalChallenge>,
     authority_receipt: Option<&ApprovalAuthorityReceipt>,
+    execution_binding_receipt: Option<&ExecutionApprovalBindingReceipt>,
     revocation: Option<&ApprovalRevocation>,
 ) -> Result<ContentDigest, ApprovalVerifierError> {
+    let mut value = vec![
+        ("ordinal".to_owned(), string(ordinal.to_string())),
+        (
+            "previous_receipt_digest".to_owned(),
+            optional_digest(previous_receipt_digest),
+        ),
+        ("request".to_owned(), command_value(command)),
+        ("request_digest".to_owned(), string(request_digest.as_str())),
+        ("before".to_owned(), optional_head(before)),
+        ("after".to_owned(), optional_head(after)),
+        ("outcome".to_owned(), outcome_value(outcome)),
+        (
+            "challenge_digest".to_owned(),
+            optional_digest(challenge.map(|value| &value.challenge_digest)),
+        ),
+        (
+            "authority_receipt_digest".to_owned(),
+            optional_digest(authority_receipt.map(ApprovalAuthorityReceipt::receipt_digest)),
+        ),
+    ];
+    if let Some(binding_receipt) = execution_binding_receipt {
+        value.push((
+            "execution_binding_receipt_digest".to_owned(),
+            string(binding_receipt.binding_receipt_digest().as_str()),
+        ));
+    }
+    value.push((
+        "revocation_digest".to_owned(),
+        optional_digest(revocation.map(ApprovalRevocation::revocation_digest)),
+    ));
     digest(
         "lattice-approval-terminal-receipt",
-        CanonicalValue::Object(vec![
-            ("ordinal".to_owned(), string(ordinal.to_string())),
-            (
-                "previous_receipt_digest".to_owned(),
-                optional_digest(previous_receipt_digest),
-            ),
-            ("request".to_owned(), command_value(command)),
-            ("request_digest".to_owned(), string(request_digest.as_str())),
-            ("before".to_owned(), optional_head(before)),
-            ("after".to_owned(), optional_head(after)),
-            ("outcome".to_owned(), outcome_value(outcome)),
-            (
-                "challenge_digest".to_owned(),
-                optional_digest(challenge.map(|value| &value.challenge_digest)),
-            ),
-            (
-                "authority_receipt_digest".to_owned(),
-                optional_digest(authority_receipt.map(ApprovalAuthorityReceipt::receipt_digest)),
-            ),
-            (
-                "revocation_digest".to_owned(),
-                optional_digest(revocation.map(ApprovalRevocation::revocation_digest)),
-            ),
-        ]),
+        CanonicalValue::Object(value),
     )
 }
 
@@ -2276,7 +2524,7 @@ fn snapshot_value(aggregate: &VerifiedApprovalAggregate) -> CanonicalValue {
 }
 
 fn record_value(record: &ApprovalRecord) -> CanonicalValue {
-    CanonicalValue::Object(vec![
+    let mut value = vec![
         ("challenge".to_owned(), challenge_value(&record.challenge)),
         ("phase".to_owned(), string(record.phase.as_str())),
         ("revision".to_owned(), string(record.revision.to_string())),
@@ -2287,6 +2535,14 @@ fn record_value(record: &ApprovalRecord) -> CanonicalValue {
                 .as_ref()
                 .map_or(CanonicalValue::Null, authority_receipt_value),
         ),
+    ];
+    if let Some(binding_receipt) = record.execution_binding_receipt.as_ref() {
+        value.push((
+            "execution_binding_receipt".to_owned(),
+            execution_binding_receipt_value(binding_receipt),
+        ));
+    }
+    value.extend([
         (
             "claim_digest".to_owned(),
             optional_digest(record.claim_digest.as_ref()),
@@ -2298,11 +2554,12 @@ fn record_value(record: &ApprovalRecord) -> CanonicalValue {
                 .as_ref()
                 .map_or(CanonicalValue::Null, revocation_value),
         ),
-    ])
+    ]);
+    CanonicalValue::Object(value)
 }
 
 fn terminal_receipt_value(receipt: &ApprovalCommandReceipt) -> CanonicalValue {
-    CanonicalValue::Object(vec![
+    let mut value = vec![
         ("ordinal".to_owned(), string(receipt.ordinal.to_string())),
         (
             "previous_receipt_digest".to_owned(),
@@ -2330,6 +2587,14 @@ fn terminal_receipt_value(receipt: &ApprovalCommandReceipt) -> CanonicalValue {
                 .as_ref()
                 .map_or(CanonicalValue::Null, authority_receipt_value),
         ),
+    ];
+    if let Some(binding_receipt) = receipt.execution_binding_receipt.as_ref() {
+        value.push((
+            "execution_binding_receipt".to_owned(),
+            execution_binding_receipt_value(binding_receipt),
+        ));
+    }
+    value.extend([
         (
             "revocation".to_owned(),
             receipt
@@ -2341,7 +2606,8 @@ fn terminal_receipt_value(receipt: &ApprovalCommandReceipt) -> CanonicalValue {
             "receipt_digest".to_owned(),
             string(receipt.receipt_digest.as_str()),
         ),
-    ])
+    ]);
+    CanonicalValue::Object(value)
 }
 
 fn authority_receipt_value(receipt: &ApprovalAuthorityReceipt) -> CanonicalValue {
@@ -2616,6 +2882,85 @@ fn guardian_value(guardian: &FakeGuardianBinding) -> CanonicalValue {
     ])
 }
 
+fn execution_approval_subject_value(subject: &ExecutionApprovalSubject) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        ("task_ref".to_owned(), string(subject.task_ref().as_str())),
+        (
+            "successor_stream_id".to_owned(),
+            string(subject.successor_stream_id().as_str()),
+        ),
+        ("binding".to_owned(), binding_value(subject.binding())),
+        (
+            "approval_subject_digest".to_owned(),
+            string(subject.approval_subject_digest().as_str()),
+        ),
+        (
+            "budget_digest".to_owned(),
+            string(subject.budget_digest().as_str()),
+        ),
+        (
+            "subject_digest".to_owned(),
+            string(subject.subject_digest().as_str()),
+        ),
+    ])
+}
+
+fn execution_approval_challenge_value(challenge: &ExecutionApprovalChallenge) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        (
+            "approval_challenge".to_owned(),
+            challenge_value(challenge.approval_challenge()),
+        ),
+        (
+            "subject".to_owned(),
+            execution_approval_subject_value(challenge.subject()),
+        ),
+        (
+            "challenge_digest".to_owned(),
+            string(challenge.challenge_digest().as_str()),
+        ),
+    ])
+}
+
+fn execution_approval_proof_value(proof: &FakeExecutionApprovalProof) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        ("base_proof".to_owned(), proof_value(proof.base_proof())),
+        (
+            "execution_challenge_digest".to_owned(),
+            string(proof.execution_challenge_digest().as_str()),
+        ),
+        (
+            "proof_digest".to_owned(),
+            string(proof.proof_digest().as_str()),
+        ),
+    ])
+}
+
+fn execution_binding_receipt_value(receipt: &ExecutionApprovalBindingReceipt) -> CanonicalValue {
+    CanonicalValue::Object(vec![
+        (
+            "subject".to_owned(),
+            execution_approval_subject_value(receipt.subject()),
+        ),
+        (
+            "approval_receipt_digest".to_owned(),
+            string(receipt.approval_receipt_digest().as_str()),
+        ),
+        (
+            "execution_challenge_digest".to_owned(),
+            string(receipt.execution_challenge_digest().as_str()),
+        ),
+        (
+            "execution_proof_digest".to_owned(),
+            string(receipt.execution_proof_digest().as_str()),
+        ),
+        (
+            "binding_receipt_digest".to_owned(),
+            string(receipt.binding_receipt_digest().as_str()),
+        ),
+    ])
+}
+
 fn command_value(command: &ApprovalCommand) -> CanonicalValue {
     match command {
         ApprovalCommand::Issue(command) => CanonicalValue::Object(vec![
@@ -2662,6 +3007,24 @@ fn command_value(command: &ApprovalCommand) -> CanonicalValue {
             ),
             ("observed_at".to_owned(), string(&command.observed_at)),
             ("proof".to_owned(), proof_value(&command.proof)),
+        ]),
+        ApprovalCommand::BindExecution(command) => CanonicalValue::Object(vec![
+            ("kind".to_owned(), string("BIND_EXECUTION")),
+            ("command_id".to_owned(), string(&command.command_id)),
+            ("approval_id".to_owned(), string(&command.approval_id)),
+            (
+                "expected_head".to_owned(),
+                state_head_value(&command.expected_head),
+            ),
+            ("observed_at".to_owned(), string(&command.observed_at)),
+            (
+                "execution_challenge".to_owned(),
+                execution_approval_challenge_value(&command.execution_challenge),
+            ),
+            (
+                "execution_proof".to_owned(),
+                execution_approval_proof_value(&command.execution_proof),
+            ),
         ]),
         ApprovalCommand::ConsumeNormal(command) => CanonicalValue::Object(vec![
             ("kind".to_owned(), string("CONSUME_NORMAL")),
@@ -3087,9 +3450,24 @@ fn decode_snapshot(value: &CanonicalValue) -> Result<DecodedSnapshot, ApprovalVe
 fn parse_terminal_command(
     value: &CanonicalValue,
 ) -> Result<RawTerminalCommand, ApprovalVerifierError> {
-    let object = RawObject::exact(
-        value,
-        &[
+    let object = RawObject::new(value)?;
+    if object.fields.contains_key("execution_binding_receipt") {
+        object.expect_fields(&[
+            "ordinal",
+            "previous_receipt_digest",
+            "request",
+            "request_digest",
+            "before",
+            "after",
+            "outcome",
+            "challenge",
+            "authority_receipt",
+            "execution_binding_receipt",
+            "revocation",
+            "receipt_digest",
+        ])?;
+    } else {
+        object.expect_fields(&[
             "ordinal",
             "previous_receipt_digest",
             "request",
@@ -3101,8 +3479,8 @@ fn parse_terminal_command(
             "authority_receipt",
             "revocation",
             "receipt_digest",
-        ],
-    )?;
+        ])?;
+    }
     Ok(RawTerminalCommand {
         ordinal: raw_u64(object.value("ordinal")?)?,
         previous_receipt_digest: parse_optional_digest(object.value("previous_receipt_digest")?)?,
@@ -3166,6 +3544,31 @@ fn parse_command(value: &CanonicalValue) -> Result<ApprovalCommand, ApprovalVeri
                 observed_at: raw_string(object.value("observed_at")?)?.to_owned(),
                 proof: parse_proof(object.value("proof")?)?,
             }))
+        }
+        "BIND_EXECUTION" => {
+            object.expect_fields(&[
+                "kind",
+                "command_id",
+                "approval_id",
+                "expected_head",
+                "observed_at",
+                "execution_challenge",
+                "execution_proof",
+            ])?;
+            Ok(ApprovalCommand::BindExecution(
+                BindExecutionApprovalCommand {
+                    command_id: raw_string(object.value("command_id")?)?.to_owned(),
+                    approval_id: raw_string(object.value("approval_id")?)?.to_owned(),
+                    expected_head: parse_state_head(object.value("expected_head")?)?,
+                    observed_at: raw_string(object.value("observed_at")?)?.to_owned(),
+                    execution_challenge: parse_execution_approval_challenge(
+                        object.value("execution_challenge")?,
+                    )?,
+                    execution_proof: parse_execution_approval_proof(
+                        object.value("execution_proof")?,
+                    )?,
+                },
+            ))
         }
         "CONSUME_NORMAL" => {
             object.expect_fields(&[
@@ -3276,6 +3679,115 @@ fn parse_proof(value: &CanonicalValue) -> Result<FakeApprovalProof, ApprovalVeri
         guardian: parse_optional_fake_guardian(object.value("guardian")?)?,
         proof_digest: parse_digest(object.value("proof_digest")?)?,
     })
+}
+
+fn parse_approval_challenge(
+    value: &CanonicalValue,
+) -> Result<ApprovalChallenge, ApprovalVerifierError> {
+    let object = RawObject::exact(
+        value,
+        &[
+            "identity",
+            "runtime",
+            "nonce_id",
+            "nonce_commitment",
+            "issued_at",
+            "expires_at",
+            "subject_digest",
+            "authenticator_id",
+            "key_id",
+            "verification_key_commitment",
+            "evidence_digest",
+            "review_set_digest",
+            "challenge_digest",
+        ],
+    )?;
+    let challenge = ApprovalChallenge {
+        identity: parse_identity(object.value("identity")?)?,
+        runtime: parse_runtime(object.value("runtime")?)?,
+        nonce_id: raw_string(object.value("nonce_id")?)?.to_owned(),
+        nonce_commitment: parse_digest(object.value("nonce_commitment")?)?,
+        issued_at: raw_string(object.value("issued_at")?)?.to_owned(),
+        expires_at: raw_string(object.value("expires_at")?)?.to_owned(),
+        subject_digest: parse_digest(object.value("subject_digest")?)?,
+        authenticator_id: raw_string(object.value("authenticator_id")?)?.to_owned(),
+        key_id: raw_string(object.value("key_id")?)?.to_owned(),
+        verification_key_commitment: parse_digest(object.value("verification_key_commitment")?)?,
+        evidence_digest: parse_digest(object.value("evidence_digest")?)?,
+        review_set_digest: parse_optional_digest(object.value("review_set_digest")?)?,
+        challenge_digest: parse_digest(object.value("challenge_digest")?)?,
+    };
+    let expected = digest(
+        "lattice-approval-challenge",
+        challenge_value_without_digest(&challenge),
+    )?;
+    if challenge.challenge_digest != expected {
+        return Err(ApprovalVerifierError::CorruptSnapshot);
+    }
+    Ok(challenge)
+}
+
+fn parse_execution_approval_subject(
+    value: &CanonicalValue,
+) -> Result<ExecutionApprovalSubject, ApprovalVerifierError> {
+    let object = RawObject::exact(
+        value,
+        &[
+            "task_ref",
+            "successor_stream_id",
+            "binding",
+            "approval_subject_digest",
+            "budget_digest",
+            "subject_digest",
+        ],
+    )?;
+    let expected_digest = parse_digest(object.value("subject_digest")?)?;
+    let subject = ExecutionApprovalSubject::new(
+        parse_digest(object.value("task_ref")?)?,
+        parse_digest(object.value("successor_stream_id")?)?,
+        parse_binding(object.value("binding")?)?,
+        parse_digest(object.value("approval_subject_digest")?)?,
+        parse_digest(object.value("budget_digest")?)?,
+    )
+    .map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+    if subject.subject_digest() != &expected_digest {
+        return Err(ApprovalVerifierError::CorruptSnapshot);
+    }
+    Ok(subject)
+}
+
+fn parse_execution_approval_challenge(
+    value: &CanonicalValue,
+) -> Result<ExecutionApprovalChallenge, ApprovalVerifierError> {
+    let object = RawObject::exact(
+        value,
+        &["approval_challenge", "subject", "challenge_digest"],
+    )?;
+    let expected_digest = parse_digest(object.value("challenge_digest")?)?;
+    let challenge = ExecutionApprovalChallenge::new(
+        parse_approval_challenge(object.value("approval_challenge")?)?,
+        parse_execution_approval_subject(object.value("subject")?)?,
+    )
+    .map_err(|_| ApprovalVerifierError::CorruptSnapshot)?;
+    if challenge.challenge_digest() != &expected_digest {
+        return Err(ApprovalVerifierError::CorruptSnapshot);
+    }
+    Ok(challenge)
+}
+
+fn parse_execution_approval_proof(
+    value: &CanonicalValue,
+) -> Result<FakeExecutionApprovalProof, ApprovalVerifierError> {
+    let object = RawObject::exact(
+        value,
+        &["base_proof", "execution_challenge_digest", "proof_digest"],
+    )?;
+    recover_fake_execution_approval_proof(
+        parse_proof(object.value("base_proof")?)?,
+        parse_digest(object.value("execution_challenge_digest")?)?,
+        parse_digest(object.value("proof_digest")?)?,
+    )
+    .map_err(|_| ApprovalVerifierError::CorruptSnapshot)
 }
 
 fn parse_optional_fake_guardian(

@@ -1,8 +1,10 @@
 //! Pure Task Ledger V2 semantic owner, append planner, and non-durable fake.
 
 mod foreman;
+mod task_runtime;
 
 pub use foreman::*;
+pub use task_runtime::*;
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -117,6 +119,18 @@ pub enum LedgerError {
     UnknownForemanSnapshotVersion,
     /// A new foreman generation was not exactly the prior generation plus one.
     ForemanGenerationRollback,
+    /// A managed-task lineage or runtime child record is malformed or cross-bound.
+    InvalidTaskRuntimeRecord,
+    /// A managed-task lineage or runtime child record schema is unknown.
+    UnknownTaskRuntimeRecordVersion,
+    /// An immutable managed-task lineage was reused with changed semantics.
+    TaskRuntimeSubstitution,
+    /// A new worker attempt number or Writer fence was not strictly monotonic.
+    WorkerAttemptNotMonotonic,
+    /// A repair attempt was claimed before its predecessor had an exact terminal.
+    WorkerAttemptBeforeTerminal,
+    /// A retained worker attempt changed its immutable provider thread or turn.
+    WorkerIdentityDrift,
     /// A generic caller selected a reserved or unknown Task-created profile.
     UnknownTaskCreatedProfile,
     /// A pre-specification intake stream was asked to append executable work.
@@ -194,6 +208,12 @@ impl LedgerError {
             Self::InvalidForemanSnapshot => "LEDGER_INVALID_FOREMAN_SNAPSHOT",
             Self::UnknownForemanSnapshotVersion => "LEDGER_UNKNOWN_FOREMAN_SNAPSHOT_VERSION",
             Self::ForemanGenerationRollback => "LEDGER_FOREMAN_GENERATION_ROLLBACK",
+            Self::InvalidTaskRuntimeRecord => "LEDGER_INVALID_TASK_RUNTIME_RECORD",
+            Self::UnknownTaskRuntimeRecordVersion => "LEDGER_UNKNOWN_TASK_RUNTIME_RECORD_VERSION",
+            Self::TaskRuntimeSubstitution => "LEDGER_TASK_RUNTIME_SUBSTITUTION",
+            Self::WorkerAttemptNotMonotonic => "LEDGER_WORKER_ATTEMPT_NOT_MONOTONIC",
+            Self::WorkerAttemptBeforeTerminal => "LEDGER_WORKER_ATTEMPT_BEFORE_TERMINAL",
+            Self::WorkerIdentityDrift => "LEDGER_WORKER_IDENTITY_DRIFT",
             Self::UnknownTaskCreatedProfile => "LEDGER_UNKNOWN_TASK_CREATED_PROFILE",
             Self::GeneralTaskIntakeCreateOnly => "LEDGER_GENERAL_TASK_INTAKE_CREATE_ONLY",
             Self::ResourceCounterRegression => "LEDGER_RESOURCE_COUNTER_REGRESSION",
@@ -223,6 +243,7 @@ impl LedgerError {
 }
 
 impl fmt::Display for LedgerError {
+    #[allow(clippy::too_many_lines)]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidIdentifier { field } => write!(formatter, "invalid Ledger {field}"),
@@ -276,6 +297,24 @@ impl fmt::Display for LedgerError {
             }
             Self::ForemanGenerationRollback => {
                 formatter.write_str("foreman generation was not exact-next")
+            }
+            Self::InvalidTaskRuntimeRecord => {
+                formatter.write_str("invalid managed-task lineage or runtime child record")
+            }
+            Self::UnknownTaskRuntimeRecordVersion => {
+                formatter.write_str("unknown managed-task runtime record version")
+            }
+            Self::TaskRuntimeSubstitution => {
+                formatter.write_str("managed-task lineage was reused with changed semantics")
+            }
+            Self::WorkerAttemptNotMonotonic => {
+                formatter.write_str("worker attempt number or Writer fence was not monotonic")
+            }
+            Self::WorkerAttemptBeforeTerminal => {
+                formatter.write_str("worker retry was claimed before exact predecessor terminal")
+            }
+            Self::WorkerIdentityDrift => {
+                formatter.write_str("worker provider thread or turn identity changed")
             }
             Self::UnknownTaskCreatedProfile => {
                 formatter.write_str("unknown or caller-selected Task-created profile")
@@ -439,6 +478,9 @@ pub enum TaskCreatedProfile {
     /// General natural-language intake retained in Draft without classifying
     /// risk, authority, model, or execution intent.
     GeneralTaskIntakeV1,
+    /// Executable Task-Spec successor created only by the server-owned managed
+    /// foreman after an exact general-intake promotion.
+    ManagedGeneralTaskV1,
 }
 
 impl TaskCreatedProfile {
@@ -449,13 +491,17 @@ impl TaskCreatedProfile {
             Self::HistoricalAutonomyOptionalV1 => "CONTROLLED_CODEX_CANARY",
             Self::AutonomyReceiptRequiredV1 => "CONTROLLED_CODEX_CANARY_AUTONOMY_V1",
             Self::GeneralTaskIntakeV1 => "GENERAL_TASK_INTAKE_V1",
+            Self::ManagedGeneralTaskV1 => "MANAGED_GENERAL_TASK_V1",
         }
     }
 
     /// Returns whether progress requires the exact sequence-two autonomy receipt.
     #[must_use]
     pub const fn requires_autonomy_receipt(self) -> bool {
-        matches!(self, Self::AutonomyReceiptRequiredV1)
+        matches!(
+            self,
+            Self::AutonomyReceiptRequiredV1 | Self::ManagedGeneralTaskV1
+        )
     }
 }
 
@@ -1809,6 +1855,7 @@ pub struct AppendCommand {
 enum AppendConstruction {
     Generic,
     RequiredTaskCreated,
+    ManagedTaskCreated,
     GeneralTaskCreated,
     VerifiedAutonomy,
     VerifiedForeman,
@@ -1887,6 +1934,46 @@ impl AppendCommand {
             diagnostic,
             None,
             AppendConstruction::RequiredTaskCreated,
+        )
+    }
+
+    /// Constructs the managed-foreman-only Task-Spec successor marker.
+    ///
+    /// Unlike the historical controlled canary, the Task-created subject is
+    /// the exact Task Spec digest and no ingress diagnostic is retained.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-vacant or non-Task-Spec stream and malformed metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_managed_general_task_created(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+        reason_code: ReasonCode,
+    ) -> Result<Self, LedgerError> {
+        let Some(task_spec_digest) = expected_head.identity().task_spec_digest().cloned() else {
+            return Err(LedgerError::InvalidStreamHead);
+        };
+        if expected_head.sequence() != 0 {
+            return Err(LedgerError::InvalidAutonomyReceipt);
+        }
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            LedgerEventKind::TaskCreated,
+            actor_id,
+            ActionId::new(TaskCreatedProfile::ManagedGeneralTaskV1.action())?,
+            LedgerOutcome::Recorded,
+            reason_code,
+            task_spec_digest,
+            None,
+            None,
+            AppendConstruction::ManagedTaskCreated,
         )
     }
 
@@ -1985,6 +2072,11 @@ impl AppendCommand {
                 {
                     return Err(LedgerError::UnknownTaskCreatedProfile);
                 }
+                AppendConstruction::ManagedTaskCreated
+                    if profile != Some(TaskCreatedProfile::ManagedGeneralTaskV1) =>
+                {
+                    return Err(LedgerError::UnknownTaskCreatedProfile);
+                }
                 AppendConstruction::GeneralTaskCreated
                     if profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
                 {
@@ -1992,6 +2084,7 @@ impl AppendCommand {
                 }
                 AppendConstruction::Generic
                 | AppendConstruction::RequiredTaskCreated
+                | AppendConstruction::ManagedTaskCreated
                 | AppendConstruction::GeneralTaskCreated
                 | AppendConstruction::VerifiedAutonomy
                 | AppendConstruction::VerifiedForeman
@@ -2286,14 +2379,32 @@ fn classify_task_created_action(action: &str) -> Result<Option<TaskCreatedProfil
             Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
         }
         "GENERAL_TASK_INTAKE_V1" => Ok(Some(TaskCreatedProfile::GeneralTaskIntakeV1)),
+        "MANAGED_GENERAL_TASK_V1" => Ok(Some(TaskCreatedProfile::ManagedGeneralTaskV1)),
         value if value.starts_with("CONTROLLED_CODEX_CANARY") => {
             Err(LedgerError::UnknownTaskCreatedProfile)
         }
         value if value.starts_with("GENERAL_TASK_INTAKE") => {
             Err(LedgerError::UnknownTaskCreatedProfile)
         }
+        value if value.starts_with("MANAGED_GENERAL_TASK") => {
+            Err(LedgerError::UnknownTaskCreatedProfile)
+        }
         _ => Ok(None),
     }
+}
+
+fn validate_task_created_profile_subject(
+    identity: &TaskLedgerStreamIdentity,
+    profile: Option<TaskCreatedProfile>,
+    subject_digest: &ContentDigest,
+) -> Result<(), LedgerError> {
+    if profile == Some(TaskCreatedProfile::ManagedGeneralTaskV1)
+        && (identity.subject_kind() != TaskLedgerSubjectKind::TaskSpec
+            || identity.task_spec_digest() != Some(subject_digest))
+    {
+        return Err(LedgerError::InvalidStreamHead);
+    }
+    Ok(())
 }
 
 /// Stable terminal reason for a non-appending command.
@@ -3086,6 +3197,11 @@ pub fn plan_append(
     } else {
         None
     };
+    validate_task_created_profile_subject(
+        current.identity(),
+        requested_profile,
+        &command.subject_digest,
+    )?;
     match current.identity().subject_kind() {
         TaskLedgerSubjectKind::TaskSpec
             if requested_profile == Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
@@ -3452,7 +3568,10 @@ pub fn verify_untrusted_autonomy_receipt_rows(
                 .map(|receipt| VerifiedAutonomyReceiptState::HistoricalOptional(Some(receipt))),
             _ => Err(LedgerError::InvalidAutonomyReceipt),
         },
-        Some(TaskCreatedProfile::AutonomyReceiptRequiredV1) => match rows {
+        Some(
+            TaskCreatedProfile::AutonomyReceiptRequiredV1
+            | TaskCreatedProfile::ManagedGeneralTaskV1,
+        ) => match rows {
             [] if stream.events().len() == 1 && autonomy_events.is_empty() => {
                 Ok(VerifiedAutonomyReceiptState::PendingRequiredReceipt)
             }
@@ -6223,6 +6342,126 @@ mod tests {
                 duplicated.as_slice()
             ),
             Err(LedgerError::InvalidAutonomyReceipt)
+        );
+    }
+
+    #[test]
+    fn managed_profile_planner_rejects_a_non_spec_subject() {
+        let vacant = VerifiedStream::vacant(identity(), RuntimeKind::Fake).expect("vacant");
+        let forged = AppendCommand::from_fields(
+            vacant.head().clone(),
+            CommandId::new("forged-managed-subject").expect("command"),
+            CorrelationId::new("managed-general-task-v1").expect("correlation"),
+            "2026-08-26T00:00:00Z",
+            LedgerEventKind::TaskCreated,
+            ActorId::new("lattice-foreman").expect("actor"),
+            ActionId::new(TaskCreatedProfile::ManagedGeneralTaskV1.action()).expect("action"),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("MANAGED_GENERAL_TASK_ACCEPTED").expect("reason"),
+            digest('b'),
+            None,
+            None,
+            AppendConstruction::VerifiedReplay,
+        )
+        .expect("shape-valid forged retained command");
+
+        assert_eq!(
+            plan_append(&vacant, forged),
+            Err(LedgerError::InvalidStreamHead)
+        );
+    }
+
+    fn self_consistent_managed_profile_stream(subject: char) -> VerifiedStream {
+        let vacant = VerifiedStream::vacant(identity(), RuntimeKind::Fake).expect("vacant");
+        let forged_command = AppendCommand::from_fields(
+            vacant.head().clone(),
+            CommandId::new("retained-managed-subject").expect("command"),
+            CorrelationId::new("managed-general-task-v1").expect("correlation"),
+            "2026-08-26T00:00:00Z",
+            LedgerEventKind::TaskCreated,
+            ActorId::new("lattice-foreman").expect("actor"),
+            ActionId::new(TaskCreatedProfile::ManagedGeneralTaskV1.action()).expect("action"),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("MANAGED_GENERAL_TASK_ACCEPTED").expect("reason"),
+            digest(subject),
+            None,
+            None,
+            AppendConstruction::VerifiedReplay,
+        )
+        .expect("shape-valid retained command");
+        let request_digest = request_digest(&forged_command).expect("request digest");
+        let (counters, revision, projection_digest) =
+            next_resource_projection(vacant.head(), &vacant.counters, &forged_command)
+                .expect("projection");
+        let forged_event = build_event(
+            &forged_command,
+            1,
+            request_digest.clone(),
+            revision,
+            projection_digest.clone(),
+        )
+        .expect("self-consistent event");
+        let head = build_head(
+            RuntimeKind::Fake,
+            vacant.identity.clone(),
+            vacant.head.stream_id().clone(),
+            1,
+            forged_event.event_digest().clone(),
+            revision,
+            projection_digest,
+        )
+        .expect("self-consistent head");
+        let receipt = command_receipt(
+            forged_command.command_id.clone(),
+            request_digest,
+            vacant.head.clone(),
+            head.clone(),
+            CommandOutcome::Appended,
+            Some(forged_event.event_digest().clone()),
+        )
+        .expect("self-consistent receipt");
+        let events = vec![forged_event];
+        let mut commands = vec![VerifiedCommandRecord {
+            request: forged_command,
+            receipt,
+            base_checkpoint: vacant.checkpoint.clone(),
+            result_checkpoint: vacant.checkpoint.clone(),
+        }];
+        let checkpoint = build_checkpoint(
+            &vacant.identity,
+            RuntimeKind::Fake,
+            &head,
+            &counters,
+            &events,
+            &commands,
+            &[],
+        )
+        .expect("self-consistent checkpoint");
+        commands[0].result_checkpoint = checkpoint.clone();
+        VerifiedStream {
+            identity: vacant.identity,
+            head,
+            events,
+            commands,
+            outboxes: Vec::new(),
+            counters,
+            checkpoint,
+        }
+    }
+
+    #[test]
+    fn managed_profile_replay_accepts_the_exact_spec_subject() {
+        let retained = self_consistent_managed_profile_stream('a');
+        verify_untrusted_snapshot(&export_untrusted_snapshot(&retained))
+            .expect("exact Task Spec subject replays");
+    }
+
+    #[test]
+    fn managed_profile_replay_rejects_a_self_consistent_non_spec_subject() {
+        let retained = self_consistent_managed_profile_stream('b');
+        assert_eq!(
+            verify_untrusted_snapshot(&export_untrusted_snapshot(&retained)),
+            Err(LedgerError::InvalidStreamHead)
         );
     }
 

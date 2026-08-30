@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lattice_codex_adapter::{
-    CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME, CodexDeliveryAdapter,
-    CodexDeliveryAdapterConfig, CodexIdentityExpectation,
+    CODEX_HOME_CONFIG_BYTES, CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME,
+    CodexDeliveryAdapter, CodexDeliveryAdapterConfig, CodexIdentityExpectation,
 };
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CodexDeliveryRequest, ContentDigest, DaemonEpoch, DeliveryProfile,
@@ -193,23 +193,8 @@ impl GovernedDigestFixture {
             CODEX_HOME_OWNERSHIP_MARKER_BYTES,
         )
         .expect("write Codex home marker");
-        fs::write(codex_home.join("auth.json"), b"{}\n").expect("write inert auth state");
-        fs::write(
-            codex_home.join("config.toml"),
-            concat!(
-                "approval_policy = \"never\"\n",
-                "sandbox_mode = \"workspace-write\"\n",
-                "model = \"gpt-5.6-sol\"\n",
-                "model_reasoning_effort = \"low\"\n",
-                "\n",
-                "[windows]\n",
-                "sandbox = \"unelevated\"\n",
-                "\n",
-                "[features]\n",
-                "plugins = false\n",
-            ),
-        )
-        .expect("write exact safe Codex config");
+        fs::write(codex_home.join("config.toml"), CODEX_HOME_CONFIG_BYTES)
+            .expect("write exact keyring-only Codex config");
         let launcher = write_governed_launcher(&root, &codex_home);
         let launcher_sha256 = sha256(&fs::read(&launcher).expect("read launcher"));
         Self {
@@ -342,6 +327,7 @@ $null = [Console]::In.ReadLine()
 [Console]::Out.WriteLine('{{"id":1,"result":{{"thread":{{"id":"thread-governed"}}}}}}')
 $null = [Console]::In.ReadLine()
 [Console]::Out.WriteLine('{{"id":2,"result":{{"turn":{{"id":"turn-governed"}}}}}}')
+[Console]::Out.WriteLine('{{"method":"turn/started","params":{{"threadId":"thread-governed","turn":{{"id":"turn-governed","status":"inProgress"}}}}}}')
 [Console]::Out.WriteLine('{{"method":"item/completed","params":{{"threadId":"thread-governed","turnId":"turn-governed","item":{{"arguments":{{"command":"controlled apply"}},"contentItems":[{{"text":"Script completed\nExit code: 0","type":"inputText"}}],"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":1}}}}')
 [Console]::Out.WriteLine('{{"method":"item/completed","params":{{"threadId":"thread-governed","turnId":"turn-governed","item":{{"arguments":{{"command":"controlled verify"}},"contentItems":[{{"text":"Script completed\nExit code: 0","type":"inputText"}}],"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":2}}}}')
 [Console]::Out.WriteLine('{{"method":"turn/completed","params":{{"threadId":"thread-governed","turn":{{"id":"turn-governed","items":[{{"id":"agent-final","text":"Delivery complete.","type":"agentMessage"}}],"itemsView":"summary","status":"completed","error":null}}}}}}')
@@ -395,6 +381,7 @@ read -r _
 printf '%s\n' '{{"id":1,"result":{{"thread":{{"id":"thread-governed"}}}}}}'
 read -r _
 printf '%s\n' '{{"id":2,"result":{{"turn":{{"id":"turn-governed"}}}}}}'
+printf '%s\n' '{{"method":"turn/started","params":{{"threadId":"thread-governed","turn":{{"id":"turn-governed","status":"inProgress"}}}}}}'
 printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thread-governed","turnId":"turn-governed","item":{{"arguments":{{"command":"controlled apply"}},"contentItems":[{{"text":"Script completed\\nExit code: 0","type":"inputText"}}],"id":"tool-apply","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":1}}}}'
 printf '%s\n' '{{"method":"item/completed","params":{{"threadId":"thread-governed","turnId":"turn-governed","item":{{"arguments":{{"command":"controlled verify"}},"contentItems":[{{"text":"Script completed\\nExit code: 0","type":"inputText"}}],"id":"tool-verify","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"}},"completedAtMs":2}}}}'
 printf '%s\n' '{{"method":"turn/completed","params":{{"threadId":"thread-governed","turn":{{"id":"turn-governed","items":[{{"id":"agent-final","text":"Delivery complete.","type":"agentMessage"}}],"itemsView":"summary","status":"completed","error":null}}}}}}'

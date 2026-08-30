@@ -38,13 +38,23 @@ $officialSandboxSetupSha256 = 'c12d225b34e7f82cdab6bbc714797abed661f40e158104694
 $officialCommandRunnerSha256 = '0102fa1820ecd03bb03a991fd2303a1a484118f7da8a71864f88ec94bca61d6d'
 $officialSignerThumbprint = '0B7C30C11BF7250EC1ECD3254AC781D9E13D62F8'
 $codexHomeConfigBytes = [System.Text.UTF8Encoding]::new($false).GetBytes((@(
+    'cli_auth_credentials_store = "keyring"',
     'approval_policy = "never"',
     'sandbox_mode = "workspace-write"',
     'model = "gpt-5.6-sol"',
     'model_reasoning_effort = "low"',
     '',
+    '[shell_environment_policy]',
+    'inherit = "all"',
+    'ignore_default_excludes = false',
+    'include_only = ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "LANG", "LC_ALL"]',
+    'experimental_use_profile = false',
+    '',
     '[windows]',
-    'sandbox = "unelevated"'
+    'sandbox = "unelevated"',
+    '',
+    '[features]',
+    'plugins = false'
 ) -join "`n") + "`n")
 $scriptedDeliveryTimeoutSeconds = if ($deadlineRegression) { '40' } else { '120' }
 $officialDeliveryTimeoutSeconds = '600'
@@ -406,9 +416,11 @@ function Get-OfficialCodexHomeEvidence {
 
     $authStatePath = Join-Path $codexStateDir 'auth.json'
     $configPath = Join-Path $codexStateDir 'config.toml'
-    Assert-RegularFile -Path $authStatePath
+    if (Test-Path -LiteralPath $authStatePath) {
+        throw 'LATTICE_DELIVERY_PLAINTEXT_CODEX_AUTH_DENIED'
+    }
     Assert-RegularFile -Path $configPath
-    foreach ($isolatedFile in @($ownershipMarker, $authStatePath, $configPath)) {
+    foreach ($isolatedFile in @($ownershipMarker, $configPath)) {
         Assert-SingleLinkFile -Path $isolatedFile
         $null = Get-RestrictedDirectoryAclEvidence -Path $isolatedFile
     }
@@ -422,7 +434,7 @@ function Get-OfficialCodexHomeEvidence {
         path = $codexStateDir
         owner_sid = [string]$aclEvidence.owner_sid
         acl_protected = [bool]$aclEvidence.acl_protected
-        auth_present = $true
+        auth_present = $false
         sandbox_mode = 'workspace-write'
         windows_sandbox = 'unelevated'
     }
@@ -1642,10 +1654,6 @@ function Invoke-DefaultAcceptance {
             [System.Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
         )
         [System.IO.File]::WriteAllBytes(
-            (Join-Path $codexHome 'auth.json'),
-            [System.Text.Encoding]::ASCII.GetBytes("{}`n")
-        )
-        [System.IO.File]::WriteAllBytes(
             (Join-Path $codexHome 'config.toml'),
             $codexHomeConfigBytes
         )
@@ -1666,6 +1674,7 @@ function Invoke-DefaultAcceptance {
             'if "%~1"=="--version" if "%~2"=="" goto version',
             'if "%~1"=="app-server" if "%~2"=="generate-json-schema" if "%~3"=="--out" if "%~4" NEQ "" if "%~5"=="" goto schema',
             'if "%~1"=="app-server" if "%~2"=="--listen" if "%~3"=="stdio://" if "%~4"=="" goto server',
+            'if "%~1"=="app-server" if "%~2"=="--stdio" if "%~3"=="" goto server',
             'exit /b 11',
             ':version',
             ('echo ' + $launcherVersion),
@@ -1674,6 +1683,7 @@ function Invoke-DefaultAcceptance {
             ('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripted-codex.ps1" -ExpectedSelfSha256 "' + $serverSha256 + '" -Mode Schema -SchemaRoot "%~4"'),
             'exit /b %ERRORLEVEL%',
             ':server',
+            'set LATTICE_DELIVERY_CODEX_MODE=SCRIPTED_ACCEPTANCE',
             ('"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0scripted-codex.ps1" -ExpectedSelfSha256 "' + $serverSha256 + '" -Mode Server'),
             'exit /b %ERRORLEVEL%'
         ) -join "`r`n") + "`r`n"

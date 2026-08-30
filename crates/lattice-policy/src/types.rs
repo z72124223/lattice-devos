@@ -481,6 +481,19 @@ pub struct ExecutionGate<'a> {
     pub approval: Option<ApprovalFact>,
 }
 
+/// Exact immutable Task-Ledger execution binding supplied to the managed
+/// execution Policy lane. Policy captures these values in opaque evidence so
+/// downstream code cannot attach an allowed decision to another task,
+/// successor stream, approval subject, or budget.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedExecutionBindingFact {
+    pub task_ref: ContentDigest,
+    pub successor_stream_id: ContentDigest,
+    pub task_spec_digest: ContentDigest,
+    pub approval_subject_digest: ContentDigest,
+    pub budget_digest: ContentDigest,
+}
+
 /// Worker-set admission decision.
 #[derive(Clone, Debug)]
 pub struct WorkerAdmissionGate<'a> {

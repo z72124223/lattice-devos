@@ -365,7 +365,11 @@ v7 transition cannot retain or partially copy that identifier.
   the ordinal. Changed command reuse returns no retained receipt. Every new
   terminal command, including `Denied`, `Blocked`, and exact read-only
   observation, advances the global command ordinal/checkpoint exactly once.
-- `MigrationRunner` recognizes Fresh and exact v1/v2/v3/v4/v5 prefixes only.
+- `MigrationRunner` recognizes Fresh and exact v1/v2/v3/v4/v5/v6 prefixes.
+  Fresh creates only the retained Store-v5 foundation. Product bootstrap then
+  composes the independently owned Memory and Writer transitions before the
+  exact v5-to-v6 and v6-to-v7 Store calls; Fresh never installs or rebinds
+  Writer inside the Store transaction.
   Exact Registry `0005` advances to autonomy `0006`; autonomy content at
   ordinal `0005` returns `PostgresStoreSetupErrorKind::HistoryMismatch` /
   `STORE_MIGRATION_HISTORY_MISMATCH` before migration DDL and is never repaired.

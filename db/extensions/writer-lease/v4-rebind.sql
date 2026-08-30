@@ -45,7 +45,7 @@ BEGIN
                FROM ONLY control.schema_compatibility AS c
               WHERE c.singleton
                 AND c.manifest_sha256 =
-                    '7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c'
+                    'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078'
                 AND c.current_schema_version = 7
                 AND c.min_reader = 7 AND c.max_reader = 7
                 AND c.min_writer = 7 AND c.max_writer = 7) = 1
@@ -72,7 +72,7 @@ BEGIN
                 AND ((w.global_schema_version = 6 AND w.global_manifest_sha256 =
                     '75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae')
                   OR (w.global_schema_version = 7 AND w.global_manifest_sha256 =
-                    '7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c'))
+                    'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078'))
                 AND w.required_memory_schema_version = 3
                 AND w.required_memory_manifest_sha256 =
                     'd4cc712d262ae1f7c96bd65526eab611c90e193363afd865af2126307b2903f0') = 1
@@ -92,7 +92,7 @@ BEGIN
     UPDATE ONLY writer_lease.writer_lease_extension_identity
        SET global_schema_version = 7,
            global_manifest_sha256 =
-               '7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c'
+               'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078'
      WHERE singleton AND extension_id = 'lattice-writer-lease'
        AND extension_schema_version = 4
        AND extension_path = 'db/extensions/writer-lease/v4.sql'
@@ -167,7 +167,7 @@ BEGIN
           WHERE w.singleton AND w.extension_schema_version = 4
             AND w.global_schema_version = 7
             AND w.global_manifest_sha256 =
-                '7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c') = 1
+                'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078') = 1
         AND v_ledger_shape IN (
             '1:INSTALLED:3:6,2:UPGRADED:4:6,3:REBOUND:4:7',
             '1:INSTALLED:2:5,2:UPGRADED:3:5,3:REBOUND:3:6,4:UPGRADED:4:6,5:REBOUND:4:7',

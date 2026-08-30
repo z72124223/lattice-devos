@@ -10,6 +10,31 @@ const EPISTEMIC_SCHEMA: &str = "lattice.foreman-epistemic/1.0";
 const DEPENDENCY_BLOCKER_PREFIX: &str = "dependency:v1:";
 const MAX_REFERENCE_BYTES: usize = 256;
 const MAX_CHECKPOINT_ID_BYTES: usize = 64;
+const MODEL_SELECTION_SCHEMA: &str = "lattice.foreman-model-selection";
+const MODEL_SELECTION_VERSION: &str = "1.0";
+const WORKER_BUDGET_SCHEMA: &str = "lattice.foreman-worker-budget";
+const WORKER_BUDGET_VERSION: &str = "1.0";
+const CONTINUATION_SCHEMA: &str = "lattice.foreman-continuation-summary";
+const CONTINUATION_VERSION: &str = "1.0";
+const ATTEMPT_PACKET_SCHEMA: &str = "lattice.foreman-attempt-packet";
+const ATTEMPT_PACKET_VERSION: &str = "1.0";
+const NATIVE_WINDOWS_EXECUTION_ENVIRONMENT_REF: &str =
+    "execution-environment:sha256:0000000000000000000000000000000000000000000000000000000000000001";
+const ATTEMPT_STATE_SCHEMA: &str = "lattice.foreman-attempt-state";
+const ATTEMPT_STATE_VERSION: &str = "1.0";
+const MEANINGFUL_PROGRESS_SCHEMA: &str = "lattice.foreman-meaningful-progress";
+const MEANINGFUL_PROGRESS_VERSION: &str = "1.0";
+/// Maximum retained repair-continuation text included in a worker packet.
+pub const MAX_CONTINUATION_BYTES: usize = 512;
+
+/// Product-wide active managed-worker capacity.
+pub const MAX_GLOBAL_ACTIVE_ATTEMPTS: u8 = 4;
+/// Default and currently admitted active attempts for one task.
+pub const DEFAULT_PER_TASK_ACTIVE_ATTEMPTS: u8 = 1;
+/// Maximum repair retries after the initial attempt.
+pub const MAX_REPAIR_RETRIES: u8 = 2;
+/// Initial attempt plus the maximum two repair retries.
+pub const MAX_ATTEMPTS: u8 = MAX_REPAIR_RETRIES + 1;
 
 /// The only durable foreman identity admitted to the product coordination
 /// stream. Git evidence remains observed per checkpoint, but this identity is
@@ -58,6 +83,1693 @@ pub enum ForemanState {
     Active,
     Blocked,
     Completed,
+}
+
+/// Stable failures for the pure managed-worker domain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum WorkerAttemptError {
+    MalformedField,
+    ForbiddenContent,
+    InvalidModelReason,
+    MissingEvidence,
+    InvalidBudget,
+    InvalidAttempt,
+    InvalidPhase,
+    DigestFailure,
+}
+
+/// The complete model allowlist for managed workers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerModel {
+    Luna,
+    Terra,
+    Sol,
+}
+
+impl WorkerModel {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Luna => "gpt-5.6-luna",
+            Self::Terra => "gpt-5.6-terra",
+            Self::Sol => "gpt-5.6-sol",
+        }
+    }
+
+    /// Parses only the product model allowlist.
+    ///
+    /// # Errors
+    ///
+    /// Rejects unavailable aliases, older model names, and case changes.
+    pub fn from_persisted(value: &str) -> Result<Self, WorkerAttemptError> {
+        match value {
+            "gpt-5.6-luna" => Ok(Self::Luna),
+            "gpt-5.6-terra" => Ok(Self::Terra),
+            "gpt-5.6-sol" => Ok(Self::Sol),
+            _ => Err(WorkerAttemptError::MalformedField),
+        }
+    }
+}
+
+/// Closed reasoning-effort values retained in a worker packet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+    Ultra,
+}
+
+impl ReasoningEffort {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+            Self::Ultra => "ultra",
+        }
+    }
+
+    /// Parses one exact reasoning-effort spelling.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary provider strings and case substitutions.
+    pub fn from_persisted(value: &str) -> Result<Self, WorkerAttemptError> {
+        match value {
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
+            "ultra" => Ok(Self::Ultra),
+            _ => Err(WorkerAttemptError::MalformedField),
+        }
+    }
+}
+
+/// Closed reason for selecting a managed-worker model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModelReason {
+    BoundedStateEvidenceDocumentation,
+    RoutineEngineering,
+    P0,
+    Architecture,
+    Security,
+    HighRisk,
+    TerraInsufficient,
+}
+
+impl ModelReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BoundedStateEvidenceDocumentation => "BOUNDED_STATE_EVIDENCE_DOCUMENTATION",
+            Self::RoutineEngineering => "ROUTINE_ENGINEERING",
+            Self::P0 => "P0",
+            Self::Architecture => "ARCHITECTURE",
+            Self::Security => "SECURITY",
+            Self::HighRisk => "HIGH_RISK",
+            Self::TerraInsufficient => "TERRA_INSUFFICIENT",
+        }
+    }
+
+    /// Reconstructs one exact persisted routing reason.
+    ///
+    /// # Errors
+    ///
+    /// Rejects arbitrary provider text, aliases, and case substitutions.
+    pub fn from_persisted(value: &str) -> Result<Self, WorkerAttemptError> {
+        match value {
+            "BOUNDED_STATE_EVIDENCE_DOCUMENTATION" => Ok(Self::BoundedStateEvidenceDocumentation),
+            "ROUTINE_ENGINEERING" => Ok(Self::RoutineEngineering),
+            "P0" => Ok(Self::P0),
+            "ARCHITECTURE" => Ok(Self::Architecture),
+            "SECURITY" => Ok(Self::Security),
+            "HIGH_RISK" => Ok(Self::HighRisk),
+            "TERRA_INSUFFICIENT" => Ok(Self::TerraInsufficient),
+            _ => Err(WorkerAttemptError::MalformedField),
+        }
+    }
+
+    /// Returns whether this closed reason is valid for the selected model.
+    #[must_use]
+    pub const fn is_allowed_for(self, model: WorkerModel) -> bool {
+        match model {
+            WorkerModel::Luna => matches!(self, Self::BoundedStateEvidenceDocumentation),
+            WorkerModel::Terra => matches!(self, Self::RoutineEngineering),
+            WorkerModel::Sol => matches!(
+                self,
+                Self::P0
+                    | Self::Architecture
+                    | Self::Security
+                    | Self::HighRisk
+                    | Self::TerraInsufficient
+            ),
+        }
+    }
+}
+
+/// Validated model, effort, and routing rationale. Availability remains an
+/// injected server observation; this type never performs provider I/O.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelSelection {
+    model: WorkerModel,
+    reasoning: ReasoningEffort,
+    reason: ModelReason,
+    evidence_ref: Option<String>,
+    digest: String,
+}
+
+impl ModelSelection {
+    /// Constructs one policy-compatible model selection.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a reason outside the selected model's role or a retained
+    /// Terra-insufficiency claim without exact evidence.
+    pub fn new(
+        model: WorkerModel,
+        reasoning: ReasoningEffort,
+        reason: ModelReason,
+        evidence_ref: Option<&str>,
+    ) -> Result<Self, WorkerAttemptError> {
+        if !reason.is_allowed_for(model) {
+            return Err(WorkerAttemptError::InvalidModelReason);
+        }
+        if reason == ModelReason::TerraInsufficient && evidence_ref.is_none() {
+            return Err(WorkerAttemptError::MissingEvidence);
+        }
+        let evidence_ref = evidence_ref
+            .map(|value| attempt_digest_pointer(value, "evidence"))
+            .transpose()?;
+        let value = CanonicalValue::Object(vec![
+            (
+                "model".to_owned(),
+                CanonicalValue::String(model.as_str().to_owned()),
+            ),
+            (
+                "reasoning".to_owned(),
+                CanonicalValue::String(reasoning.as_str().to_owned()),
+            ),
+            (
+                "reason".to_owned(),
+                CanonicalValue::String(reason.as_str().to_owned()),
+            ),
+            (
+                "evidence_ref".to_owned(),
+                CanonicalValue::String(evidence_ref.clone().unwrap_or_default()),
+            ),
+        ]);
+        let digest = canonical_digest_pointer(
+            MODEL_SELECTION_SCHEMA,
+            MODEL_SELECTION_VERSION,
+            "model-selection",
+            &value,
+        )?;
+        Ok(Self {
+            model,
+            reasoning,
+            reason,
+            evidence_ref,
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn model(&self) -> WorkerModel {
+        self.model
+    }
+
+    #[must_use]
+    pub const fn reasoning(&self) -> ReasoningEffort {
+        self.reasoning
+    }
+
+    #[must_use]
+    pub const fn reason(&self) -> ModelReason {
+        self.reason
+    }
+
+    #[must_use]
+    pub fn evidence_ref(&self) -> Option<&str> {
+        self.evidence_ref.as_deref()
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// A quoted currency bound is structurally distinct from unavailable cost.
+/// `Unavailable` must never be serialized as a numeric zero.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExternalCostBudget {
+    Unavailable,
+    LimitMicros(u64),
+}
+
+impl ExternalCostBudget {
+    #[must_use]
+    pub const fn status(self) -> &'static str {
+        match self {
+            Self::Unavailable => "UNAVAILABLE",
+            Self::LimitMicros(_) => "LIMIT_MICROS",
+        }
+    }
+
+    fn amount(self) -> String {
+        match self {
+            Self::Unavailable => String::new(),
+            Self::LimitMicros(value) => value.to_string(),
+        }
+    }
+
+    #[must_use]
+    pub const fn limit_micros(self) -> Option<u64> {
+        match self {
+            Self::Unavailable => None,
+            Self::LimitMicros(value) => Some(value),
+        }
+    }
+}
+
+/// Immutable server-owned capacity, retry, time, token, model-call, cost, and
+/// deadline limits bound into each managed-worker packet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerBudget {
+    global_active_limit: u8,
+    per_task_active_limit: u8,
+    repair_retry_limit: u8,
+    max_duration_seconds: u64,
+    max_total_tokens: u64,
+    max_model_calls: u32,
+    external_cost: ExternalCostBudget,
+    deadline_at: String,
+    digest: String,
+}
+
+impl WorkerBudget {
+    /// Constructs a closed budget that cannot exceed product capacity or the
+    /// two-repair limit.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero resource bounds, excessive capacity/retries, and a
+    /// non-canonical UTC deadline.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        global_active_limit: u8,
+        per_task_active_limit: u8,
+        repair_retry_limit: u8,
+        max_duration_seconds: u64,
+        max_total_tokens: u64,
+        max_model_calls: u32,
+        external_cost: ExternalCostBudget,
+        deadline_at: impl Into<String>,
+    ) -> Result<Self, WorkerAttemptError> {
+        if !(1..=MAX_GLOBAL_ACTIVE_ATTEMPTS).contains(&global_active_limit)
+            || !(1..=global_active_limit).contains(&per_task_active_limit)
+            || repair_retry_limit > MAX_REPAIR_RETRIES
+            || max_duration_seconds == 0
+            || max_total_tokens == 0
+            || max_model_calls == 0
+        {
+            return Err(WorkerAttemptError::InvalidBudget);
+        }
+        let deadline_at = attempt_timestamp(deadline_at.into())?;
+        let value = CanonicalValue::Object(vec![
+            text_canonical("global_active_limit", &global_active_limit),
+            text_canonical("per_task_active_limit", &per_task_active_limit),
+            text_canonical("repair_retry_limit", &repair_retry_limit),
+            text_canonical("max_duration_seconds", &max_duration_seconds),
+            text_canonical("max_total_tokens", &max_total_tokens),
+            text_canonical("max_model_calls", &max_model_calls),
+            (
+                "external_cost_status".to_owned(),
+                CanonicalValue::String(external_cost.status().to_owned()),
+            ),
+            (
+                "external_cost_micros".to_owned(),
+                CanonicalValue::String(external_cost.amount()),
+            ),
+            (
+                "deadline_at".to_owned(),
+                CanonicalValue::String(deadline_at.clone()),
+            ),
+        ]);
+        let digest = canonical_digest_pointer(
+            WORKER_BUDGET_SCHEMA,
+            WORKER_BUDGET_VERSION,
+            "budget",
+            &value,
+        )?;
+        Ok(Self {
+            global_active_limit,
+            per_task_active_limit,
+            repair_retry_limit,
+            max_duration_seconds,
+            max_total_tokens,
+            max_model_calls,
+            external_cost,
+            deadline_at,
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn global_active_limit(&self) -> u8 {
+        self.global_active_limit
+    }
+
+    #[must_use]
+    pub const fn per_task_active_limit(&self) -> u8 {
+        self.per_task_active_limit
+    }
+
+    #[must_use]
+    pub const fn repair_retry_limit(&self) -> u8 {
+        self.repair_retry_limit
+    }
+
+    #[must_use]
+    pub const fn max_attempts(&self) -> u8 {
+        self.repair_retry_limit + 1
+    }
+
+    #[must_use]
+    pub const fn max_duration_seconds(&self) -> u64 {
+        self.max_duration_seconds
+    }
+
+    #[must_use]
+    pub const fn max_total_tokens(&self) -> u64 {
+        self.max_total_tokens
+    }
+
+    #[must_use]
+    pub const fn max_model_calls(&self) -> u32 {
+        self.max_model_calls
+    }
+
+    #[must_use]
+    pub const fn external_cost(&self) -> ExternalCostBudget {
+        self.external_cost
+    }
+
+    #[must_use]
+    pub fn deadline_at(&self) -> &str {
+        &self.deadline_at
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    #[must_use]
+    pub const fn allows_attempt(&self, attempt: u8) -> bool {
+        attempt > 0 && attempt <= self.max_attempts()
+    }
+}
+
+/// A bounded continuation summary retained for a repair attempt. It is data,
+/// never a command or an authority grant.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContinuationSummary {
+    text: String,
+    digest: String,
+}
+
+impl ContinuationSummary {
+    /// # Errors
+    ///
+    /// Rejects empty, oversized, control-bearing, prompt-like, credential-like,
+    /// or unredacted credential-bearing URL text.
+    pub fn new(text: impl Into<String>) -> Result<Self, WorkerAttemptError> {
+        let text = text.into();
+        if text.is_empty()
+            || text.len() > MAX_CONTINUATION_BYTES
+            || text.trim() != text
+            || text.chars().any(char::is_control)
+        {
+            return Err(WorkerAttemptError::MalformedField);
+        }
+        if looks_worker_secret_like(&text) {
+            return Err(WorkerAttemptError::ForbiddenContent);
+        }
+        let digest = canonical_digest_pointer(
+            CONTINUATION_SCHEMA,
+            CONTINUATION_VERSION,
+            "continuation",
+            &CanonicalValue::String(text.clone()),
+        )?;
+        Ok(Self { text, digest })
+    }
+
+    #[must_use]
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// Immutable identity of one worker attempt. Resolved paths, prompts,
+/// commands and credentials are deliberately absent. The stable execution
+/// environment descriptor is digest-bound so retry/reconnect cannot cross an
+/// operating-system domain while retaining the same packet identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptPacketIdentity {
+    task_ref: String,
+    attempt: u8,
+    project_ref: String,
+    spec_ref: String,
+    approval_ref: String,
+    budget_digest: String,
+    global_active_limit: u8,
+    per_task_active_limit: u8,
+    repair_retry_limit: u8,
+    max_duration_seconds: u64,
+    max_total_tokens: u64,
+    max_model_calls: u32,
+    remaining_total_tokens: u64,
+    remaining_model_calls: u32,
+    external_cost: ExternalCostBudget,
+    verification_ref: String,
+    worktree_ref: String,
+    execution_environment_ref: String,
+    base_commit: String,
+    model_selection: ModelSelection,
+    deadline_at: String,
+    writer_fence: u64,
+    prior_terminal_evidence_ref: Option<String>,
+    continuation: Option<ContinuationSummary>,
+    digest: String,
+}
+
+impl AttemptPacketIdentity {
+    /// Constructs one exact initial or repair-attempt identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed bindings, an attempt outside its immutable budget,
+    /// or a repair packet without prior terminal evidence and a bounded
+    /// continuation summary.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        task_ref: impl Into<String>,
+        attempt: u8,
+        project_ref: &str,
+        spec_ref: &str,
+        approval_ref: &str,
+        budget: &WorkerBudget,
+        verification_ref: &str,
+        worktree_ref: &str,
+        base_commit: impl Into<String>,
+        model_selection: ModelSelection,
+        writer_fence: u64,
+        prior_terminal_evidence_ref: Option<&str>,
+        continuation: Option<ContinuationSummary>,
+    ) -> Result<Self, WorkerAttemptError> {
+        if !budget.allows_attempt(attempt) || writer_fence == 0 {
+            return Err(WorkerAttemptError::InvalidAttempt);
+        }
+        match (attempt, prior_terminal_evidence_ref, continuation.as_ref()) {
+            (1, None, None) | (2.., Some(_), Some(_)) => {}
+            _ => return Err(WorkerAttemptError::InvalidAttempt),
+        }
+        let task_ref = attempt_identifier(task_ref.into())?;
+        let project_ref = attempt_digest_pointer(project_ref, "project")?;
+        let spec_ref = attempt_digest_pointer(spec_ref, "spec")?;
+        let approval_ref = attempt_digest_pointer(approval_ref, "approval")?;
+        let verification_ref = attempt_digest_pointer(verification_ref, "verification")?;
+        let worktree_ref = attempt_digest_pointer(worktree_ref, "worktree")?;
+        let prior_terminal_evidence_ref = prior_terminal_evidence_ref
+            .map(|value| attempt_digest_pointer(value, "evidence"))
+            .transpose()?;
+        let base_commit = base_commit.into();
+        if !is_lower_hex(&base_commit, 40) {
+            return Err(WorkerAttemptError::MalformedField);
+        }
+        let budget_digest = budget.digest().to_owned();
+        let deadline_at = budget.deadline_at().to_owned();
+        let mut packet = Self {
+            task_ref,
+            attempt,
+            project_ref,
+            spec_ref,
+            approval_ref,
+            budget_digest,
+            global_active_limit: budget.global_active_limit(),
+            per_task_active_limit: budget.per_task_active_limit(),
+            repair_retry_limit: budget.repair_retry_limit(),
+            max_duration_seconds: budget.max_duration_seconds(),
+            max_total_tokens: budget.max_total_tokens(),
+            max_model_calls: budget.max_model_calls(),
+            remaining_total_tokens: budget.max_total_tokens(),
+            remaining_model_calls: budget.max_model_calls(),
+            external_cost: budget.external_cost(),
+            verification_ref,
+            worktree_ref,
+            execution_environment_ref: NATIVE_WINDOWS_EXECUTION_ENVIRONMENT_REF.to_owned(),
+            base_commit,
+            model_selection,
+            deadline_at,
+            writer_fence,
+            prior_terminal_evidence_ref,
+            continuation,
+            digest: String::new(),
+        };
+        packet.digest = canonical_digest_pointer(
+            ATTEMPT_PACKET_SCHEMA,
+            ATTEMPT_PACKET_VERSION,
+            "attempt-packet",
+            &packet.canonical_value(),
+        )?;
+        Ok(packet)
+    }
+
+    fn canonical_value(&self) -> CanonicalValue {
+        CanonicalValue::Object(vec![
+            (
+                "task_ref".to_owned(),
+                CanonicalValue::String(self.task_ref.clone()),
+            ),
+            text_canonical("attempt", &self.attempt),
+            (
+                "project_ref".to_owned(),
+                CanonicalValue::String(self.project_ref.clone()),
+            ),
+            (
+                "spec_ref".to_owned(),
+                CanonicalValue::String(self.spec_ref.clone()),
+            ),
+            (
+                "approval_ref".to_owned(),
+                CanonicalValue::String(self.approval_ref.clone()),
+            ),
+            (
+                "budget_digest".to_owned(),
+                CanonicalValue::String(self.budget_digest.clone()),
+            ),
+            text_canonical("global_active_limit", &self.global_active_limit),
+            text_canonical("per_task_active_limit", &self.per_task_active_limit),
+            text_canonical("repair_retry_limit", &self.repair_retry_limit),
+            text_canonical("max_duration_seconds", &self.max_duration_seconds),
+            text_canonical("max_total_tokens", &self.max_total_tokens),
+            text_canonical("max_model_calls", &self.max_model_calls),
+            text_canonical("remaining_total_tokens", &self.remaining_total_tokens),
+            text_canonical("remaining_model_calls", &self.remaining_model_calls),
+            (
+                "external_cost_status".to_owned(),
+                CanonicalValue::String(self.external_cost.status().to_owned()),
+            ),
+            (
+                "external_cost_micros".to_owned(),
+                CanonicalValue::String(self.external_cost.amount()),
+            ),
+            (
+                "non_model_external_spend_allowed".to_owned(),
+                CanonicalValue::Bool(false),
+            ),
+            (
+                "verification_ref".to_owned(),
+                CanonicalValue::String(self.verification_ref.clone()),
+            ),
+            (
+                "worktree_ref".to_owned(),
+                CanonicalValue::String(self.worktree_ref.clone()),
+            ),
+            (
+                "execution_environment_ref".to_owned(),
+                CanonicalValue::String(self.execution_environment_ref.clone()),
+            ),
+            (
+                "base_commit".to_owned(),
+                CanonicalValue::String(self.base_commit.clone()),
+            ),
+            (
+                "model_selection_digest".to_owned(),
+                CanonicalValue::String(self.model_selection.digest().to_owned()),
+            ),
+            (
+                "deadline_at".to_owned(),
+                CanonicalValue::String(self.deadline_at.clone()),
+            ),
+            text_canonical("writer_fence", &self.writer_fence),
+            (
+                "prior_terminal_evidence_ref".to_owned(),
+                CanonicalValue::String(
+                    self.prior_terminal_evidence_ref.clone().unwrap_or_default(),
+                ),
+            ),
+            (
+                "continuation_digest".to_owned(),
+                CanonicalValue::String(
+                    self.continuation
+                        .as_ref()
+                        .map_or_else(String::new, |value| value.digest().to_owned()),
+                ),
+            ),
+        ])
+    }
+
+    #[must_use]
+    pub const fn schema(&self) -> &'static str {
+        "lattice.foreman-attempt-packet/1.0"
+    }
+
+    #[must_use]
+    pub fn task_ref(&self) -> &str {
+        &self.task_ref
+    }
+
+    #[must_use]
+    pub const fn attempt(&self) -> u8 {
+        self.attempt
+    }
+
+    #[must_use]
+    pub fn project_ref(&self) -> &str {
+        &self.project_ref
+    }
+
+    #[must_use]
+    pub fn spec_ref(&self) -> &str {
+        &self.spec_ref
+    }
+
+    #[must_use]
+    pub fn approval_ref(&self) -> &str {
+        &self.approval_ref
+    }
+
+    #[must_use]
+    pub fn budget_digest(&self) -> &str {
+        &self.budget_digest
+    }
+
+    #[must_use]
+    pub const fn global_active_limit(&self) -> u8 {
+        self.global_active_limit
+    }
+
+    #[must_use]
+    pub const fn per_task_active_limit(&self) -> u8 {
+        self.per_task_active_limit
+    }
+
+    #[must_use]
+    pub const fn repair_retry_limit(&self) -> u8 {
+        self.repair_retry_limit
+    }
+
+    #[must_use]
+    pub const fn max_duration_seconds(&self) -> u64 {
+        self.max_duration_seconds
+    }
+
+    #[must_use]
+    pub const fn max_total_tokens(&self) -> u64 {
+        self.max_total_tokens
+    }
+
+    #[must_use]
+    pub const fn max_model_calls(&self) -> u32 {
+        self.max_model_calls
+    }
+
+    #[must_use]
+    pub const fn remaining_total_tokens(&self) -> u64 {
+        self.remaining_total_tokens
+    }
+
+    #[must_use]
+    pub const fn remaining_model_calls(&self) -> u32 {
+        self.remaining_model_calls
+    }
+
+    /// Narrows this exact attempt to the replay-derived cumulative budget
+    /// remaining before its first model call and rebinds the packet digest.
+    ///
+    /// # Errors
+    ///
+    /// Rejects zero or expanding limits.
+    pub fn with_remaining_budget(
+        mut self,
+        remaining_total_tokens: u64,
+        remaining_model_calls: u32,
+    ) -> Result<Self, WorkerAttemptError> {
+        if remaining_total_tokens == 0
+            || remaining_total_tokens > self.max_total_tokens
+            || remaining_model_calls == 0
+            || remaining_model_calls > self.max_model_calls
+        {
+            return Err(WorkerAttemptError::InvalidBudget);
+        }
+        self.remaining_total_tokens = remaining_total_tokens;
+        self.remaining_model_calls = remaining_model_calls;
+        self.digest = canonical_digest_pointer(
+            ATTEMPT_PACKET_SCHEMA,
+            ATTEMPT_PACKET_VERSION,
+            "attempt-packet",
+            &self.canonical_value(),
+        )?;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub const fn external_cost(&self) -> ExternalCostBudget {
+        self.external_cost
+    }
+
+    #[must_use]
+    pub const fn non_model_external_spend_allowed(&self) -> bool {
+        false
+    }
+
+    #[must_use]
+    pub fn verification_ref(&self) -> &str {
+        &self.verification_ref
+    }
+
+    #[must_use]
+    pub fn worktree_ref(&self) -> &str {
+        &self.worktree_ref
+    }
+
+    #[must_use]
+    pub fn execution_environment_ref(&self) -> &str {
+        &self.execution_environment_ref
+    }
+
+    /// Reports whether this packet uses the legacy process-owned native
+    /// Windows domain rather than a durable external execution descriptor.
+    #[must_use]
+    pub fn is_native_windows_execution_environment(&self) -> bool {
+        self.execution_environment_ref == NATIVE_WINDOWS_EXECUTION_ENVIRONMENT_REF
+    }
+
+    /// Rebinds this immutable packet to one verified execution-environment
+    /// descriptor before claim/provider effects.
+    ///
+    /// # Errors
+    ///
+    /// Rejects anything other than an exact secret-free environment digest.
+    pub fn with_execution_environment_ref(
+        mut self,
+        execution_environment_ref: &str,
+    ) -> Result<Self, WorkerAttemptError> {
+        self.execution_environment_ref =
+            attempt_digest_pointer(execution_environment_ref, "execution-environment")?;
+        self.digest = canonical_digest_pointer(
+            ATTEMPT_PACKET_SCHEMA,
+            ATTEMPT_PACKET_VERSION,
+            "attempt-packet",
+            &self.canonical_value(),
+        )?;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn base_commit(&self) -> &str {
+        &self.base_commit
+    }
+
+    #[must_use]
+    pub const fn model_selection(&self) -> &ModelSelection {
+        &self.model_selection
+    }
+
+    #[must_use]
+    pub const fn writer_fence(&self) -> u64 {
+        self.writer_fence
+    }
+
+    #[must_use]
+    pub fn deadline_at(&self) -> &str {
+        &self.deadline_at
+    }
+
+    #[must_use]
+    pub fn prior_terminal_evidence_ref(&self) -> Option<&str> {
+        self.prior_terminal_evidence_ref.as_deref()
+    }
+
+    #[must_use]
+    pub const fn continuation(&self) -> Option<&ContinuationSummary> {
+        self.continuation.as_ref()
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Checks the immutable lineage plus exact next attempt and strictly newer
+    /// Writer fence. A repair may select a different allowed model and base
+    /// commit, but cannot change task/spec/approval/budget/profile/worktree.
+    ///
+    /// # Errors
+    ///
+    /// Rejects every lineage substitution or non-incrementing attempt/fence.
+    pub fn validate_repair_successor(
+        &self,
+        previous: &WorkerAttemptState,
+    ) -> Result<(), WorkerAttemptError> {
+        let previous_packet = previous.packet();
+        if previous.phase() != WorkerAttemptPhase::Terminal
+            || previous.terminal_evidence_ref() != self.prior_terminal_evidence_ref()
+            || previous_packet.attempt.checked_add(1) != Some(self.attempt)
+            || self.writer_fence <= previous_packet.writer_fence
+            || self.task_ref != previous_packet.task_ref
+            || self.project_ref != previous_packet.project_ref
+            || self.spec_ref != previous_packet.spec_ref
+            || self.approval_ref != previous_packet.approval_ref
+            || self.budget_digest != previous_packet.budget_digest
+            || self.verification_ref != previous_packet.verification_ref
+            || self.worktree_ref != previous_packet.worktree_ref
+            || self.execution_environment_ref != previous_packet.execution_environment_ref
+            || self.prior_terminal_evidence_ref.is_none()
+            || self.continuation.is_none()
+            || (self.model_selection.reason() == ModelReason::TerraInsufficient
+                && (previous_packet.model_selection().model() != WorkerModel::Terra
+                    || self.model_selection.evidence_ref() != self.prior_terminal_evidence_ref()))
+        {
+            return Err(WorkerAttemptError::InvalidAttempt);
+        }
+        Ok(())
+    }
+
+    /// Checks a repair successor whose predecessor ended before an exact
+    /// provider terminal and was instead closed by a durable exact no-effect
+    /// reconciliation proof. The proof reference is persisted separately from
+    /// the immutable original blocker and becomes the repair evidence anchor.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed or substituted closure proof, lineage drift,
+    /// non-consecutive attempt, stale Writer fence, or missing continuation.
+    pub fn validate_closed_prestart_repair_successor(
+        &self,
+        previous: &Self,
+        closure_proof_evidence_ref: &str,
+    ) -> Result<(), WorkerAttemptError> {
+        let proof = attempt_digest_pointer(closure_proof_evidence_ref, "evidence")?;
+        if self.prior_terminal_evidence_ref.as_deref() != Some(proof.as_str())
+            || previous.attempt.checked_add(1) != Some(self.attempt)
+            || self.writer_fence <= previous.writer_fence
+            || self.task_ref != previous.task_ref
+            || self.project_ref != previous.project_ref
+            || self.spec_ref != previous.spec_ref
+            || self.approval_ref != previous.approval_ref
+            || self.budget_digest != previous.budget_digest
+            || self.verification_ref != previous.verification_ref
+            || self.worktree_ref != previous.worktree_ref
+            || self.execution_environment_ref != previous.execution_environment_ref
+            || self.continuation.is_none()
+            || (self.model_selection.reason() == ModelReason::TerraInsufficient
+                && (previous.model_selection().model() != WorkerModel::Terra
+                    || self.model_selection.evidence_ref() != self.prior_terminal_evidence_ref()))
+        {
+            return Err(WorkerAttemptError::InvalidAttempt);
+        }
+        Ok(())
+    }
+}
+
+/// Lifecycle phase of one Task-Ledger-owned worker-attempt child record. This
+/// is not a second Task Domain state machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerAttemptPhase {
+    Claimed,
+    Dispatching,
+    Accepted,
+    Starting,
+    Executing,
+    Reconciling,
+    Interrupting,
+    Terminal,
+}
+
+impl WorkerAttemptPhase {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "CLAIMED",
+            Self::Dispatching => "DISPATCHING",
+            Self::Accepted => "ACCEPTED",
+            Self::Starting => "STARTING",
+            Self::Executing => "EXECUTING",
+            Self::Reconciling => "RECONCILING",
+            Self::Interrupting => "INTERRUPTING",
+            Self::Terminal => "TERMINAL",
+        }
+    }
+}
+
+/// Exact App Server terminal observation. Completion remains only a candidate
+/// for independent verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkerTerminal {
+    Completed,
+    Interrupted,
+    Failed,
+}
+
+impl WorkerTerminal {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "COMPLETED",
+            Self::Interrupted => "INTERRUPTED",
+            Self::Failed => "FAILED",
+        }
+    }
+}
+
+/// Status carried by a `turn/started` observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnStartedStatus {
+    InProgress,
+    NotInProgress,
+}
+
+/// Closed exact-start observations. RPC acceptance never implies execution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StartObservation {
+    ThreadStartAccepted {
+        thread_id: String,
+    },
+    ThreadStarted {
+        thread_id: String,
+    },
+    TurnStartAccepted {
+        thread_id: String,
+        turn_id: String,
+    },
+    TurnStarted {
+        thread_id: String,
+        turn_id: String,
+        status: TurnStartedStatus,
+        observed_at: String,
+    },
+}
+
+/// Result of applying one exact-start observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartGateDecision {
+    Applied(WorkerAttemptPhase),
+    Ignored,
+}
+
+/// Pure retained state for one exact worker attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerAttemptState {
+    packet: AttemptPacketIdentity,
+    phase: WorkerAttemptPhase,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    attempt_started_at: Option<String>,
+    attempt_deadline_at: Option<String>,
+    terminal: Option<WorkerTerminal>,
+    terminal_evidence_ref: Option<String>,
+    digest: String,
+}
+
+impl WorkerAttemptState {
+    /// Creates one claimed but not yet dispatched attempt.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if its canonical state digest cannot be constructed.
+    pub fn new(packet: AttemptPacketIdentity) -> Result<Self, WorkerAttemptError> {
+        let mut state = Self {
+            packet,
+            phase: WorkerAttemptPhase::Claimed,
+            thread_id: None,
+            turn_id: None,
+            attempt_started_at: None,
+            attempt_deadline_at: None,
+            terminal: None,
+            terminal_evidence_ref: None,
+            digest: String::new(),
+        };
+        state.refresh_digest()?;
+        Ok(state)
+    }
+
+    #[must_use]
+    pub const fn packet(&self) -> &AttemptPacketIdentity {
+        &self.packet
+    }
+
+    #[must_use]
+    pub const fn phase(&self) -> WorkerAttemptPhase {
+        self.phase
+    }
+
+    #[must_use]
+    pub fn thread_id(&self) -> Option<&str> {
+        self.thread_id.as_deref()
+    }
+
+    #[must_use]
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    /// Returns the exact provider-observed `turn/started` time, if execution
+    /// was durably established.
+    #[must_use]
+    pub fn attempt_started_at(&self) -> Option<&str> {
+        self.attempt_started_at.as_deref()
+    }
+
+    /// Returns the immutable execution deadline bounded by both exact start
+    /// plus the packet's maximum duration and the task-level budget deadline.
+    #[must_use]
+    pub fn attempt_deadline_at(&self) -> Option<&str> {
+        self.attempt_deadline_at.as_deref()
+    }
+
+    #[must_use]
+    pub const fn terminal(&self) -> Option<WorkerTerminal> {
+        self.terminal
+    }
+
+    #[must_use]
+    pub fn terminal_evidence_ref(&self) -> Option<&str> {
+        self.terminal_evidence_ref.as_deref()
+    }
+
+    /// True only after an exact matching in-progress `turn/started` and before
+    /// an exact terminal. Reconciliation/interrupt retain the same active turn.
+    #[must_use]
+    pub const fn is_real_running(&self) -> bool {
+        matches!(
+            self.phase,
+            WorkerAttemptPhase::Executing
+                | WorkerAttemptPhase::Reconciling
+                | WorkerAttemptPhase::Interrupting
+        )
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    /// Records the durable effect intent before a `thread/start` RPC may be
+    /// sent. A restart in this phase blocks as uncertain rather than opening a
+    /// duplicate thread.
+    ///
+    /// # Errors
+    ///
+    /// Rejects dispatch intent after an RPC result or lifecycle observation.
+    pub fn begin_dispatch(&mut self) -> Result<(), WorkerAttemptError> {
+        if !matches!(
+            self.phase,
+            WorkerAttemptPhase::Claimed | WorkerAttemptPhase::Dispatching
+        ) {
+            return Err(WorkerAttemptError::InvalidPhase);
+        }
+        self.phase = WorkerAttemptPhase::Dispatching;
+        self.refresh_digest()
+    }
+
+    /// Applies one exact-start observation without I/O.
+    ///
+    /// # Errors
+    ///
+    /// Rejects secret-bearing/malformed IDs or an impossible local phase.
+    pub fn apply_start(
+        &mut self,
+        observation: StartObservation,
+    ) -> Result<StartGateDecision, WorkerAttemptError> {
+        let decision = match observation {
+            StartObservation::ThreadStartAccepted { thread_id } => {
+                let thread_id = attempt_identifier(thread_id)?;
+                if self.phase == WorkerAttemptPhase::Dispatching {
+                    self.thread_id = Some(thread_id);
+                    self.phase = WorkerAttemptPhase::Accepted;
+                    StartGateDecision::Applied(self.phase)
+                } else if self.thread_id.as_deref() == Some(thread_id.as_str()) {
+                    StartGateDecision::Ignored
+                } else {
+                    return Err(WorkerAttemptError::InvalidPhase);
+                }
+            }
+            StartObservation::ThreadStarted { thread_id } => {
+                let thread_id = attempt_identifier(thread_id)?;
+                if self.thread_id.as_deref() != Some(thread_id.as_str()) {
+                    StartGateDecision::Ignored
+                } else if matches!(
+                    self.phase,
+                    WorkerAttemptPhase::Accepted | WorkerAttemptPhase::Starting
+                ) {
+                    self.phase = WorkerAttemptPhase::Starting;
+                    StartGateDecision::Applied(self.phase)
+                } else {
+                    StartGateDecision::Ignored
+                }
+            }
+            StartObservation::TurnStartAccepted { thread_id, turn_id } => {
+                let thread_id = attempt_identifier(thread_id)?;
+                let turn_id = attempt_identifier(turn_id)?;
+                if self.thread_id.as_deref() != Some(thread_id.as_str()) {
+                    StartGateDecision::Ignored
+                } else if matches!(
+                    self.phase,
+                    WorkerAttemptPhase::Accepted | WorkerAttemptPhase::Starting
+                ) && self
+                    .turn_id
+                    .as_deref()
+                    .is_none_or(|retained| retained == turn_id)
+                {
+                    self.turn_id = Some(turn_id);
+                    self.phase = WorkerAttemptPhase::Starting;
+                    StartGateDecision::Applied(self.phase)
+                } else {
+                    StartGateDecision::Ignored
+                }
+            }
+            StartObservation::TurnStarted {
+                thread_id,
+                turn_id,
+                status,
+                observed_at,
+            } => {
+                let thread_id = attempt_identifier(thread_id)?;
+                let turn_id = attempt_identifier(turn_id)?;
+                let observed_at = attempt_event_timestamp(observed_at)?;
+                let attempt_deadline_at = derive_attempt_deadline(
+                    &observed_at,
+                    self.packet.max_duration_seconds(),
+                    self.packet.deadline_at(),
+                )?;
+                if self.phase == WorkerAttemptPhase::Starting
+                    && status == TurnStartedStatus::InProgress
+                    && self.thread_id.as_deref() == Some(thread_id.as_str())
+                    && self.turn_id.as_deref() == Some(turn_id.as_str())
+                {
+                    self.attempt_started_at = Some(observed_at);
+                    self.attempt_deadline_at = Some(attempt_deadline_at);
+                    self.phase = WorkerAttemptPhase::Executing;
+                    StartGateDecision::Applied(self.phase)
+                } else {
+                    StartGateDecision::Ignored
+                }
+            }
+        };
+        if matches!(decision, StartGateDecision::Applied(_)) {
+            self.refresh_digest()?;
+        }
+        Ok(decision)
+    }
+
+    /// Marks reconciliation of the already retained exact turn.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a phase without a real exact active turn.
+    pub fn begin_reconciliation(&mut self) -> Result<(), WorkerAttemptError> {
+        if !self.is_real_running() || self.thread_id.is_none() || self.turn_id.is_none() {
+            return Err(WorkerAttemptError::InvalidPhase);
+        }
+        self.phase = WorkerAttemptPhase::Reconciling;
+        self.refresh_digest()
+    }
+
+    /// Marks an exact-turn interrupt only after reconciliation.
+    ///
+    /// # Errors
+    ///
+    /// Rejects interrupt-before-reconcile.
+    pub fn begin_interrupt(&mut self) -> Result<(), WorkerAttemptError> {
+        if self.phase != WorkerAttemptPhase::Reconciling {
+            return Err(WorkerAttemptError::InvalidPhase);
+        }
+        self.phase = WorkerAttemptPhase::Interrupting;
+        self.refresh_digest()
+    }
+
+    /// Records one exact terminal; it never marks the parent task complete.
+    ///
+    /// # Errors
+    ///
+    /// Rejects mismatched IDs, terminal-before-exact-start, or malformed
+    /// evidence.
+    pub fn record_terminal(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        terminal: WorkerTerminal,
+        evidence_ref: &str,
+    ) -> Result<(), WorkerAttemptError> {
+        let thread_id = attempt_identifier(thread_id.to_owned())?;
+        let turn_id = attempt_identifier(turn_id.to_owned())?;
+        if !self.is_real_running()
+            || self.thread_id.as_deref() != Some(thread_id.as_str())
+            || self.turn_id.as_deref() != Some(turn_id.as_str())
+        {
+            return Err(WorkerAttemptError::InvalidPhase);
+        }
+        self.terminal_evidence_ref = Some(attempt_digest_pointer(evidence_ref, "evidence")?);
+        self.terminal = Some(terminal);
+        self.phase = WorkerAttemptPhase::Terminal;
+        self.refresh_digest()
+    }
+
+    /// Records the sole terminal allowed before exact `turn/started`: a
+    /// recovered failed start for the already accepted exact thread/turn.
+    /// The attempt never becomes real-running and retains no start/deadline.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a non-starting phase, mismatched IDs, any prior exact start,
+    /// or malformed evidence.
+    pub fn record_prestart_terminal_failed(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        evidence_ref: &str,
+    ) -> Result<(), WorkerAttemptError> {
+        let thread_id = attempt_identifier(thread_id.to_owned())?;
+        let turn_id = attempt_identifier(turn_id.to_owned())?;
+        if self.phase != WorkerAttemptPhase::Starting
+            || self.attempt_started_at.is_some()
+            || self.attempt_deadline_at.is_some()
+            || self.thread_id.as_deref() != Some(thread_id.as_str())
+            || self.turn_id.as_deref() != Some(turn_id.as_str())
+        {
+            return Err(WorkerAttemptError::InvalidPhase);
+        }
+        self.terminal_evidence_ref = Some(attempt_digest_pointer(evidence_ref, "evidence")?);
+        self.terminal = Some(WorkerTerminal::Failed);
+        self.phase = WorkerAttemptPhase::Terminal;
+        self.refresh_digest()
+    }
+
+    fn refresh_digest(&mut self) -> Result<(), WorkerAttemptError> {
+        let value = CanonicalValue::Object(vec![
+            (
+                "packet_digest".to_owned(),
+                CanonicalValue::String(self.packet.digest().to_owned()),
+            ),
+            (
+                "phase".to_owned(),
+                CanonicalValue::String(self.phase.as_str().to_owned()),
+            ),
+            (
+                "thread_id".to_owned(),
+                CanonicalValue::String(self.thread_id.clone().unwrap_or_default()),
+            ),
+            (
+                "turn_id".to_owned(),
+                CanonicalValue::String(self.turn_id.clone().unwrap_or_default()),
+            ),
+            (
+                "attempt_started_at".to_owned(),
+                CanonicalValue::String(self.attempt_started_at.clone().unwrap_or_default()),
+            ),
+            (
+                "attempt_deadline_at".to_owned(),
+                CanonicalValue::String(self.attempt_deadline_at.clone().unwrap_or_default()),
+            ),
+            (
+                "terminal".to_owned(),
+                CanonicalValue::String(
+                    self.terminal
+                        .map_or_else(String::new, |value| value.as_str().to_owned()),
+                ),
+            ),
+            (
+                "terminal_evidence_ref".to_owned(),
+                CanonicalValue::String(self.terminal_evidence_ref.clone().unwrap_or_default()),
+            ),
+        ]);
+        self.digest = canonical_digest_pointer(
+            ATTEMPT_STATE_SCHEMA,
+            ATTEMPT_STATE_VERSION,
+            "attempt-state",
+            &value,
+        )?;
+        Ok(())
+    }
+}
+
+/// Closed inputs that may advance the meaningful-progress clock.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MeaningfulProgressKind {
+    ExactLifecycleNotification,
+    ProcessObservation,
+    TerminalObservation,
+    VerifiedWorkChange,
+    VerifiedEvidenceChange,
+}
+
+impl MeaningfulProgressKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::ExactLifecycleNotification => "EXACT_LIFECYCLE_NOTIFICATION",
+            Self::ProcessObservation => "PROCESS_OBSERVATION",
+            Self::TerminalObservation => "TERMINAL_OBSERVATION",
+            Self::VerifiedWorkChange => "VERIFIED_WORK_CHANGE",
+            Self::VerifiedEvidenceChange => "VERIFIED_EVIDENCE_CHANGE",
+        }
+    }
+}
+
+/// One bounded, digest-only meaningful-progress heartbeat.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MeaningfulProgress {
+    packet_digest: String,
+    kind: MeaningfulProgressKind,
+    occurred_at: String,
+    evidence_ref: String,
+    digest: String,
+}
+
+impl MeaningfulProgress {
+    /// # Errors
+    ///
+    /// Rejects malformed time/evidence; free-form heartbeat text is absent.
+    pub fn new(
+        state: &WorkerAttemptState,
+        kind: MeaningfulProgressKind,
+        occurred_at: impl Into<String>,
+        evidence_ref: &str,
+    ) -> Result<Self, WorkerAttemptError> {
+        let occurred_at = attempt_timestamp(occurred_at.into())?;
+        let evidence_ref = attempt_digest_pointer(evidence_ref, "evidence")?;
+        let packet_digest = state.packet().digest().to_owned();
+        let value = CanonicalValue::Object(vec![
+            (
+                "packet_digest".to_owned(),
+                CanonicalValue::String(packet_digest.clone()),
+            ),
+            (
+                "kind".to_owned(),
+                CanonicalValue::String(kind.as_str().to_owned()),
+            ),
+            (
+                "occurred_at".to_owned(),
+                CanonicalValue::String(occurred_at.clone()),
+            ),
+            (
+                "evidence_ref".to_owned(),
+                CanonicalValue::String(evidence_ref.clone()),
+            ),
+        ]);
+        let digest = canonical_digest_pointer(
+            MEANINGFUL_PROGRESS_SCHEMA,
+            MEANINGFUL_PROGRESS_VERSION,
+            "progress",
+            &value,
+        )?;
+        Ok(Self {
+            packet_digest,
+            kind,
+            occurred_at,
+            evidence_ref,
+            digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> MeaningfulProgressKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn occurred_at(&self) -> &str {
+        &self.occurred_at
+    }
+
+    #[must_use]
+    pub fn evidence_ref(&self) -> &str {
+        &self.evidence_ref
+    }
+
+    #[must_use]
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+/// Independently observed worker-process state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessObservation {
+    Unknown,
+    Alive,
+    Exited,
+}
+
+/// Exact active-turn observation supplied by the App Server connector. An
+/// unbound boolean cannot suppress or create a heartbeat stall.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TurnActivityObservation {
+    Unknown,
+    ExactInProgress { thread_id: String, turn_id: String },
+}
+
+/// Progress of the mandatory read/resume/reconcile-first action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReconciliationState {
+    NotAttempted,
+    Pending,
+    Recovered,
+    Exhausted,
+}
+
+/// Pure inputs for one watchdog classification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttemptWatchdogObservation {
+    now: String,
+    heartbeat_timeout_seconds: u64,
+    process: ProcessObservation,
+    turn_activity: TurnActivityObservation,
+    reconciliation: ReconciliationState,
+}
+
+impl AttemptWatchdogObservation {
+    /// # Errors
+    ///
+    /// Rejects zero/unrepresentable timeout and malformed current time.
+    pub fn new(
+        now: impl Into<String>,
+        heartbeat_timeout_seconds: u64,
+        process: ProcessObservation,
+        turn_activity: TurnActivityObservation,
+        reconciliation: ReconciliationState,
+    ) -> Result<Self, WorkerAttemptError> {
+        if heartbeat_timeout_seconds == 0 || heartbeat_timeout_seconds > i64::MAX as u64 {
+            return Err(WorkerAttemptError::InvalidBudget);
+        }
+        let turn_activity = match turn_activity {
+            TurnActivityObservation::Unknown => TurnActivityObservation::Unknown,
+            TurnActivityObservation::ExactInProgress { thread_id, turn_id } => {
+                TurnActivityObservation::ExactInProgress {
+                    thread_id: attempt_identifier(thread_id)?,
+                    turn_id: attempt_identifier(turn_id)?,
+                }
+            }
+        };
+        Ok(Self {
+            now: attempt_timestamp(now.into())?,
+            heartbeat_timeout_seconds,
+            process,
+            turn_activity,
+            reconciliation,
+        })
+    }
+}
+
+/// Complete, replayable stall reason allowlist.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StallReason {
+    HeartbeatTimeoutActiveTurn,
+    ProcessExitWithoutTerminal,
+    ReconciliationExhausted,
+    DeadlineExceeded,
+}
+
+/// Watchdog outcome. Repairable raw observations always require
+/// reconciliation before interruption or retry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StallClassification {
+    Healthy,
+    ReconcileFirst(StallReason),
+    Stalled(StallReason),
+}
+
+/// Classifies one worker without filesystem, process, database, or network I/O.
+/// Elapsed time is a heartbeat stall only for the retained exact active turn.
+///
+/// # Errors
+///
+/// Rejects substituted packet/budget identity and malformed time ordering.
+pub fn classify_attempt_stall(
+    state: &WorkerAttemptState,
+    budget: &WorkerBudget,
+    last_progress: &MeaningfulProgress,
+    observation: &AttemptWatchdogObservation,
+) -> Result<StallClassification, WorkerAttemptError> {
+    if state.packet().budget_digest() != budget.digest()
+        || last_progress.packet_digest != state.packet().digest()
+        || observation.heartbeat_timeout_seconds > budget.max_duration_seconds()
+    {
+        return Err(WorkerAttemptError::InvalidBudget);
+    }
+    let now = parse_attempt_time(&observation.now)?;
+    let progress_at = parse_attempt_time(last_progress.occurred_at())?;
+    if now < progress_at {
+        return Err(WorkerAttemptError::MalformedField);
+    }
+    let exact_turn_in_progress = match &observation.turn_activity {
+        TurnActivityObservation::Unknown => false,
+        TurnActivityObservation::ExactInProgress { thread_id, turn_id } => {
+            if state.thread_id() != Some(thread_id.as_str())
+                || state.turn_id() != Some(turn_id.as_str())
+            {
+                return Err(WorkerAttemptError::InvalidPhase);
+            }
+            true
+        }
+    };
+    if state.phase() == WorkerAttemptPhase::Terminal {
+        return Ok(StallClassification::Healthy);
+    }
+    if observation.reconciliation == ReconciliationState::Exhausted {
+        return Ok(StallClassification::Stalled(
+            StallReason::ReconciliationExhausted,
+        ));
+    }
+    if observation.process == ProcessObservation::Exited {
+        return Ok(StallClassification::ReconcileFirst(
+            StallReason::ProcessExitWithoutTerminal,
+        ));
+    }
+    if state.is_real_running() {
+        let deadline = state
+            .attempt_deadline_at()
+            .ok_or(WorkerAttemptError::InvalidPhase)
+            .and_then(parse_attempt_time)?;
+        if now >= deadline {
+            return Ok(StallClassification::ReconcileFirst(
+                StallReason::DeadlineExceeded,
+            ));
+        }
+    }
+    let elapsed_seconds = (now - progress_at).whole_seconds();
+    let heartbeat_timeout = i64::try_from(observation.heartbeat_timeout_seconds)
+        .map_err(|_| WorkerAttemptError::InvalidBudget)?;
+    if state.phase() == WorkerAttemptPhase::Executing
+        && exact_turn_in_progress
+        && observation.reconciliation == ReconciliationState::NotAttempted
+        && elapsed_seconds >= heartbeat_timeout
+    {
+        return Ok(StallClassification::ReconcileFirst(
+            StallReason::HeartbeatTimeoutActiveTurn,
+        ));
+    }
+    Ok(StallClassification::Healthy)
+}
+
+/// Fresh-process action for a retained worker attempt. Only an attempt that
+/// was durably claimed but never dispatched may start; all retained IDs are
+/// reconciled exactly before any later action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RestartDecision {
+    DispatchUnsentAttempt,
+    BlockUncertainDispatch,
+    ReadExactThread { thread_id: String },
+    ReadResumeExactTurn { thread_id: String, turn_id: String },
+    PreserveTerminal,
+}
+
+/// # Errors
+///
+/// Rejects a retained phase missing the exact IDs required by that phase.
+pub fn restart_reconciliation_decision(
+    state: &WorkerAttemptState,
+) -> Result<RestartDecision, WorkerAttemptError> {
+    Ok(match state.phase() {
+        WorkerAttemptPhase::Claimed => RestartDecision::DispatchUnsentAttempt,
+        WorkerAttemptPhase::Dispatching => RestartDecision::BlockUncertainDispatch,
+        WorkerAttemptPhase::Accepted | WorkerAttemptPhase::Starting => {
+            if let (Some(thread_id), Some(turn_id)) = (state.thread_id(), state.turn_id()) {
+                RestartDecision::ReadResumeExactTurn {
+                    thread_id: thread_id.to_owned(),
+                    turn_id: turn_id.to_owned(),
+                }
+            } else {
+                let thread_id = state.thread_id().ok_or(WorkerAttemptError::InvalidPhase)?;
+                RestartDecision::ReadExactThread {
+                    thread_id: thread_id.to_owned(),
+                }
+            }
+        }
+        WorkerAttemptPhase::Executing
+        | WorkerAttemptPhase::Reconciling
+        | WorkerAttemptPhase::Interrupting => {
+            let thread_id = state.thread_id().ok_or(WorkerAttemptError::InvalidPhase)?;
+            let turn_id = state.turn_id().ok_or(WorkerAttemptError::InvalidPhase)?;
+            RestartDecision::ReadResumeExactTurn {
+                thread_id: thread_id.to_owned(),
+                turn_id: turn_id.to_owned(),
+            }
+        }
+        WorkerAttemptPhase::Terminal => RestartDecision::PreserveTerminal,
+    })
+}
+
+/// Closed repair decision. A non-terminal attempt can only reconcile its exact
+/// turn; it can never consume retry budget yet.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetryDecision {
+    ReconcileExactTurn,
+    Retry { next_attempt: u8 },
+    BlockedNonRepairable,
+    BlockedRetryBudgetExhausted,
+}
+
+/// Applies the immutable repair budget after an exact terminal.
+///
+/// # Errors
+///
+/// Rejects a substituted budget digest.
+pub fn decide_repair_retry(
+    state: &WorkerAttemptState,
+    budget: &WorkerBudget,
+    repairable: bool,
+) -> Result<RetryDecision, WorkerAttemptError> {
+    if state.packet().budget_digest() != budget.digest() {
+        return Err(WorkerAttemptError::InvalidBudget);
+    }
+    if state.phase() != WorkerAttemptPhase::Terminal {
+        return Ok(RetryDecision::ReconcileExactTurn);
+    }
+    if !repairable {
+        return Ok(RetryDecision::BlockedNonRepairable);
+    }
+    let attempt = state.packet().attempt();
+    if attempt >= budget.max_attempts() {
+        return Ok(RetryDecision::BlockedRetryBudgetExhausted);
+    }
+    Ok(RetryDecision::Retry {
+        next_attempt: attempt + 1,
+    })
 }
 
 /// The explicit confidence of a non-authoritative epistemic record.
@@ -1278,6 +2990,108 @@ fn is_lower_hex(value: &str, expected_len: usize) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn attempt_digest_pointer(value: &str, prefix: &str) -> Result<String, WorkerAttemptError> {
+    let expected_prefix = format!("{prefix}:sha256:");
+    let Some(digest) = value.strip_prefix(&expected_prefix) else {
+        return Err(if looks_secret_like(value) {
+            WorkerAttemptError::ForbiddenContent
+        } else {
+            WorkerAttemptError::MalformedField
+        });
+    };
+    if !is_lower_hex(digest, 64) {
+        return Err(WorkerAttemptError::MalformedField);
+    }
+    Ok(value.to_owned())
+}
+
+fn canonical_digest_pointer(
+    schema: &str,
+    version: &str,
+    prefix: &str,
+    value: &CanonicalValue,
+) -> Result<String, WorkerAttemptError> {
+    let domain = HashDomain::new(schema, version).map_err(|_| WorkerAttemptError::DigestFailure)?;
+    let digest = canonical_sha256(&domain, value).map_err(|_| WorkerAttemptError::DigestFailure)?;
+    Ok(format!("{prefix}:sha256:{}", digest.to_hex()))
+}
+
+fn text_canonical(label: &str, value: &impl ToString) -> (String, CanonicalValue) {
+    (label.to_owned(), CanonicalValue::String(value.to_string()))
+}
+
+fn attempt_timestamp(value: String) -> Result<String, WorkerAttemptError> {
+    timestamp(value).map_err(|_| WorkerAttemptError::MalformedField)
+}
+
+fn parse_attempt_time(value: &str) -> Result<OffsetDateTime, WorkerAttemptError> {
+    OffsetDateTime::parse(value, &Rfc3339).map_err(|_| WorkerAttemptError::MalformedField)
+}
+
+fn attempt_event_timestamp(value: String) -> Result<String, WorkerAttemptError> {
+    let parsed = parse_attempt_time(&value)?;
+    let canonical = parsed
+        .format(&Rfc3339)
+        .map_err(|_| WorkerAttemptError::MalformedField)?;
+    if !value.ends_with('Z') || canonical != value {
+        return Err(WorkerAttemptError::MalformedField);
+    }
+    Ok(value)
+}
+
+fn derive_attempt_deadline(
+    started_at: &str,
+    max_duration_seconds: u64,
+    task_deadline_at: &str,
+) -> Result<String, WorkerAttemptError> {
+    let seconds =
+        i64::try_from(max_duration_seconds).map_err(|_| WorkerAttemptError::InvalidBudget)?;
+    let attempt_deadline = parse_attempt_time(started_at)?
+        .checked_add(time::Duration::seconds(seconds))
+        .ok_or(WorkerAttemptError::InvalidBudget)?;
+    let task_deadline = parse_attempt_time(task_deadline_at)?;
+    let deadline = attempt_deadline.min(task_deadline);
+    deadline
+        .format(&Rfc3339)
+        .map_err(|_| WorkerAttemptError::MalformedField)
+}
+
+fn attempt_identifier(value: String) -> Result<String, WorkerAttemptError> {
+    let mut bytes = value.bytes();
+    if !(3..=128).contains(&value.len())
+        || !bytes
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || !bytes
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(if looks_worker_secret_like(&value) {
+            WorkerAttemptError::ForbiddenContent
+        } else {
+            WorkerAttemptError::MalformedField
+        });
+    }
+    if looks_worker_secret_like(&value) {
+        return Err(WorkerAttemptError::ForbiddenContent);
+    }
+    Ok(value)
+}
+
+fn looks_worker_secret_like(value: &str) -> bool {
+    let lowercase = value.to_ascii_lowercase();
+    looks_secret_like(value)
+        || lowercase.starts_with("bearer-")
+        || lowercase.contains("authorization:")
+        || lowercase.contains("api_key")
+        || lowercase.contains("api-key")
+        || lowercase.contains("token=")
+        || lowercase.contains("client_secret")
+        || lowercase.contains("private key")
+        || lowercase.contains("full prompt")
+        || lowercase.contains("system prompt")
+        || (lowercase.contains("://") && lowercase.contains('@'))
 }
 
 fn looks_secret_like(value: &str) -> bool {

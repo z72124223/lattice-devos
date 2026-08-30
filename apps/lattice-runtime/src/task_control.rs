@@ -5,7 +5,7 @@ use std::time::Instant;
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
     ContentDigest, StoreAuthorityHead, SubjectBinding, TaskIngressPeerEvidence, TaskIntakeBinding,
-    TaskLedgerStreamIdentity, TaskLedgerSubjectKind, WriterLeaseAuthorityHead,
+    TaskLedgerStreamIdentity, TaskLedgerSubjectKind, TaskSpecSubmission, WriterLeaseAuthorityHead,
 };
 use lattice_orchestrator::{
     AutonomyDecision as OrchestratorAutonomyDecision, AutonomyDecisionReason,
@@ -38,10 +38,12 @@ use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_clie
 
 const CORRELATION_ID: &str = "task038-controlled-codex-canary";
 const GENERAL_TASK_CORRELATION_ID: &str = "general-task-intake-v1";
+const MANAGED_GENERAL_TASK_CORRELATION_ID: &str = "managed-general-task-v1";
 const TASK_SUBMIT_INGRESS_ID: &str = "lattice_task_submit.v1";
 #[cfg(test)]
 const TASK_CREATED_ACTION: &str = TaskCreatedProfile::AutonomyReceiptRequiredV1.action();
 const TASK_CREATED_REASON: &str = "TASK038_TASK_ACCEPTED";
+const MANAGED_TASK_CREATED_REASON: &str = "MANAGED_GENERAL_TASK_ACCEPTED";
 const TASK_CREATED_AUDIT_SCHEMA: &str = "lattice.task-created-ingress-audit.v1";
 const STATE_REASON: &str = "TASK038_STATE_TRANSITION";
 const RESULT_ACTION: &str = "TASK_RESULT";
@@ -73,6 +75,8 @@ pub enum TaskAdmissionProfile {
     ControlledCodexCanary,
     /// Create-only general-task admission bound to one verified envelope.
     GeneralTaskIntake(Box<TaskSubmissionEnvelope>),
+    /// Server-owned executable successor of one promoted general intake.
+    ManagedGeneralTask(Box<TaskSpecSubmission>),
 }
 
 impl TaskAdmissionProfile {
@@ -80,6 +84,7 @@ impl TaskAdmissionProfile {
         match self {
             Self::ControlledCodexCanary => CORRELATION_ID,
             Self::GeneralTaskIntake(_) => GENERAL_TASK_CORRELATION_ID,
+            Self::ManagedGeneralTask(_) => MANAGED_GENERAL_TASK_CORRELATION_ID,
         }
     }
 
@@ -92,6 +97,9 @@ impl TaskAdmissionProfile {
             ),
             Self::GeneralTaskIntake(_) => {
                 matches!(profile, TaskCreatedProfile::GeneralTaskIntakeV1)
+            }
+            Self::ManagedGeneralTask(_) => {
+                matches!(profile, TaskCreatedProfile::ManagedGeneralTaskV1)
             }
         }
     }
@@ -118,6 +126,21 @@ impl TaskPersistenceFoundation {
 }
 
 impl PostgresTaskLifecycle {
+    /// Extends only this already-connected adapter's aggregate lifecycle
+    /// window. The fixed connection's statement/lock timeouts remain those
+    /// selected at connect time, so one SQL operation cannot consume the
+    /// longer managed-worker execution window.
+    pub(crate) fn extend_aggregate_deadline(
+        &mut self,
+        deadline: Instant,
+    ) -> TaskLifecycleResult<()> {
+        ensure_before(deadline)?;
+        if deadline > self.deadline {
+            self.deadline = deadline;
+        }
+        Ok(())
+    }
+
     /// Opens a fresh fixed runtime connection and loads one replay-verified
     /// general-task envelope by its scoped idempotency key.
     ///
@@ -285,10 +308,20 @@ impl PostgresTaskLifecycle {
         ingress_peer: TaskIngressPeerEvidence,
         admission_profile: TaskAdmissionProfile,
     ) -> TaskLifecycleResult<Self> {
-        if let TaskAdmissionProfile::GeneralTaskIntake(submission) = &admission_profile
-            && submission.identity() != &identity
-        {
-            return Err(rejected("LATTICE_TASK_SUBMISSION_BINDING_REJECTED"));
+        match &admission_profile {
+            TaskAdmissionProfile::GeneralTaskIntake(submission)
+                if submission.identity() != &identity =>
+            {
+                return Err(rejected("LATTICE_TASK_SUBMISSION_BINDING_REJECTED"));
+            }
+            TaskAdmissionProfile::ManagedGeneralTask(submission)
+                if !managed_submission_matches_identity(submission, &identity) =>
+            {
+                return Err(rejected("LATTICE_TASK_SUBMISSION_BINDING_REJECTED"));
+            }
+            TaskAdmissionProfile::ControlledCodexCanary
+            | TaskAdmissionProfile::GeneralTaskIntake(_)
+            | TaskAdmissionProfile::ManagedGeneralTask(_) => {}
         }
         Self::connect_inner(
             database,
@@ -336,6 +369,7 @@ impl PostgresTaskLifecycle {
         if matches!(
             self.admission_profile,
             TaskAdmissionProfile::ControlledCodexCanary
+                | TaskAdmissionProfile::ManagedGeneralTask(_)
         ) && self.identity.subject_kind() == TaskLedgerSubjectKind::TaskSpec
         {
             Ok(())
@@ -353,7 +387,8 @@ impl PostgresTaskLifecycle {
                 Ok(submission.as_ref().clone())
             }
             TaskAdmissionProfile::ControlledCodexCanary
-            | TaskAdmissionProfile::GeneralTaskIntake(_) => {
+            | TaskAdmissionProfile::GeneralTaskIntake(_)
+            | TaskAdmissionProfile::ManagedGeneralTask(_) => {
                 Err(rejected("LATTICE_TASK_INTAKE_LIFECYCLE_REQUIRED"))
             }
         }
@@ -432,6 +467,37 @@ impl PostgresTaskLifecycle {
             database_identity_digest: loaded.persistence().database_identity_digest().clone(),
             global_manifest_digest: loaded.persistence().manifest_digest().clone(),
         })
+    }
+
+    /// Replays the controlled lifecycle and derives its writer persistence
+    /// foundation from the same owner-verified Ledger load. Status callers use
+    /// this to avoid opening or replaying a second PostgreSQL lifecycle merely
+    /// to construct the read-only writer projection.
+    pub(crate) fn load_with_persistence_foundation(
+        &mut self,
+        binding: &SubjectBinding,
+    ) -> TaskLifecycleResult<(TaskLifecycleEvidence, TaskPersistenceFoundation)> {
+        let ingress_peer = self.required_ingress_peer()?;
+        self.ensure_controlled_profile()?;
+        ensure_binding(binding, &self.identity)?;
+        ensure_before(self.deadline)?;
+        let loaded = self
+            .ledger
+            .load_stream(self.identity.clone())
+            .map_err(map_store_error)?;
+        ensure_before(self.deadline)?;
+        let foundation = TaskPersistenceFoundation {
+            database_identity_digest: loaded.persistence().database_identity_digest().clone(),
+            global_manifest_digest: loaded.persistence().manifest_digest().clone(),
+        };
+        let lifecycle = replay_lifecycle_with_autonomy_for_profile(
+            loaded.stream(),
+            binding,
+            &ingress_peer,
+            loaded.autonomy_state(),
+            &self.admission_profile,
+        )?;
+        Ok((lifecycle, foundation))
     }
 
     /// Returns the exact durable `TaskCreated` command after replay validation.
@@ -534,6 +600,20 @@ impl PostgresTaskLifecycle {
                     return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
                 }
                 Ok(execution.ledger_execution().is_exact_retry())
+            }
+            TaskAdmissionProfile::ManagedGeneralTask(_) => {
+                ensure_before(self.deadline)?;
+                let execution = self
+                    .ledger
+                    .execute(command, self.authority.clone())
+                    .map_err(map_store_error)?;
+                ensure_after_mutation(self.deadline)?;
+                if execution.receipt().outcome() != &CommandOutcome::Appended
+                    && !execution.is_exact_retry()
+                {
+                    return Err(rejected("LATTICE_TASK_LEDGER_APPEND_REJECTED"));
+                }
+                Ok(execution.is_exact_retry())
             }
         }
     }
@@ -1153,6 +1233,17 @@ fn transition_writer_policy(
     match (from, to) {
         (TaskState::Preparing, TaskState::Executing)
         | (TaskState::Executing, TaskState::Verifying | TaskState::Stopping)
+        | (
+            TaskState::Preparing
+            | TaskState::Executing
+            | TaskState::Verifying
+            | TaskState::Reviewing,
+            TaskState::Blocked | TaskState::Failed,
+        )
+        | (
+            TaskState::Executing | TaskState::Verifying | TaskState::Reviewing,
+            TaskState::Preparing,
+        )
         | (TaskState::Verifying, TaskState::Reviewing)
         | (TaskState::Reviewing, TaskState::AwaitingMergeApproval)
         | (TaskState::AwaitingMergeApproval, TaskState::Merging) => {
@@ -1300,6 +1391,14 @@ fn replay_lifecycle_state_inner(
                     TaskAdmissionProfile::GeneralTaskIntake(_) => {
                         return Err(rejected("LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED"));
                     }
+                    TaskAdmissionProfile::ManagedGeneralTask(submission) => {
+                        if event.reason_code().as_str() != MANAGED_TASK_CREATED_REASON
+                            || event.diagnostic().is_some()
+                            || event.subject_digest() != submission.binding().task_spec_digest()
+                        {
+                            return Err(corrupt("LATTICE_TASK_CREATED_EVIDENCE_REJECTED"));
+                        }
+                    }
                 }
                 created = true;
                 profile = event_profile;
@@ -1367,10 +1466,15 @@ fn pending_required_admission_for_profile(
         replay_lifecycle_state_for_profile(stream, binding, ingress_peer, admission_profile)?;
     if !replayed.created
         || !matches!(
-            admission_profile,
-            TaskAdmissionProfile::ControlledCodexCanary
+            (admission_profile, replayed.profile),
+            (
+                TaskAdmissionProfile::ControlledCodexCanary,
+                Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
+            ) | (
+                TaskAdmissionProfile::ManagedGeneralTask(_),
+                Some(TaskCreatedProfile::ManagedGeneralTaskV1)
+            )
         )
-        || replayed.profile != Some(TaskCreatedProfile::AutonomyReceiptRequiredV1)
         || replayed.state != TaskState::Draft
         || replayed.result_digest.is_some()
         || stream.events().len() != 1
@@ -1432,8 +1536,35 @@ fn task_created_command_for_profile(
         TaskAdmissionProfile::GeneralTaskIntake(_) => {
             return Err(rejected("LATTICE_TASK_SPEC_LIFECYCLE_REQUIRED"));
         }
+        TaskAdmissionProfile::ManagedGeneralTask(submission) => {
+            if submission.binding() != binding {
+                return Err(rejected("LATTICE_TASK_SUBMISSION_BINDING_REJECTED"));
+            }
+            AppendCommand::new_managed_general_task_created(
+                head,
+                command_id,
+                correlation_id,
+                "2000-01-01T00:00:00Z",
+                actor_id,
+                ReasonCode::new(MANAGED_TASK_CREATED_REASON)
+                    .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))?,
+            )
+        }
     }
     .map_err(|_| corrupt("LATTICE_TASK_COMMAND_REJECTED"))
+}
+
+fn managed_submission_matches_identity(
+    submission: &TaskSpecSubmission,
+    identity: &TaskLedgerStreamIdentity,
+) -> bool {
+    let binding = submission.binding();
+    identity.subject_kind() == TaskLedgerSubjectKind::TaskSpec
+        && binding.project_id() == identity.project_id()
+        && binding.project_snapshot_id() == identity.project_snapshot_id()
+        && binding.task_id() == identity.task_id()
+        && binding.task_revision() == identity.task_revision()
+        && Some(binding.task_spec_digest()) == identity.task_spec_digest()
 }
 
 fn task_created_subject_digest(
@@ -2186,7 +2317,6 @@ mod tests {
 
         for (from, to) in [
             (TaskState::Draft, TaskState::Cancelled),
-            (TaskState::Executing, TaskState::Failed),
             (TaskState::Merging, TaskState::Stopping),
         ] {
             transition(from, to).expect("edge remains legal in Task Domain");
@@ -2197,6 +2327,26 @@ mod tests {
                 error.code(),
                 "LATTICE_TASK_STATE_TRANSITION_PROFILE_REJECTED"
             );
+        }
+    }
+
+    #[test]
+    fn managed_active_failure_edges_require_the_current_writer_fence() {
+        for from in [
+            TaskState::Preparing,
+            TaskState::Executing,
+            TaskState::Verifying,
+            TaskState::Reviewing,
+        ] {
+            for to in [TaskState::Blocked, TaskState::Failed] {
+                assert_eq!(
+                    transition_writer_policy(from, to).expect("managed closed edge"),
+                    TransitionWriterPolicy::Fenced
+                );
+                assert!(enforce_transition_writer_policy(from, to, false).is_err());
+                enforce_transition_writer_policy(from, to, true)
+                    .expect("current writer fences managed closed edge");
+            }
         }
     }
 
@@ -2221,6 +2371,15 @@ mod tests {
             "TWD",
         )
         .unwrap()
+    }
+
+    fn managed_submission(binding: &SubjectBinding) -> TaskSpecSubmission {
+        TaskSpecSubmission::new(
+            binding.clone(),
+            br#"{"schema":"managed-general-task-test"}"#.to_vec(),
+            binding.task_spec_digest().clone(),
+        )
+        .expect("managed Task Spec submission")
     }
 
     fn intake_binding() -> TaskIntakeBinding {
@@ -2341,6 +2500,46 @@ mod tests {
         .unwrap();
         fake.execute(plan.append_plan().command_record().request().clone())
             .unwrap();
+    }
+
+    fn append_managed_non_writer_receipt(
+        fake: &mut FakeTaskLedger,
+        identity: &TaskLedgerStreamIdentity,
+        ingress_peer: &TaskIngressPeerEvidence,
+        profile: &TaskAdmissionProfile,
+    ) -> VerifiedAutonomyReceipt {
+        let stream = verified(fake, identity);
+        let intent = task_ledger_autonomy_intent(OrchestratorAutonomyIntent {
+            version: AutonomyIntentVersion::V1,
+            kind: TaskKind::Feature,
+            risk: RiskClass::R0,
+            execution_preapproved: false,
+            requires_new_authority: false,
+            irreversible_or_high_risk: false,
+        });
+        let plan = plan_autonomy_receipt_append(
+            &stream,
+            AutonomyAppendMetadata::new(
+                CommandId::new(AUTONOMY_COMMAND_ID).unwrap(),
+                CorrelationId::new(profile.correlation_id()).unwrap(),
+                "2000-01-01T00:00:01Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+            )
+            .unwrap(),
+            intent,
+            LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+                ingress_peer.process_start_authority_digest().clone(),
+                task_ingress_profile_adapter_commitment(ingress_peer).unwrap(),
+                ContentDigest::from_sha256("e".repeat(64)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .expect("managed non-writer autonomy receipt plan");
+        let receipt = plan.receipt().clone();
+        fake.execute(plan.append_plan().command_record().request().clone())
+            .expect("managed non-writer autonomy receipt append");
+        receipt
     }
 
     fn append_transition(
@@ -2938,6 +3137,205 @@ mod tests {
         assert!(replay.is_exact_replay());
         assert_eq!(replay.state(), TaskState::Draft);
         assert!(replay.result_digest().is_none());
+    }
+
+    #[test]
+    fn managed_general_task_profile_is_exact_spec_bound_and_receipt_required() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let profile =
+            TaskAdmissionProfile::ManagedGeneralTask(Box::new(managed_submission(&binding)));
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        let command = task_created_command_for_profile(
+            vacant.head().clone(),
+            "foreman-managed-create-1",
+            &binding,
+            &ingress_peer,
+            &profile,
+        )
+        .expect("managed task-created command");
+
+        assert_eq!(command.action().as_str(), "MANAGED_GENERAL_TASK_V1");
+        assert_eq!(command.subject_digest(), binding.task_spec_digest());
+        assert!(command.diagnostic().is_none());
+        fake.execute(command).expect("managed task-created append");
+
+        let stream = verified(&fake, &identity);
+        let autonomy = verify_untrusted_autonomy_receipt_rows(&stream, &[])
+            .expect("managed required-receipt projection");
+        assert_eq!(
+            autonomy,
+            VerifiedAutonomyReceiptState::PendingRequiredReceipt
+        );
+        let pending =
+            pending_required_admission_for_profile(&stream, &binding, &ingress_peer, &profile)
+                .expect("managed admission remains pending receipt");
+        assert_eq!(pending.binding(), &binding);
+        assert!(pending.existing_evidence().is_none());
+
+        let error = replay_lifecycle_with_autonomy_for_profile(
+            &stream,
+            &binding,
+            &ingress_peer,
+            &autonomy,
+            &profile,
+        )
+        .expect_err("managed task cannot progress without its required receipt");
+        assert_eq!(error.kind(), TaskLifecycleErrorKind::Rejected);
+        assert_eq!(
+            error.code(),
+            "LATTICE_AUTONOMY_RECEIPT_RECONCILIATION_REQUIRED"
+        );
+    }
+
+    #[test]
+    fn managed_general_task_non_writer_receipt_does_not_preapprove_execution() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let profile =
+            TaskAdmissionProfile::ManagedGeneralTask(Box::new(managed_submission(&binding)));
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command_for_profile(
+                vacant.head().clone(),
+                "foreman-managed-create-non-preapproval",
+                &binding,
+                &ingress_peer,
+                &profile,
+            )
+            .expect("managed task-created command"),
+        )
+        .expect("managed task-created append");
+
+        let retained =
+            append_managed_non_writer_receipt(&mut fake, &identity, &ingress_peer, &profile);
+
+        let completed = verified(&fake, &identity);
+        let autonomy =
+            verify_untrusted_autonomy_receipt_rows(&completed, &[retained.to_untrusted()])
+                .expect("verified non-writer autonomy receipt");
+        let lifecycle = replay_lifecycle_with_autonomy_for_profile(
+            &completed,
+            &binding,
+            &ingress_peer,
+            &autonomy,
+            &profile,
+        )
+        .expect("managed lifecycle after required receipt");
+        let receipt = lifecycle.autonomy_receipt().expect("required receipt");
+        assert_eq!(lifecycle.state(), TaskState::Draft);
+        assert_eq!(receipt.disposition(), AutonomyDisposition::AskUser);
+        assert_eq!(receipt.reason(), AutonomyReason::NewUserDecision);
+        assert_eq!(receipt.model(), None);
+        assert_eq!(receipt.verification(), None);
+    }
+
+    #[test]
+    fn managed_general_task_changed_process_replays_receipt_without_resigning() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let original_peer = ingress_peer_with_authority('a', 'c', 'd');
+        let restarted_peer = ingress_peer_with_authority('a', 'c', 'f');
+        let profile =
+            TaskAdmissionProfile::ManagedGeneralTask(Box::new(managed_submission(&binding)));
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command_for_profile(
+                vacant.head().clone(),
+                "foreman-managed-create-process-replay",
+                &binding,
+                &original_peer,
+                &profile,
+            )
+            .expect("managed task-created command"),
+        )
+        .expect("managed task-created append");
+        let retained =
+            append_managed_non_writer_receipt(&mut fake, &identity, &original_peer, &profile);
+        assert_ne!(
+            original_peer.process_start_authority_digest(),
+            restarted_peer.process_start_authority_digest()
+        );
+
+        let changed_authority = LedgerAutonomyAuthorityEvidence::new_p0_process_start_profile(
+            restarted_peer.process_start_authority_digest().clone(),
+            task_ingress_profile_adapter_commitment(&restarted_peer).unwrap(),
+            retained.store_authority_head_digest().clone(),
+            None,
+        )
+        .expect("fresh process receipt authority");
+        let substitution = ensure_exact_autonomy_retry(
+            &identity,
+            &retained,
+            retained.intent(),
+            &changed_authority,
+        )
+        .expect_err("a fresh process must not re-sign the retained receipt");
+        assert_eq!(substitution.code(), "LATTICE_AUTONOMY_RECEIPT_SUBSTITUTED");
+
+        let completed = verified(&fake, &identity);
+        let autonomy =
+            verify_untrusted_autonomy_receipt_rows(&completed, &[retained.to_untrusted()])
+                .expect("verified retained receipt");
+        let replayed = replay_lifecycle_with_autonomy_for_profile(
+            &completed,
+            &binding,
+            &restarted_peer,
+            &autonomy,
+            &profile,
+        )
+        .expect("fresh process replays the retained receipt without a write");
+        let replayed_receipt = replayed.autonomy_receipt().expect("replayed receipt");
+        assert_eq!(replayed.state(), TaskState::Draft);
+        assert_eq!(
+            replayed_receipt.authority_digest(),
+            retained.authority_digest()
+        );
+        assert_eq!(replayed_receipt.receipt_digest(), retained.receipt_digest());
+    }
+
+    #[test]
+    fn managed_general_task_profile_cannot_impersonate_canary_or_general_intake() {
+        let binding = binding();
+        let identity = identity(&binding);
+        let ingress_peer = ingress_peer('a', 'c');
+        let managed =
+            TaskAdmissionProfile::ManagedGeneralTask(Box::new(managed_submission(&binding)));
+        assert!(managed.accepts_replayed_profile(TaskCreatedProfile::ManagedGeneralTaskV1));
+        assert!(
+            !managed.accepts_replayed_profile(TaskCreatedProfile::HistoricalAutonomyOptionalV1)
+        );
+        assert!(!managed.accepts_replayed_profile(TaskCreatedProfile::AutonomyReceiptRequiredV1));
+        assert!(!managed.accepts_replayed_profile(TaskCreatedProfile::GeneralTaskIntakeV1));
+
+        let mut fake = FakeTaskLedger::new();
+        let vacant = verified(&fake, &identity);
+        fake.execute(
+            task_created_command_for_profile(
+                vacant.head().clone(),
+                "foreman-managed-create-1",
+                &binding,
+                &ingress_peer,
+                &managed,
+            )
+            .expect("managed task-created command"),
+        )
+        .expect("managed task-created append");
+        let stream = verified(&fake, &identity);
+
+        let general =
+            TaskAdmissionProfile::GeneralTaskIntake(Box::new(intake_submission(&intake_binding())));
+        for impostor in [TaskAdmissionProfile::ControlledCodexCanary, general] {
+            let error =
+                replay_lifecycle_state_for_profile(&stream, &binding, &ingress_peer, &impostor)
+                    .expect_err("another admission family cannot replay a managed successor");
+            assert_eq!(error.code(), "LATTICE_TASK_CREATED_PROFILE_SUBSTITUTED");
+        }
     }
 
     #[test]

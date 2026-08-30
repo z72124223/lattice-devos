@@ -5,6 +5,113 @@ use lattice_postgres_store::{
     verify_embedded_manifest,
 };
 
+#[test]
+fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let fresh = setup
+        .split_once("InstalledManifestState::Fresh => {")
+        .expect("fresh migration arm")
+        .1
+        .split_once("InstalledManifestState::ExactV1Prefix")
+        .expect("next migration arm")
+        .0;
+    let order = [
+        "apply_entries_until(&mut transaction, 0, 6)",
+        "insert_current_compatibility(&mut transaction, &v5_manifest, 6)",
+    ]
+    .map(|needle| {
+        fresh
+            .find(needle)
+            .unwrap_or_else(|| panic!("fresh Store-v5 foundation missing {needle}"))
+    });
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "fresh migration must create the exact Store-v5 foundation in order"
+    );
+    for forbidden in [
+        "apply_entries_until(&mut transaction, 6, 7)",
+        "advance_compatibility_from_v5",
+        "CALL writer_lease.writer_lease_rebind_v3()",
+        "apply_missing_entries(&mut transaction, 7)",
+        "advance_compatibility_from_v6",
+        "CALL writer_lease.writer_lease_rebind_v4()",
+    ] {
+        assert!(
+            !fresh.contains(forbidden),
+            "Fresh Store must not install or rebind Writer through {forbidden}"
+        );
+    }
+
+    let post_apply = setup
+        .rsplit_once("match installed {")
+        .expect("post-apply verification match")
+        .1;
+    assert!(
+        post_apply.contains(
+            "InstalledManifestState::Fresh\n        | InstalledManifestState::ExactV1Prefix"
+        ),
+        "Fresh must verify the retained V5 catalog rather than requiring V7 before Writer exists"
+    );
+    assert!(
+        !post_apply.contains(
+            "InstalledManifestState::Fresh\n        | InstalledManifestState::ExactV6Prefix"
+        ),
+        "Fresh must not enter the V7 runtime verifier"
+    );
+
+    let composition = include_str!("../../../apps/lattice-runtime/src/composition.rs");
+    let bootstrap = composition
+        .split_once("pub fn bootstrap_postgres_extensions_from_environment()")
+        .expect("product bootstrap entrypoint")
+        .1;
+    for required in [
+        "apply_store_migrations",
+        "apply_postgres_memory_extension",
+        "apply_postgres_writer_extension",
+        "apply_v3_extension",
+        "rebind_existing_v3_extension",
+        "apply_v4_extension",
+        "apply_v5_extension",
+        "if final_store.schema_version() != 7",
+    ] {
+        assert!(
+            bootstrap.contains(required),
+            "product bootstrap must compose Store, Memory, and Writer before V7: {required}"
+        );
+    }
+}
+
+#[test]
+fn product_bootstrapped_foreman_uses_active_runtime_store_verification() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let submission = setup
+        .split_once("fn verify_runtime_submission_schema_v7")
+        .expect("Store-v7 verifier")
+        .1
+        .split_once("fn preflight_connection")
+        .expect("end Store-v7 verifier")
+        .0;
+    assert!(submission.contains("WHERE n.nspname='control'"));
+    assert!(
+        !submission.contains("foreman_execution"),
+        "Store-v7 catalog verification must stay limited to Store-owned control objects"
+    );
+
+    let submission_live = include_str!("postgres_task_ledger.rs");
+    let acceptance = submission_live
+        .split_once(
+            "fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisioned",
+        )
+        .expect("general submission acceptance")
+        .1;
+    assert!(acceptance.contains("product-bootstrap Store-v7 runtime profile"));
+    assert!(acceptance.contains("task_submission_composition_tamper"));
+    assert!(
+        !acceptance.contains("activate submission acceptance runtime"),
+        "product-bootstrap acceptance must preserve the restored ACTIVE authority"
+    );
+}
+
 const BOOTSTRAP_SHA256: &str = "7bff021fc17f738551309c906578c8015b2dd0307d27d239c21df1697c4d09c8";
 const FOUNDATION_SHA256: &str = "e996dc64af3112a647e75ebf07df2a77b1e9b3a018ed443880150365184883f0";
 const LIVE_CONTROL_STORE_SHA256: &str =
@@ -411,7 +518,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v7 manifest")
             .manifest_sha256()
             .as_str(),
-        "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c"
+        "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078"
     );
 
     let registry = &manifest[4];
@@ -1344,10 +1451,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         submission.path(),
         "db/migrations/0008_task_submission_envelope.sql"
     );
-    assert_eq!(submission.byte_length(), 298_666);
+    assert_eq!(submission.byte_length(), 306_891);
     assert_eq!(
         submission.sha256(),
-        "35be9a1f34fd8209cbf7466b39811f0fad91d9049dd72336af9bcf422d68d067"
+        "e2087d36c55b09a7d2cff2cd7d3e8d2cccbf03c9fb7b86cf6ab2259314b7dcbc"
     );
     assert_eq!(submission.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(submission.reader_compatibility(), 7..=7);
@@ -1358,11 +1465,6 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
-    let live = include_str!("postgres_live.rs");
-    assert!(
-        live.contains("executable_count: 5"),
-        "fresh setup must stop at the exact v5 bridge predecessor before the one-entry v6 transition"
-    );
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
         task_ledger
@@ -1373,7 +1475,7 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     );
     assert!(
         task_ledger.contains("executable_count: 5"),
-        "fresh consolidated schema-v7 fixture evidence remains explicit"
+        "Fresh Store fixture must remain the independently owned V5 foundation"
     );
 }
 
@@ -1503,7 +1605,7 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
 }
 
 #[test]
-fn schema_v7_runtime_admission_requires_writer_v4_current_and_closed_acl() {
+fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_closed_acl() {
     let setup = include_str!("../src/postgres_setup.rs");
     let verifier = setup
         .split_once("fn verify_runtime_submission_schema_v7")
@@ -1513,26 +1615,41 @@ fn schema_v7_runtime_admission_requires_writer_v4_current_and_closed_acl() {
         .expect("verifier boundary")
         .0;
     for required in [
+        "match writer_functions",
+        "15 =>",
         "verify_writer_lease_v4_functions(client, true)",
-        "!= 15",
-        "!= 7",
+        "17 =>",
+        "verify_writer_lease_v5_functions(client)",
+        "writer_tables != 5",
+        "writer_runtime_functions != 7",
     ] {
         assert!(
             verifier.contains(required),
-            "missing exact Writer-v4 schema-v7 proof: {required}"
+            "missing exact Writer-v4/v5 schema-v7 proof: {required}"
         );
     }
     for required in [
         "writer_lease_bind_runtime_v4",
         "writer_lease_load_for_update_v4",
         "WRITER_LEASE_V4_REBIND_SQL",
+        "writer_lease_bind_runtime_v5",
+        "writer_lease_load_for_update_v5",
+        "WRITER_LEASE_V5_SQL_SHA256",
+        "PHASE4_EXACT_PROCESS_HANDOFF",
+        "verify_writer_lease_v5_transition_constraint(client)",
+        "writer_lease_transitions_identity_v5",
+        "definition.contains(\"PROCESS_HANDOFF\")",
     ] {
         assert!(
             setup.contains(required),
-            "missing Writer-v4 verifier asset: {required}"
+            "missing Writer-v4/v5 verifier asset: {required}"
         );
     }
     assert!(!verifier.contains("verify_writer_lease_v3_functions(client, true)"));
+    assert!(
+        !verifier.contains("writer_lease.writer_lease_extension_identity"),
+        "runtime admission must not bypass the Writer function boundary to read denied tables"
+    );
 }
 
 #[test]

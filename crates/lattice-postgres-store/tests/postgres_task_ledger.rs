@@ -94,7 +94,10 @@ fn connect_superuser(database: &str) -> Client {
                 .parse::<u16>()
                 .expect("port"),
         )
-        .user("task019_harness")
+        .user(
+            &std::env::var("LATTICE_TASK_SUBMISSION_SUPERUSER")
+                .unwrap_or_else(|_| "task019_harness".to_owned()),
+        )
         .password(required_environment("LATTICE_TASK019_PASSWORD"))
         .dbname(database)
         .application_name("lattice-devos-task050-provision")
@@ -2085,32 +2088,30 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
     let database = required_environment("LATTICE_TASK_SUBMISSION_DATABASE");
     let run_id = required_environment("LATTICE_TASK_SUBMISSION_RUN_ID");
     let target = MigrationTarget::new(database.clone(), run_id.clone()).expect("submission target");
-    if std::env::var("LATTICE_TASK_SUBMISSION_PROVISION_FRESH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        provision_fresh_database(&target);
-        set_exact_database_access(&database);
-    }
-    let mut migrator = connect_as(&database, "lattice_migrator");
-    let evidence = verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
-        .expect("schema-v7 submission profile");
-    assert_eq!(evidence.schema_version(), 7);
     assert_eq!(
-        migrator
-            .execute(
-                "UPDATE ONLY control.runtime_admission SET admission_mode='ACTIVE', \
-                 daemon_instance_id='task050-fresh-process', daemon_epoch=50, \
-                 authority_revision=50, observation_digest=$1::bytea, \
-                 authority_head_digest=$2::bytea, updated_at=clock_timestamp() \
-                 WHERE singleton=true",
-                &[&hex_bytes(&digest('a')), &hex_bytes(&digest('b'))],
-            )
-            .expect("activate submission acceptance runtime"),
-        1
+        std::env::var("LATTICE_TASK_SUBMISSION_PROVISION_FRESH").as_deref(),
+        Ok("0"),
+        "general-submission acceptance requires the formal product bootstrap, not Store-owned fresh provisioning"
     );
-    drop(migrator);
+    let composed = PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target)
+        .expect("product-bootstrap Store-v7 runtime profile");
+    drop(composed);
+
+    let mut tamper_admin = connect_superuser(&database);
+    tamper_admin
+        .batch_execute(
+            "CREATE TABLE control.task_submission_composition_tamper (id bigint NOT NULL)",
+        )
+        .expect("install Store-owned catalog tamper");
+    assert!(
+        PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target).is_err(),
+        "a product-installed foreman extension must not make Store-owned catalog drift acceptable"
+    );
+    tamper_admin
+        .batch_execute("DROP TABLE control.task_submission_composition_tamper")
+        .expect("remove Store-owned catalog tamper");
+    drop(tamper_admin);
+
     let project = provision_general_project(&database, &target);
 
     let atomic_identity = general_submission_identity(&project, "TASK-GENERAL-ATOMIC");

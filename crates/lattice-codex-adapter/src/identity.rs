@@ -11,9 +11,9 @@ use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::process::{
-    AppServerRunErrorKind, OwnedChild, OwnedChildStdio, OwnedSandboxTemp, PinnedCodexResources,
-    cleanup_sandbox_temp, configure_pinned_child_environment, spawn_owned_child, stop_owned_child,
-    validate_pinned_resources_for_launcher,
+    AppServerRunErrorKind, OwnedChild, OwnedChildEnvironment, OwnedChildStdio, OwnedSandboxTemp,
+    PinnedCodexResources, cleanup_sandbox_temp, configure_pinned_child_environment,
+    spawn_owned_child, stop_owned_child, validate_pinned_resources_for_launcher,
 };
 
 const SCHEMA_BUNDLE_DOMAIN: &[u8] = b"lattice.codex-app-server.schema-bundle.v1\0";
@@ -340,7 +340,11 @@ fn run_version_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let mut child = match spawn_owned_child(&mut command, OwnedChildStdio::Stdout) {
+    let mut child = match spawn_owned_child(
+        &mut command,
+        OwnedChildStdio::Stdout,
+        OwnedChildEnvironment::InheritParent,
+    ) {
         Ok(child) => child,
         Err(spawn_error) => {
             cleanup_identity_sandbox_temp(sandbox_temp)?;
@@ -401,7 +405,11 @@ fn run_schema_command(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     validate_identity_resources_before_spawn(launcher, pinned_resources)?;
-    let mut child = match spawn_owned_child(&mut command, OwnedChildStdio::Null) {
+    let mut child = match spawn_owned_child(
+        &mut command,
+        OwnedChildStdio::Null,
+        OwnedChildEnvironment::InheritParent,
+    ) {
         Ok(child) => child,
         Err(spawn_error) => {
             cleanup_identity_sandbox_temp(sandbox_temp)?;

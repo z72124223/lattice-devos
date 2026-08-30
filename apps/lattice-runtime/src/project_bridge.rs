@@ -11,7 +11,7 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{self, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -27,14 +27,17 @@ use std::os::windows::io::AsRawHandle;
 
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_DELETE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, GetFileInformationByHandle,
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    GetFileInformationByHandle,
 };
 
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
+use lattice_codex_adapter::SupervisedDuplexChild;
 use lattice_contracts::{
     ContentDigest, GitRefIdentity, ProjectAuthorityHead, ProjectAuthorityReceipt, ProjectClass,
     ProjectId, ProjectLifecycle, StoreAuthorityHead,
@@ -51,6 +54,7 @@ use serde_json::{Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
+use crate::managed_file_identity::ManagedFileIdentity;
 
 const DEFAULT_CONTROL_ORIGIN: &str = "http://127.0.0.1:4317";
 const CONTROL_ORIGIN_ENV: &str = "LATTICE_CONTROL_ORIGIN";
@@ -67,6 +71,7 @@ const MAX_CONTROL_PROJECT_NAME_BYTES: usize = 1_024;
 const MAX_PROJECT_NAME_CHARS: usize = 64;
 const MAX_PROJECT_NAME_BYTES: usize = 256;
 const MAX_GIT_OUTPUT_BYTES: usize = 128 * 1024;
+const MAX_PROJECT_BRIDGE_GIT_BYTES: u64 = 512 * 1_024 * 1_024;
 const IO_TIMEOUT_CAP: Duration = Duration::from_secs(5);
 const MAX_REGISTRY_CURRENTNESS_RETRIES: usize = 1;
 
@@ -118,6 +123,7 @@ impl ProjectSelector {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedProjectAuthority {
     display_name: String,
+    canonical_path: PathBuf,
     authority: ProjectAuthorityReceipt,
     current_head: ProjectAuthorityHead,
 }
@@ -126,6 +132,14 @@ impl ResolvedProjectAuthority {
     #[must_use]
     pub(crate) fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    /// Verified canonical repository path from the twice-read Control locator.
+    /// This remains a locator observation; Project Registry authority continues
+    /// to own the durable project identity.
+    #[must_use]
+    pub(crate) fn canonical_path(&self) -> &Path {
+        &self.canonical_path
     }
 
     #[must_use]
@@ -749,8 +763,10 @@ fn inspect_repository(
     git_executable: &Path,
     deadline: Instant,
 ) -> ProjectBridgeResult<RepositoryObservation> {
-    let first = repository_probe(catalog_path, git_executable, deadline)?;
-    let second = repository_probe(catalog_path, git_executable, deadline)?;
+    let git_identity = ManagedFileIdentity::capture(git_executable, MAX_PROJECT_BRIDGE_GIT_BYTES)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    let first = repository_probe(catalog_path, git_executable, &git_identity, deadline)?;
+    let second = repository_probe(catalog_path, git_executable, &git_identity, deadline)?;
     if !same_probe(&first, &second) {
         return Err(bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged));
     }
@@ -788,13 +804,15 @@ fn inspect_repository(
 fn repository_probe(
     catalog_path: &Path,
     git_executable: &Path,
+    git_identity: &ManagedFileIdentity,
     deadline: Instant,
 ) -> ProjectBridgeResult<RepositoryProbe> {
     ensure_before(deadline)?;
     let root = capture_directory(catalog_path)?;
     let top_level = git_stdout(
         git_executable,
-        &root.canonical_path,
+        git_identity,
+        &root,
         ["rev-parse", "--show-toplevel"],
         deadline,
     )?;
@@ -804,19 +822,22 @@ fn repository_probe(
     }
     let git_directory_path = git_stdout(
         git_executable,
-        &root.canonical_path,
+        git_identity,
+        &root,
         ["rev-parse", "--path-format=absolute", "--git-dir"],
         deadline,
     )?;
     let common_directory_path = git_stdout(
         git_executable,
-        &root.canonical_path,
+        git_identity,
+        &root,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
         deadline,
     )?;
     let primary_ref = git_stdout(
         git_executable,
-        &root.canonical_path,
+        git_identity,
+        &root,
         ["symbolic-ref", "--quiet", "HEAD"],
         deadline,
     )?;
@@ -880,7 +901,7 @@ fn open_directory(path: &Path) -> ProjectBridgeResult<File> {
     let mut options = OpenOptions::new();
     options
         .read(true)
-        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
         .custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
     options
         .open(path)
@@ -928,7 +949,8 @@ fn physical_identity(_file: &File) -> ProjectBridgeResult<PhysicalIdentity> {
 
 fn git_stdout<I, S>(
     executable: &Path,
-    repository_root: &Path,
+    executable_identity: &ManagedFileIdentity,
+    repository_root: &CapturedDirectory,
     arguments: I,
     deadline: Instant,
 ) -> ProjectBridgeResult<String>
@@ -936,51 +958,251 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    ensure_before(deadline)?;
-    let mut command = Command::new(executable);
-    command
-        .current_dir(repository_root)
-        .args(arguments)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GCM_INTERACTIVE", "Never")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", null_device())
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_INDEX_FILE")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .env_remove("GIT_CONFIG")
-        .env_remove("GIT_CONFIG_COUNT")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
-    let status = wait_for_child(&mut child, deadline)?;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    child
-        .stdout
-        .take()
-        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?
-        .take((MAX_GIT_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut stdout)
-        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
-    child
-        .stderr
-        .take()
-        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?
-        .take((MAX_GIT_OUTPUT_BYTES + 1) as u64)
-        .read_to_end(&mut stderr)
-        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
-    if !status.success()
-        || !stderr.is_empty()
-        || stdout.len() > MAX_GIT_OUTPUT_BYTES
-        || stderr.len() > MAX_GIT_OUTPUT_BYTES
+    git_stdout_from_captured_with_hooks(
+        executable,
+        executable_identity,
+        repository_root,
+        arguments,
+        deadline,
+        |_| {},
+        || {},
+    )
+}
+
+fn git_stdout_from_captured_with_hooks<I, S, Configure, PostSeal>(
+    executable: &Path,
+    executable_identity: &ManagedFileIdentity,
+    repository_root: &CapturedDirectory,
+    arguments: I,
+    deadline: Instant,
+    pre_configuration_hook: Configure,
+    post_seal_hook: PostSeal,
+) -> ProjectBridgeResult<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    Configure: FnOnce(&mut Command),
+    PostSeal: FnOnce(),
+{
+    let arguments = project_git_arguments(repository_root, arguments)?;
+    let child_root = captured_directory_child_path(repository_root)?;
+    git_stdout_with_hooks(
+        executable,
+        executable_identity,
+        &child_root,
+        arguments,
+        deadline,
+        pre_configuration_hook,
+        post_seal_hook,
+        Some(repository_root),
+    )
+}
+
+fn project_git_arguments<I, S>(
+    repository_root: &CapturedDirectory,
+    arguments: I,
+) -> ProjectBridgeResult<Vec<OsString>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    verify_captured_directory_current(repository_root)?;
+    let safe_directory = git_safe_directory_value(&repository_root.canonical_path)?;
+    let mut configured = vec![
+        OsString::from("-c"),
+        OsString::from(format!("safe.directory={safe_directory}")),
+    ];
+    configured.extend(
+        arguments
+            .into_iter()
+            .map(|argument| argument.as_ref().to_os_string()),
+    );
+    Ok(configured)
+}
+
+fn verify_captured_directory_current(
+    repository_root: &CapturedDirectory,
+) -> ProjectBridgeResult<()> {
+    let replay = capture_directory(&repository_root.canonical_path)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    if replay.canonical_path != repository_root.canonical_path
+        || replay.identity != repository_root.identity
     {
+        return Err(bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn captured_directory_child_path(
+    repository_root: &CapturedDirectory,
+) -> ProjectBridgeResult<PathBuf> {
+    verify_captured_directory_current(repository_root)?;
+    windows_child_directory_path(&repository_root.canonical_path)
+}
+
+#[cfg(windows)]
+fn windows_child_directory_path(path: &Path) -> ProjectBridgeResult<PathBuf> {
+    const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+
+    if !path.is_absolute() {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    let value = path
+        .to_str()
+        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+    let child_path = if value
+        .get(..VERBATIM_UNC_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VERBATIM_UNC_PREFIX))
+    {
+        PathBuf::from(format!(r"\\{}", &value[VERBATIM_UNC_PREFIX.len()..]))
+    } else {
+        path.to_path_buf()
+    };
+    if !child_path.is_absolute() {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    Ok(child_path)
+}
+
+#[cfg(unix)]
+fn captured_directory_child_path(
+    repository_root: &CapturedDirectory,
+) -> ProjectBridgeResult<PathBuf> {
+    #[cfg(target_os = "linux")]
+    let descriptor_root = Path::new("/proc/self/fd");
+    #[cfg(not(target_os = "linux"))]
+    let descriptor_root = Path::new("/dev/fd");
+    let child_root = descriptor_root.join(repository_root._handle.as_raw_fd().to_string());
+    if !fs::metadata(&child_root).is_ok_and(|metadata| metadata.is_dir()) {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    Ok(child_root)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn captured_directory_child_path(
+    _repository_root: &CapturedDirectory,
+) -> ProjectBridgeResult<PathBuf> {
+    Err(bridge_error(
+        ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+    ))
+}
+
+#[cfg(windows)]
+fn git_safe_directory_value(path: &Path) -> ProjectBridgeResult<String> {
+    const VERBATIM_PREFIX: &str = r"\\?\";
+    const VERBATIM_UNC_PREFIX: &str = r"\\?\UNC\";
+
+    if !path.is_absolute() {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    let value = path
+        .to_str()
+        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+    let native = if value
+        .get(..VERBATIM_UNC_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(VERBATIM_UNC_PREFIX))
+    {
+        format!("//{}", &value[VERBATIM_UNC_PREFIX.len()..])
+    } else if let Some(suffix) = value.strip_prefix(VERBATIM_PREFIX) {
+        suffix.to_owned()
+    } else {
+        value.to_owned()
+    };
+    validate_git_safe_directory_value(native.replace('\\', "/"))
+}
+
+#[cfg(not(windows))]
+fn git_safe_directory_value(path: &Path) -> ProjectBridgeResult<String> {
+    if !path.is_absolute() {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    let value = path
+        .to_str()
+        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+    validate_git_safe_directory_value(value.to_owned())
+}
+
+fn validate_git_safe_directory_value(value: String) -> ProjectBridgeResult<String> {
+    if !safe_text(&value, lattice_project_registry::MAX_CANONICAL_ROOT_BYTES)
+        || value.nfc().ne(value.chars())
+        || value.contains('*')
+    {
+        return Err(bridge_error(
+            ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
+        ));
+    }
+    Ok(value)
+}
+
+fn git_stdout_with_hooks<I, S, Configure, PostSeal>(
+    executable: &Path,
+    executable_identity: &ManagedFileIdentity,
+    repository_root: &Path,
+    arguments: I,
+    deadline: Instant,
+    pre_configuration_hook: Configure,
+    post_seal_hook: PostSeal,
+    captured_repository_root: Option<&CapturedDirectory>,
+) -> ProjectBridgeResult<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+    Configure: FnOnce(&mut Command),
+    PostSeal: FnOnce(),
+{
+    ensure_before(deadline)?;
+    let _executable_seal = executable_identity
+        .seal()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    let mut command = Command::new(executable);
+    command.current_dir(repository_root).args(arguments);
+    pre_configuration_hook(&mut command);
+    configure_project_git_environment(&mut command);
+    post_seal_hook();
+    if let Some(repository_root) = captured_repository_root {
+        verify_captured_directory_current(repository_root)?;
+    }
+    executable_identity
+        .verify()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    ensure_before(deadline)?;
+    let mut child = SupervisedDuplexChild::spawn_with_stderr_cleared(&mut command)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+    let mut stdout_reader = None;
+    let mut stderr_reader = None;
+    let operation_result = (|| -> ProjectBridgeResult<ExitStatus> {
+        child.take_stdin();
+        let stdout = child
+            .take_stdout()
+            .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+        let stderr = child
+            .take_stderr()
+            .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?;
+        stdout_reader = Some(spawn_bounded_git_reader(stdout));
+        stderr_reader = Some(spawn_bounded_git_reader(stderr));
+        wait_for_supervised_child(&mut child, deadline)
+    })();
+    let cleanup = child
+        .terminate_and_reap()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable));
+    drop(child);
+    let stdout = join_bounded_git_reader(stdout_reader)?;
+    let stderr = join_bounded_git_reader(stderr_reader)?;
+    cleanup?;
+    let status = operation_result?;
+    if !status.success() || !stderr.is_empty() {
         return Err(bridge_error(
             ProjectBridgeErrorKind::ProjectFilesystemUnavailable,
         ));
@@ -999,8 +1221,64 @@ where
     Ok(text.to_owned())
 }
 
-fn wait_for_child(
-    child: &mut std::process::Child,
+fn configure_project_git_environment(command: &mut Command) {
+    command
+        .env_clear()
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", null_device())
+        .env("GIT_CONFIG_COUNT", "0")
+        .env("GIT_ATTR_NOSYSTEM", "1")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_PAGER", "cat")
+        .env("LC_ALL", "C")
+        .env("LANG", "C")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+}
+
+fn spawn_bounded_git_reader(
+    stream: Box<dyn Read + Send>,
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || read_bounded_git_stream(stream))
+}
+
+fn read_bounded_git_stream(mut stream: impl Read) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(MAX_GIT_OUTPUT_BYTES.min(8 * 1_024));
+    let mut buffer = [0_u8; 4 * 1_024];
+    loop {
+        let count = stream.read(&mut buffer)?;
+        if count == 0 {
+            return Ok(bytes);
+        }
+        if bytes
+            .len()
+            .checked_add(count)
+            .is_none_or(|total| total > MAX_GIT_OUTPUT_BYTES)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "project Git output limit exceeded",
+            ));
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+    }
+}
+
+fn join_bounded_git_reader(
+    reader: Option<thread::JoinHandle<io::Result<Vec<u8>>>>,
+) -> ProjectBridgeResult<Vec<u8>> {
+    reader
+        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?
+        .join()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))?
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectFilesystemUnavailable))
+}
+
+fn wait_for_supervised_child(
+    child: &mut SupervisedDuplexChild,
     deadline: Instant,
 ) -> ProjectBridgeResult<ExitStatus> {
     loop {
@@ -1011,8 +1289,6 @@ fn wait_for_child(
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
             return Err(bridge_error(ProjectBridgeErrorKind::DeadlineExceeded));
         }
         thread::sleep(Duration::from_millis(5));
@@ -1236,6 +1512,7 @@ fn resolved_project_authority(
 ) -> ResolvedProjectAuthority {
     ResolvedProjectAuthority {
         display_name: project.name.clone(),
+        canonical_path: project.canonical_path.clone(),
         authority: current.authority().clone(),
         current_head: current.authority().head(),
     }
@@ -1769,6 +2046,166 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn project_git_safe_directory_normalizes_only_an_exact_wsl_unc_root() {
+        assert_eq!(
+            git_safe_directory_value(Path::new(
+                r"\\?\UNC\wsl.localhost\Ubuntu\home\lattice\repository"
+            ))
+            .expect("exact Git-compatible WSL UNC root"),
+            "//wsl.localhost/Ubuntu/home/lattice/repository"
+        );
+        assert!(git_safe_directory_value(Path::new("*")).is_err());
+        assert!(
+            git_safe_directory_value(Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\home\lattice\*"))
+                .is_err()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_git_child_cwd_converts_verbatim_wsl_unc_for_supervisor() {
+        let child_path = windows_child_directory_path(Path::new(
+            r"\\?\UNC\wsl.localhost\Ubuntu\home\lattice\repository",
+        ))
+        .expect("supervisor-compatible WSL UNC child cwd");
+        assert_eq!(
+            child_path,
+            PathBuf::from(r"\\wsl.localhost\Ubuntu\home\lattice\repository")
+        );
+        let mut command = Command::new(test_cmd_executable());
+        command.current_dir(&child_path);
+        assert_eq!(command.get_current_dir(), Some(child_path.as_path()));
+    }
+
+    #[test]
+    fn project_git_safe_directory_is_captured_exact_and_precedes_the_subcommand() {
+        let root = env::temp_dir().join(format!(
+            "lattice-project-safe-directory-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let substituted = root.with_extension("substituted");
+        fs::create_dir(&root).expect("captured root");
+        fs::create_dir(&substituted).expect("substituted root");
+        let mut captured = capture_directory(&root).expect("capture exact root handle");
+        let safe_directory =
+            git_safe_directory_value(&captured.canonical_path).expect("Git-compatible exact root");
+        let arguments = project_git_arguments(&captured, ["rev-parse", "--show-toplevel"])
+            .expect("captured safe.directory arguments");
+        assert_eq!(arguments[0], OsStr::new("-c"));
+        assert_eq!(
+            arguments[1],
+            OsString::from(format!("safe.directory={safe_directory}"))
+        );
+        assert_eq!(arguments[2], OsStr::new("rev-parse"));
+        assert_eq!(arguments[3], OsStr::new("--show-toplevel"));
+
+        captured.canonical_path = substituted.clone();
+        assert_eq!(
+            project_git_arguments(&captured, ["status"]).map_err(ProjectBridgeError::kind),
+            Err(ProjectBridgeErrorKind::ProjectIdentityChanged)
+        );
+        drop(captured);
+        fs::remove_dir_all(root).expect("remove captured root");
+        fs::remove_dir_all(substituted).expect("remove substituted root");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_git_safe_directory_seals_replay_to_spawn_directory_substitution() {
+        let Some(git) = test_git_executable() else {
+            panic!("git executable is required for project bridge tests");
+        };
+        let original = TestRepository::new(&git);
+        let substitute = TestRepository::new(&git);
+        substitute.git(&["checkout", "-b", "attacker"]);
+        let moved = original.root.with_extension("moved-after-replay");
+        let captured = capture_directory(&original.root).expect("capture exact repository root");
+        let git_identity =
+            ManagedFileIdentity::capture(&git, MAX_PROJECT_BRIDGE_GIT_BYTES).expect("Git identity");
+        let substitution_succeeded = std::cell::Cell::new(false);
+        let output = git_stdout_from_captured_with_hooks(
+            &git,
+            &git_identity,
+            &captured,
+            ["symbolic-ref", "--quiet", "HEAD"],
+            Instant::now() + Duration::from_secs(5),
+            |_| {},
+            || {
+                if fs::rename(&original.root, &moved).is_ok() {
+                    fs::rename(&substitute.root, &original.root)
+                        .expect("install substituted repository after replay");
+                    substitution_succeeded.set(true);
+                }
+            },
+        )
+        .expect("captured repository remains the only child cwd");
+        assert!(!substitution_succeeded.get());
+        assert_eq!(output, "refs/heads/main");
+        drop(captured);
+        assert!(!moved.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_git_safe_directory_rejects_post_replay_substitution_before_child_effect() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = env::temp_dir().join(format!(
+            "lattice-project-safe-directory-race-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let original = root.join("original");
+        let moved = root.join("moved");
+        let substitute = root.join("substitute");
+        let marker = root.join("child-started");
+        let executable = root.join("git-probe");
+        fs::create_dir_all(&original).expect("original root");
+        fs::create_dir(&substitute).expect("substitute root");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf child > {:?}\nprintf refs/heads/main\n",
+                marker
+            ),
+        )
+        .expect("probe executable");
+        let mut permissions = fs::metadata(&executable)
+            .expect("probe metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(&executable, permissions).expect("probe permissions");
+        let captured = capture_directory(&original).expect("capture exact repository root");
+        let executable_identity =
+            ManagedFileIdentity::capture(&executable, MAX_PROJECT_BRIDGE_GIT_BYTES)
+                .expect("probe identity");
+        let failure = git_stdout_from_captured_with_hooks(
+            &executable,
+            &executable_identity,
+            &captured,
+            ["status"],
+            Instant::now() + Duration::from_secs(5),
+            |_| {},
+            || {
+                fs::rename(&original, &moved).expect("move captured root after replay");
+                fs::rename(&substitute, &original).expect("install substitute after replay");
+            },
+        )
+        .expect_err("post-replay substitution must fail before child spawn");
+        assert_eq!(
+            failure.kind(),
+            ProjectBridgeErrorKind::ProjectIdentityChanged
+        );
+        assert!(!marker.exists(), "substituted child must never start");
+        drop(captured);
+        fs::rename(&original, &substitute).expect("remove substituted root");
+        fs::rename(&moved, &original).expect("restore captured root");
+        fs::remove_dir_all(root).expect("remove race fixture");
+    }
+
     #[test]
     fn real_git_observation_survives_loose_to_packed_ref_change() {
         let Some(git) = test_git_executable() else {
@@ -1824,6 +2261,175 @@ mod tests {
                 .map_err(ProjectBridgeError::kind),
             Err(ProjectBridgeErrorKind::ProjectFilesystemUnavailable)
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_git_clears_hostile_trace_environment_before_any_child_effect() {
+        let command = test_cmd_executable();
+        let identity = ManagedFileIdentity::capture(&command, MAX_PROJECT_BRIDGE_GIT_BYTES)
+            .expect("cmd identity");
+        let root = env::temp_dir().join(format!(
+            "lattice-project-git-env-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("environment fixture");
+        let marker = root.join("hostile-trace-effect.txt");
+        let probe = root.join("probe.cmd");
+        fs::write(
+            &probe,
+            format!(
+                "@echo off\r\nif defined GIT_TRACE (\r\n  echo effect>\"{}\"\r\n) else (\r\n  echo trusted\r\n)\r\n",
+                marker.display()
+            ),
+        )
+        .expect("environment probe");
+        let output = git_stdout_with_hooks(
+            &command,
+            &identity,
+            &root,
+            [
+                OsString::from("/d"),
+                OsString::from("/c"),
+                probe.into_os_string(),
+            ],
+            Instant::now() + Duration::from_secs(5),
+            |process| {
+                process.env("GIT_TRACE", &marker);
+                process.env("GIT_TRACE2", &marker);
+            },
+            || {},
+            None,
+        )
+        .expect("closed environment command");
+        assert_eq!(output, "trusted");
+        assert!(!marker.exists(), "ambient Git trace must have zero effect");
+        fs::remove_dir_all(root).expect("remove environment fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_git_seal_denies_pre_spawn_aba_write_and_delete() {
+        let root = env::temp_dir().join(format!(
+            "lattice-project-git-aba-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("ABA fixture");
+        let executable = root.join("trusted-cmd.exe");
+        fs::copy(test_cmd_executable(), &executable).expect("copy trusted executable");
+        let identity = ManagedFileIdentity::capture(&executable, MAX_PROJECT_BRIDGE_GIT_BYTES)
+            .expect("copied executable identity");
+        let marker = root.join("substitution-effect.txt");
+        let write_rejected = std::cell::Cell::new(false);
+        let delete_rejected = std::cell::Cell::new(false);
+        let output = git_stdout_with_hooks(
+            &executable,
+            &identity,
+            &root,
+            ["/d", "/c", "echo trusted"],
+            Instant::now() + Duration::from_secs(5),
+            |_| {},
+            || {
+                let write = fs::write(&executable, b"malicious replacement");
+                write_rejected.set(write.is_err());
+                if write.is_ok() {
+                    fs::write(&marker, b"effect").expect("record unsafe substitution");
+                }
+                delete_rejected.set(fs::remove_file(&executable).is_err());
+            },
+            None,
+        )
+        .expect("sealed executable command");
+        assert_eq!(output, "trusted");
+        assert!(write_rejected.get(), "held handle must deny ABA write");
+        assert!(delete_rejected.get(), "held handle must deny ABA delete");
+        assert!(
+            !marker.exists(),
+            "substituted executable effect must be absent"
+        );
+        fs::remove_dir_all(root).expect("remove ABA fixture");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_git_timeout_reaps_descendant_and_joins_bounded_pipes() {
+        let command = test_cmd_executable();
+        let identity = ManagedFileIdentity::capture(&command, MAX_PROJECT_BRIDGE_GIT_BYTES)
+            .expect("cmd identity");
+        let root = env::temp_dir().join(format!(
+            "lattice-project-git-timeout-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("timeout fixture");
+        let marker = root.join("late-descendant-effect.txt");
+        let ping = PathBuf::from(r"C:\Windows\System32\PING.EXE");
+        let descendant = root.join("descendant.cmd");
+        let launcher = root.join("launcher.cmd");
+        fs::write(
+            &descendant,
+            format!(
+                "@echo off\r\n\"{}\" -n 3 127.0.0.1 >nul\r\necho late>\"{}\"\r\n",
+                ping.display(),
+                marker.display()
+            ),
+        )
+        .expect("descendant script");
+        fs::write(
+            &launcher,
+            format!(
+                "@echo off\r\nstart \"\" /b \"{}\" /d /c \"{}\"\r\n\"{}\" -n 30 127.0.0.1 >nul\r\n",
+                command.display(),
+                descendant.display(),
+                ping.display()
+            ),
+        )
+        .expect("launcher script");
+        let failure = git_stdout_with_hooks(
+            &command,
+            &identity,
+            &root,
+            [
+                OsString::from("/d"),
+                OsString::from("/c"),
+                launcher.into_os_string(),
+            ],
+            Instant::now() + Duration::from_millis(250),
+            |_| {},
+            || {},
+            None,
+        )
+        .expect_err("hanging root and descendant must time out");
+        assert_eq!(failure.kind(), ProjectBridgeErrorKind::DeadlineExceeded);
+        thread::sleep(Duration::from_secs(3));
+        assert!(!marker.exists(), "owned Job descendant must be reaped");
+        fs::remove_dir_all(root).expect("remove timeout fixture");
+    }
+
+    #[test]
+    fn project_git_process_contract_is_sealed_closed_and_supervised() {
+        let source = include_str!("project_bridge.rs");
+        let transport = source
+            .split("fn git_stdout_with_hooks")
+            .nth(1)
+            .expect("project Git transport")
+            .split("#[cfg(windows)]\nfn null_device")
+            .next()
+            .expect("transport body");
+        let seal = transport.find(".seal()").expect("Git executable seal");
+        let spawn = transport
+            .find("SupervisedDuplexChild::spawn_with_stderr")
+            .expect("Job-contained spawn");
+        let cleanup = transport
+            .find("terminate_and_reap")
+            .expect("subtree-zero cleanup");
+        assert!(seal < spawn && spawn < cleanup);
+        assert!(transport.contains("env_clear()"));
+        assert!(transport.contains("spawn_bounded_git_reader(stdout)"));
+        assert!(transport.contains("spawn_bounded_git_reader(stderr)"));
+        assert!(!transport.contains("std::process::Child"));
     }
 
     fn locator(id: &str, name: &str, eligible: bool) -> Value {
@@ -1910,6 +2516,22 @@ mod tests {
         }
         let first = std::str::from_utf8(&output.stdout).ok()?.lines().next()?;
         fs::canonicalize(first.trim()).ok()
+    }
+
+    #[cfg(windows)]
+    fn test_cmd_executable() -> PathBuf {
+        let output = Command::new("where.exe")
+            .arg("cmd.exe")
+            .output()
+            .expect("locate cmd.exe");
+        assert!(output.status.success());
+        let path = std::str::from_utf8(&output.stdout)
+            .expect("where output")
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .map(str::trim)
+            .expect("cmd path");
+        fs::canonicalize(path).expect("canonical cmd path")
     }
 
     struct TestRepository {

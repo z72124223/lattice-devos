@@ -8,6 +8,8 @@ rust-version.workspace = true
 [dependencies]
 getrandom = "=0.4.3"
 lattice-codebase-memory = { path = "../../crates/lattice-codebase-memory" }
+lattice-approval-verifier = { path = "../../crates/lattice-approval-verifier" }
+lattice-artifact-store = { path = "../../crates/lattice-artifact-store" }
 lattice-codex-adapter = { path = "../../crates/lattice-codex-adapter" }
 lattice-cjson = { path = "../../crates/lattice-cjson" }
 lattice-contracts = { path = "../../crates/lattice-contracts" }
@@ -17,8 +19,10 @@ lattice-gateway-ipc = { path = "../../crates/lattice-gateway-ipc" }
 lattice-hermes-adapter = { path = "../../crates/lattice-hermes-adapter" }
 lattice-openclaw-adapter = { path = "../../crates/lattice-openclaw-adapter" }
 lattice-orchestrator = { path = "../../crates/lattice-orchestrator" }
+lattice-policy = { path = "../../crates/lattice-policy" }
 lattice-ports = { path = "../../crates/lattice-ports" }
 lattice-postgres-codebase-memory = { path = "../../crates/lattice-postgres-codebase-memory" }
+lattice-postgres-foreman = { path = "../../crates/lattice-postgres-foreman" }
 lattice-postgres-store = { path = "../../crates/lattice-postgres-store" }
 lattice-postgres-writer-lease = { path = "../../crates/lattice-postgres-writer-lease" }
 lattice-project-registry = { path = "../../crates/lattice-project-registry" }
@@ -35,10 +39,13 @@ unicode-normalization = "=0.1.25"
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
 ] }
 
-# Direct Win32 file-identity inspection is isolated to `composition.rs` and
-# the registered-project bridge; the rest of the crate remains unsafe-free.
+# Audited Win32 calls are isolated to exact file-identity inspection in
+# `composition.rs`, the registered-project bridge, and the managed verifier,
+# plus process-tree observation in `managed_process_observer.rs`; the rest of
+# the crate remains unsafe-free.
 [lints.rust]
 unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"

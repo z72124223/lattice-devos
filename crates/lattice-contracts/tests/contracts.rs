@@ -87,6 +87,10 @@ fn task_ingress_client_request_id_contract_is_bounded_secret_free_ascii() {
         "private key----- marker before -----begin marker",
         "embedded-ghp_do-not-use",
         "use AKIAIOSFODNN7EXAMPLE here",
+        "clone https://alice:hunter2@example.invalid/repo",
+        "fetch http://alice%3ahunter2@example.invalid/repo",
+        "inspect ssh://git:private@example.invalid/repo",
+        "inspect ssh://git@example.invalid/repo",
     ] {
         assert!(
             task_ingress_text_contains_recognized_secret(rejected),
@@ -97,6 +101,8 @@ fn task_ingress_client_request_id_contract_is_bounded_secret_free_ascii() {
         "finish mask-based validation",
         "tokenize input",
         "monkey:value",
+        "document https://example.invalid/repo",
+        "discuss https://example.invalid with @alice",
     ] {
         assert!(
             !task_ingress_text_contains_recognized_secret(benign),

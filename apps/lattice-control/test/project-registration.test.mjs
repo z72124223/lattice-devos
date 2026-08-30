@@ -23,9 +23,11 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import {
+  createWsl2ProjectGitExecutor,
   defaultGitExecutor,
   inspectProject,
   normalizeRequestedProjectPath,
+  parseWsl2ProjectPath,
   ProjectInspectionError,
   sanitizeRemoteUrl,
 } from "../src/project-inspector.mjs";
@@ -654,6 +656,57 @@ test("submodule working tree state is explicitly unobserved instead of reported 
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("WSL2 project paths stay in the bound Linux Git domain", async (context) => {
+  if (process.platform !== "win32") {
+    context.skip("WSL2 UNC namespaces are Windows-only");
+    return;
+  }
+  const windowsPath = "\\\\wsl.localhost\\Ubuntu\\home\\zk\\phase4-source";
+  const identity = parseWsl2ProjectPath(windowsPath);
+  assert.equal(identity.schema, "lattice.wsl2-project-path/1.0");
+  assert.equal(identity.distribution, "Ubuntu");
+  assert.equal(identity.linux_path, "/home/zk/phase4-source");
+  assert.match(identity.identity_ref, /^wsl2-project-path:sha256:[a-f0-9]{64}$/u);
+  assert.equal(normalizeRequestedProjectPath(windowsPath), windowsPath);
+  assert.equal(parseWsl2ProjectPath("\\\\wsl.localhost\\Ubuntu\\mnt\\c\\phase4"), null);
+  assert.throws(
+    () => normalizeRequestedProjectPath("\\\\wsl.localhost\\Ubuntu\\mnt\\c\\phase4"),
+    (error) => error instanceof ProjectInspectionError
+      && error.code === "PROJECT_PATH_UNSAFE_NAMESPACE",
+  );
+
+  let observed = null;
+  const executor = createWsl2ProjectGitExecutor(identity, {
+    systemRoot: "C:\\Windows",
+    executeFile: async (executable, args, options) => {
+      observed = { executable, args, options };
+      return { stdout: "/home/zk/phase4-source\n", stderr: "" };
+    },
+  });
+  const result = await executor({
+    cwd: windowsPath,
+    args: ["rev-parse", "--show-toplevel"],
+    timeoutMs: 1_000,
+  });
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.stdout, `${windowsPath}\n`);
+  assert.equal(observed.executable, "C:\\Windows\\System32\\wsl.exe");
+  assert.deepEqual(observed.args.slice(0, 5), [
+    "-d", "Ubuntu", "--exec", "/usr/bin/env", "-i",
+  ]);
+  assert.equal(observed.args.includes("/usr/bin/git"), true);
+  assert.equal(observed.args.includes("-C"), true);
+  assert.equal(observed.args.includes("/home/zk/phase4-source"), true);
+  assert.deepEqual(Object.keys(observed.options.env).sort(), ["SystemRoot", "WINDIR"].filter(
+    (key) => process.env[key] !== undefined,
+  ).sort());
+  await assert.rejects(() => executor({
+    cwd: "\\\\wsl.localhost\\Ubuntu-Other\\home\\zk\\phase4-source",
+    args: ["status"],
+    timeoutMs: 1_000,
+  }), /bound Linux project domain/u);
 });
 
 test("inspection explains non-Git, missing, and redirected project paths without following links", async (context) => {

@@ -32,6 +32,24 @@
 - 第三階段讓 `lattice_task_submit` 接受自然語言 objective，透過 Control locator 與
   PostgreSQL Project Registry 的明確橋接建立可由 `task_ref` 重啟查回的正式 `DRAFT`
   任務；既有 canary 相容性保留，任務建檔與 Agent 執行／規格／tickets／部署分離。
+- 第四階段依 `SPEC-011`／`ADR-028` 接上正式工頭：create-only intake 只可唯一連到
+  同一 Task Ledger 的 TaskSpec successor；取得 task/spec/budget-bound execution authority
+  後才原子 claim、啟動 exact Codex turn、監看／有限修復、獨立驗證並將證據保存到
+  PostgreSQL Task Ledger／Artifact Store。程式任務驗證成功停在 merge 關卡。
+- 2026-08-30 的 fresh WSL2 window 已完成官方隔離登入與 zero-model preflight，
+  並執行該窗口唯一一次 full live run。task `db30e0c8...` 在 provider dispatch 前
+  因 ACTIVE status RPC 逾時失敗；approval 早已 durable 約 115.6 秒，因此不是舊的
+  promotion／approval 競態。durable provider effect、attempt、model call、thread、
+  turn、outbox 均為 0，實際 token／cost 為 null／未知。產品 status 內層卡點缺少
+  telemetry，不能宣稱已定位或已修好。
+- Harness 已把 ACTIVE 外層窗口綁到產品 stage contract（目前預設 480 秒），所有
+  status RPC 使用各 stage 剩餘時間；逾時後 session 立即標成 contaminated 且禁止
+  再呼叫。delayed／hung／late-response 行為測試與 create-new、digest-bound failure
+  receipt 行為測試均 PASS。舊 `db30e0c8...` evidence 不回寫 receipt；新持久化只
+  適用未來執行。
+- 本窗口唯一真實 attempt 已耗用，Phase 4 維持 `NEEDS_REVIEW`。restart／reconnect／
+  outbox 與 final full gates 全部 `NOT RUN`，本機 commit 未建立；任何新真實驗收
+  都需要新的明確授權與全新 task／thread／turn／attempt identity。
 - 易變 SHA、PR、CI、安裝收據與 replay 歷史保留在 Git 與 LATTICE；完整
   驗收索引由 TASK-106 workflow ledger 提供，不複製成會過期的計畫狀態。
 

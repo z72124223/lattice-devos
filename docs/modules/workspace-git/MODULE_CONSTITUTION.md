@@ -1,10 +1,10 @@
 ---
 module_id: workspace-git
 name: Workspace and Git
-version: 1.1
+version: 1.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-27
 ---
 
 ## Mission
@@ -25,7 +25,11 @@ injectable executor.
 
 - Project lock record and monotonically increasing fencing-token counter.
 - Worktree identity and task branch metadata created by this module.
+- Managed-task ownership marker and digest-only pre-dispatch Git baseline.
+- Task-owned protected local refs for independently verified result commits.
 - Git command arguments and returned Git evidence.
+- Typed Windows-UNC to Linux path mapping and the pinned Linux Git identity
+  whenever the owning attempt selects `WSL2_LINUX`.
 
 The repository owns product code. This module never claims ownership of user
 files or another repository's Git state.
@@ -36,6 +40,15 @@ files or another repository's Git state.
 - Atomically acquire, inspect, validate, and release a writer lease.
 - Reject a second lease or stale fencing token.
 - Create a sanitized task branch/worktree using argument arrays.
+- Create or exact-replay one deterministic managed-task worktree under a
+  configured absolute root, without reset, cleanup, or source-checkout writes.
+- Capture a path-free baseline binding ownership, canonical locators, base and
+  HEAD trees, branch, `.git` pointer, index, and security-sensitive Git control
+  state; replay compares actual state to the durable baseline digest.
+- Atomically create or exact-replay
+  `refs/lattice/managed/<task-ref>/attempt-<n>` only for a result commit already
+  proven by independent verification and review. This is object retention, not
+  merge, push, checkout mutation, or release authority.
 - Expose that same closed creation contract through a bounded dependency CLI
   that returns only validated task/worktree/branch/base evidence.
 - Return machine-readable changed-path evidence.
@@ -50,6 +63,19 @@ files or another repository's Git state.
    workspace root.
 5. Conflict resolution never chooses ours/theirs or edits product code.
 6. Cleanup targets only a verified task-owned disposable worktree.
+7. A managed Codex worker never receives the registered source checkout as its
+   current directory. Ignored or untracked source-only files are not copied
+   into the task worktree, and worker-created ignored files cannot appear in
+   the source checkout.
+8. A retained baseline cannot be regenerated from post-dispatch state. Restart
+   and retry verify its exact content digest; branch, HEAD, index, `.git`
+   pointer, ownership, common-Git identity, or control drift fails closed.
+9. Worktree creation, replay, baseline, commit, and protected-ref operations
+   execute through the Git binary inside the attempt's execution domain; a
+   Windows Git observation cannot attest a WSL2 attempt.
+9. A protected result ref is task/attempt/base/result exact and cannot be
+   overwritten by a changed replay. No managed-worktree operation deletes a
+   worktree or ref.
 
 ## Allowed Dependencies
 
@@ -76,6 +102,8 @@ version provides a proven containment policy.
 | Lease/fencing tests | `node --test test/workspace-lock.test.js` | Engineering | yes |
 | Git command tests | injected executor assertions | Engineering | yes |
 | Disposable repository | `node --test test/git-workspace.integration.test.js` | Engineering | yes |
+| Managed isolation/replay | `node --test apps/lattice-control/test/managed-worktree.test.mjs` | Security review | yes |
+| Protected result object | exact local-ref create/replay/substitution tests | Architecture review | yes |
 | Conflict fail-closed | integration conflict fixture | Architecture review | yes |
 
 ## Change Policy
@@ -90,3 +118,4 @@ responsible-human approval.
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | ADR-002 | Initial project lock and Git boundary | Current user task |
 | 1.1 | 2026-08-25 | SPEC-010, TASK-106 | Expose existing owned-worktree creation through a closed dependency CLI without accepting commands, paths, branches, hooks, or cleanup authority | Explicit user delegation |
+| 1.2 | 2026-08-27 | SPEC-011 | Reuse the owner for isolated managed-worker worktrees, durable pre-dispatch baselines, and post-verification task refs without merge/push authority | Delegated product owner |

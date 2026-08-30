@@ -12,6 +12,10 @@ lattice-foreman-state = { path = "../lattice-foreman-state" }
 lattice-ports = { path = "../lattice-ports" }
 lattice-task-domain = { path = "../lattice-task-domain" }
 lattice-writer-lease = { path = "../lattice-writer-lease" }
+serde_json = "=1.0.151"
+
+[dev-dependencies]
+lattice-task-ledger = { path = "../lattice-task-ledger" }
 
 [lints]
 workspace = true

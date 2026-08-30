@@ -22,6 +22,8 @@ use lattice_task_ledger::{
 };
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
+use time::format_description::well_known::Rfc3339;
+use time::{OffsetDateTime, UtcOffset};
 use unicode_normalization::is_nfc;
 
 use crate::mcp_budget::{McpAdmission, McpBudget, McpToolClass};
@@ -62,6 +64,8 @@ const MAX_PROJECT_SNAPSHOT_ID_BYTES: usize = TASK_LEDGER_PROJECT_SNAPSHOT_ID_MAX
 const FOREMAN_CHECKPOINT_RESULT_SCHEMA: &str = "lattice.foreman-checkpoint-result/1.0";
 const TASK_PUBLIC_STATUS_SCHEMA_V2: &str = "lattice.task.status.v2";
 const TASK_PUBLIC_STATUS_SCHEMA_V3: &str = "lattice.task.status.v3";
+const TASK_PUBLIC_STATUS_SCHEMA_V4: &str = "lattice.task.status.v4";
+const TASK_PUBLIC_STATUS_SCHEMA_V5: &str = "lattice.task.status.v5";
 const TASK_PUBLIC_STATUS_VALUES: [&str; 5] = [
     "NOT_SUBMITTED",
     "SUBMITTED",
@@ -69,6 +73,17 @@ const TASK_PUBLIC_STATUS_VALUES: [&str; 5] = [
     "FAILED",
     "COMPLETED",
 ];
+const TASK_MANAGED_PUBLIC_STATUS_VALUES: [&str; 5] = [
+    "SUBMITTED",
+    "RUNNING",
+    "BLOCKED",
+    "FAILED",
+    "AWAITING_MERGE_APPROVAL",
+];
+const TASK_MANAGED_MODEL_VALUES: [&str; 3] = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"];
+const TASK_MANAGED_REASONING_VALUES: [&str; 6] = ["low", "medium", "high", "xhigh", "max", "ultra"];
+const TASK_MANAGED_VERIFICATION_VALUES: [&str; 4] = ["NOT_STARTED", "RUNNING", "PASSED", "FAILED"];
+pub(crate) const TASK_PUBLIC_OBJECTIVE_SUMMARY: &str = "Objective retained; digest only.";
 const TASK_PUBLIC_STATE_VALUES: [&str; 15] = [
     "NOT_SUBMITTED",
     "DRAFT",
@@ -86,6 +101,12 @@ const TASK_PUBLIC_STATE_VALUES: [&str; 15] = [
     "STOPPING",
     "CANCELLED",
 ];
+
+pub(crate) fn task_public_objective_digest(objective: &str) -> Option<ContentDigest> {
+    let domain = HashDomain::new("lattice.managed-status.objective", "1.0").ok()?;
+    let digest = canonical_sha256(&domain, &CanonicalValue::String(objective.to_owned())).ok()?;
+    ContentDigest::from_sha256(digest.to_hex()).ok()
+}
 
 /// Maximum encoded bytes accepted for one newline-delimited stdio message.
 pub const MAX_STDIO_MESSAGE_BYTES: usize = 65_536;
@@ -1182,7 +1203,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_output_schema".to_owned(),
             CanonicalValue::String(
-                "closed:v2-legacy|v3-general-create-only;v2-status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;v2-task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;v3-status:SUBMITTED;v3-task_state:DRAFT;task_ref:lower-sha256;ledger_head_digest:lower-sha256;v2-result_digest:lower-sha256|null;v2-failure_stage:upper-underscore|null;v2-failure_code:upper-underscore|null;v3-result_digest:null;v3-failure_stage:null;v3-failure_code:null;v3:objective|project_id|project_name|project_snapshot_id"
+                "closed:v2-legacy|v5-general-create-only-redacted|v4-managed-general;v2-status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;v2-task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;v5-status:SUBMITTED;v5-task_state:DRAFT;v4-status:SUBMITTED|RUNNING|BLOCKED|FAILED|AWAITING_MERGE_APPROVAL;v4-task_state:existing-closed-enum;task_ref:lower-sha256;ledger_head_digest:lower-sha256;v2-result_digest:lower-sha256|null;v2-failure_stage:upper-underscore|null;v2-failure_code:upper-underscore|null;v5-result_digest:null;v5-failure_stage:null;v5-failure_code:null;v4-v5:objective_summary:fixed-redacted|objective_digest:lower-sha256|project_id|project_name|project_snapshot_id;v4:worker_running:bool|attempt:null-or-1..3|retry_count:0..2|model:null-or-gpt-5.6-luna-terra-sol|reasoning:null-or-low-medium-high-xhigh-max-ultra|thread_id:null-or-safe-1..256|turn_id:null-or-safe-1..256|last_progress_at:null-or-canonical-utc|blocker:null-or-upper-underscore-1..128|verification_status:NOT_STARTED-RUNNING-PASSED-FAILED|verification_digest:null-or-lower-sha256|evidence_digest:null-or-lower-sha256|resource_observation:null-or-closed-task-cumulative-11-field-nonnegative-token-budget-object-unavailable-cost|next_action:safe-text-1..256|foreman_generation:>=1|foreman_checkpoint_digest:lower-sha256"
                     .to_owned(),
             ),
         ),
@@ -1498,6 +1519,49 @@ struct TaskPublicStatus {
     project_id: Option<String>,
     project_name: Option<String>,
     project_snapshot_id: Option<String>,
+    redacted_objective: Option<RedactedTaskObjective>,
+    managed: Option<ManagedTaskPublicStatus>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RedactedTaskObjective {
+    summary: String,
+    digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedTaskPublicStatus {
+    objective_summary: String,
+    objective_digest: String,
+    worker_running: bool,
+    attempt: Option<u64>,
+    retry_count: u64,
+    model: Option<String>,
+    reasoning: Option<String>,
+    thread_id: Option<String>,
+    turn_id: Option<String>,
+    last_progress_at: Option<String>,
+    blocker: Option<String>,
+    verification_status: String,
+    verification_digest: Option<String>,
+    evidence_digest: Option<String>,
+    resource_observation: Option<ManagedResourceObservation>,
+    next_action: String,
+    foreman_generation: u64,
+    foreman_checkpoint_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ManagedResourceObservation {
+    attempts_observed: u64,
+    model_calls: u64,
+    remaining_model_calls: u64,
+    remaining_total_tokens: Option<u64>,
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
+    total_tokens: Option<u64>,
 }
 
 impl TaskPublicStatus {
@@ -1517,23 +1581,62 @@ impl TaskPublicStatus {
         if !required.iter().all(|field| object.contains_key(*field)) {
             return None;
         }
-        let general_fields = [
-            "objective",
-            "project_id",
-            "project_name",
-            "project_snapshot_id",
+        let general_fields = ["project_id", "project_name", "project_snapshot_id"];
+        let redacted_objective_fields = ["objective_summary", "objective_digest"];
+        let managed_fields = [
+            "worker_running",
+            "attempt",
+            "retry_count",
+            "model",
+            "reasoning",
+            "thread_id",
+            "turn_id",
+            "last_progress_at",
+            "blocker",
+            "verification_status",
+            "verification_digest",
+            "evidence_digest",
+            "resource_observation",
+            "next_action",
+            "foreman_generation",
+            "foreman_checkpoint_digest",
         ];
-        let is_general = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V3;
+        let is_legacy_general_create_only = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V3;
+        let is_redacted_general_create_only = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V5;
+        let is_general_create_only =
+            is_legacy_general_create_only || is_redacted_general_create_only;
+        let is_managed = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V4;
+        let is_general = is_general_create_only || is_managed;
+        let expected_fields = if is_managed {
+            29
+        } else if is_redacted_general_create_only {
+            13
+        } else if is_legacy_general_create_only {
+            12
+        } else {
+            8
+        };
         if (schema_version != TASK_PUBLIC_STATUS_SCHEMA_V2 && !is_general)
-            || object.len() != if is_general { 12 } else { 8 }
+            || object.len() != expected_fields
             || general_fields
                 .iter()
                 .any(|field| object.contains_key(*field) != is_general)
+            || object.contains_key("objective") != is_legacy_general_create_only
+            || redacted_objective_fields.iter().any(|field| {
+                object.contains_key(*field) != (is_redacted_general_create_only || is_managed)
+            })
+            || managed_fields
+                .iter()
+                .any(|field| object.contains_key(*field) != is_managed)
         {
             return None;
         }
         let status = object.get("status")?.as_str()?;
-        if !TASK_PUBLIC_STATUS_VALUES.contains(&status) || (!is_general && status == "SUBMITTED") {
+        if (is_managed && !TASK_MANAGED_PUBLIC_STATUS_VALUES.contains(&status))
+            || (!is_managed
+                && (!TASK_PUBLIC_STATUS_VALUES.contains(&status)
+                    || (!is_general_create_only && status == "SUBMITTED")))
+        {
             return None;
         }
         let task_state = object.get("task_state")?.as_str()?;
@@ -1555,7 +1658,7 @@ impl TaskPublicStatus {
         if failure_stage.is_some() != failure_code.is_some() {
             return None;
         }
-        if is_general
+        if is_general_create_only
             && (status != "SUBMITTED"
                 || task_state != "DRAFT"
                 || result_digest.is_some()
@@ -1565,25 +1668,50 @@ impl TaskPublicStatus {
             return None;
         }
         let (objective, project_id, project_name, project_snapshot_id) = if is_general {
-            let objective = object.get("objective")?.as_str()?;
             let project_id = object.get("project_id")?.as_str()?;
             let project_name = object.get("project_name")?.as_str()?;
             let project_snapshot_id = object.get("project_snapshot_id")?.as_str()?;
-            if !valid_task_objective(objective)
-                || !valid_project_id(project_id)
+            let objective = if is_legacy_general_create_only {
+                let objective = object.get("objective")?.as_str()?;
+                if !valid_task_objective(objective) {
+                    return None;
+                }
+                Some(objective.to_owned())
+            } else {
+                None
+            };
+            if !valid_project_id(project_id)
                 || !valid_project_name(project_name)
                 || !valid_project_snapshot_id(project_snapshot_id)
             {
                 return None;
             }
             (
-                Some(objective.to_owned()),
+                objective,
                 Some(project_id.to_owned()),
                 Some(project_name.to_owned()),
                 Some(project_snapshot_id.to_owned()),
             )
         } else {
             (None, None, None, None)
+        };
+        let redacted_objective = if is_redacted_general_create_only {
+            let summary = object.get("objective_summary")?.as_str()?;
+            let digest = object.get("objective_digest")?.as_str()?;
+            if summary != TASK_PUBLIC_OBJECTIVE_SUMMARY || !valid_task_ref(digest) {
+                return None;
+            }
+            Some(RedactedTaskObjective {
+                summary: summary.to_owned(),
+                digest: digest.to_owned(),
+            })
+        } else {
+            None
+        };
+        let managed = if is_managed {
+            Some(ManagedTaskPublicStatus::from_object(object)?)
+        } else {
+            None
         };
 
         Some(Self {
@@ -1599,6 +1727,8 @@ impl TaskPublicStatus {
             project_id,
             project_name,
             project_snapshot_id,
+            redacted_objective,
+            managed,
         })
     }
 
@@ -1613,22 +1743,205 @@ impl TaskPublicStatus {
             "failure_stage": self.failure_stage,
             "failure_code": self.failure_code,
         });
-        if let (Some(objective), Some(project_id), Some(project_name), Some(project_snapshot_id)) = (
-            self.objective,
-            self.project_id,
-            self.project_name,
-            self.project_snapshot_id,
-        ) {
+        if let (Some(project_id), Some(project_name), Some(project_snapshot_id)) =
+            (self.project_id, self.project_name, self.project_snapshot_id)
+        {
             let object = value.as_object_mut().expect("task status object");
-            object.insert("objective".to_owned(), Value::String(objective));
             object.insert("project_id".to_owned(), Value::String(project_id));
             object.insert("project_name".to_owned(), Value::String(project_name));
             object.insert(
                 "project_snapshot_id".to_owned(),
                 Value::String(project_snapshot_id),
             );
+            if let Some(objective) = self.objective {
+                object.insert("objective".to_owned(), Value::String(objective));
+            }
+        }
+        if let Some(redacted) = self.redacted_objective {
+            let object = value.as_object_mut().expect("redacted task status object");
+            object.insert(
+                "objective_summary".to_owned(),
+                Value::String(redacted.summary),
+            );
+            object.insert(
+                "objective_digest".to_owned(),
+                Value::String(redacted.digest),
+            );
+        }
+        if let Some(managed) = self.managed {
+            managed.insert_into(value.as_object_mut().expect("managed task status object"));
         }
         value
+    }
+}
+
+impl ManagedTaskPublicStatus {
+    fn from_object(object: &Map<String, Value>) -> Option<Self> {
+        let objective_summary = object.get("objective_summary")?.as_str()?;
+        if objective_summary != TASK_PUBLIC_OBJECTIVE_SUMMARY {
+            return None;
+        }
+        let objective_digest = object.get("objective_digest")?.as_str()?;
+        if !valid_task_ref(objective_digest) {
+            return None;
+        }
+        let worker_running = object.get("worker_running")?.as_bool()?;
+        let attempt = optional_bounded_u64(object.get("attempt")?, 1, 3)?;
+        let retry_count = object.get("retry_count")?.as_u64()?;
+        if retry_count > 2 {
+            return None;
+        }
+        let model = optional_allowlisted_string(object.get("model")?, &TASK_MANAGED_MODEL_VALUES)?;
+        let reasoning =
+            optional_allowlisted_string(object.get("reasoning")?, &TASK_MANAGED_REASONING_VALUES)?;
+        let thread_id = optional_safe_identifier(object.get("thread_id")?)?;
+        let turn_id = optional_safe_identifier(object.get("turn_id")?)?;
+        let last_progress_at = optional_canonical_utc(object.get("last_progress_at")?)?;
+        let blocker = optional_public_failure_atom(object.get("blocker")?)?;
+        let verification_status = object.get("verification_status")?.as_str()?;
+        if !TASK_MANAGED_VERIFICATION_VALUES.contains(&verification_status) {
+            return None;
+        }
+        let verification_digest = optional_lower_sha256(object.get("verification_digest")?)?;
+        let evidence_digest = optional_lower_sha256(object.get("evidence_digest")?)?;
+        let resource_observation =
+            ManagedResourceObservation::optional_from_value(object.get("resource_observation")?)?;
+        let next_action = object.get("next_action")?.as_str()?;
+        if !valid_public_plain_text(next_action, 256) {
+            return None;
+        }
+        let foreman_generation = object.get("foreman_generation")?.as_u64()?;
+        if foreman_generation == 0 {
+            return None;
+        }
+        let foreman_checkpoint_digest = object.get("foreman_checkpoint_digest")?.as_str()?;
+        if !valid_task_ref(foreman_checkpoint_digest) {
+            return None;
+        }
+        Some(Self {
+            objective_summary: objective_summary.to_owned(),
+            objective_digest: objective_digest.to_owned(),
+            worker_running,
+            attempt,
+            retry_count,
+            model,
+            reasoning,
+            thread_id,
+            turn_id,
+            last_progress_at,
+            blocker,
+            verification_status: verification_status.to_owned(),
+            verification_digest,
+            evidence_digest,
+            resource_observation,
+            next_action: next_action.to_owned(),
+            foreman_generation,
+            foreman_checkpoint_digest: foreman_checkpoint_digest.to_owned(),
+        })
+    }
+
+    fn insert_into(self, object: &mut Map<String, Value>) {
+        object.insert(
+            "objective_summary".to_owned(),
+            Value::String(self.objective_summary),
+        );
+        object.insert(
+            "objective_digest".to_owned(),
+            Value::String(self.objective_digest),
+        );
+        object.insert("worker_running".to_owned(), json!(self.worker_running));
+        object.insert("attempt".to_owned(), json!(self.attempt));
+        object.insert("retry_count".to_owned(), json!(self.retry_count));
+        object.insert("model".to_owned(), json!(self.model));
+        object.insert("reasoning".to_owned(), json!(self.reasoning));
+        object.insert("thread_id".to_owned(), json!(self.thread_id));
+        object.insert("turn_id".to_owned(), json!(self.turn_id));
+        object.insert("last_progress_at".to_owned(), json!(self.last_progress_at));
+        object.insert("blocker".to_owned(), json!(self.blocker));
+        object.insert(
+            "verification_status".to_owned(),
+            Value::String(self.verification_status),
+        );
+        object.insert(
+            "verification_digest".to_owned(),
+            json!(self.verification_digest),
+        );
+        object.insert("evidence_digest".to_owned(), json!(self.evidence_digest));
+        object.insert(
+            "resource_observation".to_owned(),
+            self.resource_observation
+                .map_or(Value::Null, ManagedResourceObservation::into_value),
+        );
+        object.insert("next_action".to_owned(), Value::String(self.next_action));
+        object.insert(
+            "foreman_generation".to_owned(),
+            json!(self.foreman_generation),
+        );
+        object.insert(
+            "foreman_checkpoint_digest".to_owned(),
+            Value::String(self.foreman_checkpoint_digest),
+        );
+    }
+}
+
+impl ManagedResourceObservation {
+    fn optional_from_value(value: &Value) -> Option<Option<Self>> {
+        if value.is_null() {
+            return Some(None);
+        }
+        let object = value.as_object()?;
+        let fields = [
+            "scope",
+            "attempts_observed",
+            "model_calls",
+            "remaining_model_calls",
+            "remaining_total_tokens",
+            "input_tokens",
+            "cached_input_tokens",
+            "output_tokens",
+            "reasoning_output_tokens",
+            "total_tokens",
+            "external_cost_status",
+        ];
+        if object.len() != fields.len() || !fields.iter().all(|field| object.contains_key(*field)) {
+            return None;
+        }
+        if object.get("scope")?.as_str()? != "TASK_CUMULATIVE"
+            || object.get("external_cost_status")?.as_str()? != "UNAVAILABLE"
+        {
+            return None;
+        }
+        Some(Some(Self {
+            attempts_observed: object.get("attempts_observed")?.as_u64()?,
+            model_calls: object.get("model_calls")?.as_u64()?,
+            remaining_model_calls: object.get("remaining_model_calls")?.as_u64()?,
+            remaining_total_tokens: optional_non_negative_integer(
+                object.get("remaining_total_tokens")?,
+            )?,
+            input_tokens: optional_non_negative_integer(object.get("input_tokens")?)?,
+            cached_input_tokens: optional_non_negative_integer(object.get("cached_input_tokens")?)?,
+            output_tokens: optional_non_negative_integer(object.get("output_tokens")?)?,
+            reasoning_output_tokens: optional_non_negative_integer(
+                object.get("reasoning_output_tokens")?,
+            )?,
+            total_tokens: optional_non_negative_integer(object.get("total_tokens")?)?,
+        }))
+    }
+
+    fn into_value(self) -> Value {
+        json!({
+            "scope": "TASK_CUMULATIVE",
+            "attempts_observed": self.attempts_observed,
+            "model_calls": self.model_calls,
+            "remaining_model_calls": self.remaining_model_calls,
+            "remaining_total_tokens": self.remaining_total_tokens,
+            "input_tokens": self.input_tokens,
+            "cached_input_tokens": self.cached_input_tokens,
+            "output_tokens": self.output_tokens,
+            "reasoning_output_tokens": self.reasoning_output_tokens,
+            "total_tokens": self.total_tokens,
+            "external_cost_status": "UNAVAILABLE"
+        })
     }
 }
 
@@ -1646,6 +1959,89 @@ fn optional_public_failure_atom(value: &Value) -> Option<Option<String>> {
         }
         _ => None,
     }
+}
+
+fn optional_bounded_u64(value: &Value, minimum: u64, maximum: u64) -> Option<Option<u64>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Number(_) => value
+            .as_u64()
+            .filter(|number| (minimum..=maximum).contains(number))
+            .map(Some),
+        _ => None,
+    }
+}
+
+fn optional_non_negative_integer(value: &Value) -> Option<Option<u64>> {
+    match value {
+        Value::Null => Some(None),
+        Value::Number(_) => value.as_u64().map(Some),
+        _ => None,
+    }
+}
+
+fn optional_allowlisted_string(value: &Value, allowlist: &[&str]) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value) if allowlist.contains(&value.as_str()) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
+fn optional_safe_identifier(value: &Value) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value) if valid_safe_identifier(value) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
+fn valid_safe_identifier(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (1..=256).contains(&bytes.len())
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes
+            .iter()
+            .skip(1)
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b':'))
+        && !task_submission_text_contains_secret(value)
+}
+
+fn optional_canonical_utc(value: &Value) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value) if valid_canonical_utc(value) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
+fn valid_canonical_utc(value: &str) -> bool {
+    let Ok(parsed) = OffsetDateTime::parse(value, &Rfc3339) else {
+        return false;
+    };
+    parsed.offset() == UtcOffset::UTC
+        && value.ends_with('Z')
+        && parsed
+            .format(&Rfc3339)
+            .is_ok_and(|formatted| formatted == value)
+}
+
+fn optional_lower_sha256(value: &Value) -> Option<Option<String>> {
+    match value {
+        Value::Null => Some(None),
+        Value::String(value) if valid_task_ref(value) => Some(Some(value.clone())),
+        _ => None,
+    }
+}
+
+fn valid_public_plain_text(value: &str, maximum_chars: usize) -> bool {
+    !value.is_empty()
+        && value.chars().count() <= maximum_chars
+        && value.len() <= maximum_chars.saturating_mul(4)
+        && value.trim() == value
+        && is_nfc(value)
+        && !value.chars().any(char::is_control)
+        && !task_submission_text_contains_secret(value)
 }
 
 /// Composition-owned typed operations exposed by MCP.
@@ -2612,9 +3008,35 @@ fn task_public_status_schema() -> Value {
     json!({
         "oneOf": [
             task_public_status_variant_schema(false),
-            task_public_status_variant_schema(true)
+            redacted_general_task_public_status_variant_schema(),
+            managed_task_public_status_variant_schema()
         ]
     })
+}
+
+fn redacted_general_task_public_status_variant_schema() -> Value {
+    let mut schema = task_public_status_variant_schema(true);
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("redacted task status properties");
+    properties.remove("objective");
+    properties.insert(
+        "objective_summary".to_owned(),
+        json!({"type": "string", "enum": [TASK_PUBLIC_OBJECTIVE_SUMMARY]}),
+    );
+    properties.insert("objective_digest".to_owned(), lower_sha256_schema());
+    properties["schema_version"] =
+        json!({"type": "string", "enum": [TASK_PUBLIC_STATUS_SCHEMA_V5]});
+    let required = schema["required"]
+        .as_array_mut()
+        .expect("redacted task status required fields");
+    required.retain(|field| field.as_str() != Some("objective"));
+    required.extend(
+        ["objective_summary", "objective_digest"]
+            .into_iter()
+            .map(|field| json!(field)),
+    );
+    schema
 }
 
 fn task_public_status_variant_schema(general: bool) -> Value {
@@ -2705,6 +3127,168 @@ fn task_public_status_variant_schema(general: bool) -> Value {
     })
 }
 
+fn managed_task_public_status_variant_schema() -> Value {
+    let mut schema = task_public_status_variant_schema(true);
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("managed task status properties");
+    properties.remove("objective");
+    properties.insert(
+        "objective_summary".to_owned(),
+        json!({"type": "string", "enum": [TASK_PUBLIC_OBJECTIVE_SUMMARY]}),
+    );
+    properties.insert("objective_digest".to_owned(), lower_sha256_schema());
+    properties["schema_version"] =
+        json!({"type": "string", "enum": [TASK_PUBLIC_STATUS_SCHEMA_V4]});
+    properties["status"] = json!({
+        "type": "string",
+        "enum": TASK_MANAGED_PUBLIC_STATUS_VALUES
+    });
+    properties["task_state"] = json!({
+        "type": "string",
+        "enum": TASK_PUBLIC_STATE_VALUES
+    });
+    properties["result_digest"] = json!({
+        "anyOf": [lower_sha256_schema(), {"type": "null"}]
+    });
+    for field in ["failure_stage", "failure_code"] {
+        properties[field] = json!({
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                {"type": "null"}
+            ]
+        });
+    }
+    properties.insert("worker_running".to_owned(), json!({"type": "boolean"}));
+    properties.insert(
+        "attempt".to_owned(),
+        json!({"anyOf": [{"type": "integer", "minimum": 1, "maximum": 3}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "retry_count".to_owned(),
+        json!({"type": "integer", "minimum": 0, "maximum": 2}),
+    );
+    properties.insert(
+        "model".to_owned(),
+        json!({"anyOf": [{"type": "string", "enum": TASK_MANAGED_MODEL_VALUES}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "reasoning".to_owned(),
+        json!({"anyOf": [{"type": "string", "enum": TASK_MANAGED_REASONING_VALUES}, {"type": "null"}]}),
+    );
+    let identifier_schema = json!({
+        "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+            {"type": "null"}
+        ]
+    });
+    properties.insert("thread_id".to_owned(), identifier_schema.clone());
+    properties.insert("turn_id".to_owned(), identifier_schema);
+    properties.insert(
+        "last_progress_at".to_owned(),
+        json!({"anyOf": [{"type": "string", "format": "date-time", "pattern": "Z$"}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "blocker".to_owned(),
+        json!({"anyOf": [{"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "verification_status".to_owned(),
+        json!({"type": "string", "enum": TASK_MANAGED_VERIFICATION_VALUES}),
+    );
+    let nullable_digest_schema = json!({
+        "anyOf": [lower_sha256_schema(), {"type": "null"}]
+    });
+    properties.insert(
+        "verification_digest".to_owned(),
+        nullable_digest_schema.clone(),
+    );
+    properties.insert("evidence_digest".to_owned(), nullable_digest_schema);
+    properties.insert(
+        "resource_observation".to_owned(),
+        json!({
+            "anyOf": [managed_resource_observation_schema(), {"type": "null"}]
+        }),
+    );
+    properties.insert(
+        "next_action".to_owned(),
+        json!({"type": "string", "minLength": 1, "maxLength": 256}),
+    );
+    properties.insert(
+        "foreman_generation".to_owned(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "foreman_checkpoint_digest".to_owned(),
+        lower_sha256_schema(),
+    );
+
+    let required = schema["required"]
+        .as_array_mut()
+        .expect("managed task status required fields");
+    required.retain(|field| field.as_str() != Some("objective"));
+    required.extend(
+        [
+            "objective_summary",
+            "objective_digest",
+            "worker_running",
+            "attempt",
+            "retry_count",
+            "model",
+            "reasoning",
+            "thread_id",
+            "turn_id",
+            "last_progress_at",
+            "blocker",
+            "verification_status",
+            "verification_digest",
+            "evidence_digest",
+            "resource_observation",
+            "next_action",
+            "foreman_generation",
+            "foreman_checkpoint_digest",
+        ]
+        .into_iter()
+        .map(|field| json!(field)),
+    );
+    schema
+}
+
+fn managed_resource_observation_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "scope": {"type": "string", "enum": ["TASK_CUMULATIVE"]},
+            "attempts_observed": {"type": "integer", "minimum": 0},
+            "model_calls": {"type": "integer", "minimum": 0},
+            "remaining_model_calls": {"type": "integer", "minimum": 0},
+            "remaining_total_tokens": nullable_non_negative_integer_schema(),
+            "input_tokens": nullable_non_negative_integer_schema(),
+            "cached_input_tokens": nullable_non_negative_integer_schema(),
+            "output_tokens": nullable_non_negative_integer_schema(),
+            "reasoning_output_tokens": nullable_non_negative_integer_schema(),
+            "total_tokens": nullable_non_negative_integer_schema(),
+            "external_cost_status": {"type": "string", "enum": ["UNAVAILABLE"]}
+        },
+        "required": [
+            "scope", "attempts_observed", "model_calls",
+            "remaining_model_calls", "remaining_total_tokens",
+            "input_tokens", "cached_input_tokens", "output_tokens",
+            "reasoning_output_tokens", "total_tokens", "external_cost_status"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn nullable_non_negative_integer_schema() -> Value {
+    json!({
+        "anyOf": [
+            {"type": "integer", "minimum": 0},
+            {"type": "null"}
+        ]
+    })
+}
+
 fn lower_sha256_schema() -> Value {
     json!({
         "type": "string",
@@ -2739,7 +3323,7 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             json!({
                 "name": TASK_SUBMIT_TOOL,
                 "title": "Submit a bounded LATTICE task",
-                "description": "Creates a durable general LATTICE task for one registered project, or runs the retained controlled canary. General creation does not start an Agent or grant execution, merge, deployment, payment, or external-action authority.",
+                "description": "Creates a durable general LATTICE task for one registered project, or runs the retained controlled canary. Submitting an objective grants no authority. In managed ACTIVE mode, the foreman may dispatch asynchronously only after an independently verified, task/spec/budget-bound local execution gate; in DISABLED mode general intake remains create-only. Merge, deployment, payment, and external-action authority stay separate.",
                 "inputSchema": task_submit_arguments_schema(),
                 "outputSchema": task_public_status_schema()
             }),
@@ -3068,6 +3652,7 @@ fn closed_task_public_status(
 ) -> Result<Value, ToolExecutionError> {
     result.and_then(|value| {
         TaskPublicStatus::from_value(&value)
+            .filter(|status| status.schema_version != TASK_PUBLIC_STATUS_SCHEMA_V3)
             .map(TaskPublicStatus::into_value)
             .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_PUBLIC_STATUS_REJECTED"))
     })
@@ -3249,7 +3834,7 @@ mod acceptance_evidence_tests {
     use super::{
         ACCEPTANCE_EVIDENCE_SCHEMA, AcceptanceEvidence, DELIVERY_RECONCILE_TOOL,
         OBSERVED_EFFECT_EVIDENCE_SCHEMA, ObservedEffectEvidence, ObservedEffectKind,
-        RUNTIME_STATUS_TOOL, RequestProtocol, TaskPublicStatus, ToolSurface,
+        RUNTIME_STATUS_TOOL, RequestProtocol, TASK_SUBMIT_TOOL, TaskPublicStatus, ToolSurface,
         closed_task_public_status, tool_catalog, verify_observed_effect_evidence,
     };
     use serde_json::{Value, json};
@@ -3284,6 +3869,31 @@ mod acceptance_evidence_tests {
         assert_eq!(runtime["inputSchema"]["additionalProperties"], false);
         assert_eq!(runtime["annotations"]["readOnlyHint"], true);
         assert_eq!(runtime["annotations"]["destructiveHint"], false);
+    }
+
+    #[test]
+    fn task_submit_catalog_is_mode_neutral_and_keeps_execution_authority_separate() {
+        let tools = tool_catalog(
+            RequestProtocol::Stateless,
+            ToolSurface::CanonicalTaskControl,
+        );
+        let submit = tools
+            .as_array()
+            .expect("tool array")
+            .iter()
+            .find(|tool| tool["name"] == TASK_SUBMIT_TOOL)
+            .expect("task submit tool");
+        let description = submit["description"].as_str().expect("description");
+        assert!(description.contains("Submitting an objective grants no authority"));
+        assert!(description.contains("managed ACTIVE mode"));
+        assert!(description.contains("independently verified, task/spec/budget-bound"));
+        assert!(description.contains("DISABLED mode general intake remains create-only"));
+        assert!(
+            description.contains(
+                "Merge, deployment, payment, and external-action authority stay separate"
+            )
+        );
+        assert!(!description.contains("General creation does not start an Agent"));
     }
 
     #[test]
@@ -3334,6 +3944,31 @@ mod acceptance_evidence_tests {
             "failure_code": "path=C:\\\\secret"
         });
         assert!(TaskPublicStatus::from_value(&invalid).is_none());
+    }
+
+    #[test]
+    fn legacy_v3_decoder_is_retained_but_closed_service_output_rejects_objective_disclosure() {
+        let legacy = json!({
+            "schema_version": "lattice.task.status.v3",
+            "status": "SUBMITTED",
+            "task_state": "DRAFT",
+            "task_ref": "ab".repeat(32),
+            "ledger_head_digest": "cd".repeat(32),
+            "result_digest": null,
+            "failure_stage": null,
+            "failure_code": null,
+            "objective": "Internal acquisition codename Quiet Orchard",
+            "project_id": "private-project",
+            "project_name": "Confidential Planning",
+            "project_snapshot_id": "private-project:snapshot:1"
+        });
+        assert!(TaskPublicStatus::from_value(&legacy).is_some());
+        assert_eq!(
+            closed_task_public_status(Ok(legacy))
+                .expect_err("new service output must reject legacy objective disclosure")
+                .code(),
+            "LATTICE_TASK_PUBLIC_STATUS_REJECTED"
+        );
     }
 
     #[test]

@@ -4,8 +4,10 @@ use lattice_contracts::{
 };
 use lattice_policy::{
     AgentActionGate, AgentRole, Boundary, DecisionKind, DecisionStage, DecisionSubject,
-    DeploymentIntent, NetworkIntent, POLICY_CONTRACT_VERSION, PolicyAction, PolicyInputFailure,
-    PolicyReason, ProjectAuthorityFact, RuntimeAdmission, SubjectBinding, TaskContext, evaluate,
+    DeploymentIntent, ExecutionGate, ManagedExecutionBindingFact, NetworkIntent,
+    POLICY_CONTRACT_VERSION, PolicyAction, PolicyInputFailure, PolicyReason, ProjectAuthorityFact,
+    RuntimeAdmission, SubjectBinding, TaskContext, evaluate,
+    evaluate_managed_execution_gate_with_evidence,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -160,6 +162,65 @@ fn fake_registry_receipt_cannot_masquerade_as_live_task_authority() {
 
     assert!(!decision.allowed());
     assert_eq!(decision.reason(), PolicyReason::RuntimeKindMismatch);
+}
+
+#[test]
+fn managed_execution_evidence_seals_exact_binding_and_denies_spec_drift() {
+    let spec = task_spec();
+    let subject_binding = binding(&spec);
+    let execution_binding = ManagedExecutionBindingFact {
+        task_ref: ContentDigest::from_sha256("1".repeat(64)).expect("task ref"),
+        successor_stream_id: ContentDigest::from_sha256("2".repeat(64)).expect("successor"),
+        task_spec_digest: subject_binding.task_spec_digest().clone(),
+        approval_subject_digest: ContentDigest::from_sha256("3".repeat(64))
+            .expect("approval subject"),
+        budget_digest: ContentDigest::from_sha256("4".repeat(64)).expect("budget"),
+    };
+    let evidence = evaluate_managed_execution_gate_with_evidence(
+        ExecutionGate {
+            context: TaskContext {
+                task_spec: Some(&spec),
+                project: Some(project_fact(
+                    &spec,
+                    ProjectLifecycle::Active,
+                    RuntimeKind::Fake,
+                )),
+                state: Boundary::Known(TaskState::AwaitingExecutionApproval),
+                runtime_admission: Boundary::Known(RuntimeAdmission::Active),
+            },
+            approval: None,
+        },
+        execution_binding.clone(),
+    );
+    assert!(evidence.decision().allowed());
+    assert_eq!(
+        evidence.managed_execution_binding(),
+        Some(&execution_binding)
+    );
+
+    let mut drifted = execution_binding;
+    drifted.task_spec_digest = ContentDigest::from_sha256("5".repeat(64)).expect("drift");
+    let denied = evaluate_managed_execution_gate_with_evidence(
+        ExecutionGate {
+            context: TaskContext {
+                task_spec: Some(&spec),
+                project: Some(project_fact(
+                    &spec,
+                    ProjectLifecycle::Active,
+                    RuntimeKind::Fake,
+                )),
+                state: Boundary::Known(TaskState::AwaitingExecutionApproval),
+                runtime_admission: Boundary::Known(RuntimeAdmission::Active),
+            },
+            approval: None,
+        },
+        drifted,
+    );
+    assert!(!denied.decision().allowed());
+    assert_eq!(
+        denied.decision().reason(),
+        PolicyReason::InvalidDecisionSubject
+    );
 }
 
 fn read_gate(spec: &TaskSpec) -> AgentActionGate<'_> {

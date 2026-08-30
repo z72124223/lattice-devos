@@ -20,8 +20,52 @@ fn schema_v7_owns_one_cross_profile_ingress_claim_keyspace() {
             .count(),
         1
     );
-    assert!(MIGRATION.contains("'CONTROLLED_CODEX_CANARY',e.stream_id,e.stream_id,e.sequence"));
+    assert_eq!(
+        MIGRATION
+            .matches("e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence")
+            .count(),
+        2,
+        "singleton and ambiguous historical classifications must retain the original stream identity"
+    );
     assert!(MIGRATION.contains("e.command_id::text ~ '^mcp-submit:"));
+}
+
+#[test]
+fn historical_duplicate_claims_are_preserved_as_fail_closed_ambiguities() {
+    for required in [
+        "CREATE TABLE control.task_ingress_historical_ambiguities",
+        "PRIMARY KEY (ingress_id, client_request_id, stream_id)",
+        "FOREIGN KEY (stream_id, event_sequence)\n        REFERENCES control.task_ledger_events",
+        "FOREIGN KEY (stream_id, command_id)\n        REFERENCES control.task_ledger_commands",
+        "count(*) OVER (\n            PARTITION BY historical.ingress_id, historical.client_request_id\n        ) AS historical_identity_count",
+        "WHERE classified.historical_identity_count = 1",
+        "WHERE classified.historical_identity_count > 1",
+        "LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS",
+        "REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_runtime",
+    ] {
+        assert!(
+            MIGRATION.contains(required),
+            "missing duplicate-history contract: {required}"
+        );
+    }
+    assert_eq!(
+        MIGRATION
+            .matches("LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS")
+            .count(),
+        3,
+        "prepare, record, and read must all reject an ambiguous historical key"
+    );
+    for forbidden_winner in [
+        "ON CONFLICT DO NOTHING",
+        "DISTINCT ON (ingress_id, client_request_id)",
+        "MIN(stream_id)",
+        "MAX(stream_id)",
+    ] {
+        assert!(
+            !MIGRATION.contains(forbidden_winner),
+            "migration must preserve every historical identity, not select a winner: {forbidden_winner}"
+        );
+    }
 }
 
 #[test]

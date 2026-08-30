@@ -388,14 +388,30 @@ const WRITE_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
     SET LOCAL row_security = on; \
     SET LOCAL synchronous_commit = on; \
-    SET LOCAL lock_timeout = '5s'; \
-    SET LOCAL statement_timeout = '30s'";
+    SELECT pg_catalog.set_config('lock_timeout', \
+        CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 5000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('statement_timeout', \
+        CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true)";
 
 const READ_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
     SET LOCAL row_security = on; \
-    SET LOCAL lock_timeout = '5s'; \
-    SET LOCAL statement_timeout = '30s'";
+    SELECT pg_catalog.set_config('lock_timeout', \
+        CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 5000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('statement_timeout', \
+        CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true)";
 
 /// Result returned by the live durable Task Ledger adapter.
 pub type PostgresTaskLedgerResult<T> = Result<T, PostgresTaskLedgerError>;
@@ -2694,7 +2710,7 @@ fn validate_autonomy_surface_for_profile(
     for event in stream.events() {
         let required_profile = classify_task_created_profile(event)
             .map_err(|ledger| map_ledger_error(&ledger))?
-            == Some(TaskCreatedProfile::AutonomyReceiptRequiredV1);
+            .is_some_and(TaskCreatedProfile::requires_autonomy_receipt);
         if required_profile || event.kind() == LedgerEventKind::AutonomyReceiptRecorded {
             return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
         }
@@ -3743,8 +3759,9 @@ fn autonomy_plan_matches_store_authority(
 fn plan_uses_autonomy_surface(plan: &LedgerAppendPlan) -> bool {
     plan.new_event().is_some_and(|event| {
         event.kind() == lattice_task_ledger::LedgerEventKind::AutonomyReceiptRecorded
-            || classify_task_created_profile(event)
-                == Ok(Some(TaskCreatedProfile::AutonomyReceiptRequiredV1))
+            || classify_task_created_profile(event).is_ok_and(|profile| {
+                profile.is_some_and(TaskCreatedProfile::requires_autonomy_receipt)
+            })
     })
 }
 
@@ -5682,10 +5699,13 @@ mod tests {
     }
 
     #[test]
-    fn runtime_transactions_have_fixed_timeouts_and_queries_append_global_identity() {
+    fn runtime_transactions_cap_without_extending_session_deadlines_and_append_global_identity() {
         for settings in [WRITE_TRANSACTION_SETTINGS, READ_TRANSACTION_SETTINGS] {
-            assert!(settings.contains("SET LOCAL lock_timeout = '5s'"));
-            assert!(settings.contains("SET LOCAL statement_timeout = '30s'"));
+            assert!(settings.contains("pg_catalog.set_config('lock_timeout'"));
+            assert!(settings.contains("pg_catalog.set_config('statement_timeout'"));
+            assert!(settings.contains("LEAST("));
+            assert!(!settings.contains("SET LOCAL lock_timeout = '5s'"));
+            assert!(!settings.contains("SET LOCAL statement_timeout = '30s'"));
         }
         assert!(
             LEDGER_HEAD_V5_SQL
@@ -5801,6 +5821,34 @@ mod tests {
         .expect("required plan");
         assert!(plan_uses_autonomy_surface(&plan));
         assert!(!TaskLedgerSqlProfile::V3.supports_autonomy());
+    }
+
+    #[test]
+    fn historical_v3_profile_rejects_managed_required_task_profile() {
+        let stream =
+            VerifiedStream::vacant(identity("project-managed"), RuntimeKind::Live).expect("stream");
+        let plan = plan_append(
+            &stream,
+            AppendCommand::new_managed_general_task_created(
+                stream.head().clone(),
+                CommandId::new("managed-required-profile").expect("command"),
+                CorrelationId::new("managed-general-task-v1").expect("correlation"),
+                "2026-08-26T00:00:00Z",
+                ActorId::new("lattice-foreman").expect("actor"),
+                ReasonCode::new("MANAGED_GENERAL_TASK_ACCEPTED").expect("reason"),
+            )
+            .expect("managed required command"),
+        )
+        .expect("managed required plan");
+        assert!(plan_uses_autonomy_surface(&plan));
+
+        let pending = apply_append_plan(&stream, &plan).expect("pending managed stream");
+        assert_eq!(
+            validate_autonomy_surface_for_profile(&pending, TaskLedgerSqlProfile::V3),
+            Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))
+        );
+        validate_autonomy_surface_for_profile(&pending, TaskLedgerSqlProfile::V5)
+            .expect("current SQL profile supports the managed receipt surface");
     }
 
     #[test]

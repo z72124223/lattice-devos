@@ -1,5 +1,9 @@
 //! Pure injected-port delivery orchestration for LATTICE.
 
+mod managed_attempt;
+
+pub use managed_attempt::*;
+
 use std::error::Error;
 use std::fmt;
 

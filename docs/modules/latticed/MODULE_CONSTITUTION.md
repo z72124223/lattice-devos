@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.4
+version: 3.7
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-27
 ---
 
 ## Mission
@@ -39,7 +39,7 @@ Orchestrator composition.
 
 ## Public Contracts
 
-- Construct one Orchestrator 2.9 instance with typed Contracts 1.15 / Ports 2.3
+- Construct one Orchestrator 3.0 instance with typed Contracts 1.15 / Ports 2.4
   implementations for the bounded delivery, graph-memory, and task-control
   paths.
 - Through canonical `latticed`, expose exactly seven MCP tools:
@@ -76,6 +76,9 @@ Orchestrator composition.
   `project_name` locator. Task Status requires the lowercase SHA-256 `task_ref`;
   `client_request_id` is optional only for legacy canary compatibility. Every
   variant has `additionalProperties: false` and no path/command/authority field.
+  Submitting an objective grants no execution authority. In managed `ACTIVE`
+  mode the supervisor may dispatch asynchronously only after the independent
+  task/spec/budget-bound gate; in `DISABLED` mode general intake is create-only.
 - Through canonical `latticed --hermes-launch`, expose one exact
   process-start-only Hermes lifecycle entry. It accepts no additional CLI
   arguments, reuses the production Hermes configuration and runner from the
@@ -153,8 +156,16 @@ Orchestrator composition.
 - For general intake, construct and revalidate the Task-Ledger-owned
   `TaskSubmissionEnvelope` from the exact objective, registered-project
   authority receipt, formal stream identity, and process-owned ingress. Do not
-  manufacture an execution-ready Task Spec, spec/ticket tree, or parallel task
-  record from the objective.
+  treat the objective itself as an execution-ready Task Spec, approval, model,
+  command, or path. When the process-owned managed-foreman profile is active,
+  the composition may promote that replay-verified intake exactly once into a
+  server-built bounded Task Spec and schedule its successor through the typed
+  Orchestrator; the immutable promotion link is not a parallel task record.
+- Before constructing or reloading the formal identity used for a managed task
+  claim, replay Foreman Runtime status from PostgreSQL and require a nonzero
+  latest generation, exactly one `ACTIVE`, zero `BLOCKED`, zero `COMPLETED`,
+  and `next_action=CONTINUE`. Every other projection returns the fixed
+  `LATTICE_MANAGED_FOREMAN_NOT_ACTIVE` failure before claim or provider RPC.
 - Compose the injected Writer Lease domain 1.1 repository and Task lifecycle
   port. Production task dispatch cannot use `FakeWriterLease`, synthetic
   authority, or a process-memory task/status store.
@@ -173,18 +184,19 @@ Orchestrator composition.
   gains an argument, and task tools cannot alter their delivery binding.
 - The fixed canary remains `WriterOnly`: after its durable result and Writer
   Lease release, Submit/Status returns without running Graphify, Hermes, or
-  Memory. General Task Submit is create-only: it atomically records the
+  Memory. General Task intake remains create-only: it atomically records the
   shared ingress claim, authoritative envelope, and one
-  `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event, then returns
-  `SUBMITTED`/`DRAFT`. It creates no Task Spec, accounting currency, autonomy
-  classification/receipt, transition, result, or effect and does not acquire
-  Writer authority or invoke workspace, Codex/model, verification, Git,
-  Graphify, Hermes, Memory, payment, network, merge, deployment, or release.
+  `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event. That event grants no Task Spec,
+  accounting, autonomy, transition, result, or effect. A separately configured
+  managed foreman may then consume the committed intake asynchronously, bind a
+  server-built spec/approval/budget, acquire Writer authority, and invoke the
+  exact Codex and verification ports. It still cannot invoke Graphify, Hermes,
+  Memory, payment, push, merge, deployment, publication, or release.
   The fixed canary
   accepts only a process deadline above the 30-second cleanup
-  reserve and at most 300 seconds, below its 600-second lease TTL. Longer task
-  profiles remain forbidden until heartbeat, interruption, and orphan recovery
-  are composed.
+  reserve and at most 300 seconds, below its 600-second lease TTL. Managed
+  general work has its own digest-bound 900-second budget, heartbeat, exact
+  interruption, bounded retry, and restart-reconciliation contract.
 - Retain `lattice-runtime delivery-run` only as a visibly scripted, exact
   repository-owned acceptance fixture. It rejects official Codex mode before
   identity, database, workspace, or process effects; canonical `latticed` is
@@ -195,12 +207,15 @@ Orchestrator composition.
   writable-agent control, or protected-release operation.
 - Return only the allowlisted typed status projection and reconstruct it from
   PostgreSQL in a fresh process/session without rerunning external effects.
-  General tasks use `lattice.task.status.v3`, exposing only `task_ref`,
-  `SUBMITTED`/`DRAFT`, Ledger-head digest, exact objective, Control project
-  ID/display name, formal project snapshot ID, and nullable result/failure
-  fields. The snapshot boundary is the Registry-compatible 159 ASCII bytes
-  across Ledger, Store, and MCP projection. Canary results retain the
-  compatible v2 projection.
+  While the managed foreman is enabled, both unpromoted and promoted general
+  tasks use the closed `lattice.task.status.v4` projection; unpromoted tasks
+  have no attempt/worker and expose any durable preparation blocker/next
+  action. The projection adds only
+  replay-verified phase, real-running flag, attempt/retry count, allowlisted
+  model/reasoning, exact thread/turn IDs, last progress, blocker, verification
+  and evidence digests, normalized resource observation, next action, and
+  formal foreman generation/checkpoint. The snapshot boundary remains the
+  Registry-compatible 159 ASCII bytes. Canary results retain compatible v2.
   A Completed projection additionally requires an existing, independently
   replayed Writer Lease project with no current authority and the fixed canary
   `1/2/2` fence/transition/command history. `Merging + result` recovery verifies
@@ -330,21 +345,39 @@ Orchestrator composition.
     resolution; the retained formal project snapshot ID is secret-free before
     persistence or public projection. The objective is never executed or interpolated into shell,
     path, SQL, configuration, permission, or prompt authority.
-26. General creation stops at replay-verified `DRAFT` after exactly one
-    `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event, with no Task Spec, currency,
-    autonomy receipt, transition, result, Writer Lease, or effect. Any state or
-    operation beyond that boundary is separately governed and cannot be
-    inferred from Submit.
-27. General Status is reconstructed by `task_ref` from the PostgreSQL envelope
-    plus verified Task Ledger stream. It neither depends on process memory nor
-    repeats Control/Registry mutation, Codex/model, Writer, Git, or downstream
-    effects.
+26. General creation itself stops at replay-verified `DRAFT` after exactly one
+    `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event. Only the separately composed
+    managed-foreman successor may progress beyond that boundary, and only after
+    replaying the immutable promotion plus current task/spec/budget-bound local
+    execution authority.
+27. General Status is reconstructed by `task_ref` from the PostgreSQL envelope,
+    successor Task Ledger stream, subordinate foreman rows, Approval evidence,
+    and Artifact Store bytes. It never trusts process memory or repeats
+    Control/Registry mutation, Codex start, Writer acquisition, Git mutation,
+    or another downstream effect.
+28. A managed worker is real-running only after the exact retained
+    `turn/started` for its thread/turn and before an exact terminal. Restart
+    reads, resumes, and reconciles those retained IDs before any replacement
+    attempt. The default limits are four active attempts globally, one per
+    task, and two repair retries.
+29. Managed verification executes only fixed argument vectors selected by the
+    captured Task Spec/trusted repository policy. A worker message, exit zero,
+    or Git object is not completion; successful programming work stops at
+    `AWAITING_MERGE_APPROVAL`, and local execution authority cannot authorize
+    push, merge, deployment, publication, payment, external messaging, or
+    permanent deletion.
+30. A generation and checkpoint digest do not independently authorize managed
+    dispatch. Initial and restart identity loads must replay one uniquely
+    active, continuing `SoleForemanBinding`; empty, blocked, completed,
+    multi-active, or wrong-next-action projections fail before task claim.
 
 ## Allowed Dependencies
 
-- `lattice-contracts` 1.15, `lattice-ports` 2.3,
-  `orchestrator-runtime` 2.9, Foreman State 1.4, Task Ledger 2.9, PostgreSQL
-  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 2.0 public APIs.
+- `lattice-contracts` 1.15, `lattice-ports` 2.4,
+  `orchestrator-runtime` 3.0, Foreman State 1.5, Task Ledger 3.0, PostgreSQL
+  Memory 1.3, Writer Lease domain 1.1, PostgreSQL Writer Lease 2.0,
+  PostgreSQL Foreman 1.0, Approval Verifier 1.1, and Artifact Store 1.1 public
+  APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
@@ -445,6 +478,26 @@ Registry and Task Ledger remain authority; canary v2 remains compatible. The
 explicit bootstrap reaches the required schema-v7 profile only through the
 append-only Writer-v4 successor and finishes with fresh-runtime verification.
 
+Version 3.5 composes the optional process-owned managed-foreman lane after that
+unchanged intake boundary. It uses one immutable Task-Spec successor, the
+existing Task lifecycle and Writer Lease, formal sole-foreman checkpoint,
+exact Codex connector, Approval Verifier, Artifact Store, and subordinate
+same-database PostgreSQL foreman extension. Dispatch is asynchronous and
+bounded; restart reconciles retained exact IDs; status v4 is replay-only; a
+verified programming result stops before every protected external effect.
+
+Version 3.6 makes the replayed sole-foreman lifecycle state an explicit
+preclaim authority gate. Formal identity construction now requires one active,
+continuing latest generation and rejects empty, terminal, or ambiguous runtime
+projections before task claim or provider dispatch.
+
+Version 3.7 makes durable intake discovery the supervisor-owned preparation
+entry, pins one clean immutable promotion intent before successor effects,
+projects unpromoted/deferred work as read-only v4 status, retains a bounded
+rebuttable preparation observation, and holds the complete verified effect
+bundle plus supervised Git process tree for the process lifetime. It does not
+add an MCP authority or protected-action permission.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -456,6 +509,7 @@ append-only Writer-v4 successor and finishes with fresh-runtime verification.
 | Fixed identity | process profile supplies the actor/audit binding; tunnel/local commitments cannot substitute; hostile `clientInfo`/arguments grant no authority | Security review | yes |
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
 | Registered general intake | unique Control locator, live double-read/physical observation, exact Registry authority/currentness, no arbitrary path/default guess, shared-key exact retry/substitution, distinct no-spec/no-currency subject, one create event, v3 `DRAFT` restart replay, and zero autonomy/execution/model/writer effects | Engineering and security review | yes |
+| Managed general foreman | exactly-once promotion, current local authority, atomic capacity claim, exact start, bounded retry/reconcile, independent fixed-command verification, v4 replay, real Codex disposable happy path, and restart without duplicate Agent | Engineering, architecture, and security review | yes |
 | Store-v7 bootstrap closure | exact accepted cross-product, v6 pending rebind, v6 current Writer-v4 apply, v6/v4 bridge Store-v7 apply plus fixed v4 rebind, final v7/v4 verify-only, and fresh runtime-role replay | Architecture and integration review | yes |
 | Controlled-canary autonomy profile | required canary marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
 | Writer authority | real PostgreSQL lease/fencing/current-head evidence; no fake/synthetic production path | Security review | yes |
@@ -478,10 +532,13 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.7 | 2026-08-27 | SPEC-011 durable-core review, ADR-028 | Add supervisor-owned durable intake preparation, immutable pre-successor source intent, unpromoted v4 blocker replay, and process-lifetime effect/Git containment | Delegated product owner |
+| 3.6 | 2026-08-27 | SPEC-011 v1.2, ADR-028 | Require replay-verified unique ACTIVE and CONTINUE Foreman Runtime state before formal managed identity, task claim, or provider dispatch | Delegated product owner |
 | 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
 | 3.2 | 2026-08-25 | SPEC-010, TASK-106 | Accept one closed dependency blocker, prove owned Git binding before block/resume, and expose restart-restored dependency next action without adding a tool or database schema | Explicit user delegation |
 | 3.3 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial registered-project general Task Submit; superseded before release by 3.4 because intake must not reuse Task-Spec/autonomy lifecycle semantics | User-authorized Phase 3 |
 | 3.4 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Use a distinct pre-specification intake identity and admit/load-only port with one create event, no currency/autonomy/progression, append-only Writer-v4/Store-v7 bootstrap closure, and unchanged canary/protected-action gates | User-authorized Phase 3 |
+| 3.5 | 2026-08-26 | SPEC-011, ADR-028 | Compose the formal bounded managed foreman successor, exact Codex lifecycle, PostgreSQL evidence replay, independent verification, v4 status, and protected-effect separation without weakening create-only intake | Delegated product owner |
 | 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
 | 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |

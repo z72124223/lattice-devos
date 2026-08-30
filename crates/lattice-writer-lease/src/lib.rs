@@ -274,6 +274,26 @@ pub struct ReleaseCommand {
     pub observation: LeaseObservation,
 }
 
+/// Transfer one exact active or suspect logical lease to a replacement OS
+/// process after the predecessor process is proven dead.
+///
+/// This is a process-supervision handoff, not a new writer acquisition: the
+/// project, task, attempt, lease, worktree, daemon leadership, and fencing
+/// token remain unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessHandoffCommand {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+    pub successor_holder_process_id: HolderProcessId,
+    pub successor_holder_process_start_identity: ContentDigest,
+    pub successor_daemon_instance_id: String,
+    pub successor_daemon_epoch: DaemonEpoch,
+    pub observation: LeaseObservation,
+    pub expires_at: String,
+    pub evidence: RecoveryEvidence,
+}
+
 /// Typed recovery evidence for a suspect holder.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RecoveryEvidence {
@@ -323,6 +343,7 @@ pub enum WriterLeaseCommand {
     Acquire(AcquireCommand),
     Heartbeat(HeartbeatCommand),
     MarkSuspect(MarkSuspectCommand),
+    ProcessHandoff(ProcessHandoffCommand),
     Release(ReleaseCommand),
     Revoke(RevokeCommand),
 }
@@ -335,6 +356,7 @@ impl WriterLeaseCommand {
             Self::Acquire(command) => &command.command_id,
             Self::Heartbeat(command) => &command.command_id,
             Self::MarkSuspect(command) => &command.command_id,
+            Self::ProcessHandoff(command) => &command.command_id,
             Self::Release(command) => &command.command_id,
             Self::Revoke(command) => &command.command_id,
         }
@@ -347,6 +369,7 @@ impl WriterLeaseCommand {
             Self::Acquire(command) => &command.claim.project_id,
             Self::Heartbeat(command) => &command.project_id,
             Self::MarkSuspect(command) => &command.project_id,
+            Self::ProcessHandoff(command) => &command.project_id,
             Self::Release(command) => &command.project_id,
             Self::Revoke(command) => &command.project_id,
         }
@@ -359,6 +382,7 @@ impl WriterLeaseCommand {
             Self::Acquire(command) => &command.observation,
             Self::Heartbeat(command) => &command.observation,
             Self::MarkSuspect(command) => &command.observation,
+            Self::ProcessHandoff(command) => &command.observation,
             Self::Release(command) => &command.observation,
             Self::Revoke(command) => &command.observation,
         }
@@ -371,6 +395,7 @@ impl WriterLeaseCommand {
             Self::Acquire(command) => command.expected_head.as_ref(),
             Self::Heartbeat(command) => Some(&command.expected_head),
             Self::MarkSuspect(command) => Some(&command.expected_head),
+            Self::ProcessHandoff(command) => Some(&command.expected_head),
             Self::Release(command) => Some(&command.expected_head),
             Self::Revoke(command) => Some(&command.expected_head),
         }
@@ -449,6 +474,21 @@ pub struct WriterLeaseReleaseRequest {
     pub expected_head: WriterLeaseAuthorityHead,
 }
 
+/// Caller-owned exact process-handoff intent.
+///
+/// Database time, admission, expiry, and the retained daemon identity are
+/// repository-owned. The caller supplies only the replacement process
+/// identity and typed death evidence for the exact predecessor.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WriterLeaseProcessHandoffRequest {
+    pub command_id: String,
+    pub project_id: ProjectId,
+    pub expected_head: WriterLeaseAuthorityHead,
+    pub successor_holder_process_id: HolderProcessId,
+    pub successor_holder_process_start_identity: ContentDigest,
+    pub evidence: RecoveryEvidence,
+}
+
 /// Caller-owned evidence-bound revoke intent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WriterLeaseRevokeRequest {
@@ -464,6 +504,7 @@ pub enum WriterLeaseRepositoryCommand {
     Acquire(WriterLeaseAcquireRequest),
     Heartbeat(WriterLeaseHeartbeatRequest),
     MarkSuspect(WriterLeaseMarkSuspectRequest),
+    ProcessHandoff(WriterLeaseProcessHandoffRequest),
     Release(WriterLeaseReleaseRequest),
     Revoke(WriterLeaseRevokeRequest),
 }
@@ -476,6 +517,7 @@ impl WriterLeaseRepositoryCommand {
             Self::Acquire(request) => &request.command_id,
             Self::Heartbeat(request) => &request.command_id,
             Self::MarkSuspect(request) => &request.command_id,
+            Self::ProcessHandoff(request) => &request.command_id,
             Self::Release(request) => &request.command_id,
             Self::Revoke(request) => &request.command_id,
         }
@@ -488,6 +530,7 @@ impl WriterLeaseRepositoryCommand {
             Self::Acquire(request) => &request.project_id,
             Self::Heartbeat(request) => &request.project_id,
             Self::MarkSuspect(request) => &request.project_id,
+            Self::ProcessHandoff(request) => &request.project_id,
             Self::Release(request) => &request.project_id,
             Self::Revoke(request) => &request.project_id,
         }
@@ -517,6 +560,7 @@ pub enum TransitionKind {
     Acquire,
     Heartbeat,
     MarkSuspect,
+    ProcessHandoff,
     Release,
     Revoke,
 }
@@ -529,6 +573,7 @@ impl TransitionKind {
             Self::Acquire => "ACQUIRE",
             Self::Heartbeat => "HEARTBEAT",
             Self::MarkSuspect => "MARK_SUSPECT",
+            Self::ProcessHandoff => "PROCESS_HANDOFF",
             Self::Release => "RELEASE",
             Self::Revoke => "REVOKE",
         }
@@ -971,6 +1016,35 @@ impl VerifiedWriterLeaseAggregate {
     #[must_use]
     pub fn command_receipts(&self) -> &[WriterLeaseCommandReceipt] {
         &self.command_receipts
+    }
+
+    /// Looks up one immutable historical authority receipt by its exact owner
+    /// digest, including after the aggregate has been released.
+    ///
+    /// Only transition-produced authority receipts are eligible. A duplicate
+    /// digest is impossible in a valid replay and therefore fails closed.
+    ///
+    /// # Errors
+    ///
+    /// Rejects the all-zero sentinel or duplicate replay evidence.
+    pub fn historical_authority_receipt(
+        &self,
+        receipt_digest: &ContentDigest,
+    ) -> Result<Option<WriterLeaseAuthorityReceipt>, WriterLeaseError> {
+        if is_zero_digest(receipt_digest) {
+            return Err(WriterLeaseError::ZeroEvidenceDigest);
+        }
+        let matches = self
+            .transitions
+            .iter()
+            .filter_map(|transition| transition.after.as_ref())
+            .filter(|receipt| receipt.receipt_digest() == receipt_digest)
+            .collect::<Vec<_>>();
+        match matches.as_slice() {
+            [] => Ok(None),
+            [receipt] => Ok(Some((*receipt).clone())),
+            _ => Err(WriterLeaseError::CorruptSnapshot),
+        }
     }
 
     /// Returns a commitment suitable for an independently trusted restore
@@ -1520,6 +1594,7 @@ fn raw_transition_kind(value: &CanonicalValue) -> Result<TransitionKind, WriterL
         "ACQUIRE" => Ok(TransitionKind::Acquire),
         "HEARTBEAT" => Ok(TransitionKind::Heartbeat),
         "MARK_SUSPECT" => Ok(TransitionKind::MarkSuspect),
+        "PROCESS_HANDOFF" => Ok(TransitionKind::ProcessHandoff),
         "RELEASE" => Ok(TransitionKind::Release),
         "REVOKE" => Ok(TransitionKind::Revoke),
         _ => Err(WriterLeaseError::CorruptSnapshot),
@@ -1811,6 +1886,20 @@ fn parse_command(value: &CanonicalValue) -> Result<WriterLeaseCommand, WriterLea
             "expected_head",
             "observation",
         ][..],
+        "PROCESS_HANDOFF" => &[
+            "schema_version",
+            "kind",
+            "command_id",
+            "project_id",
+            "expected_head",
+            "successor_holder_process_id",
+            "successor_holder_process_start_identity",
+            "successor_daemon_instance_id",
+            "successor_daemon_epoch",
+            "observation",
+            "expires_at",
+            "evidence",
+        ][..],
         "REVOKE" => &[
             "schema_version",
             "kind",
@@ -1852,6 +1941,24 @@ fn parse_command(value: &CanonicalValue) -> Result<WriterLeaseCommand, WriterLea
             project_id,
             expected_head: parse_required_head(object.value("expected_head")?)?,
             observation,
+        })),
+        "PROCESS_HANDOFF" => Ok(WriterLeaseCommand::ProcessHandoff(ProcessHandoffCommand {
+            command_id,
+            project_id,
+            expected_head: parse_required_head(object.value("expected_head")?)?,
+            successor_holder_process_id: HolderProcessId::new(
+                object.integer("successor_holder_process_id")?,
+            )
+            .map_err(|_| WriterLeaseError::CorruptSnapshot)?,
+            successor_holder_process_start_identity: raw_digest(
+                object.value("successor_holder_process_start_identity")?,
+            )?,
+            successor_daemon_instance_id: object.text("successor_daemon_instance_id")?.to_owned(),
+            successor_daemon_epoch: DaemonEpoch::new(object.integer("successor_daemon_epoch")?)
+                .map_err(|_| WriterLeaseError::CorruptSnapshot)?,
+            observation,
+            expires_at: object.text("expires_at")?.to_owned(),
+            evidence: parse_recovery(object.value("evidence")?)?,
         })),
         "RELEASE" => Ok(WriterLeaseCommand::Release(ReleaseCommand {
             command_id,
@@ -2179,6 +2286,9 @@ fn validate_command(
                 return Err(WriterLeaseError::InvalidExpiry);
             }
         }
+        WriterLeaseCommand::ProcessHandoff(command) => {
+            validate_process_handoff(command)?;
+        }
         WriterLeaseCommand::MarkSuspect(_)
         | WriterLeaseCommand::Release(_)
         | WriterLeaseCommand::Revoke(_) => {}
@@ -2206,6 +2316,35 @@ fn validate_command(
         if !valid_recovery_identifiers {
             return Err(WriterLeaseError::InvalidRecoveryEvidence);
         }
+    }
+    Ok(())
+}
+
+fn validate_process_handoff(command: &ProcessHandoffCommand) -> Result<(), WriterLeaseError> {
+    let observed = parse_canonical_utc(&command.observation.observed_at)?;
+    let expires = parse_canonical_utc(&command.expires_at)?;
+    if expires <= observed {
+        return Err(WriterLeaseError::InvalidExpiry);
+    }
+    if is_zero_digest(&command.successor_holder_process_start_identity)
+        || is_zero_digest(command.evidence.evidence_digest())
+    {
+        return Err(WriterLeaseError::ZeroEvidenceDigest);
+    }
+    if !valid_identifier(&command.successor_daemon_instance_id)
+        || !matches!(command.evidence, RecoveryEvidence::ProcessDeath { .. })
+    {
+        return Err(WriterLeaseError::InvalidRecoveryEvidence);
+    }
+    let RecoveryEvidence::ProcessDeath {
+        holder_daemon_instance_id,
+        ..
+    } = &command.evidence
+    else {
+        unreachable!();
+    };
+    if !valid_identifier(holder_daemon_instance_id) {
+        return Err(WriterLeaseError::InvalidRecoveryEvidence);
     }
     Ok(())
 }
@@ -2448,6 +2587,105 @@ fn transition_for(
                     ordinal,
                     command_id: command.command_id.clone(),
                     kind: TransitionKind::MarkSuspect,
+                    request_digest: request_digest.clone(),
+                    before,
+                    after: Some(authority),
+                    transition_digest,
+                }),
+            ))
+        }
+        WriterLeaseCommand::ProcessHandoff(command) => {
+            if command.observation.admission != RuntimeAdmissionMode::Active {
+                return Ok((CommandOutcome::Denied(LeaseDenial::AdmissionDenied), None));
+            }
+            let current = next
+                .current_receipt
+                .as_ref()
+                .ok_or(WriterLeaseError::CorruptSnapshot)?;
+            let current_identity = current.identity();
+            if command.successor_daemon_instance_id != current_identity.daemon_instance_id()
+                || command.successor_daemon_epoch != current_identity.daemon_epoch()
+                || !recovery_matches(current_identity, &command.evidence)
+                || (command.successor_holder_process_id == current_identity.holder_process_id()
+                    && command.successor_holder_process_start_identity
+                        == *current_identity.holder_process_start_identity())
+            {
+                return Ok((
+                    CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch),
+                    None,
+                ));
+            }
+            let observed = parse_canonical_utc(&command.observation.observed_at)?;
+            let old_heartbeat = parse_canonical_utc(current.heartbeat_at())?;
+            let old_expiry = parse_canonical_utc(current.expires_at())?;
+            let new_expiry = parse_canonical_utc(&command.expires_at)?;
+            let valid_time = match current.status() {
+                WriterLeaseStatus::Active => observed > old_heartbeat && observed < old_expiry,
+                WriterLeaseStatus::Suspect => observed >= old_expiry,
+            };
+            if !valid_time || new_expiry <= old_expiry {
+                return Ok((CommandOutcome::Denied(LeaseDenial::InvalidState), None));
+            }
+            let Some(revision_value) = next.revision.checked_add(1) else {
+                return Ok((CommandOutcome::Denied(LeaseDenial::CounterExhausted), None));
+            };
+            if revision_value > MAX_SIGNED_BIGINT {
+                return Ok((CommandOutcome::Denied(LeaseDenial::CounterExhausted), None));
+            }
+            let revision =
+                WriterLeaseRevision::new(revision_value).map_err(|_| WriterLeaseError::Contract)?;
+            let identity = WriterLeaseIdentity::new(
+                current_identity.project_id().clone(),
+                current_identity.project_snapshot_id().clone(),
+                current_identity.task_id().clone(),
+                current_identity.task_revision().to_owned(),
+                current_identity.task_spec_digest().clone(),
+                current_identity.attempt_id().clone(),
+                current_identity.lease_id().to_owned(),
+                current_identity.lease_holder_id().to_owned(),
+                current_identity.worktree_id().to_owned(),
+                command.successor_holder_process_id,
+                command.successor_holder_process_start_identity.clone(),
+                command.successor_daemon_instance_id.clone(),
+                command.successor_daemon_epoch,
+                current_identity.fencing_token(),
+            )
+            .map_err(|_| WriterLeaseError::Contract)?;
+            let acquired_at = current.acquired_at().to_owned();
+            let transition_digest = transition_digest(
+                ordinal,
+                TransitionKind::ProcessHandoff,
+                &WriterLeaseCommand::ProcessHandoff(command.clone()),
+                request_digest,
+                before.as_ref(),
+                Some(AuthoritySemantic {
+                    identity: &identity,
+                    status: WriterLeaseStatus::Active,
+                    revision,
+                    acquired_at: &acquired_at,
+                    heartbeat_at: &command.observation.observed_at,
+                    expires_at: &command.expires_at,
+                }),
+            )?;
+            let authority = authority_receipt(
+                command.observation.runtime,
+                identity,
+                WriterLeaseStatus::Active,
+                revision,
+                &command.observation,
+                &acquired_at,
+                &command.observation.observed_at,
+                &command.expires_at,
+                transition_digest.clone(),
+            )?;
+            next.revision = revision_value;
+            next.current_receipt = Some(authority.clone());
+            Ok((
+                CommandOutcome::Applied,
+                Some(WriterLeaseTransitionRecord {
+                    ordinal,
+                    command_id: command.command_id.clone(),
+                    kind: TransitionKind::ProcessHandoff,
                     request_digest: request_digest.clone(),
                     before,
                     after: Some(authority),
@@ -2763,6 +3001,33 @@ fn command_value(command: &WriterLeaseCommand) -> CanonicalValue {
             &command.observation,
             Vec::new(),
         ),
+        WriterLeaseCommand::ProcessHandoff(command) => common(
+            "PROCESS_HANDOFF",
+            &command.command_id,
+            &command.project_id,
+            Some(&command.expected_head),
+            &command.observation,
+            vec![
+                (
+                    "successor_holder_process_id".to_owned(),
+                    string(command.successor_holder_process_id.get().to_string()),
+                ),
+                (
+                    "successor_holder_process_start_identity".to_owned(),
+                    string(command.successor_holder_process_start_identity.as_str()),
+                ),
+                (
+                    "successor_daemon_instance_id".to_owned(),
+                    string(&command.successor_daemon_instance_id),
+                ),
+                (
+                    "successor_daemon_epoch".to_owned(),
+                    string(command.successor_daemon_epoch.get().to_string()),
+                ),
+                ("expires_at".to_owned(), string(&command.expires_at)),
+                ("evidence".to_owned(), recovery_value(&command.evidence)),
+            ],
+        ),
         WriterLeaseCommand::Release(command) => common(
             "RELEASE",
             &command.command_id,
@@ -2851,6 +3116,23 @@ fn repository_command_value(command: &WriterLeaseRepositoryCommand) -> Canonical
             Some(&request.expected_head),
             Vec::new(),
         ),
+        WriterLeaseRepositoryCommand::ProcessHandoff(request) => common(
+            "PROCESS_HANDOFF",
+            &request.command_id,
+            &request.project_id,
+            Some(&request.expected_head),
+            vec![
+                (
+                    "successor_holder_process_id".to_owned(),
+                    string(request.successor_holder_process_id.get().to_string()),
+                ),
+                (
+                    "successor_holder_process_start_identity".to_owned(),
+                    string(request.successor_holder_process_start_identity.as_str()),
+                ),
+                ("evidence".to_owned(), recovery_value(&request.evidence)),
+            ],
+        ),
         WriterLeaseRepositoryCommand::Release(request) => common(
             "RELEASE",
             &request.command_id,
@@ -2901,6 +3183,18 @@ fn repository_command_from_live_command(
                 command_id: command.command_id.clone(),
                 project_id: command.project_id.clone(),
                 expected_head: command.expected_head.clone(),
+            })
+        }
+        WriterLeaseCommand::ProcessHandoff(command) => {
+            WriterLeaseRepositoryCommand::ProcessHandoff(WriterLeaseProcessHandoffRequest {
+                command_id: command.command_id.clone(),
+                project_id: command.project_id.clone(),
+                expected_head: command.expected_head.clone(),
+                successor_holder_process_id: command.successor_holder_process_id,
+                successor_holder_process_start_identity: command
+                    .successor_holder_process_start_identity
+                    .clone(),
+                evidence: command.evidence.clone(),
             })
         }
         WriterLeaseCommand::Release(command) => {

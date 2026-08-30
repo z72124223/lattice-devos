@@ -2,12 +2,15 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lattice_codex_adapter::{
-    AppServerRunConfig, AppServerRunErrorKind, CODEX_HOME_OWNERSHIP_MARKER_BYTES,
-    CODEX_HOME_OWNERSHIP_MARKER_NAME, PinnedCodexResourceDigests, PinnedCodexResources, TurnStatus,
+    AppServerRunConfig, AppServerRunErrorKind, CODEX_HOME_CONFIG_BYTES,
+    CODEX_HOME_OWNERSHIP_MARKER_BYTES, CODEX_HOME_OWNERSHIP_MARKER_NAME,
+    PinnedCodexResourceDigests, PinnedCodexResources, TurnStatus,
 };
 
 #[cfg(windows)]
 use std::fs;
+#[cfg(windows)]
+use std::io::Read;
 #[cfg(windows)]
 use std::path::Path;
 #[cfg(windows)]
@@ -18,14 +21,126 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 #[cfg(windows)]
-use lattice_codex_adapter::{run_codex_app_server, run_codex_app_server_until};
+use lattice_codex_adapter::{
+    ManagedCodexSpawnIdentity, SupervisedDuplexChild, run_codex_app_server,
+    run_codex_app_server_until,
+};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(1);
+#[cfg(windows)]
+const ENVIRONMENT_CONTROLLER: &str = "LATTICE_OWNED_ENVIRONMENT_CONTROLLER";
+#[cfg(windows)]
+const ENVIRONMENT_LEAF: &str = "LATTICE_OWNED_ENVIRONMENT_LEAF";
+#[cfg(windows)]
+const ENVIRONMENT_HOSTILE: &str = "LATTICE_OWNED_ENVIRONMENT_HOSTILE";
+#[cfg(windows)]
+const ENVIRONMENT_ALLOWED: &str = "LATTICE_OWNED_ENVIRONMENT_ALLOWED";
 const DESCENDANT_DEADLINE_TRIGGER_NAME: &str = "descendant-deadline-trigger.txt";
 const DESCENDANT_TRIGGER_NAME: &str = "descendant-trigger.txt";
+
+#[cfg(windows)]
+#[test]
+fn owned_child_environment_modes_are_enforced_by_the_spawned_process() {
+    let status = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--exact",
+            "owned_child_environment_controller",
+            "--nocapture",
+        ])
+        .env(ENVIRONMENT_CONTROLLER, "1")
+        .env(ENVIRONMENT_HOSTILE, "parent-hostile-value")
+        .status()
+        .expect("spawn isolated environment controller");
+    assert!(status.success(), "environment controller failed: {status}");
+}
+
+#[cfg(windows)]
+#[test]
+fn owned_child_environment_controller() {
+    if std::env::var_os(ENVIRONMENT_CONTROLLER).is_none() {
+        return;
+    }
+
+    let executable = std::env::current_exe().expect("current test executable");
+    let leaf = || {
+        let mut command = Command::new(&executable);
+        command
+            .args(["--exact", "owned_child_environment_leaf", "--nocapture"])
+            .env(ENVIRONMENT_LEAF, "1");
+        command
+    };
+
+    let mut cleared = leaf();
+    cleared
+        .env_clear()
+        .env(ENVIRONMENT_LEAF, "1")
+        .env(ENVIRONMENT_ALLOWED, "explicit-allowlist-value");
+    let cleared = run_environment_leaf(cleared, true);
+    assert!(
+        cleared.contains("hostile=<missing>;allowed=explicit-allowlist-value"),
+        "cleared child environment was not exact: {cleared:?}"
+    );
+
+    let inherited = run_environment_leaf(leaf(), false);
+    assert!(
+        inherited.contains("hostile=parent-hostile-value;allowed=<missing>"),
+        "inherited child environment lost its parent value: {inherited:?}"
+    );
+
+    let mut removed = leaf();
+    removed.env_remove(ENVIRONMENT_HOSTILE);
+    let removed = run_environment_leaf(removed, false);
+    assert!(
+        removed.contains("hostile=<missing>;allowed=<missing>"),
+        "explicit removal did not override inheritance: {removed:?}"
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn owned_child_environment_leaf() {
+    if std::env::var_os(ENVIRONMENT_LEAF).is_none() {
+        return;
+    }
+    let hostile = std::env::var(ENVIRONMENT_HOSTILE).unwrap_or_else(|_| "<missing>".to_owned());
+    let allowed = std::env::var(ENVIRONMENT_ALLOWED).unwrap_or_else(|_| "<missing>".to_owned());
+    println!("hostile={hostile};allowed={allowed}");
+}
+
+#[cfg(windows)]
+fn run_environment_leaf(mut command: Command, cleared: bool) -> String {
+    let child = if cleared {
+        SupervisedDuplexChild::spawn_cleared(&mut command)
+    } else {
+        SupervisedDuplexChild::spawn(&mut command)
+    };
+    let mut child = child.expect("spawn owned environment leaf");
+    drop(child.take_stdin());
+    let mut stdout = child.take_stdout().expect("owned environment leaf stdout");
+    let mut output = String::new();
+    stdout
+        .read_to_string(&mut output)
+        .expect("read owned environment leaf stdout");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll owned environment leaf") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "owned environment leaf timed out"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    child
+        .terminate_and_reap()
+        .expect("reap owned environment leaf subtree");
+    assert!(status.success(), "owned environment leaf failed: {status}");
+    output
+}
 
 #[test]
 fn pinned_resource_binding_requires_an_absolute_directory_and_exact_digests() {
@@ -204,24 +319,8 @@ impl ProcessFixture {
             CODEX_HOME_OWNERSHIP_MARKER_BYTES,
         )
         .expect("mark dedicated Codex home as LATTICE-owned");
-        fs::write(codex_home.join("auth.json"), b"{}\n")
-            .expect("write inert fixture auth presence");
-        fs::write(
-            codex_home.join("config.toml"),
-            concat!(
-                "approval_policy = \"never\"\n",
-                "sandbox_mode = \"workspace-write\"\n",
-                "model = \"gpt-5.6-sol\"\n",
-                "model_reasoning_effort = \"low\"\n",
-                "\n",
-                "[windows]\n",
-                "sandbox = \"unelevated\"\n",
-                "\n",
-                "[features]\n",
-                "plugins = false\n",
-            ),
-        )
-        .expect("write safe fixture configuration");
+        fs::write(codex_home.join("config.toml"), CODEX_HOME_CONFIG_BYTES)
+            .expect("write exact keyring-only fixture configuration");
         let effect_log = root.join("thread-started.txt");
         let descendant_pid_log = root.join("descendant.pid");
         let descendant_trigger = root.join(DESCENDANT_TRIGGER_NAME);
@@ -256,6 +355,146 @@ impl ProcessFixture {
         )
         .expect("valid scripted app-server config")
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_bridge_identity_rechecks_owned_home_and_rejects_external_connector_config() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+    let identity = ManagedCodexSpawnIdentity::capture(
+        fixture.launcher.clone(),
+        &fixture.codex_home,
+        &fixture.working_directory,
+    )
+    .expect("capture exact managed bridge identity");
+    assert_eq!(
+        identity.launcher(),
+        fs::canonicalize(&fixture.launcher).expect("canonical fixture launcher")
+    );
+    assert_eq!(identity.launcher_sha256(), fixture.launcher_sha256);
+    fs::write(
+        fixture.codex_home.join("config.toml"),
+        b"approval_policy = \"never\"\n[mcp_servers.untrusted]\ncommand = \"outside.exe\"\n",
+    )
+    .expect("tamper managed home with external connector");
+    assert_eq!(
+        identity
+            .verify(&fixture.codex_home, &fixture.working_directory)
+            .expect_err("external connector configuration is not managed state")
+            .kind(),
+        AppServerRunErrorKind::InvalidCodexHome
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_identity_accepts_only_a_keyring_home_without_plaintext_auth() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+
+    let identity = ManagedCodexSpawnIdentity::capture(
+        fixture.launcher.clone(),
+        &fixture.codex_home,
+        &fixture.working_directory,
+    )
+    .expect("keyring-only managed home must be admissible");
+    assert!(
+        identity
+            .codex_home_digest()
+            .starts_with("codex-home:sha256:")
+    );
+    assert_eq!(identity.codex_home_digest().len(), 82);
+    assert!(identity.config_digest().starts_with("codex-config:sha256:"));
+    assert_eq!(identity.config_digest().len(), 84);
+}
+
+#[test]
+fn managed_codex_config_is_keyring_only_with_a_closed_shell_environment() {
+    let config = std::str::from_utf8(CODEX_HOME_CONFIG_BYTES).expect("managed config is UTF-8");
+    assert!(config.starts_with("cli_auth_credentials_store = \"keyring\"\n"));
+    assert!(config.contains("[shell_environment_policy]\ninherit = \"all\"\n"));
+    assert!(config.contains("ignore_default_excludes = false\n"));
+    assert!(config.contains(concat!(
+        "include_only = [\"SystemRoot\", \"WINDIR\", \"ComSpec\", \"PATH\", ",
+        "\"PATHEXT\", \"PROCESSOR_ARCHITECTURE\", \"NUMBER_OF_PROCESSORS\", ",
+        "\"TEMP\", \"TMP\", \"LANG\", \"LC_ALL\"]\n",
+    )));
+    for forbidden in [
+        "CODEX_HOME",
+        "HOME",
+        "USERPROFILE",
+        "APPDATA",
+        "LOCALAPPDATA",
+        "OPENAI_API_KEY",
+        "CODEX_ACCESS_TOKEN",
+        "DATABASE_URL",
+    ] {
+        assert!(
+            !config
+                .lines()
+                .any(|line| line.starts_with("include_only") && line.contains(forbidden)),
+            "managed Codex shell environment admitted {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn official_runtime_home_provisioning_never_reads_or_copies_plaintext_auth() {
+    let source =
+        include_str!("../../../scripts/start-lattice-runtime-postgres.ps1").replace("\r\n", "\n");
+    let provisioning = source
+        .split("function Initialize-LatticeRuntimeCodexHome {")
+        .nth(1)
+        .expect("runtime Codex-home provisioning function")
+        .split("function Start-LatticePostgres {")
+        .next()
+        .expect("bounded provisioning function body");
+
+    assert!(provisioning.contains("'cli_auth_credentials_store = \"keyring\"'"));
+    assert!(provisioning.contains("'[shell_environment_policy]'"));
+    assert!(provisioning.contains("throw 'LATTICE_RUNTIME_CODEX_PLAINTEXT_AUTH_DENIED'"));
+    assert!(provisioning.contains("[IO.File]::ReadAllBytes($configPath)"));
+    assert!(!provisioning.contains("$authSource"));
+    assert!(!provisioning.contains("[IO.File]::Copy"));
+    assert!(!provisioning.contains("[IO.File]::ReadAllBytes($authPath)"));
+    assert!(source.contains("'LATTICE\\runtime-codex-home-keyring-v1'"));
+}
+
+#[test]
+fn delivery_runner_uses_the_same_keyring_only_home_contract() {
+    let source = include_str!("../../../scripts/run-lattice-delivery.ps1").replace("\r\n", "\n");
+    let config = std::str::from_utf8(CODEX_HOME_CONFIG_BYTES).expect("managed config is UTF-8");
+    for line in config.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            source.contains(&format!("    '{line}'")),
+            "delivery runner is missing exact managed config line: {line}"
+        );
+    }
+    assert!(source.contains("throw 'LATTICE_DELIVERY_PLAINTEXT_CODEX_AUTH_DENIED'"));
+    assert!(source.contains("auth_present = $false"));
+    assert!(!source.contains("(Join-Path $codexHome 'auth.json')"));
+}
+
+#[cfg(windows)]
+#[test]
+fn managed_identity_rejects_any_plaintext_auth_file_before_spawn() {
+    let fixture = ProcessFixture::new(FakeMode::Success);
+    fs::write(
+        fixture.codex_home.join("auth.json"),
+        b"fixture-must-not-be-read",
+    )
+    .expect("write forbidden plaintext auth marker");
+
+    let error = ManagedCodexSpawnIdentity::capture(
+        fixture.launcher.clone(),
+        &fixture.codex_home,
+        &fixture.working_directory,
+    )
+    .expect_err("auth.json presence must be denied without reading its contents");
+    assert_eq!(
+        error.kind(),
+        AppServerRunErrorKind::PlaintextCodexAuthDenied
+    );
+    assert!(!fixture.effect_log.exists());
 }
 
 #[cfg(windows)]
@@ -350,7 +589,7 @@ fn pinned_app_server_script(paths: &PinnedServerScript<'_>) -> String {
     let quote = |path: &Path| path.display().to_string().replace('\'', "''");
     let reported_home = paths.codex_home.display().to_string().replace('\\', r"\\");
     format!(
-        "$ErrorActionPreference = 'Stop'\n$log = '{}'\nif ([IO.File]::ReadAllText('{}') -ne 'completed') {{ exit 57 }}\nif ($args.Count -ne 3 -or $args[0] -ne 'app-server' -or $args[1] -ne '--listen' -or $args[2] -ne 'stdio://') {{ exit 58 }}\n[IO.File]::WriteAllText($log, 'spawned')\nif ($env:CODEX_HOME -ne '{}') {{ [IO.File]::WriteAllText($log, 'home:' + $env:CODEX_HOME); exit 59 }}\nif ($env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'root:' + $env:CODEX_MANAGED_PACKAGE_ROOT); exit 51 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path:' + $first); exit 52 }}\nif ($env:TMP -ne '{}' -or $env:TEMP -ne '{}' -or $env:TMPDIR -ne '{}') {{ [IO.File]::WriteAllText($log, 'temp'); exit 56 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1) {{ [IO.File]::WriteAllText($log, 'matches:' + $matches.Count); exit 54 }}\n$resolved = $matches[0].Source\nif ($resolved -ne '{}') {{ [IO.File]::WriteAllText($log, 'resolved:' + $resolved); exit 53 }}\n[IO.File]::WriteAllText($log, 'verified')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.146.0\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{}\"}}}}')\n$null = [Console]::In.ReadLine()\n$readiness = [Console]::In.ReadLine() | ConvertFrom-Json\nif ($readiness.method -ne 'windowsSandbox/readiness' -or $readiness.id -ne 3) {{ exit 55 }}\n$mode = [IO.File]::ReadAllText('{}').Trim()\nif ($mode -eq 'hang') {{\n  Start-Sleep -Milliseconds 250\n  $grandchild = \"Start-Sleep -Seconds 31; [IO.File]::WriteAllText('{}', 'survived')\"\n  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n  $descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n  [IO.File]::WriteAllText('{}', [string]$descendant.Id)\n  Start-Sleep -Seconds 60\n}}\nif ($mode -eq 'update-required') {{\n  [Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"updateRequired\"}}}}')\n  Start-Sleep -Seconds 60\n}}\n[Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"ready\"}}}}')\n$threadStart = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $threadStart)\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-pinned\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-pinned\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"apply fixture\"}},\"id\":\"tool-apply\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":1}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"verify fixture\"}},\"id\":\"tool-verify\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":2}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"items\":[{{\"id\":\"agent-final\",\"text\":\"Delivery complete.\",\"type\":\"agentMessage\"}}],\"itemsView\":\"summary\",\"status\":\"completed\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
+        "$ErrorActionPreference = 'Stop'\n$log = '{}'\nif ([IO.File]::ReadAllText('{}') -ne 'completed') {{ exit 57 }}\nif ($args.Count -ne 3 -or $args[0] -ne 'app-server' -or $args[1] -ne '--listen' -or $args[2] -ne 'stdio://') {{ exit 58 }}\n[IO.File]::WriteAllText($log, 'spawned')\nif ($env:CODEX_HOME -ne '{}') {{ [IO.File]::WriteAllText($log, 'home:' + $env:CODEX_HOME); exit 59 }}\nif ($env:CODEX_MANAGED_PACKAGE_ROOT -ne '{}') {{ [IO.File]::WriteAllText($log, 'root:' + $env:CODEX_MANAGED_PACKAGE_ROOT); exit 51 }}\n$first = ($env:PATH -split ';')[0]\nif ($first -ne '{}') {{ [IO.File]::WriteAllText($log, 'path:' + $first); exit 52 }}\nif ($env:TMP -ne '{}' -or $env:TEMP -ne '{}' -or $env:TMPDIR -ne '{}') {{ [IO.File]::WriteAllText($log, 'temp'); exit 56 }}\n$matches = @(Get-Command 'codex-windows-sandbox-setup.exe' -CommandType Application -ErrorAction Stop)\nif ($matches.Count -ne 1) {{ [IO.File]::WriteAllText($log, 'matches:' + $matches.Count); exit 54 }}\n$resolved = $matches[0].Source\nif ($resolved -ne '{}') {{ [IO.File]::WriteAllText($log, 'resolved:' + $resolved); exit 53 }}\n[IO.File]::WriteAllText($log, 'verified')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.146.0\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{}\"}}}}')\n$null = [Console]::In.ReadLine()\n$readiness = [Console]::In.ReadLine() | ConvertFrom-Json\nif ($readiness.method -ne 'windowsSandbox/readiness' -or $readiness.id -ne 3) {{ exit 55 }}\n$mode = [IO.File]::ReadAllText('{}').Trim()\nif ($mode -eq 'hang') {{\n  Start-Sleep -Milliseconds 250\n  $grandchild = \"Start-Sleep -Seconds 31; [IO.File]::WriteAllText('{}', 'survived')\"\n  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($grandchild))\n  $descendant = Start-Process -FilePath \"$PSHOME\\powershell.exe\" -WindowStyle Hidden -ArgumentList @('-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',$encoded) -PassThru\n  [IO.File]::WriteAllText('{}', [string]$descendant.Id)\n  Start-Sleep -Seconds 60\n}}\nif ($mode -eq 'update-required') {{\n  [Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"updateRequired\"}}}}')\n  Start-Sleep -Seconds 60\n}}\n[Console]::Out.WriteLine('{{\"id\":3,\"result\":{{\"status\":\"ready\"}}}}')\n$threadStart = [Console]::In.ReadLine()\n[IO.File]::WriteAllText('{}', $threadStart)\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-pinned\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-pinned\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/started\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"status\":\"inProgress\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"apply fixture\"}},\"id\":\"tool-apply\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":1}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"item/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turnId\":\"turn-pinned\",\"item\":{{\"arguments\":{{\"command\":\"verify fixture\"}},\"id\":\"tool-verify\",\"status\":\"completed\",\"success\":true,\"tool\":\"exec\",\"type\":\"dynamicToolCall\"}},\"completedAtMs\":2}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/completed\",\"params\":{{\"threadId\":\"thread-pinned\",\"turn\":{{\"id\":\"turn-pinned\",\"items\":[{{\"id\":\"agent-final\",\"text\":\"Delivery complete.\",\"type\":\"agentMessage\"}}],\"itemsView\":\"summary\",\"status\":\"completed\",\"error\":null}}}}}}')\nStart-Sleep -Seconds 60\n",
         quote(paths.launch_log),
         quote(paths.sandbox_preflight_log),
         quote(paths.codex_home),
@@ -414,23 +653,8 @@ fn write_pinned_codex_home(codex_home: &Path) {
         CODEX_HOME_OWNERSHIP_MARKER_BYTES,
     )
     .expect("write Codex home marker");
-    fs::write(codex_home.join("auth.json"), b"{}\n").expect("write inert fixture auth");
-    fs::write(
-        codex_home.join("config.toml"),
-        concat!(
-            "approval_policy = \"never\"\n",
-            "sandbox_mode = \"workspace-write\"\n",
-            "model = \"gpt-5.6-sol\"\n",
-            "model_reasoning_effort = \"low\"\n",
-            "\n",
-            "[windows]\n",
-            "sandbox = \"unelevated\"\n",
-            "\n",
-            "[features]\n",
-            "plugins = false\n",
-        ),
-    )
-    .expect("write exact safe fixture config");
+    fs::write(codex_home.join("config.toml"), CODEX_HOME_CONFIG_BYTES)
+        .expect("write exact keyring-only fixture config");
 }
 
 #[cfg(windows)]
@@ -1144,7 +1368,7 @@ fn rejects_unsafe_isolated_home_config_before_spawn() {
 
 #[cfg(windows)]
 #[test]
-fn accepts_and_clears_a_prior_lattice_delivery_worktree_trust_entry() {
+fn rejects_and_preserves_any_codex_project_trust_entry() {
     let fixture = ProcessFixture::new(FakeMode::Success);
     let trust_path = fixture
         .codex_home
@@ -1159,31 +1383,22 @@ fn accepts_and_clears_a_prior_lattice_delivery_worktree_trust_entry() {
         fixture.codex_home.join("config.toml"),
         format!(
             "{}[projects.'{}']\ntrust_level = \"trusted\"\n",
-            concat!(
-                "approval_policy = \"never\"\n",
-                "sandbox_mode = \"workspace-write\"\n",
-                "model = \"gpt-5.6-sol\"\n",
-                "model_reasoning_effort = \"low\"\n",
-                "\n",
-                "[windows]\n",
-                "sandbox = \"unelevated\"\n",
-                "\n",
-                "[features]\n",
-                "plugins = false\n\n",
-            ),
+            String::from_utf8_lossy(CODEX_HOME_CONFIG_BYTES),
             trust_path,
         ),
     )
     .expect("write Codex-generated current-worktree trust entry");
 
-    run_codex_app_server(&fixture.config(Duration::from_secs(5)))
-        .expect("a prior LATTICE delivery worktree trust entry is safe");
-    assert!(fixture.effect_log.exists());
-    let reset_config = String::from_utf8(
-        fs::read(fixture.codex_home.join("config.toml")).expect("read reset config"),
-    )
-    .expect("reset config is UTF-8");
-    assert!(!reset_config.contains("[projects."));
+    let exact = fs::read(fixture.codex_home.join("config.toml")).expect("read tampered config");
+    let error = run_codex_app_server(&fixture.config(Duration::from_secs(5)))
+        .expect_err("any project trust entry must be rejected before spawn");
+    assert_eq!(error.kind(), AppServerRunErrorKind::InvalidCodexHome);
+    assert!(!fixture.effect_log.exists());
+    assert_eq!(
+        fs::read(fixture.codex_home.join("config.toml")).expect("re-read tampered config"),
+        exact,
+        "validation must not rewrite rejected Codex state"
+    );
 }
 
 #[cfg(windows)]
@@ -1322,7 +1537,7 @@ fn fake_launcher_script(
         "$ErrorActionPreference = 'Stop'\nif ($env:CODEX_HOME -ne '{configured_home}') {{ exit 41 }}\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":0,\"result\":{{\"userAgent\":\"codex_cli_rs/0.144.6\",\"platformFamily\":\"windows\",\"platformOs\":\"windows\",\"codexHome\":\"{reported_home}\"}}}}')\n"
     );
     let lifecycle = format!(
-        "$null = [Console]::In.ReadLine()\n$threadStart = [Console]::In.ReadLine()\nif ($threadStart -like '*\"method\":\"thread/start\"*') {{ [IO.File]::WriteAllText('{}', 'thread/start received') }}\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-scripted\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}')\n",
+        "$null = [Console]::In.ReadLine()\n$threadStart = [Console]::In.ReadLine()\nif ($threadStart -like '*\"method\":\"thread/start\"*') {{ [IO.File]::WriteAllText('{}', 'thread/start received') }}\n[Console]::Out.WriteLine('{{\"id\":1,\"result\":{{\"thread\":{{\"id\":\"thread-scripted\"}}}}}}')\n$null = [Console]::In.ReadLine()\n[Console]::Out.WriteLine('{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}')\n[Console]::Out.WriteLine('{{\"method\":\"turn/started\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"status\":\"inProgress\"}}}}}}')\n",
         quote(effect_log)
     );
     let apply_completed = r#"{"method":"item/completed","params":{"threadId":"thread-scripted","turnId":"turn-scripted","item":{"arguments":{"command":"nested shell write fixture"},"contentItems":[{"text":"Script completed\nExit code: 0","type":"inputText"}],"id":"tool-shell-write","status":"completed","success":true,"tool":"exec","type":"dynamicToolCall"},"completedAtMs":1}}"#;

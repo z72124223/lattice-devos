@@ -49,6 +49,8 @@ const WRITER_LEASE_V3_SQL_SHA256: &str =
     "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0";
 const WRITER_LEASE_V4_SQL_SHA256: &str =
     "51996b50c9a7d3696f8319613d35acae6257c5802b63dc4a809873721a22da09";
+const WRITER_LEASE_V5_SQL_SHA256: &str =
+    "c8193b47ef764d54a445a3f481331f642d0ce67b3a148c7c00fb3ca26d7ad12a";
 const WRITER_LEASE_V1_SQL: &str = include_str!("../../../db/extensions/writer-lease/v1.sql");
 const WRITER_LEASE_V2_SQL: &str = include_str!("../../../db/extensions/writer-lease/v2.sql");
 const WRITER_LEASE_V3_SQL: &str = include_str!("../../../db/extensions/writer-lease/v3.sql");
@@ -57,6 +59,7 @@ const WRITER_LEASE_V3_REBIND_SQL: &str =
 const WRITER_LEASE_V4_SQL: &str = include_str!("../../../db/extensions/writer-lease/v4.sql");
 const WRITER_LEASE_V4_REBIND_SQL: &str =
     include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
+const WRITER_LEASE_V5_SQL: &str = include_str!("../../../db/extensions/writer-lease/v5.sql");
 const CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION: i16 = 5;
 const CATALOG_SIGNATURE_DOMAIN: &[u8] = b"LATTICE_POSTGRES_CATALOG_SIGNATURE_V1\0";
 const V1_EXPECTED_RELATION_SIGNATURE: &str =
@@ -2299,12 +2302,15 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
                   WHERE n.nspname='control'), \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='control' AND c.relname IN (
-                    'task_submission_envelopes','task_ingress_claims') \
+                    'task_submission_envelopes','task_ingress_claims',
+                    'task_ingress_historical_ambiguities') \
                     AND c.relkind='r' AND pg_get_userbyid(c.relowner)='lattice_migrator'), \
                 COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
                     'control.task_submission_envelopes','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false) \
                   OR COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
-                    'control.task_ingress_claims','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false), \
+                    'control.task_ingress_claims','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false) \
+                  OR COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
+                    'control.task_ingress_historical_ambiguities','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false), \
                 (SELECT count(*)::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
                   WHERE n.nspname='control' AND p.proname IN (\
                     'task_submission_prepare_v1','task_submission_record_v1',\
@@ -2369,7 +2375,7 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
         general_runtime_functions,
         legacy_head_runtime_functions,
         subject_constraint,
-    ) != (19, 58, 29, 2, false, 7, 4, 2, 0, 1)
+    ) != (20, 58, 29, 3, false, 7, 4, 2, 0, 1)
     {
         return Err(catalog_error());
     }
@@ -2389,14 +2395,29 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    if row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 5
-        || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 15
-        || row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)? != 7
-        || !row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?
-    {
+    let writer_tables = row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let writer_functions =
+        row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let writer_runtime_functions =
+        row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    let writer_usage =
+        row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    if writer_tables != 5 || writer_runtime_functions != 7 || !writer_usage {
         return Err(catalog_error());
     }
-    verify_writer_lease_v4_functions(client, true)?;
+    // Runtime has no table privilege in the Writer namespace by design. The
+    // exact function count selects only the frozen v4 predecessor or its v5
+    // append-only successor; the selected verifier then pins every function
+    // body, comment, ACL, owner, argument list, and embedded SQL digest.
+    match writer_functions {
+        15 => {
+            verify_writer_lease_v4_functions(client, true)?;
+        }
+        17 => {
+            verify_writer_lease_v5_functions(client)?;
+        }
+        _ => return Err(catalog_error()),
+    }
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -5321,6 +5342,315 @@ fn verify_writer_lease_v4_functions<C: GenericClient>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v5_functions<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    if WRITER_LEASE_V5_SQL.len() != 20_740
+        || hex_digest(Sha256::digest(WRITER_LEASE_V5_SQL.as_bytes()).as_ref())
+            != WRITER_LEASE_V5_SQL_SHA256
+        || WRITER_LEASE_V4_REBIND_SQL.is_empty()
+    {
+        return Err(catalog_error());
+    }
+    verify_writer_lease_v5_transition_constraint(client)?;
+    let rows = client
+        .query(
+            "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
+                    p.provolatile::text,p.proparallel::text, \
+                    pg_catalog.oidvectortypes(p.proargtypes), \
+                    COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'), \
+                    pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE'), \
+                    p.prosrc::text,COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>') \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+               JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+              WHERE n.nspname='writer_lease' \
+              ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let allowed = |name: &str| {
+        matches!(
+            name,
+            "writer_lease_assert_current_v1"
+                | "writer_lease_bind_runtime_v5"
+                | "writer_lease_commit_plan_v1"
+                | "writer_lease_load_commands_v1"
+                | "writer_lease_load_current_v1"
+                | "writer_lease_load_for_update_v5"
+                | "writer_lease_load_transitions_v1"
+        )
+    };
+    let expected = [
+        (
+            "writer_lease_assert_current_v1",
+            "f",
+            "s",
+            "s",
+            "text, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, bytea",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v1",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v2",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v3",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v4",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v5",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "f",
+            "v",
+            "u",
+            "text, bigint, bytea, bigint, bytea, text, bytea, text, text, bigint, bytea, bytea, bytea, bytea, bigint, bigint, bigint, bytea, text, bytea, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, text, bigint, text, bytea, bytea, bytea, bytea, bytea, text, text, bytea, bytea, bytea, text, bytea",
+            true,
+        ),
+        ("writer_lease_load_commands_v1", "f", "s", "s", "text", true),
+        ("writer_lease_load_current_v1", "f", "s", "s", "text", true),
+        (
+            "writer_lease_load_for_update_v1",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v3",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v4",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v5",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "f",
+            "s",
+            "s",
+            "text",
+            true,
+        ),
+        ("writer_lease_rebind_v3", "p", "v", "u", "", false),
+        ("writer_lease_rebind_v4", "p", "v", "u", "", false),
+    ];
+    if rows.len() != expected.len() {
+        return Err(catalog_error());
+    }
+    for (row, (name, kind, volatility, parallel, args, security_definer)) in
+        rows.iter().zip(expected)
+    {
+        if row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != name
+            || row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != kind
+            || row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "plpgsql"
+            || row_value::<String>(row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "lattice_migrator"
+            || row_value::<bool>(row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != security_definer
+            || row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != volatility
+            || row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CorruptCatalog)? != parallel
+            || row_value::<String>(row, 7, PostgresStoreSetupErrorKind::CorruptCatalog)? != args
+            || row_value::<String>(row, 8, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+            || row_value::<bool>(row, 9, PostgresStoreSetupErrorKind::PermissionDenied)?
+                != allowed(name)
+        {
+            return Err(catalog_error());
+        }
+        let (sql, delimiter, comment) = match name {
+            "writer_lease_bind_runtime_v2" | "writer_lease_load_for_update_v2" => (
+                WRITER_LEASE_V2_SQL,
+                if name == "writer_lease_bind_runtime_v2" {
+                    "lattice_writer_lease_bind_runtime_v2"
+                } else {
+                    "lattice_writer_lease_load_for_update_v2"
+                },
+                None,
+            ),
+            "writer_lease_bind_runtime_v3" | "writer_lease_load_for_update_v3" => (
+                WRITER_LEASE_V3_SQL,
+                if name == "writer_lease_bind_runtime_v3" {
+                    "lattice_writer_lease_bind_runtime_v3"
+                } else {
+                    "lattice_writer_lease_load_for_update_v3"
+                },
+                if name == "writer_lease_bind_runtime_v3" {
+                    Some("TASK087_GLOBAL_SCHEMA_V6_FOREMAN_COORDINATION_FOREMAN_SNAPSHOT_RECORDED")
+                } else {
+                    None
+                },
+            ),
+            "writer_lease_bind_runtime_v4" | "writer_lease_load_for_update_v4" => (
+                WRITER_LEASE_V4_SQL,
+                if name == "writer_lease_bind_runtime_v4" {
+                    "lattice_writer_lease_bind_runtime_v4"
+                } else {
+                    "lattice_writer_lease_load_for_update_v4"
+                },
+                if name == "writer_lease_bind_runtime_v4" {
+                    Some("PHASE3_GLOBAL_SCHEMA_V7_GENERAL_TASK_INTAKE")
+                } else {
+                    None
+                },
+            ),
+            "writer_lease_bind_runtime_v5" | "writer_lease_load_for_update_v5" => (
+                WRITER_LEASE_V5_SQL,
+                if name == "writer_lease_bind_runtime_v5" {
+                    "lattice_writer_lease_bind_runtime_v5"
+                } else {
+                    "lattice_writer_lease_load_for_update_v5"
+                },
+                Some("PHASE4_EXACT_PROCESS_HANDOFF"),
+            ),
+            "writer_lease_rebind_v3" => (
+                WRITER_LEASE_V3_REBIND_SQL,
+                "lattice_writer_lease_rebind_v3",
+                Some("LATTICE_WRITER_LEASE_REBIND_V3"),
+            ),
+            "writer_lease_rebind_v4" => (
+                WRITER_LEASE_V4_REBIND_SQL,
+                "lattice_writer_lease_rebind_v4",
+                Some("LATTICE_WRITER_LEASE_REBIND_V4"),
+            ),
+            _ => (
+                WRITER_LEASE_V1_SQL,
+                match name {
+                    "writer_lease_assert_current_v1" => "lattice_writer_lease_assert_current_v1",
+                    "writer_lease_bind_runtime_v1" => "lattice_writer_lease_bind_runtime_v1",
+                    "writer_lease_commit_plan_v1" => "lattice_writer_lease_commit_plan_v1",
+                    "writer_lease_load_commands_v1" => "lattice_writer_lease_load_commands_v1",
+                    "writer_lease_load_current_v1" => "lattice_writer_lease_load_current_v1",
+                    "writer_lease_load_for_update_v1" => "lattice_writer_lease_load_for_update_v1",
+                    "writer_lease_load_transitions_v1" => {
+                        "lattice_writer_lease_load_transitions_v1"
+                    }
+                    _ => return Err(catalog_error()),
+                },
+                None,
+            ),
+        };
+        if row_value::<String>(row, 10, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != embedded_writer_function_source(sql, delimiter)?
+            || row_value::<String>(row, 11, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != comment.unwrap_or("<NULL>")
+        {
+            return Err(catalog_error());
+        }
+    }
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
+                 'lattice_runtime',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles r WHERE n.nspname='writer_lease' AND NOT r.rolsuper \
+                 AND r.rolname !~ '^pg_' AND r.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                 AND pg_catalog.has_function_privilege(r.rolname,p.oid,'EXECUTE')), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied))?;
+    if row_value::<i64>(&closure, 0, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<i64>(&closure, 1, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<bool>(&closure, 2, PostgresStoreSetupErrorKind::PermissionDenied)?
+    {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v5_transition_constraint<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT pg_catalog.count(*), \
+                    pg_catalog.max(pg_catalog.pg_get_constraintdef(c.oid,false)) \
+               FROM pg_catalog.pg_constraint c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace \
+              WHERE n.nspname='writer_lease' \
+                AND c.conname IN ('writer_lease_transitions_identity', \
+                                  'writer_lease_transitions_identity_v5')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let definition =
+        row_value::<Option<String>>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    if row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 1
+        || definition.as_deref().is_none_or(|definition| {
+            !definition.contains("transition_kind")
+                || !definition.contains("PROCESS_HANDOFF")
+                || !definition.contains("MARK_SUSPECT")
+                || !definition.contains("REVOKE")
+        })
+    {
+        return Err(catalog_error());
+    }
+    Ok(())
+}
+
 fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
     client: &mut C,
     runtime: WriterLeaseV2RuntimeProfile,
@@ -7327,7 +7657,7 @@ mod tests {
         const FROZEN_CURRENT_V6_MANIFEST_SHA256: &str =
             "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
         const CURRENT_V7_MANIFEST_SHA256: &str =
-            "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
+            "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078";
         let current = retained_current_history();
         let current_compatibility = compatibility_for(&current, 7);
         assert_eq!(

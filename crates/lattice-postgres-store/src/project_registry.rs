@@ -63,16 +63,40 @@ const WRITE_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
     SET LOCAL row_security = on; \
     SET LOCAL synchronous_commit = on; \
-    SET LOCAL lock_timeout = '5s'; \
-    SET LOCAL statement_timeout = '30s'; \
-    SET LOCAL idle_in_transaction_session_timeout = '30s'";
+    SELECT pg_catalog.set_config('lock_timeout', \
+        CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 5000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('statement_timeout', \
+        CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', \
+        CASE WHEN pg_catalog.current_setting('idle_in_transaction_session_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('idle_in_transaction_session_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true)";
 
 const READ_TRANSACTION_SETTINGS: &str = "\
     SET LOCAL search_path = pg_catalog; \
     SET LOCAL row_security = on; \
-    SET LOCAL lock_timeout = '5s'; \
-    SET LOCAL statement_timeout = '30s'; \
-    SET LOCAL idle_in_transaction_session_timeout = '30s'";
+    SELECT pg_catalog.set_config('lock_timeout', \
+        CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 5000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('statement_timeout', \
+        CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true); \
+    SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', \
+        CASE WHEN pg_catalog.current_setting('idle_in_transaction_session_timeout') = '0' THEN '30000' \
+             ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                 pg_catalog.current_setting('idle_in_transaction_session_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                 30000::bigint)::text END, true)";
 
 const PREPARE_SQL: &str = "\
     SELECT prepare_status, retained_request_digest, retained_result_digest, \
@@ -2311,6 +2335,17 @@ const fn error(kind: PostgresProjectRegistryErrorKind) -> PostgresProjectRegistr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_transactions_never_extend_a_shorter_session_deadline() {
+        for settings in [WRITE_TRANSACTION_SETTINGS, READ_TRANSACTION_SETTINGS] {
+            assert!(settings.contains("pg_catalog.set_config('lock_timeout'"));
+            assert!(settings.contains("pg_catalog.set_config('statement_timeout'"));
+            assert!(settings.contains("LEAST("));
+            assert!(!settings.contains("SET LOCAL lock_timeout = '5s'"));
+            assert!(!settings.contains("SET LOCAL statement_timeout = '30s'"));
+        }
+    }
 
     #[test]
     fn retry_and_commit_failure_classification_is_closed() {
