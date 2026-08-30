@@ -28,7 +28,17 @@ const workItemChangeFields = new Set([
 const installationReceiptSchemaVersion = "lattice.control.installation-receipt.v1";
 const installationObservationKind = "OBSERVED_AFTER_INSTALL";
 const installationReceiptAuthority = "NON_AUTHORITATIVE";
-const controlSchemaVersion = 1;
+const developmentRadarSchemaVersion = "lattice.control.development-radar.v1";
+const developmentRadarObservationKind = "UPSTREAM_DEVELOPMENT_RADAR";
+const developmentRadarAuthority = "NON_AUTHORITATIVE";
+const developmentRadarActions = new Set([
+  "IGNORE",
+  "WATCH",
+  "WRAP_OFFICIAL",
+  "ADOPT_OSS",
+  "FREEZE_LATTICE",
+]);
+const controlSchemaVersion = 2;
 const projectCatalogSchemaVersion = "lattice.control.project-catalog.v1";
 const projectCatalogRecordKind = "CONTROL_LOCAL_CATALOG";
 const legacyProjectRecordKind = "LEGACY_CONTROL_PROJECT";
@@ -86,6 +96,60 @@ function observationTime(value, label = "observation time") {
   const parsed = new Date(text);
   if (!Number.isFinite(parsed.getTime())) throw new TypeError(`${label} must be an ISO timestamp`);
   return parsed.toISOString();
+}
+
+function normalizedHttpsUrl(value, label) {
+  const text = boundedText(value, label, 2_048);
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    throw new TypeError(`${label} must be a valid HTTPS URL`);
+  }
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
+    throw new TypeError(`${label} must be a credential-free HTTPS URL`);
+  }
+  return boundedText(parsed.href, label, 2_048);
+}
+
+function normalizedDevelopmentRadar(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("development radar snapshot is required");
+  }
+  const observedAt = observationTime(input.observed_at, "radar observation time");
+  const expiresAt = observationTime(input.expires_at, "radar expiry time");
+  if (expiresAt <= observedAt) {
+    throw new TypeError("radar expiry time must be later than its observation time");
+  }
+  if (!Array.isArray(input.decisions) || input.decisions.length > 32) {
+    throw new TypeError("radar decisions must be an array of at most 32 entries");
+  }
+  const decisions = input.decisions.map((decision) => {
+    if (!decision || typeof decision !== "object" || Array.isArray(decision)) {
+      throw new TypeError("radar decision must be an object");
+    }
+    const action = boundedText(decision.action, "radar decision action", 32);
+    if (!developmentRadarActions.has(action)) {
+      throw new TypeError("radar decision action is invalid");
+    }
+    return {
+      action,
+      subject: boundedText(decision.subject, "radar decision subject", 256),
+      source_url: normalizedHttpsUrl(decision.source_url, "radar decision source URL"),
+      version_or_date: optionalBoundedText(
+        decision.version_or_date,
+        "radar decision version or date",
+        128,
+      ),
+      impact: optionalBoundedText(decision.impact, "radar decision impact", 2_048),
+    };
+  });
+  return {
+    observed_at: observedAt,
+    expires_at: expiresAt,
+    summary: boundedText(input.summary, "radar summary", 4_096),
+    decisions,
+  };
 }
 
 function nullableBoolean(value, label) {
@@ -321,6 +385,10 @@ const schemaColumns = new Map([
     "id", "schema_version", "observation_kind", "authority", "project_id", "component",
     "source_commit_sha", "artifact_path", "artifact_sha256", "receipt_digest", "recorded_at",
   ]],
+  ["development_radar", [
+    "slot", "schema_version", "observation_kind", "authority", "observed_at",
+    "expires_at", "summary", "decisions_json", "updated_at",
+  ]],
   ["project_registration_details", [
     "project_id", "canonical_path", "repo_root_path", "repo_root_observed_at", "registered_at",
     "refreshed_at", "refresh_generation", "last_refresh_failure_code",
@@ -540,6 +608,21 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
         SELECT RAISE(ABORT, 'installation receipts are append-only');
       END;
 
+      CREATE TABLE IF NOT EXISTS development_radar (
+        slot TEXT PRIMARY KEY CHECK (slot = 'current'),
+        schema_version TEXT NOT NULL
+          CHECK (schema_version = 'lattice.control.development-radar.v1'),
+        observation_kind TEXT NOT NULL
+          CHECK (observation_kind = 'UPSTREAM_DEVELOPMENT_RADAR'),
+        authority TEXT NOT NULL
+          CHECK (authority = 'NON_AUTHORITATIVE'),
+        observed_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND 4096),
+        decisions_json TEXT NOT NULL CHECK (length(decisions_json) BETWEEN 2 AND 262144),
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS project_registration_details (
         project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
         canonical_path TEXT NOT NULL COLLATE NOCASE UNIQUE,
@@ -602,7 +685,35 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
 
     `);
     if (validateProfile) validateControlSchemaProfile(database);
-    database.exec("PRAGMA user_version = 1;");
+    database.exec(`PRAGMA user_version = ${controlSchemaVersion};`);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV1ToV2(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.exec(`
+      CREATE TABLE development_radar (
+        slot TEXT PRIMARY KEY CHECK (slot = 'current'),
+        schema_version TEXT NOT NULL
+          CHECK (schema_version = 'lattice.control.development-radar.v1'),
+        observation_kind TEXT NOT NULL
+          CHECK (observation_kind = 'UPSTREAM_DEVELOPMENT_RADAR'),
+        authority TEXT NOT NULL
+          CHECK (authority = 'NON_AUTHORITATIVE'),
+        observed_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND 4096),
+        decisions_json TEXT NOT NULL CHECK (length(decisions_json) BETWEEN 2 AND 262144),
+        updated_at TEXT NOT NULL
+      );
+      PRAGMA user_version = 2;
+    `);
+    validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
     database.exec("ROLLBACK;");
@@ -671,12 +782,13 @@ export class LatticeStore {
     const database = new DatabaseSync(databasePath);
     try {
       const version = database.prepare("PRAGMA user_version").get().user_version;
-      if (version !== 0 && version !== controlSchemaVersion) {
+      if (version !== 0 && version !== 1 && version !== controlSchemaVersion) {
         throw new Error(
-          `Control database schema ${version} is unsupported; expected 0 or ${controlSchemaVersion}`,
+          `Control database schema ${version} is unsupported; expected 0, 1, or ${controlSchemaVersion}`,
         );
       }
       if (version === 0) initializeControlDatabase(database);
+      else if (version === 1) migrateControlDatabaseV1ToV2(database);
       else validateControlSchemaProfile(database);
       database.exec("PRAGMA foreign_keys = ON;");
       if (databasePath !== ":memory:") database.exec("PRAGMA journal_mode = WAL;");
@@ -765,6 +877,49 @@ export class LatticeStore {
 
   countInstallationReceipts() {
     return this.database.prepare("SELECT COUNT(*) AS count FROM installation_receipts").get().count;
+  }
+
+  replaceDevelopmentRadar(input) {
+    const snapshot = normalizedDevelopmentRadar(input);
+    const updatedAt = now();
+    this.database.prepare(`
+      INSERT INTO development_radar (
+        slot, schema_version, observation_kind, authority, observed_at,
+        expires_at, summary, decisions_json, updated_at
+      ) VALUES ('current', ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(slot) DO UPDATE SET
+        schema_version = excluded.schema_version,
+        observation_kind = excluded.observation_kind,
+        authority = excluded.authority,
+        observed_at = excluded.observed_at,
+        expires_at = excluded.expires_at,
+        summary = excluded.summary,
+        decisions_json = excluded.decisions_json,
+        updated_at = excluded.updated_at
+    `).run(
+      developmentRadarSchemaVersion,
+      developmentRadarObservationKind,
+      developmentRadarAuthority,
+      snapshot.observed_at,
+      snapshot.expires_at,
+      snapshot.summary,
+      JSON.stringify(snapshot.decisions),
+      updatedAt,
+    );
+    return this.getDevelopmentRadar();
+  }
+
+  getDevelopmentRadar() {
+    const row = this.database.prepare(
+      "SELECT * FROM development_radar WHERE slot = 'current'",
+    ).get();
+    if (!row) return null;
+    const { decisions_json: decisionsJson, ...snapshot } = row;
+    return {
+      ...snapshot,
+      decisions: parseJsonArray(decisionsJson),
+      freshness: Date.now() < Date.parse(row.expires_at) ? "CURRENT" : "EXPIRED",
+    };
   }
 
   close() {

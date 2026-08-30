@@ -1843,7 +1843,6 @@ fn redacted_run_failure_missing_detail_diagnostic(component: &str, source: &str)
 /// The bridge owns process containment; this parser retains Hermes' existing
 /// evidence binding and canonicalization rules so a model response can never
 /// become durable truth without the normal LATTICE memory-port path.
-#[cfg(windows)]
 pub(crate) fn parse_reflection(
     output: &str,
     job: &HermesReflectionJob,
