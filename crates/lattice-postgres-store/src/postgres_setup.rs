@@ -263,6 +263,28 @@ const TYPE_SIGNATURE_SQL: &str = r"
     ORDER BY n.nspname, t.typname
 ";
 
+const TYPE_CATALOG_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname, t.typname, t.typtype::text, t.typisdefined,
+        owner.rolname, COALESCE(c.relname, '<NULL>'),
+        COALESCE(element_ns.nspname || '.' || element.typname, '<NULL>'),
+        COALESCE(array_ns.nspname || '.' || array_type.typname, '<NULL>')
+    )::text
+    FROM pg_type t
+    JOIN pg_namespace n ON n.oid = t.typnamespace
+    JOIN pg_roles owner ON owner.oid = t.typowner
+    LEFT JOIN pg_class c ON c.oid = t.typrelid
+    LEFT JOIN pg_type element ON element.oid = t.typelem
+    LEFT JOIN pg_namespace element_ns ON element_ns.oid = element.typnamespace
+    LEFT JOIN pg_type array_type ON array_type.oid = t.typarray
+    LEFT JOIN pg_namespace array_ns ON array_ns.oid = array_type.typnamespace
+    WHERE n.nspname IN ('control', 'memory', 'readmodel')
+      AND NOT (n.nspname = 'control' AND t.typname IN (
+          'task_ledger_autonomy_receipts', '_task_ledger_autonomy_receipts'
+      ))
+    ORDER BY n.nspname, t.typname
+";
+
 const FUNCTION_SIGNATURE_SQL: &str = r"
     SELECT jsonb_build_array(
         n.nspname, p.proname,
@@ -808,6 +830,42 @@ const WRITER_LEASE_V2_CURRENT_CATALOG_PROFILES: [(&str, &str, PostgresStoreSetup
         PostgresStoreSetupErrorKind::CorruptCatalog,
     ),
 ];
+const WRITER_LEASE_V3_CURRENT_CATALOG_SIGNATURES: [&str; 10] = [
+    "0fdd123e2939cee6ad128564668ef57c8130d0780ee9f6a3a7f725d1c4ce840f",
+    "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    "9be3f0f60b5113317678328d490ff88d866c252c3544e5bed1a7a60c0d543cc1",
+    "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    "4b9a0caf84307961d7780f87ca0aa9e0382c9920def32415d3688fb28e7701ef",
+    "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    "72640b1eec7e3bbb4e56532f795712930dd84f79f6d2ea846bd83395185fdbf3",
+    "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+];
+const WRITER_LEASE_V4_BRIDGE_CATALOG_SIGNATURES: [&str; 10] = [
+    "41652b9772ad01aeb834f84eb0fc21ecef8a424afa755a8ec1b95e86eedb8861",
+    "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    "8aec9d54882a49e41b93bc1ead82f80c34e52c679f3e9efaca45342325af622e",
+    "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    "e253b95704f78e288fc0a0799327a7034932cc8e721b390f9d629cccebc3a8d0",
+    "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+    "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    "25de9857318874012f716bb9a9db146aa40597cd8fe95ff550ba21f55f2dcc00",
+    "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+];
+const WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES: [&str; 10] = [
+    "41652b9772ad01aeb834f84eb0fc21ecef8a424afa755a8ec1b95e86eedb8861",
+    "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    "8aec9d54882a49e41b93bc1ead82f80c34e52c679f3e9efaca45342325af622e",
+    "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    "e253b95704f78e288fc0a0799327a7034932cc8e721b390f9d629cccebc3a8d0",
+    "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    "42db5b1428da3e9e6aa96f770dd1996893fdcdf4f88b275d1ddb28ae8df12309",
+    "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+];
 const STORE_PREPARE_V2_IDENTITY: &str = "control.store_prepare_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
 const STORE_FINALIZE_V2_IDENTITY: &str = "control.store_finalize_v2(smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
 const STORE_CURRENT_HEAD_V2_IDENTITY: &str = "control.store_current_head_v2(text,text,text,bytea)";
@@ -901,6 +959,155 @@ const AUTONOMY_PROFILE_SIGNATURE_SQL: &str = r"
 ";
 const AUTONOMY_PROFILE_SIGNATURE: &str =
     "e4995f4127a8ad1fb7123c78ef4de3990d5d6493cbe999a860a6f7407577035d";
+const V7_AMBIGUITY_RELATION_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname, c.relname, c.relkind::text, owner.rolname,
+        c.relpersistence::text, c.relrowsecurity, c.relforcerowsecurity,
+        c.relhassubclass, c.relispartition, c.relreplident::text,
+        COALESCE(array_to_string(c.reloptions, ','), '<NULL>')
+    )::text
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner
+    WHERE n.nspname='control'
+      AND c.relname='task_ingress_historical_ambiguities'
+    ORDER BY n.nspname,c.relname
+";
+const V7_AMBIGUITY_COLUMN_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,c.relname,a.attnum,a.attname,
+        pg_catalog.format_type(a.atttypid,a.atttypmod),a.attnotnull,a.attisdropped,
+        COALESCE(pg_catalog.pg_get_expr(def.adbin,def.adrelid,false),'<NULL>'),
+        a.attidentity::text,a.attgenerated::text,
+        CASE WHEN coll.oid IS NULL THEN '<NULL>'
+             ELSE coll_ns.nspname || '.' || coll.collname END,
+        a.attstorage::text,a.attcompression::text,a.attstattarget,
+        COALESCE(a.attacl::text,'<NULL>')
+    )::text
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid
+    LEFT JOIN pg_catalog.pg_attrdef def
+      ON def.adrelid=c.oid AND def.adnum=a.attnum
+    LEFT JOIN pg_catalog.pg_collation coll ON coll.oid=a.attcollation
+    LEFT JOIN pg_catalog.pg_namespace coll_ns ON coll_ns.oid=coll.collnamespace
+    WHERE n.nspname='control'
+      AND c.relname='task_ingress_historical_ambiguities'
+      AND c.relkind='r' AND a.attnum>0
+    ORDER BY a.attnum
+";
+const V7_AMBIGUITY_CONSTRAINT_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,c.relname,con.conname,con.contype::text,
+        con.convalidated,con.condeferrable,con.condeferred,
+        con.connoinherit,con.conislocal,con.coninhcount,
+        con.conkey,ref_ns.nspname,ref_class.relname,con.confkey,
+        con.confupdtype::text,con.confdeltype::text,con.confmatchtype::text,
+        pg_catalog.pg_get_constraintdef(con.oid,false)
+    )::text
+    FROM pg_catalog.pg_constraint con
+    JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace
+    JOIN pg_catalog.pg_class c ON c.oid=con.conrelid
+    LEFT JOIN pg_catalog.pg_class ref_class ON ref_class.oid=con.confrelid
+    LEFT JOIN pg_catalog.pg_namespace ref_ns ON ref_ns.oid=ref_class.relnamespace
+    WHERE n.nspname='control'
+      AND c.relname='task_ingress_historical_ambiguities'
+    ORDER BY con.conname
+";
+const V7_AMBIGUITY_INDEX_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,table_class.relname,index_class.relname,
+        idx.indisunique,idx.indisprimary,idx.indisvalid,idx.indisready,
+        idx.indislive,idx.indisclustered,idx.indisreplident,
+        idx.indnullsnotdistinct,
+        pg_catalog.pg_get_indexdef(idx.indexrelid,0,true)
+    )::text
+    FROM pg_catalog.pg_index idx
+    JOIN pg_catalog.pg_class table_class ON table_class.oid=idx.indrelid
+    JOIN pg_catalog.pg_class index_class ON index_class.oid=idx.indexrelid
+    JOIN pg_catalog.pg_namespace n ON n.oid=table_class.relnamespace
+    WHERE n.nspname='control'
+      AND table_class.relname='task_ingress_historical_ambiguities'
+    ORDER BY index_class.relname
+";
+const V7_AMBIGUITY_TABLE_ACL_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,c.relname,owner.rolname,COALESCE(grantee.rolname,'PUBLIC'),
+        grantor.rolname,acl.privilege_type,acl.is_grantable
+    )::text
+    FROM pg_catalog.pg_class c
+    JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+    JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))
+    ) acl
+    LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+    JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
+    WHERE n.nspname='control'
+      AND c.relname='task_ingress_historical_ambiguities'
+    ORDER BY owner.rolname,COALESCE(grantee.rolname,'PUBLIC'),
+             grantor.rolname,acl.privilege_type,acl.is_grantable
+";
+const V7_INGRESS_FUNCTION_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),
+        pg_catalog.pg_get_function_result(p.oid),owner.rolname,language.lanname,
+        p.prokind::text,p.prosecdef,p.proleakproof,p.provolatile::text,
+        p.proparallel::text,p.proisstrict,p.proretset,p.pronargs,
+        p.pronargdefaults,p.prorettype::regtype::text,p.proargtypes::text,
+        COALESCE(p.proallargtypes::text,'<NULL>'),
+        COALESCE(p.proargmodes::text,'<NULL>'),
+        COALESCE(p.proargnames::text,'<NULL>'),
+        COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),
+        COALESCE(p.probin,'<NULL>'),p.prosrc,pg_catalog.pg_get_functiondef(p.oid)
+    )::text
+    FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    JOIN pg_catalog.pg_roles owner ON owner.oid=p.proowner
+    JOIN pg_catalog.pg_language language ON language.oid=p.prolang
+    WHERE n.nspname='control'
+      AND p.proname IN (
+          'task_ingress_prepare_v1','task_ingress_record_v1',
+          'task_ingress_read_by_request_v1','task_ingress_historical_closure_v1'
+      )
+    ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)
+";
+const V7_INGRESS_FUNCTION_ACL_SIGNATURE_SQL: &str = r"
+    SELECT jsonb_build_array(
+        n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),
+        COALESCE(grantee.rolname,'PUBLIC'),grantor.rolname,
+        acl.privilege_type,acl.is_grantable
+    )::text
+    FROM pg_catalog.pg_proc p
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))
+    ) acl
+    LEFT JOIN pg_catalog.pg_roles grantee ON grantee.oid=acl.grantee
+    JOIN pg_catalog.pg_roles grantor ON grantor.oid=acl.grantor
+    WHERE n.nspname='control'
+      AND p.proname IN (
+          'task_ingress_prepare_v1','task_ingress_record_v1',
+          'task_ingress_read_by_request_v1','task_ingress_historical_closure_v1'
+      )
+    ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),
+             COALESCE(grantee.rolname,'PUBLIC'),grantor.rolname,
+             acl.privilege_type,acl.is_grantable
+";
+const V7_AMBIGUITY_RELATION_SIGNATURE: &str =
+    "53cc68fd7aeeb3af0148baff87bc4eacc1b939926763ab9e5469d77a49ff2305";
+const V7_AMBIGUITY_COLUMN_SIGNATURE: &str =
+    "1dcb03efc12cc644df4c245fe455e0f1dd2120cc4cf78490f64b1a9b36592579";
+const V7_AMBIGUITY_CONSTRAINT_SIGNATURE: &str =
+    "3d025c0526ea179600c72b2a4f47720495fd51b0100fcc85a702c79b622175f1";
+const V7_AMBIGUITY_INDEX_SIGNATURE: &str =
+    "76fe47e1b086dcceba180e905f1e21ea1dcf0749cef49b0e2cfb8a71e397dfb2";
+const V7_AMBIGUITY_TABLE_ACL_SIGNATURE: &str =
+    "5e64fab71687e50674f06ab8d4904d5d3bb22b314bc1a7fa052c7d7b319a85eb";
+const V7_INGRESS_FUNCTION_SIGNATURE: &str =
+    "f4d55ccc4782025666fcdee2cf68380d2ebf1b8533224af02ff4f778a14a3124";
+const V7_INGRESS_FUNCTION_ACL_SIGNATURE: &str =
+    "7d8c5087a4561b8149ea2fc0d76b7310c6e94f2a8d162e37a4533e4c97e32ca4";
 const STORE_PREPARE_V4_IDENTITY: &str = "control.store_prepare_v4(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea)";
 const STORE_FINALIZE_V4_IDENTITY: &str = "control.store_finalize_v4(smallint,text,smallint,text,text,text,text,bytea,bytea,text,text,bigint,text,bigint,bytea,bytea,text,bigint,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,bytea,uuid,bytea,smallint,text,bigint,bytea,bytea,bigint,bytea,bytea,text,bytea,bytea)";
 const STORE_CURRENT_HEAD_V4_IDENTITY: &str =
@@ -2135,6 +2342,96 @@ enum SchemaV6WriterProfile {
     V4Bridge,
 }
 
+const SCHEMA_V6_WRITER_V3_DANGEROUS_FUNCTION_COUNT: i64 = 35;
+const SCHEMA_V6_WRITER_V4_BRIDGE_DANGEROUS_FUNCTION_COUNT: i64 = 28;
+const SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT: i64 = 44;
+const SCHEMA_V6_OWNED_CATALOG_SIGNATURES: [&str; 9] = [
+    "dc5d05955070ecd8da9fc783cdb98091be7c960def04fd9e83cf77d7c5b00cf7",
+    "5f68d85f2a5cc41d72984644284ceb73da1f6214dbd31f508fcdced961d2c517",
+    "dab28ba9e1b7b4f4fea19e69bb3e72f9e8106b69d4403d5304b1243b8b7ce543",
+    "2234eb282c4a53b632c529d307581d47eb2bf12827614878a76f00786c66f2a7",
+    "4e5cb9af7070fddd2ba22e3042d2404b4a378536d519a3d9b3d739413e7e1c0d",
+    "aa43280f9f62243291ecaf1b8aa00e425b52bd03c43cb94257e2d7d08e8ec276",
+    "320fcc8f1d08ea2b465269b9c73964cea1e77a5f760c315c01cfb5392fa268fe",
+    "30fec2dd985ad9e1244f31bdcd3ee2f074542b8551423377307aabdb867bb1e4",
+    "093efdae2f43f0f5adfdb1296010e990fed1120e54401537939454a2952e7d8e",
+];
+const SCHEMA_V7_OWNED_CATALOG_SIGNATURES: [&str; 9] = [
+    "a91e9d99aad9bd7d27c7a92f8ce398807966b598a8a8bcca2bd87e4912181b30",
+    "f004466f320b20519f47cf79e4b19c2a139af248c886e693b4a4a3819d340f7a",
+    "2c4d78fc5635ebbc257c50f2db045147dd06ba6a5982b70a0542f417dbfc78b2",
+    "bc56d82c7f0412b4e5126b3e84fc4aa88701a611b22fb3f191055c62b507fc79",
+    "9b13fe54389956deb6fc043611370445542d06161d881aa110305869b01fcd69",
+    "493d397902d88db92ac4d517432e46eaaa661c38a0f91e852c2a2e1854cf047c",
+    "01d71ae8cab8caaf07013872ff0e4d82fe4416c70dfb97793b0f64321c67da35",
+    "fc6a34bccb67771c124262cff8e81acb65b465faf548ddcf4175fe2956b77092",
+    "093efdae2f43f0f5adfdb1296010e990fed1120e54401537939454a2952e7d8e",
+];
+const SCHEMA_V6_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [61, 0, 0, 0, 0, 0, 0, 74, 0, 0];
+const SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [71, 0, 0, 0, 0, 0, 0, 114, 0, 0];
+
+fn verify_owned_catalog_signature_profile<C: GenericClient>(
+    client: &mut C,
+    expected: &[&str; 9],
+) -> Result<(), PostgresStoreSetupError> {
+    for (query, expected_signature) in [
+        RELATION_SIGNATURE_SQL,
+        COLUMN_SIGNATURE_SQL,
+        CONSTRAINT_SIGNATURE_SQL,
+        INDEX_SIGNATURE_SQL,
+        FUNCTION_SIGNATURE_SQL,
+        TYPE_CATALOG_SIGNATURE_SQL,
+    ]
+    .into_iter()
+    .zip(&expected[..6])
+    {
+        if catalog_signature(client, query, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != *expected_signature
+        {
+            return Err(catalog_error());
+        }
+    }
+    for (query, expected_signature) in [
+        TABLE_ACL_SIGNATURE_SQL,
+        FUNCTION_ACL_SIGNATURE_SQL,
+        SCHEMA_ACL_SIGNATURE_SQL,
+    ]
+    .into_iter()
+    .zip(&expected[6..])
+    {
+        if catalog_signature(client, query, PostgresStoreSetupErrorKind::PermissionDenied)?
+            != *expected_signature
+        {
+            return Err(permission_error());
+        }
+    }
+    Ok(())
+}
+
+fn verify_schema_v6_v7_forbidden_object_profile<C: GenericClient>(
+    client: &mut C,
+    expected: &[i64; 10],
+) -> Result<(), PostgresStoreSetupError> {
+    if read_forbidden_schema_object_counts(client)? != *expected {
+        return Err(catalog_error());
+    }
+    Ok(())
+}
+
+fn verify_exact_default_acl_signature<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    if catalog_signature(
+        client,
+        DEFAULT_ACL_SIGNATURE_SQL,
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    )? != EXPECTED_DEFAULT_ACL_SIGNATURE
+    {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     client: &mut C,
@@ -2158,6 +2455,16 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
             return Err(history_error());
         }
     }
+    verify_owned_catalog_signature_profile(client, &SCHEMA_V6_OWNED_CATALOG_SIGNATURES)?;
+    verify_schema_header_comments(client, "V6")?;
+    verify_schema_v6_v7_forbidden_object_profile(
+        client,
+        &SCHEMA_V6_FORBIDDEN_SCHEMA_OBJECT_COUNTS,
+    )?;
+    verify_exact_default_acl_signature(client)?;
+    verify_autonomy_receipt_profile(client)?;
+    verify_forbidden_namespace_objects(client)?;
+    verify_effective_default_privileges(client)?;
     let catalog = client
         .query_one(
             "SELECT \
@@ -2224,17 +2531,29 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
         row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)?,
         row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?,
     );
-    match writer_profile {
+    let expected_dangerous_functions = match writer_profile {
         SchemaV6WriterProfile::V3Current if writer_catalog == (5, 12, 7, true) => {
+            verify_writer_lease_exact_catalog_profile(
+                client,
+                &WRITER_LEASE_V3_CURRENT_CATALOG_SIGNATURES,
+            )?;
             verify_writer_lease_v3_functions(client, true)?;
+            verify_writer_lease_acl_closure(client, 5, true)?;
+            SCHEMA_V6_WRITER_V3_DANGEROUS_FUNCTION_COUNT
         }
         SchemaV6WriterProfile::V4Bridge if writer_catalog == (5, 15, 0, false) => {
+            verify_writer_lease_exact_catalog_profile(
+                client,
+                &WRITER_LEASE_V4_BRIDGE_CATALOG_SIGNATURES,
+            )?;
             verify_writer_lease_v4_functions(client, false)?;
+            verify_writer_lease_acl_closure(client, 15, false)?;
+            SCHEMA_V6_WRITER_V4_BRIDGE_DANGEROUS_FUNCTION_COUNT
         }
         SchemaV6WriterProfile::V3Current | SchemaV6WriterProfile::V4Bridge => {
             return Err(catalog_error());
         }
-    }
+    };
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -2260,7 +2579,77 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     } else {
         verify_stopped_admission(client)?;
     }
+    verify_exact_principal_database_boundary(client, expected_dangerous_functions, true)?;
     read_database_identity(client, target)
+}
+
+fn verify_v7_ingress_ambiguity_profile<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let profiles = [
+        (
+            "RELATION",
+            V7_AMBIGUITY_RELATION_SIGNATURE_SQL,
+            V7_AMBIGUITY_RELATION_SIGNATURE,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "COLUMN",
+            V7_AMBIGUITY_COLUMN_SIGNATURE_SQL,
+            V7_AMBIGUITY_COLUMN_SIGNATURE,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "CONSTRAINT",
+            V7_AMBIGUITY_CONSTRAINT_SIGNATURE_SQL,
+            V7_AMBIGUITY_CONSTRAINT_SIGNATURE,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "INDEX",
+            V7_AMBIGUITY_INDEX_SIGNATURE_SQL,
+            V7_AMBIGUITY_INDEX_SIGNATURE,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "TABLE_ACL",
+            V7_AMBIGUITY_TABLE_ACL_SIGNATURE_SQL,
+            V7_AMBIGUITY_TABLE_ACL_SIGNATURE,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            "FUNCTION",
+            V7_INGRESS_FUNCTION_SIGNATURE_SQL,
+            V7_INGRESS_FUNCTION_SIGNATURE,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "FUNCTION_ACL",
+            V7_INGRESS_FUNCTION_ACL_SIGNATURE_SQL,
+            V7_INGRESS_FUNCTION_ACL_SIGNATURE,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+    ];
+    let mut mismatch = None;
+    for (_, query, expected, error_kind) in profiles {
+        let actual = catalog_signature(client, query, error_kind)?;
+        if actual != expected && mismatch.is_none() {
+            mismatch = Some(error_kind);
+        }
+    }
+    if let Some(error_kind) = mismatch {
+        return Err(PostgresStoreSetupError::new(error_kind));
+    }
+
+    let closure = client
+        .query_one("SELECT control.task_ingress_historical_closure_v1()", &[])
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+        })?;
+    if !row_value::<bool>(&closure, 0, PostgresStoreSetupErrorKind::HistoryMismatch)? {
+        return Err(history_error());
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2285,6 +2674,17 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
             return Err(history_error());
         }
     }
+    verify_owned_catalog_signature_profile(client, &SCHEMA_V7_OWNED_CATALOG_SIGNATURES)?;
+    verify_schema_header_comments(client, "V7")?;
+    verify_schema_v6_v7_forbidden_object_profile(
+        client,
+        &SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS,
+    )?;
+    verify_exact_default_acl_signature(client)?;
+    verify_autonomy_receipt_profile(client)?;
+    verify_forbidden_namespace_objects(client)?;
+    verify_effective_default_privileges(client)?;
+    verify_v7_ingress_ambiguity_profile(client)?;
 
     let catalog = client
         .query_one(
@@ -2299,18 +2699,22 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
                   WHERE n.nspname='control'), \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='control' AND c.relname IN (
-                    'task_submission_envelopes','task_ingress_claims') \
+                    'task_submission_envelopes','task_ingress_claims',
+                    'task_ingress_historical_ambiguities') \
                     AND c.relkind='r' AND pg_get_userbyid(c.relowner)='lattice_migrator'), \
                 COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
                     'control.task_submission_envelopes','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false) \
                   OR COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
-                    'control.task_ingress_claims','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false), \
+                    'control.task_ingress_claims','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false) \
+                  OR COALESCE(pg_catalog.has_table_privilege('lattice_runtime',\
+                    'control.task_ingress_historical_ambiguities','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'),false), \
                 (SELECT count(*)::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace \
                   WHERE n.nspname='control' AND p.proname IN (\
                     'task_submission_prepare_v1','task_submission_record_v1',\
                     'task_submission_read_by_task_ref_v1','task_submission_read_by_request_v1',\
                     'task_ingress_prepare_v1','task_ingress_record_v1',\
-                    'task_ingress_read_by_request_v1') \
+                    'task_ingress_read_by_request_v1',\
+                    'task_ingress_historical_closure_v1') \
                     AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
                 (SELECT count(*)::bigint FROM pg_attribute a \
                   JOIN pg_class c ON c.oid=a.attrelid \
@@ -2369,7 +2773,7 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
         general_runtime_functions,
         legacy_head_runtime_functions,
         subject_constraint,
-    ) != (19, 58, 29, 2, false, 7, 4, 2, 0, 1)
+    ) != (20, 59, 30, 3, false, 8, 4, 2, 0, 1)
     {
         return Err(catalog_error());
     }
@@ -2396,7 +2800,9 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     {
         return Err(catalog_error());
     }
+    verify_writer_lease_exact_catalog_profile(client, &WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES)?;
     verify_writer_lease_v4_functions(client, true)?;
+    verify_writer_lease_acl_closure(client, 8, true)?;
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -2422,6 +2828,11 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     } else {
         verify_stopped_admission(client)?;
     }
+    verify_exact_principal_database_boundary(
+        client,
+        SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT,
+        true,
+    )?;
     read_database_identity(client, target)
 }
 
@@ -4716,6 +5127,62 @@ fn verify_writer_lease_v2_catalog<C: GenericClient>(
     Ok(())
 }
 
+fn verify_writer_lease_exact_catalog_profile<C: GenericClient>(
+    client: &mut C,
+    expected: &[&str; 10],
+) -> Result<(), PostgresStoreSetupError> {
+    for ((query, error_kind), expected_signature) in [
+        (
+            WRITER_LEASE_V1_RELATION_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_FUNCTION_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+        (
+            WRITER_LEASE_V1_TYPE_PROFILE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+    ]
+    .into_iter()
+    .zip(expected)
+    {
+        if catalog_signature(client, query, error_kind)? != *expected_signature {
+            return Err(PostgresStoreSetupError::new(error_kind));
+        }
+    }
+    Ok(())
+}
+
 fn verify_writer_lease_v2_function_catalog<C: GenericClient>(
     client: &mut C,
     runtime: WriterLeaseV2RuntimeProfile,
@@ -5330,6 +5797,14 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
         WriterLeaseV2RuntimeProfile::Current => 2_i64,
     };
     let expected_usage = runtime == WriterLeaseV2RuntimeProfile::Current;
+    verify_writer_lease_acl_closure(client, expected_missing, expected_usage)
+}
+
+fn verify_writer_lease_acl_closure<C: GenericClient>(
+    client: &mut C,
+    expected_missing: i64,
+    expected_usage: bool,
+) -> Result<(), PostgresStoreSetupError> {
     let closure = client
         .query_one(
             "SELECT \
@@ -5360,6 +5835,26 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
              (SELECT count(*) FROM pg_catalog.pg_class c \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
               WHERE n.nspname='writer_lease' AND c.relkind NOT IN ('r','i')), \
+             ((SELECT count(*) FROM pg_catalog.pg_collation x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_conversion x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.connamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_operator x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.oprnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_opclass x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opcnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_opfamily x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opfnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_statistic_ext x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.stxnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_ts_config x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.cfgnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_ts_dict x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.dictnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_ts_parser x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_ts_template x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
              (SELECT count(*) FROM pg_catalog.pg_proc p \
                JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
                CROSS JOIN pg_catalog.pg_roles roles \
@@ -5389,19 +5884,7 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
-    for (index, expected) in [12_i64, 0, 0, 0, 0, 0, 0, 0, 0, expected_missing, 0]
-        .into_iter()
-        .enumerate()
-    {
-        if row_value::<i64>(
-            &closure,
-            index,
-            PostgresStoreSetupErrorKind::PermissionDenied,
-        )? != expected
-        {
-            return Err(permission_error());
-        }
-    }
+    verify_writer_lease_acl_closure_counts(&closure, expected_missing)?;
     let usage = client
         .query_one(
             "SELECT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE')",
@@ -5414,6 +5897,30 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
         != expected_usage
     {
         return Err(permission_error());
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_acl_closure_counts(
+    closure: &Row,
+    expected_missing: i64,
+) -> Result<(), PostgresStoreSetupError> {
+    for (index, expected) in [(0, 12_i64), (1, 0), (2, 0), (3, 0), (4, 0), (6, 0), (7, 0)] {
+        if row_value::<i64>(closure, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    for (index, expected) in [(5, 0_i64), (8, 0), (9, 0), (10, expected_missing), (11, 0)] {
+        if row_value::<i64>(
+            closure,
+            index,
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        )? != expected
+        {
+            return Err(permission_error());
+        }
     }
     Ok(())
 }
@@ -5509,17 +6016,6 @@ fn verify_schema_headers<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
-    let schema_rows = client
-        .query(
-            "SELECT n.nspname, r.rolname, obj_description(n.oid, 'pg_namespace') \
-             FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner \
-             WHERE n.nspname IN ('control', 'memory', 'readmodel') ORDER BY n.nspname",
-            &[],
-        )
-        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    if schema_rows.len() != CONTROL_SCHEMAS.len() {
-        return Err(catalog_error());
-    }
     let suffix = match profile {
         CatalogProfile::V1 => "V1",
         CatalogProfile::V2 => "V2",
@@ -5536,26 +6032,7 @@ fn verify_schema_headers<C: GenericClient>(
         | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current => "V5",
         CatalogProfile::PreSchema => return Err(catalog_error()),
     };
-    let expected_comments = [
-        ("control", format!("LATTICE_DEVOS_CONTROL_SCHEMA_{suffix}")),
-        ("memory", format!("LATTICE_DEVOS_MEMORY_SCHEMA_{suffix}")),
-        (
-            "readmodel",
-            format!("LATTICE_DEVOS_READMODEL_SCHEMA_{suffix}"),
-        ),
-    ];
-    for (row, (expected_name, expected_comment)) in schema_rows.iter().zip(expected_comments) {
-        let name = row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
-        let owner = row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
-        let comment =
-            row_value::<Option<String>>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?;
-        if name != expected_name
-            || owner != DatabaseRole::Migrator.as_str()
-            || comment.as_deref() != Some(expected_comment.as_str())
-        {
-            return Err(catalog_error());
-        }
-    }
+    verify_schema_header_comments(client, suffix)?;
     let tables = string_set(
         client,
         "SELECT c.relname FROM pg_class c \
@@ -5636,6 +6113,44 @@ fn verify_schema_headers<C: GenericClient>(
         return Err(catalog_error());
     }
     verify_owned_type_closure(client, profile)?;
+    Ok(())
+}
+
+fn verify_schema_header_comments<C: GenericClient>(
+    client: &mut C,
+    suffix: &str,
+) -> Result<(), PostgresStoreSetupError> {
+    let schema_rows = client
+        .query(
+            "SELECT n.nspname, r.rolname, obj_description(n.oid, 'pg_namespace') \
+             FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner \
+             WHERE n.nspname IN ('control', 'memory', 'readmodel') ORDER BY n.nspname",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if schema_rows.len() != CONTROL_SCHEMAS.len() {
+        return Err(catalog_error());
+    }
+    let expected_comments = [
+        ("control", format!("LATTICE_DEVOS_CONTROL_SCHEMA_{suffix}")),
+        ("memory", format!("LATTICE_DEVOS_MEMORY_SCHEMA_{suffix}")),
+        (
+            "readmodel",
+            format!("LATTICE_DEVOS_READMODEL_SCHEMA_{suffix}"),
+        ),
+    ];
+    for (row, (expected_name, expected_comment)) in schema_rows.iter().zip(expected_comments) {
+        let name = row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+        let owner = row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+        let comment =
+            row_value::<Option<String>>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+        if name != expected_name
+            || owner != DatabaseRole::Migrator.as_str()
+            || comment.as_deref() != Some(expected_comment.as_str())
+        {
+            return Err(catalog_error());
+        }
+    }
     Ok(())
 }
 
@@ -6370,6 +6885,17 @@ fn verify_role_and_database_boundary<C: GenericClient>(
     profile: CatalogProfile,
     v3_prefix: bool,
 ) -> Result<(), PostgresStoreSetupError> {
+    let dangerous_functions = verify_exact_principal_database_core(client)?;
+    let expected_dangerous_functions = expected_dangerous_function_count(profile, v3_prefix);
+    if dangerous_functions != expected_dangerous_functions {
+        return Err(permission_error());
+    }
+    verify_cluster_wide_acl_closure(client, profile)
+}
+
+fn verify_exact_principal_database_core<C: GenericClient>(
+    client: &mut C,
+) -> Result<i64, PostgresStoreSetupError> {
     let role_signature = catalog_signature(
         client,
         ROLE_SIGNATURE_SQL,
@@ -6414,7 +6940,6 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         row_value::<bool>(&boundary, 12, PostgresStoreSetupErrorKind::PermissionDenied)?,
         row_value::<bool>(&boundary, 13, PostgresStoreSetupErrorKind::PermissionDenied)?,
     ];
-    let expected_dangerous_functions = expected_dangerous_function_count(profile, v3_prefix);
     if owner != DatabaseRole::Migrator.as_str()
         || is_template
         || !allows_connections
@@ -6422,13 +6947,23 @@ fn verify_role_and_database_boundary<C: GenericClient>(
         || memberships != 4
         || extra_roles != 0
         || role_settings != 0
-        || dangerous_functions != expected_dangerous_functions
         || database_privileges != [false, false, false, true, true, true]
     {
         return Err(permission_error());
     }
-    verify_cluster_wide_acl_closure(client, profile)?;
-    verify_login_principal_closure(client)
+    verify_login_principal_closure(client)?;
+    Ok(dangerous_functions)
+}
+
+fn verify_exact_principal_database_boundary<C: GenericClient>(
+    client: &mut C,
+    expected_dangerous_functions: i64,
+    writer_lease_is_owned: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    if verify_exact_principal_database_core(client)? != expected_dangerous_functions {
+        return Err(permission_error());
+    }
+    verify_cluster_wide_acl_closure_for_writer_lease(client, writer_lease_is_owned)
 }
 
 fn expected_dangerous_function_count(profile: CatalogProfile, v3_prefix: bool) -> i64 {
@@ -6470,6 +7005,21 @@ fn expected_dangerous_function_count(profile: CatalogProfile, v3_prefix: bool) -
 fn verify_cluster_wide_acl_closure<C: GenericClient>(
     client: &mut C,
     profile: CatalogProfile,
+) -> Result<(), PostgresStoreSetupError> {
+    let writer_lease_is_owned = matches!(
+        profile,
+        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
+            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
+            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
+            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+    );
+    verify_cluster_wide_acl_closure_for_writer_lease(client, writer_lease_is_owned)
+}
+
+fn verify_cluster_wide_acl_closure_for_writer_lease<C: GenericClient>(
+    client: &mut C,
+    writer_lease_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
         .query_one(
@@ -6513,14 +7063,6 @@ fn verify_cluster_wide_acl_closure<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    let writer_lease_is_owned = matches!(
-        profile,
-        CatalogProfile::V3CodebaseMemoryV2WriterLeaseV1
-            | CatalogProfile::V3CodebaseMemoryV2WriterLeaseV2Bridge
-            | CatalogProfile::V5CodebaseMemoryV2WriterLeaseV2BridgePending
-            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
-            | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
-    );
     verify_external_relation_principal_closure(client, writer_lease_is_owned)?;
     verify_external_function_principal_closure(client, writer_lease_is_owned)?;
     verify_pre_role_system_function_boundary(client)?;
@@ -7108,7 +7650,9 @@ fn verify_effective_default_privileges<C: GenericClient>(
              AND a.grantee = 0), \
              (SELECT count(*) FROM pg_default_acl d \
               CROSS JOIN LATERAL aclexplode(d.defaclacl) a \
-              WHERE a.grantee = 0)",
+              WHERE a.grantee = 0), \
+             (SELECT count(*) FROM pg_default_acl d \
+              WHERE d.defaclrole <> 'lattice_migrator'::regrole)",
             &[],
         )
         .map_err(|error| {
@@ -7120,7 +7664,12 @@ fn verify_effective_default_privileges<C: GenericClient>(
         row_value::<i64>(&defaults, 1, PostgresStoreSetupErrorKind::PermissionDenied)?;
     let all_owner_public_defaults =
         row_value::<i64>(&defaults, 2, PostgresStoreSetupErrorKind::PermissionDenied)?;
-    if global_public_defaults != 0 || schema_public_defaults != 0 || all_owner_public_defaults != 0
+    let non_migrator_defaults =
+        row_value::<i64>(&defaults, 3, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    if global_public_defaults != 0
+        || schema_public_defaults != 0
+        || all_owner_public_defaults != 0
+        || non_migrator_defaults != 0
     {
         return Err(permission_error());
     }
@@ -7245,14 +7794,22 @@ mod tests {
         INDEX_SIGNATURE_SQL, RELATION_SIGNATURE_SQL, REQUIRED_APPLICATION_NAME,
         ROLE_DATABASE_BOUNDARY_SQL, ROLE_SIGNATURE_SQL, RetainedHistoryClassification,
         RetainedMigrationHistoryRow, RetainedSchemaCompatibility, SCHEMA_ACL_SIGNATURE_SQL,
-        TABLE_ACL_SIGNATURE_SQL, apply_migrations, catalog_error, catalog_signature,
-        classify_current_catalog_profile, classify_extension_catalog_counts,
-        classify_retained_history_rows, codebase_memory_identity_profile_matches,
-        expected_dangerous_function_count, expected_internal_trigger_count,
-        expected_owned_function_count, expected_scope_head_trigger_count, is_loopback,
-        permission_error, read_database_identity, read_forbidden_schema_object_counts,
-        read_history_rows, row_value, v3_upgrade_source_has_memory,
-        verify_autonomy_receipt_profile, verify_catalog_signatures,
+        TABLE_ACL_SIGNATURE_SQL, TYPE_CATALOG_SIGNATURE_SQL, V7_AMBIGUITY_COLUMN_SIGNATURE_SQL,
+        V7_AMBIGUITY_CONSTRAINT_SIGNATURE_SQL, V7_AMBIGUITY_INDEX_SIGNATURE_SQL,
+        V7_AMBIGUITY_RELATION_SIGNATURE_SQL, V7_AMBIGUITY_TABLE_ACL_SIGNATURE_SQL,
+        V7_INGRESS_FUNCTION_ACL_SIGNATURE_SQL, V7_INGRESS_FUNCTION_SIGNATURE_SQL,
+        WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL, WRITER_LEASE_V1_COLUMN_PROFILE_SQL,
+        WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL, WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL,
+        WRITER_LEASE_V1_FUNCTION_PROFILE_SQL, WRITER_LEASE_V1_INDEX_PROFILE_SQL,
+        WRITER_LEASE_V1_RELATION_PROFILE_SQL, WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL,
+        WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL, WRITER_LEASE_V1_TYPE_PROFILE_SQL, apply_migrations,
+        catalog_error, catalog_signature, classify_current_catalog_profile,
+        classify_extension_catalog_counts, classify_retained_history_rows,
+        codebase_memory_identity_profile_matches, expected_dangerous_function_count,
+        expected_internal_trigger_count, expected_owned_function_count,
+        expected_scope_head_trigger_count, is_loopback, permission_error, read_database_identity,
+        read_forbidden_schema_object_counts, read_history_rows, row_value,
+        v3_upgrade_source_has_memory, verify_autonomy_receipt_profile, verify_catalog_signatures,
         verify_cluster_wide_acl_closure, verify_compatibility, verify_effective_default_privileges,
         verify_forbidden_namespace_objects, verify_forbidden_schema_objects, verify_history,
         verify_history_rows, verify_login_principal_closure, verify_network_boundary,
@@ -7264,6 +7821,7 @@ mod tests {
     use crate::migrations::{
         DatabaseRole, MigrationTarget, PostgresStoreSetupError, PostgresStoreSetupErrorKind,
         migration_manifest, verify_embedded_manifest, verify_v3_manifest_prefix,
+        verify_v6_manifest_prefix,
     };
     use postgres::{Client, NoTls};
 
@@ -7327,7 +7885,7 @@ mod tests {
         const FROZEN_CURRENT_V6_MANIFEST_SHA256: &str =
             "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
         const CURRENT_V7_MANIFEST_SHA256: &str =
-            "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
+            "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
         let current = retained_current_history();
         let current_compatibility = compatibility_for(&current, 7);
         assert_eq!(
@@ -7675,6 +8233,170 @@ mod tests {
             });
             println!("TASK075_CATALOG_DIAGNOSTIC_{label}=PASS");
         }
+    }
+
+    fn emit_owned_catalog_signatures(client: &mut Client, version_label: &str) {
+        for (label, query) in [
+            ("OWNED_RELATION", RELATION_SIGNATURE_SQL),
+            ("OWNED_COLUMN", COLUMN_SIGNATURE_SQL),
+            ("OWNED_CONSTRAINT", CONSTRAINT_SIGNATURE_SQL),
+            ("OWNED_INDEX", INDEX_SIGNATURE_SQL),
+            ("OWNED_FUNCTION", FUNCTION_SIGNATURE_SQL),
+            ("OWNED_TYPE", TYPE_CATALOG_SIGNATURE_SQL),
+            ("OWNED_TABLE_ACL", TABLE_ACL_SIGNATURE_SQL),
+            ("OWNED_FUNCTION_ACL", FUNCTION_ACL_SIGNATURE_SQL),
+            ("OWNED_SCHEMA_ACL", SCHEMA_ACL_SIGNATURE_SQL),
+        ] {
+            let signature =
+                catalog_signature(client, query, PostgresStoreSetupErrorKind::CorruptCatalog)
+                    .expect("owned catalog signature");
+            println!("STORE_{version_label}_CATALOG_{label}_SIGNATURE={signature}");
+        }
+    }
+
+    fn emit_forbidden_schema_object_counts(client: &mut Client, version_label: &str) {
+        let counts =
+            read_forbidden_schema_object_counts(client).expect("forbidden schema object counts");
+        let encoded = counts
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("STORE_{version_label}_FORBIDDEN_SCHEMA_OBJECT_COUNTS={encoded}");
+    }
+
+    fn emit_writer_lease_catalog_signatures(client: &mut Client, version_label: &str) {
+        for (label, query) in [
+            ("RELATION", WRITER_LEASE_V1_RELATION_PROFILE_SQL),
+            ("COLUMN", WRITER_LEASE_V1_COLUMN_PROFILE_SQL),
+            ("CONSTRAINT", WRITER_LEASE_V1_CONSTRAINT_PROFILE_SQL),
+            ("INDEX", WRITER_LEASE_V1_INDEX_PROFILE_SQL),
+            ("FUNCTION", WRITER_LEASE_V1_FUNCTION_PROFILE_SQL),
+            ("SCHEMA_ACL", WRITER_LEASE_V1_SCHEMA_ACL_PROFILE_SQL),
+            ("TABLE_ACL", WRITER_LEASE_V1_TABLE_ACL_PROFILE_SQL),
+            ("FUNCTION_ACL", WRITER_LEASE_V1_FUNCTION_ACL_PROFILE_SQL),
+            ("COLUMN_ACL", WRITER_LEASE_V1_COLUMN_ACL_PROFILE_SQL),
+            ("TYPE", WRITER_LEASE_V1_TYPE_PROFILE_SQL),
+        ] {
+            let signature =
+                catalog_signature(client, query, PostgresStoreSetupErrorKind::CorruptCatalog)
+                    .expect("Writer catalog signature");
+            println!("STORE_{version_label}_WRITER_CATALOG_{label}_SIGNATURE={signature}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an exact schema-v6 isolated PostgreSQL fixture"]
+    fn measure_v6_owned_catalog_signatures() {
+        let connection = std::env::var("LATTICE_STORE_V6_CATALOG_SIGNATURE_URL")
+            .expect("coordinator supplies schema-v6 fixture URL");
+        let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+            .expect("connect to schema-v6 fixture");
+        client
+            .batch_execute("SET search_path = pg_catalog")
+            .expect("harden schema-v6 measurement search path");
+        let current = client
+            .query_one(
+                "SELECT current_schema_version,manifest_sha256 \
+                   FROM ONLY control.schema_compatibility WHERE singleton=true",
+                &[],
+            )
+            .expect("read exact schema-v6 compatibility");
+        let current_schema_version = current.get::<_, i16>(0);
+        let current_manifest_sha256 = current.get::<_, String>(1);
+        let manifest = verify_v6_manifest_prefix().expect("embedded schema-v6 manifest");
+        assert_eq!(current_schema_version, 6, "measurement requires schema-v6");
+        assert_eq!(
+            current_manifest_sha256,
+            manifest.manifest_sha256().as_str(),
+            "measurement requires the exact schema-v6 manifest"
+        );
+        let rows = read_history_rows(&mut client).expect("read schema-v6 history");
+        verify_history_rows(&rows, &migration_manifest()[..7]).expect("exact schema-v6 history");
+        emit_owned_catalog_signatures(&mut client, "V6");
+        emit_forbidden_schema_object_counts(&mut client, "V6");
+        emit_writer_lease_catalog_signatures(&mut client, "V6");
+    }
+
+    #[test]
+    #[ignore = "requires an exact schema-v7 disposable PostgreSQL fixture"]
+    fn measure_v7_ingress_signatures() {
+        let connection = std::env::var("LATTICE_STORE_V7_CATALOG_SIGNATURE_URL")
+            .expect("coordinator supplies schema-v7 fixture URL");
+        let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+            .expect("connect to schema-v7 fixture");
+        client
+            .batch_execute("SET search_path = pg_catalog")
+            .expect("harden schema-v7 measurement search path");
+        let current = client
+            .query_one(
+                "SELECT current_schema_version,manifest_sha256 \
+                   FROM ONLY control.schema_compatibility WHERE singleton=true",
+                &[],
+            )
+            .expect("read exact schema-v7 compatibility");
+        let current_schema_version = current.get::<_, i16>(0);
+        let current_manifest_sha256 = current.get::<_, String>(1);
+        let manifest = verify_embedded_manifest().expect("embedded schema-v7 manifest");
+        assert_eq!(current_schema_version, 7, "measurement requires schema-v7");
+        assert_eq!(
+            current_manifest_sha256,
+            manifest.manifest_sha256().as_str(),
+            "measurement requires the exact schema-v7 manifest"
+        );
+        let rows = read_history_rows(&mut client).expect("read schema-v7 history");
+        verify_history_rows(&rows, migration_manifest()).expect("exact schema-v7 history");
+
+        emit_owned_catalog_signatures(&mut client, "V7");
+        emit_forbidden_schema_object_counts(&mut client, "V7");
+        emit_writer_lease_catalog_signatures(&mut client, "V7");
+        for (label, query) in [
+            ("AMBIGUITY_RELATION", V7_AMBIGUITY_RELATION_SIGNATURE_SQL),
+            ("AMBIGUITY_COLUMN", V7_AMBIGUITY_COLUMN_SIGNATURE_SQL),
+            (
+                "AMBIGUITY_CONSTRAINT",
+                V7_AMBIGUITY_CONSTRAINT_SIGNATURE_SQL,
+            ),
+            ("AMBIGUITY_INDEX", V7_AMBIGUITY_INDEX_SIGNATURE_SQL),
+            ("AMBIGUITY_TABLE_ACL", V7_AMBIGUITY_TABLE_ACL_SIGNATURE_SQL),
+            ("INGRESS_FUNCTION", V7_INGRESS_FUNCTION_SIGNATURE_SQL),
+            (
+                "INGRESS_FUNCTION_ACL",
+                V7_INGRESS_FUNCTION_ACL_SIGNATURE_SQL,
+            ),
+        ] {
+            let signature = catalog_signature(
+                &mut client,
+                query,
+                PostgresStoreSetupErrorKind::CorruptCatalog,
+            )
+            .expect("schema-v7 catalog signature");
+            println!("STORE_V7_CATALOG_{label}_SIGNATURE={signature}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an exact isolated Writer-v4 bridge fixture"]
+    fn diagnose_v4_bridge_store_profile() {
+        let connection = std::env::var("LATTICE_STORE_V4_BRIDGE_DIAGNOSTIC_URL")
+            .expect("coordinator supplies Writer-v4 bridge fixture URL");
+        let mut client = postgres::Client::connect(&connection, postgres::NoTls)
+            .expect("connect to Writer-v4 bridge fixture");
+        client
+            .batch_execute("SET search_path = pg_catalog")
+            .expect("harden Writer-v4 bridge diagnostic search path");
+        super::verify_writer_lease_exact_catalog_profile(
+            &mut client,
+            &super::WRITER_LEASE_V4_BRIDGE_CATALOG_SIGNATURES,
+        )
+        .expect("exact Writer-v4 bridge catalog profile");
+        println!("STORE_V4_BRIDGE_EXACT_CATALOG_PROFILE=PASS");
+        super::verify_writer_lease_v4_functions(&mut client, false)
+            .expect("exact Writer-v4 bridge functions");
+        println!("STORE_V4_BRIDGE_FUNCTION_PROFILE=PASS");
+        super::verify_writer_lease_acl_closure(&mut client, 15, false)
+            .expect("exact Writer-v4 bridge ACL closure");
+        println!("STORE_V4_BRIDGE_ACL_CLOSURE=PASS");
     }
 
     #[test]

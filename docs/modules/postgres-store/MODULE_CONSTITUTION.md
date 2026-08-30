@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.22
+version: 1.23
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -100,6 +100,14 @@ proof; Store does not acquire Writer state semantics. The same migration
 rejects a historical canary command whose derived `client_request_id` matches
 the shared recognized-secret predicate before any claim is backfilled, so the
 v7 transition cannot retain or partially copy that identifier.
+Version 1.23 corrects the deployment-blocking pre-v7 compatibility case where
+two distinct, valid Task Ledger streams retained the same historical canary
+command key. Migration `0008` still creates exactly one active owner for a
+singleton key, but preserves every member of a duplicate group in a separate
+migrator-owned ambiguity relation and exposes no winner. Runtime read, prepare,
+and record all reject that key with the same static substitution failure. No
+historical stream, event, command, identity, or predecessor migration is
+deleted, merged, rewritten, or re-executed.
 
 ## Non-Goals
 
@@ -199,12 +207,16 @@ v7 transition cannot retain or partially copy that identifier.
   bounded retry/poison state, and current global schema-v4 durability evidence
   used by `PostgresTaskLedger`.
 - The schema-v7 physical `control.task_ingress_claims` and
-  `control.task_submission_envelopes` rows plus exact runtime
-  prepare/record/read functions. The ingress row is the one Task-Ledger-owned
-  idempotency namespace shared by controlled-canary and general submissions.
-  The envelope is a general-intake locator bound by foreign keys and scalar
-  equality to the matching Task Ledger event/command/stream; neither row
-  carries independent lifecycle state.
+  `control.task_submission_envelopes` rows, the migration-owned physical
+  `control.task_ingress_historical_ambiguities` lineage relation, and exact
+  runtime prepare/record/read functions. Store owns the physical ambiguity
+  rows, constraints, ACL closure, and exact linkage to retained Ledger rows;
+  Task Ledger owns the semantic rule that an ambiguous historical ingress key
+  has no winner and cannot be substituted. The ingress row is the one
+  Task-Ledger-owned idempotency namespace shared by controlled-canary and
+  general submissions. The envelope is a general-intake locator bound by
+  foreign keys and scalar equality to the matching Task Ledger
+  event/command/stream; none of these rows carries independent lifecycle state.
 - The schema-v7 physical stream-subject discriminator and neutral subject
   digest. Existing `TASK_SPEC` streams retain their exact Task Spec digest and
   currency. `GENERAL_TASK_INTAKE` streams retain neither field and instead bind
@@ -799,9 +811,13 @@ v7 transition cannot retain or partially copy that identifier.
     envelope; changed objective/project/identity or submission-mode content is
     command substitution and never reveals or creates a second task. Migration
     `0008` backfills retained controlled-canary claims from their existing
-    verified `TASK_CREATED`/command binding; any duplicate or cross-mode
-    collision, or any historical secret-shaped client request ID, rolls back
-    the migration rather than choosing a winner or copying unsafe data.
+    verified `TASK_CREATED`/command binding. A singleton becomes the active
+    claim. When two or more distinct historical streams map to the same key,
+    every exact identity is instead retained in the migration-owned ambiguity
+    relation, no active claim is selected, and all runtime claim entrypoints
+    fail closed. A cross-mode collision or historical secret-shaped client
+    request ID still rolls back the migration rather than choosing a winner or
+    copying unsafe data.
 92. Before a new envelope is recorded, the fixed transaction rechecks the exact
     formal Project Registry project, snapshot, authority receipt, accepted
     observation, `ACTIVE` lifecycle, live runtime, and absence of drift or
@@ -812,16 +828,28 @@ v7 transition cannot retain or partially copy that identifier.
     stream identity, stream ID, task reference, admission action, envelope
     digest, and exact event/command linkage.
 94. Normal runtime has no direct table privilege. Only the fixed schema-v7
-    prepare/record/read functions are executable by `lattice_runtime`; they are
+    prepare/record/read functions and the boolean-only historical-lineage
+    closure verifier are executable by `lattice_runtime`; they are
     migrator-owned, schema-qualified, dynamic-SQL-free, row-security-on, and
-    bounded like the existing Task Ledger runtime surface.
+    bounded like the existing Task Ledger runtime surface. The closure verifier
+    discloses no historical identity or row.
+95. Schema-v6 and schema-v7 fast verification reuse the exact principal and
+    database core: fixed role attributes, database owner and PUBLIC ACL,
+    connection policy, absence of extra `lattice_*` roles and per-role settings,
+    and the complete LOGIN boundary are all rechecked. Each fixed LOGIN has
+    exactly one matching capability membership with `ADMIN FALSE`,
+    `INHERIT FALSE`, and `SET TRUE`; no login may acquire a migrator or
+    cross-capability role, direct database privilege, or object privilege before
+    either profile is accepted. The same fast verification also enforces the
+    exact SECURITY DEFINER count plus cluster-wide parameter, PUBLIC database,
+    external relation/function, system-function, and large-object ACL closure.
 
 ## Allowed Dependencies
 
 - `lattice-contracts` 1.15.
 - `lattice-ports` 2.3.
 - `lattice-cjson` 1.0.
-- `lattice-task-ledger` 2.9 pure planner/checkpoint/replay/profile/autonomy-subject/submission-envelope API.
+- `lattice-task-ledger` 2.10 pure planner/checkpoint/replay/profile/autonomy-subject/submission-envelope API.
 - `lattice-foreman-state` 1.3 pure retained foreman verification types.
 - `lattice-project-registry` 1.2 pure planner/checkpoint/replay API, one-way
   from this adapter only.
@@ -983,6 +1011,20 @@ transaction and call the Writer-owned fixed `writer_lease_rebind_v4()`; exact
 v7 retry verifies the same boundary, while every partial or cross-generation
 Writer profile fails closed.
 
+Version 1.23 re-pins only the unreleased `0008` bytes and schema-v7 manifest.
+Its historical candidate classifier partitions by the exact ingress/request
+key. Singleton rows enter the active claim table; duplicate groups enter the
+migrator-owned ambiguity relation with exact stream/event/command linkage.
+That relation is table-blind to runtime roles and is consulted by every fixed
+claim function before ownership or replay can be inferred. A failed migration
+rolls back its DDL and both classifications atomically; an exact fresh-client
+retry is read-only. A fixed boolean-only security-definer closure lets every
+fresh capability role rederive the exact candidate/claim/ambiguity lineage
+without granting row access; exact targeted relation, column, constraint,
+index, function-body, function-setting, table-ACL, and function-ACL signatures
+reject any profile drift. Any database that already records another ordinal-8
+byte identity remains a manifest mismatch and is never silently reinterpreted.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -1035,7 +1077,7 @@ Writer profile fails closed.
 | Writer Lease profile closure | exact V3+Memory-v2+Writer-Lease-v1 catalog/owner/ACL/function/checksum acceptance plus partial/extra/drift/wrong-owner/direct-grant denial | Security review | yes |
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
 | Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
-| Schema-v7 migration/profile | immutable 0001..0007 prefix, exact 0008 hash/order, closed subject/claim/envelope shape, exact runtime function/catalog/ACL profile, v6/v4 bridge rebind, v7 exact retry, rollback, and partial/extra/drift rejection | Architecture and integration review | yes |
+| Schema-v7 migration/profile | immutable 0001..0007 prefix, exact 0008 hash/order, closed subject/claim/envelope/ambiguity shape, production-shaped duplicate history with no winner and exact lineage, three fail-closed runtime entrypoints, exact runtime function/catalog/ACL profile, v6/v4 bridge rebind, fresh-client v7 exact retry, rollback, and partial/extra/drift rejection | Architecture and integration review | yes |
 | Future schema taxonomy | exact current prefix plus contiguous exact-next suffix, canonical full-history metadata digest and matching future compatibility return only `STORE_SCHEMA_UNSUPPORTED_FUTURE`; extra/missing/reordered/substituted/gapped/divergent history remains corrupt | Compatibility review | yes |
 | Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1`, v5-to-v6 `writer_lease_rebind_v3()`, and v6/v4-to-v7 `writer_lease_rebind_v4()` boundaries are executable | Architecture review | yes |
 
@@ -1078,3 +1120,4 @@ architecture review, and authorization consistent with protected-action rules.
 | 1.20 | 2026-08-25 | SPEC-010, TASK-106 | Reconstruct the typed dependency continuation projection from existing verified foreman snapshot scalars without a migration, new row, or alternate durable truth | Explicit user delegation |
 | 1.21 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial schema-v7 general submission-envelope persistence; superseded before release by 1.22 because intake must not reuse Task-Spec/currency/autonomy semantics | User-authorized Phase 3 |
 | 1.22 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Add the shared ingress claim, distinct no-spec/no-currency subject, one-event general intake, same-transaction formal Registry currentness check, and exact Writer-v4 rebind in the Store-v7 transaction | User-authorized Phase 3 |
+| 1.23 | 2026-08-30 | ADR-023 deployment compatibility amendment | Preserve every pre-v7 duplicate canary stream in a migration-owned ambiguity relation, select no winner, and fail closed on read/prepare/record while re-pinning exact v7 identities | User-authorized deployment hotfix |

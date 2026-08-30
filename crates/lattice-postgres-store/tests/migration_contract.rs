@@ -32,6 +32,9 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         "INSERT INTO writer_lease.",
         "DELETE FROM ONLY writer_lease.",
         "LOCK TABLE writer_lease.",
+        "reconcile_writer_lease_v4_rebind_for_v7",
+        "LEGACY_F252_WRITER_LEASE_V4_REBIND",
+        "batch_execute(WRITER_LEASE_V4_REBIND_SQL)",
     ] {
         assert!(
             !setup.contains(forbidden),
@@ -87,9 +90,25 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         1,
         "exact-v6 transition must call the append-only Writer-v4 procedure"
     );
+    let v6_order = [
+        "verify_runtime_foreman_schema_v6",
+        "apply_missing_entries(&mut transaction, 7)",
+        "advance_compatibility_from_v6",
+        "CALL writer_lease.writer_lease_rebind_v4()",
+        "verify_runtime_submission_schema_v7",
+    ]
+    .map(|needle| {
+        v6_to_v7
+            .find(needle)
+            .unwrap_or_else(|| panic!("exact-v6 transition missing {needle}"))
+    });
+    assert!(
+        v6_order.windows(2).all(|pair| pair[0] < pair[1]),
+        "exact-v6 transition must verify the Writer-owned bridge before applying v7 and invoking its fixed procedure"
+    );
     let rebind_sql = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
     for required in [
-        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v4()",
+        "CREATE OR REPLACE PROCEDURE writer_lease.writer_lease_rebind_v4()",
         "SECURITY INVOKER",
         "SET search_path = pg_catalog",
         "SET row_security = on",
@@ -411,7 +430,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v7 manifest")
             .manifest_sha256()
             .as_str(),
-        "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c"
+        "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8"
     );
 
     let registry = &manifest[4];
@@ -471,6 +490,11 @@ fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
         "control.task_submission_record_v1",
         "control.task_submission_read_by_task_ref_v1",
         "control.task_submission_read_by_request_v1",
+        "CREATE TABLE control.task_ingress_historical_ambiguities",
+        "CONSTRAINT task_ingress_historical_ambiguities_event_fk",
+        "control.task_ingress_historical_closure_v1()",
+        "SELECT * FROM expected_claims EXCEPT SELECT * FROM actual_candidate_claims",
+        "SELECT * FROM actual_candidate_claims EXCEPT SELECT * FROM expected_claims",
         "pg_catalog.pg_advisory_xact_lock",
         "GENERAL_TASK_INTAKE_V1",
         "xmin = pg_catalog.pg_current_xact_id()::xid",
@@ -481,6 +505,48 @@ fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
         );
     }
     assert!(!sql.contains("GRANT SELECT ON TABLE control.task_submission_envelopes"));
+    assert!(!sql.contains("GRANT SELECT ON TABLE control.task_ingress_historical_ambiguities"));
+
+    let verifier = include_str!("../src/postgres_setup.rs");
+    for required in [
+        "V7_AMBIGUITY_RELATION_SIGNATURE_SQL",
+        "V7_AMBIGUITY_COLUMN_SIGNATURE_SQL",
+        "V7_AMBIGUITY_CONSTRAINT_SIGNATURE_SQL",
+        "V7_AMBIGUITY_INDEX_SIGNATURE_SQL",
+        "V7_AMBIGUITY_TABLE_ACL_SIGNATURE_SQL",
+        "V7_INGRESS_FUNCTION_SIGNATURE_SQL",
+        "V7_INGRESS_FUNCTION_ACL_SIGNATURE_SQL",
+        "pg_catalog.pg_get_functiondef(p.oid)",
+        "SELECT control.task_ingress_historical_closure_v1()",
+        "verify_schema_header_comments(client, \"V6\")",
+        "verify_schema_header_comments(client, \"V7\")",
+    ] {
+        assert!(
+            verifier.contains(required),
+            "missing schema-v7 exact verifier closure: {required}"
+        );
+    }
+
+    let live = include_str!("../../../apps/lattice-runtime/tests/task094_writer_v3_transition.rs");
+    for required in [
+        "TASK094_DUPLICATE_HISTORY_V6_CANONICAL_REPLAY_PASS",
+        "TASK094_DUPLICATE_HISTORY_V7_CANONICAL_REPLAY_PASS",
+        "AMBIGUITY_ACL",
+        "AMBIGUITY_EVENT_FK",
+        "INGRESS_FUNCTION_SECURITY",
+        "INGRESS_FUNCTION_PUBLIC_ACL",
+        "AMBIGUITY_LINEAGE",
+        "TASK094_V5_WRITER_V3_BRIDGE_RELATION_DRIFT_REJECTED_AND_REPAIRED",
+        "CONTROL_SCHEMA_HEADER",
+        "READMODEL_SCHEMA_HEADER",
+        "TASK094_HISTORICAL_MISSING_EVENT_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_DUAL_ACTION_INVISIBILITY_MIGRATION_REJECTION_PASS",
+    ] {
+        assert!(
+            live.contains(required),
+            "missing schema-v7 live drift proof: {required}"
+        );
+    }
 }
 
 #[test]
@@ -1042,6 +1108,133 @@ fn schema_v5_forbidden_object_closure_counts_autonomy_reference_triggers() {
 fn schema_v5_catalog_measurement_has_closed_role_boundary_diagnostics() {
     let setup = include_str!("../src/postgres_setup.rs");
     let compact = setup.split_whitespace().collect::<String>();
+    let v5_measurement = setup
+        .split_once("fn measure_catalog_signatures()")
+        .expect("schema-v5 measurement helper")
+        .1
+        .split_once("fn emit_owned_catalog_signatures")
+        .expect("separate schema-v6/v7 measurement helpers")
+        .0;
+    assert!(
+        !v5_measurement.contains("V7_"),
+        "schema-v5 measurement must keep its fixed nine-output contract"
+    );
+    let owned_measurement = setup
+        .split_once("fn emit_owned_catalog_signatures")
+        .expect("owned catalog measurement helper")
+        .1
+        .split_once("fn measure_v6_owned_catalog_signatures()")
+        .expect("schema-v6 measurement boundary")
+        .0;
+    for label in [
+        "OWNED_RELATION",
+        "OWNED_COLUMN",
+        "OWNED_CONSTRAINT",
+        "OWNED_INDEX",
+        "OWNED_FUNCTION",
+        "OWNED_TYPE",
+        "OWNED_TABLE_ACL",
+        "OWNED_FUNCTION_ACL",
+        "OWNED_SCHEMA_ACL",
+    ] {
+        assert_eq!(
+            owned_measurement.matches(&format!("\"{label}\"")).count(),
+            1
+        );
+    }
+    assert_eq!(owned_measurement.matches("(\"OWNED_").count(), 9);
+    let v6_measurement = setup
+        .split_once("fn measure_v6_owned_catalog_signatures()")
+        .expect("schema-v6 measurement helper")
+        .1
+        .split_once("fn measure_v7_ingress_signatures()")
+        .expect("schema-v7 measurement boundary")
+        .0;
+    for required in [
+        "LATTICE_STORE_V6_CATALOG_SIGNATURE_URL",
+        "measurement requires schema-v6",
+        "verify_history_rows(&rows, &migration_manifest()[..7])",
+        "emit_owned_catalog_signatures(&mut client, \"V6\")",
+        "emit_forbidden_schema_object_counts(&mut client, \"V6\")",
+    ] {
+        assert!(
+            v6_measurement.contains(required),
+            "schema-v6 measurement missing: {required}"
+        );
+    }
+    let v7_measurement = setup
+        .split_once("fn measure_v7_ingress_signatures()")
+        .expect("schema-v7 measurement helper")
+        .1
+        .split_once("fn autonomy_catalog_signature")
+        .expect("schema-v7 measurement boundary")
+        .0;
+    for required in [
+        "LATTICE_STORE_V7_CATALOG_SIGNATURE_URL",
+        "measurement requires schema-v7",
+        "verify_history_rows(&rows, migration_manifest())",
+        "emit_owned_catalog_signatures(&mut client, \"V7\")",
+        "emit_forbidden_schema_object_counts(&mut client, \"V7\")",
+        "STORE_V7_CATALOG_{label}_SIGNATURE",
+    ] {
+        assert!(
+            v7_measurement.contains(required),
+            "schema-v7 measurement missing: {required}"
+        );
+    }
+    for label in [
+        "AMBIGUITY_RELATION",
+        "AMBIGUITY_COLUMN",
+        "AMBIGUITY_CONSTRAINT",
+        "AMBIGUITY_INDEX",
+        "AMBIGUITY_TABLE_ACL",
+        "INGRESS_FUNCTION",
+        "INGRESS_FUNCTION_ACL",
+    ] {
+        assert_eq!(v7_measurement.matches(&format!("\"{label}\"")).count(), 1);
+    }
+    let task094_harness = include_str!("../../../scripts/test-task094-writer-v3-transition.ps1");
+    for required in [
+        "postgres_setup::tests::measure_v7_ingress_signatures",
+        "LATTICE_STORE_V7_CATALOG_SIGNATURE_URL = $catalogUrl",
+        "TASK094_V7_CATALOG_MEASUREMENT_TIMEOUT",
+        "TASK094_V7_CATALOG_MEASUREMENT_OUTPUT_REJECTED",
+        "TASK094_V7_CATALOG_MEASUREMENT_PASS signatures=16 forbidden_counts=1",
+        "TASK094_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS_REJECTED",
+        "[regex]::Matches(",
+        "$catalogSignatures.Count -ne 16",
+        "$catalogLabels.Count -ne 16",
+        "[switch]$InjectInitdbFailure",
+        "[switch]$InjectTeardownStatusFailure",
+        "TASK094_INTERRUPTED_PARTIAL_CLUSTER_PID_PRESENT",
+        "TASK094_PG_STATUS_TIMEOUT",
+        "TASK094_PG_STATUS_NOT_STOPPED",
+        "log_min_error_statement=PANIC",
+        "log_parameter_max_length_on_error=0",
+        "TASK094_CREDENTIAL_FILE_CLEANUP_FAILED",
+        ".Replace($password, '[REDACTED]')",
+    ] {
+        assert!(
+            task094_harness.contains(required),
+            "TASK094 schema-v7 measurement consumer missing: {required}"
+        );
+    }
+    let normal_stop = task094_harness
+        .find("-ArgumentList @('-D', $dataRoot, '-m', 'fast', '-w', 'stop')")
+        .expect("TASK094 bounded normal stop");
+    let normal_status = task094_harness[normal_stop..]
+        .find("$statusArguments = @('-D', $dataRoot, 'status')")
+        .map(|offset| normal_stop + offset)
+        .expect("TASK094 bounded post-stop status proof");
+    let cleanup_delete = task094_harness[normal_status..]
+        .find("Remove-Item -LiteralPath $deleteTarget -Recurse -Force")
+        .map(|offset| normal_status + offset)
+        .expect("TASK094 exact cleanup deletion");
+    assert!(normal_stop < normal_status && normal_status < cleanup_delete);
+    assert!(
+        task094_harness[normal_status..cleanup_delete]
+            .contains("if ($statusProcess.ExitCode -ne 3)")
+    );
     for diagnostic in [
         "ROLE_SIGNATURE",
         "DB_ACL_SIGNATURE",
@@ -1067,6 +1260,17 @@ fn schema_v5_catalog_measurement_has_closed_role_boundary_diagnostics() {
     let live = include_str!("postgres_live.rs");
     assert!(!live.contains("set_exact_signature_fixture_database_access"));
     let harness = include_str!("../../../scripts/run-task019-postgres.ps1");
+    let store_measurement_count = harness
+        .split_once(
+            "$expectedSignatureCount = if ($EnvironmentName -eq 'LATTICE_STORE_CATALOG_SIGNATURE_URL')",
+        )
+        .expect("schema-v5 Store measurement consumer")
+        .1
+        .split_once("else")
+        .expect("Store measurement count boundary")
+        .0;
+    assert!(store_measurement_count.contains('9'));
+    assert!(!store_measurement_count.contains("16"));
     let switch_start = harness
         .find("function New-Task075CatalogDatabaseAccessQuery")
         .expect("catalog database ACL switch exists");
@@ -1344,10 +1548,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         submission.path(),
         "db/migrations/0008_task_submission_envelope.sql"
     );
-    assert_eq!(submission.byte_length(), 298_666);
+    assert_eq!(submission.byte_length(), 334_756);
     assert_eq!(
         submission.sha256(),
-        "35be9a1f34fd8209cbf7466b39811f0fad91d9049dd72336af9bcf422d68d067"
+        "a9059c74722dcbff5345a2732bf1c44f8f2dd682a5eecb57bda2f0d820e9d4a0"
     );
     assert_eq!(submission.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(submission.reader_compatibility(), 7..=7);
@@ -1475,7 +1679,7 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         .split_once("fn verify_runtime_foreman_schema_v6")
         .expect("schema-v6 runtime verifier")
         .1
-        .split_once("fn preflight_connection")
+        .split_once("fn verify_v7_ingress_ambiguity_profile")
         .expect("verifier boundary")
         .0;
     for required in [
@@ -1486,9 +1690,20 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         "has_table_privilege",
         "task_ledger_record_foreman_snapshot_v1",
         "verify_writer_lease_v3_functions(client, true)",
+        "&WRITER_LEASE_V3_CURRENT_CATALOG_SIGNATURES",
+        "verify_writer_lease_acl_closure(client, 5, true)",
+        "&WRITER_LEASE_V4_BRIDGE_CATALOG_SIGNATURES",
+        "verify_writer_lease_acl_closure(client, 15, false)",
         "n.nspname='writer_lease'",
         "WriterLeaseV3Profile::Current",
+        "verify_owned_catalog_signature_profile(client, &SCHEMA_V6_OWNED_CATALOG_SIGNATURES)",
+        "&SCHEMA_V6_FORBIDDEN_SCHEMA_OBJECT_COUNTS",
+        "verify_exact_default_acl_signature(client)",
+        "verify_autonomy_receipt_profile(client)",
+        "verify_forbidden_namespace_objects(client)",
+        "verify_effective_default_privileges(client)",
         "verify_runtime_admission_present(client)",
+        "verify_exact_principal_database_boundary(client, expected_dangerous_functions, true)",
     ] {
         assert!(
             verifier.contains(required),
@@ -1496,7 +1711,7 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         );
     }
     assert!(
-        verifier.contains("!= 7"),
+        verifier.contains("writer_catalog == (5, 12, 7, true)"),
         "runtime Writer surface must be exact"
     );
     assert!(!verifier.contains("WriterLeaseV3Profile::Bridge"));
@@ -1514,8 +1729,18 @@ fn schema_v7_runtime_admission_requires_writer_v4_current_and_closed_acl() {
         .0;
     for required in [
         "verify_writer_lease_v4_functions(client, true)",
+        "&WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES",
+        "verify_writer_lease_acl_closure(client, 8, true)",
         "!= 15",
         "!= 7",
+        "SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT",
+        "verify_owned_catalog_signature_profile(client, &SCHEMA_V7_OWNED_CATALOG_SIGNATURES)",
+        "&SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS",
+        "verify_exact_default_acl_signature(client)",
+        "verify_autonomy_receipt_profile(client)",
+        "verify_forbidden_namespace_objects(client)",
+        "verify_effective_default_privileges(client)",
+        "verify_exact_principal_database_boundary(",
     ] {
         assert!(
             verifier.contains(required),
@@ -2369,6 +2594,13 @@ fn task076_pre_snapshot_try_lock_is_narrowly_granted_to_migrator() {
 fn review_regression_requires_real_login_to_capability_role_mapping() {
     let source = include_str!("../src/postgres_setup.rs");
     let live = include_str!("postgres_live.rs");
+    let exact_core = source
+        .split_once("fn verify_exact_principal_database_core")
+        .expect("exact principal/database core")
+        .1
+        .split_once("fn expected_dangerous_function_count")
+        .expect("exact core boundary")
+        .0;
 
     for login in [
         "lattice_migrator_login",
@@ -2385,6 +2617,22 @@ fn review_regression_requires_real_login_to_capability_role_mapping() {
     assert!(source.contains("m.set_option"));
     assert!(source.contains("m.admin_option"));
     assert!(source.contains("has_schema_privilege($1, n.oid, 'CREATE')"));
+    for required in [
+        "ROLE_SIGNATURE_SQL",
+        "DATABASE_ACL_SIGNATURE_SQL",
+        "ROLE_DATABASE_BOUNDARY_SQL",
+        "memberships != 4",
+        "extra_roles != 0",
+        "role_settings != 0",
+        "database_privileges != [false, false, false, true, true, true]",
+        "verify_login_principal_closure(client)",
+        "verify_cluster_wide_acl_closure_for_writer_lease",
+    ] {
+        assert!(
+            exact_core.contains(required),
+            "exact principal/database core missing: {required}"
+        );
+    }
     assert!(live.contains("WITH ADMIN FALSE, INHERIT FALSE, SET TRUE"));
     assert!(!live.contains("WITH ADMIN FALSE, INHERIT TRUE, SET TRUE"));
     assert!(live.contains("prove_login_requires_set_role"));
@@ -2405,6 +2653,7 @@ fn review_regression_requires_real_login_to_capability_role_mapping() {
     }
     assert!(source.contains("FROM pg_database d"));
     assert!(source.contains("WHERE acl.grantee = 0"));
+    assert!(source.contains("d.defaclrole <> 'lattice_migrator'::regrole"));
     assert!(live.contains("prove_cross_database_acl_drift"));
     assert!(live.contains("prove_parameter_acl_drift"));
     assert!(live.contains("prove_external_column_acl_drift"));

@@ -53,9 +53,9 @@ const WRITER_V3_MANIFEST_SHA256: &str =
 const WRITER_V4_MANIFEST_SHA256: &str =
     "73d3e435c5923797076d30cea337d84b94b2e760db6e9727033b68ace592a229";
 const CURRENT_V7_MANIFEST_SHA256: &str =
-    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
+    "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
 const FUTURE_V8_MANIFEST_SHA256: &str =
-    "d81372211bf3dc1916ed2dd0e8a5f6fd03083bdbfe4bfe740ce7dc891efc935e";
+    "d6a30fdffd2d12cbb59d4ddd0d0e0b4c6582a03515b7e0707e1a74270e29c0b3";
 
 fn independent_manifest_sha256(include_future_v8: bool) -> String {
     fn field(hasher: &mut Sha256, value: &[u8]) {

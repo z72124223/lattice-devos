@@ -6874,7 +6874,7 @@ fn prove_non_migrator_default_acl_drift(config: &LiveConfig, admin: &mut Client)
     fixture
         .batch_execute(
             "ALTER DEFAULT PRIVILEGES FOR ROLE lattice_runtime \
-             GRANT SELECT ON TABLES TO PUBLIC",
+             GRANT SELECT ON TABLES TO lattice_guardian",
         )
         .unwrap_or_else(|_| panic!("TASK019_DEFAULT_OWNER_ACL_FIXTURE_FAILED"));
     drop(fixture);

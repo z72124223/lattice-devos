@@ -8,7 +8,7 @@ use lattice_writer_lease::{
     WriterLeaseCheckpoint, verify_snapshot_against_checkpoint,
 };
 use postgres::error::SqlState;
-use postgres::{Client, GenericClient, IsolationLevel, Transaction};
+use postgres::{Client, GenericClient, IsolationLevel, Row, Transaction};
 
 use crate::{
     ExtensionManifestEvidence, WRITER_LEASE_EXTENSION_ID, WRITER_LEASE_EXTENSION_PATH,
@@ -31,7 +31,15 @@ const CURRENT_GLOBAL_MANIFEST_SHA256: &str =
 const V6_GLOBAL_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
 const V7_GLOBAL_MANIFEST_SHA256: &str =
-    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
+    "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
+const LEGACY_F252_WRITER_LEASE_V4_REBIND_BODY_SHA256: &str =
+    "4834f71b90744dddbf828baa5b1e0c5b3e3efbc64bb1d186b8c48bce8c88da52";
+const LEGACY_F252_WRITER_LEASE_V4_REBIND_OBJECT_SIGNATURE: &str =
+    "0b5001595269061b484a31710f22e16dbf9d323d50bf67d5a08f949d4c4ddbf8";
+const LEGACY_F252_WRITER_LEASE_V4_REBIND_ACL_SIGNATURE: &str =
+    "50bfe792c391202917747211e6a28f4319e46285be5ae10b30e3cee79bedad41";
+const LEGACY_F252_WRITER_LEASE_V4_FUNCTION_SIGNATURE: &str =
+    "3a0d9b1593e0adff27ba54cb080538286ee1bbcc204d2ae4cb23ae1558dda4a8";
 const HISTORICAL_MEMORY_MANIFEST_SHA256: &str =
     "0aedbd7d9ef7ca07fc2910d0da34c163cc83e3dd56f9b28292ae1f4f0c3c4d7e";
 const CURRENT_MEMORY_MANIFEST_SHA256: &str =
@@ -101,6 +109,22 @@ const FUNCTION_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
     JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
     WHERE n.nspname='writer_lease' \
     ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)";
+const V4_REBIND_OBJECT_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),\
+    pg_catalog.pg_get_function_result(p.oid),o.rolname,l.lanname,p.prokind::text,p.prosecdef,\
+    p.proleakproof,p.provolatile::text,p.proparallel::text,p.proisstrict,p.proretset,p.pronargs,\
+    p.pronargdefaults,p.prorettype::regtype::text,p.proargtypes::text,\
+    COALESCE(p.proallargtypes::text,'<NULL>'),COALESCE(p.proargmodes::text,'<NULL>'),\
+    COALESCE(p.proargnames::text,'<NULL>'),COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'),\
+    COALESCE(p.probin,'<NULL>'),p.prosrc,pg_catalog.pg_get_functiondef(p.oid),\
+    COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>'))::text \
+    FROM pg_catalog.pg_proc p \
+    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+    WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4' \
+      AND pg_catalog.pg_get_function_identity_arguments(p.oid)='' \
+    ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)";
 const SCHEMA_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
     n.nspname,o.rolname,COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
     FROM pg_catalog.pg_namespace n JOIN pg_catalog.pg_roles o ON o.oid=n.nspowner \
@@ -128,6 +152,17 @@ const FUNCTION_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
     WHERE n.nspname='writer_lease' ORDER BY n.nspname,p.proname,\
     pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,COALESCE(g.rolname,'PUBLIC'),\
     r.rolname,a.privilege_type,a.is_grantable";
+const V4_REBIND_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
+    n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,\
+    COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable)::text \
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+    JOIN pg_catalog.pg_roles o ON o.oid=p.proowner \
+    CROSS JOIN LATERAL pg_catalog.aclexplode(COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) a \
+    LEFT JOIN pg_catalog.pg_roles g ON g.oid=a.grantee JOIN pg_catalog.pg_roles r ON r.oid=a.grantor \
+    WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4' \
+      AND pg_catalog.pg_get_function_identity_arguments(p.oid)='' \
+    ORDER BY n.nspname,p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid),o.rolname,\
+    COALESCE(g.rolname,'PUBLIC'),r.rolname,a.privilege_type,a.is_grantable";
 const COLUMN_ACL_PROFILE_SQL: &str = "SELECT pg_catalog.jsonb_build_array(\
     n.nspname,c.relname,a.attnum,a.attname,COALESCE(g.rolname,'PUBLIC'),r.rolname,x.privilege_type,\
     x.is_grantable)::text FROM pg_catalog.pg_class c \
@@ -294,6 +329,218 @@ const V2_CURRENT_EXPECTED_CATALOG_PROFILES: [(&str, usize, &str); 10] = [
         FUNCTION_ACL_PROFILE_SQL,
         16,
         "bd5b05d60340a1b9f9fbf1de2b4bed8586b7eede4fd8d7c4825841c221e89b7a",
+    ),
+    (
+        COLUMN_ACL_PROFILE_SQL,
+        0,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    ),
+    (
+        TYPE_PROFILE_SQL,
+        10,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ),
+];
+
+const V3_BRIDGE_EXPECTED_CATALOG_PROFILES: [(&str, usize, &str); 10] = [
+    (
+        RELATION_PROFILE_SQL,
+        5,
+        "0fdd123e2939cee6ad128564668ef57c8130d0780ee9f6a3a7f725d1c4ce840f",
+    ),
+    (
+        COLUMN_PROFILE_SQL,
+        73,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    ),
+    (
+        CONSTRAINT_PROFILE_SQL,
+        27,
+        "9be3f0f60b5113317678328d490ff88d866c252c3544e5bed1a7a60c0d543cc1",
+    ),
+    (
+        INDEX_PROFILE_SQL,
+        8,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    ),
+    (
+        FUNCTION_PROFILE_SQL,
+        12,
+        "4b9a0caf84307961d7780f87ca0aa9e0382c9920def32415d3688fb28e7701ef",
+    ),
+    (
+        SCHEMA_ACL_PROFILE_SQL,
+        2,
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+    ),
+    (
+        TABLE_ACL_PROFILE_SQL,
+        40,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    ),
+    (
+        FUNCTION_ACL_PROFILE_SQL,
+        12,
+        "368f4172949f70764de1f07057af69c762a572d78b26b196227943d97ebaad9f",
+    ),
+    (
+        COLUMN_ACL_PROFILE_SQL,
+        0,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    ),
+    (
+        TYPE_PROFILE_SQL,
+        10,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ),
+];
+
+const V3_CURRENT_EXPECTED_CATALOG_PROFILES: [(&str, usize, &str); 10] = [
+    (
+        RELATION_PROFILE_SQL,
+        5,
+        "0fdd123e2939cee6ad128564668ef57c8130d0780ee9f6a3a7f725d1c4ce840f",
+    ),
+    (
+        COLUMN_PROFILE_SQL,
+        73,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    ),
+    (
+        CONSTRAINT_PROFILE_SQL,
+        27,
+        "9be3f0f60b5113317678328d490ff88d866c252c3544e5bed1a7a60c0d543cc1",
+    ),
+    (
+        INDEX_PROFILE_SQL,
+        8,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    ),
+    (
+        FUNCTION_PROFILE_SQL,
+        12,
+        "4b9a0caf84307961d7780f87ca0aa9e0382c9920def32415d3688fb28e7701ef",
+    ),
+    (
+        SCHEMA_ACL_PROFILE_SQL,
+        3,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    ),
+    (
+        TABLE_ACL_PROFILE_SQL,
+        40,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    ),
+    (
+        FUNCTION_ACL_PROFILE_SQL,
+        19,
+        "72640b1eec7e3bbb4e56532f795712930dd84f79f6d2ea846bd83395185fdbf3",
+    ),
+    (
+        COLUMN_ACL_PROFILE_SQL,
+        0,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    ),
+    (
+        TYPE_PROFILE_SQL,
+        10,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ),
+];
+
+const V4_BRIDGE_EXPECTED_CATALOG_PROFILES: [(&str, usize, &str); 10] = [
+    (
+        RELATION_PROFILE_SQL,
+        5,
+        "41652b9772ad01aeb834f84eb0fc21ecef8a424afa755a8ec1b95e86eedb8861",
+    ),
+    (
+        COLUMN_PROFILE_SQL,
+        73,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    ),
+    (
+        CONSTRAINT_PROFILE_SQL,
+        27,
+        "8aec9d54882a49e41b93bc1ead82f80c34e52c679f3e9efaca45342325af622e",
+    ),
+    (
+        INDEX_PROFILE_SQL,
+        8,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    ),
+    (
+        FUNCTION_PROFILE_SQL,
+        15,
+        "e253b95704f78e288fc0a0799327a7034932cc8e721b390f9d629cccebc3a8d0",
+    ),
+    (
+        SCHEMA_ACL_PROFILE_SQL,
+        2,
+        "f8a84b870fcb8b091dbc7f9cf6835fb4311064eec5c83b31159a9a936a11e738",
+    ),
+    (
+        TABLE_ACL_PROFILE_SQL,
+        40,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    ),
+    (
+        FUNCTION_ACL_PROFILE_SQL,
+        15,
+        "25de9857318874012f716bb9a9db146aa40597cd8fe95ff550ba21f55f2dcc00",
+    ),
+    (
+        COLUMN_ACL_PROFILE_SQL,
+        0,
+        "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    ),
+    (
+        TYPE_PROFILE_SQL,
+        10,
+        "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+    ),
+];
+
+const V4_CURRENT_EXPECTED_CATALOG_PROFILES: [(&str, usize, &str); 10] = [
+    (
+        RELATION_PROFILE_SQL,
+        5,
+        "41652b9772ad01aeb834f84eb0fc21ecef8a424afa755a8ec1b95e86eedb8861",
+    ),
+    (
+        COLUMN_PROFILE_SQL,
+        73,
+        "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    ),
+    (
+        CONSTRAINT_PROFILE_SQL,
+        27,
+        "8aec9d54882a49e41b93bc1ead82f80c34e52c679f3e9efaca45342325af622e",
+    ),
+    (
+        INDEX_PROFILE_SQL,
+        8,
+        "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    ),
+    (
+        FUNCTION_PROFILE_SQL,
+        15,
+        "e253b95704f78e288fc0a0799327a7034932cc8e721b390f9d629cccebc3a8d0",
+    ),
+    (
+        SCHEMA_ACL_PROFILE_SQL,
+        3,
+        "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    ),
+    (
+        TABLE_ACL_PROFILE_SQL,
+        40,
+        "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    ),
+    (
+        FUNCTION_ACL_PROFILE_SQL,
+        22,
+        "42db5b1428da3e9e6aa96f770dd1996893fdcdf4f88b275d1ddb28ae8df12309",
     ),
     (
         COLUMN_ACL_PROFILE_SQL,
@@ -520,6 +767,10 @@ pub enum V3BootstrapProfile {
     V6Current,
     /// Schema v6 has the quarantined Writer-v4 bridge, ready for Store v7.
     V6V4Bridge,
+    /// Schema v6 has the exact f252 Writer-v4 bridge predecessor. Writer-owned
+    /// v4 apply may replace only its pinned procedure and must reclassify the
+    /// current bridge before Store v7 migration begins.
+    V6V4BridgeLegacyF252Rebind,
     /// Schema v7 has the exact current Writer-v4 successor profile.
     V7V4Current,
 }
@@ -845,13 +1096,16 @@ pub fn apply_v3_extension(
     result
 }
 
-/// Applies the append-only Writer-v4 bridge to an exact current Writer-v3 /
-/// Store-v6 database while leaving Runtime execute authority quarantined.
+/// Applies a new append-only Writer-v4 bridge only to an exact current
+/// Writer-v3 / Store-v6 database. An exact already-bridged v4 profile is
+/// verified, and only its quarantined f252 procedure predecessor may be
+/// reconciled, while Runtime execute authority remains quarantined.
 ///
 /// # Errors
 ///
-/// Rejects absent/partial Writer state, any non-v3-current predecessor, live
-/// authority, changed immutable asset, or catalog/ACL ambiguity.
+/// Rejects absent/partial Writer state, a nonclosed foundation, every other
+/// non-v3-current predecessor, live authority, changed immutable asset, or
+/// catalog/ACL ambiguity.
 pub fn apply_v4_extension(
     client: &mut Client,
     target: &V4ExtensionTarget,
@@ -933,7 +1187,7 @@ fn apply_v4_extension_attempt(
             verify_v3_rebind_boundary(&mut transaction, v3_rebind)?;
             verify_bridge_safety(&mut transaction)?;
             apply_v3_to_v4_bridge(&mut transaction, target, v3, v4)?;
-            ensure_v4_rebind_boundary(&mut transaction, v4_rebind)?;
+            install_new_v4_rebind_boundary(&mut transaction, v4_rebind)?;
             verify_v4_bridge_profile(
                 &mut transaction,
                 target,
@@ -947,7 +1201,7 @@ fn apply_v4_extension_attempt(
         }
         V3InstalledState::G6MemoryV3WriterV4Bridge => {
             verify_bridge_safety(&mut transaction)?;
-            verify_v4_rebind_boundary(&mut transaction, v4_rebind)?;
+            reconcile_existing_v4_rebind_boundary(&mut transaction, v4_rebind)?;
             verify_v4_bridge_profile(
                 &mut transaction,
                 target,
@@ -1108,20 +1362,36 @@ pub fn inspect_v3_bootstrap_profile(
         V3InstalledState::G6MemoryV3WriterV4Bridge => {
             let foundation = verify_v3_foundation(&mut transaction, &successor)
                 .map_err(SetupAttemptError::into_public)?;
-            verify_v4_bridge_profile(
-                &mut transaction,
-                &successor,
-                &foundation.database_uuid,
-                &v1,
-                &v2,
-                &v3,
-                &v4,
-            )
-            .map_err(SetupAttemptError::into_public)?;
-            verify_v4_rebind_boundary(&mut transaction, &v4_rebind)
+            let rebind_profile = classify_v4_rebind_boundary(&mut transaction, &v4_rebind)
                 .map_err(SetupAttemptError::into_public)?;
+            match rebind_profile {
+                V4RebindBoundaryProfile::Current => verify_v4_bridge_profile(
+                    &mut transaction,
+                    &successor,
+                    &foundation.database_uuid,
+                    &v1,
+                    &v2,
+                    &v3,
+                    &v4,
+                ),
+                V4RebindBoundaryProfile::LegacyF252 => verify_legacy_f252_v4_bridge_profile(
+                    &mut transaction,
+                    &successor,
+                    &foundation.database_uuid,
+                    &v1,
+                    &v2,
+                    &v3,
+                    &v4,
+                ),
+            }
+            .map_err(SetupAttemptError::into_public)?;
             verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
-            V3BootstrapProfile::V6V4Bridge
+            match rebind_profile {
+                V4RebindBoundaryProfile::Current => V3BootstrapProfile::V6V4Bridge,
+                V4RebindBoundaryProfile::LegacyF252 => {
+                    V3BootstrapProfile::V6V4BridgeLegacyF252Rebind
+                }
+            }
         }
         V3InstalledState::G7MemoryV3WriterV4Current => {
             let foundation = verify_v7_foundation(&mut transaction, &v7_successor)
@@ -2222,27 +2492,26 @@ fn verify_v3_rebind_boundary<C: GenericClient>(
     Ok(())
 }
 
-fn ensure_v4_rebind_boundary<C: GenericClient>(
+fn install_new_v4_rebind_boundary<C: GenericClient>(
     client: &mut C,
     rebind: &ExtensionManifestEvidence,
 ) -> Result<(), SetupAttemptError> {
-    let count: i64 = client
-        .query_one(
-            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
-               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
-              WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4'",
-            &[],
-        )
-        .map_err(map_database)?
-        .try_get(0)
-        .map_err(map_database)?;
-    match count {
-        0 => {
-            let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
-            client.batch_execute(sql).map_err(map_database)?;
-        }
-        1 => {}
-        _ => return Err(profile_collision()),
+    let rows = query_v4_rebind_boundary(client)?;
+    if !rows.is_empty() {
+        return Err(profile_collision());
+    }
+    let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
+    client.batch_execute(sql).map_err(map_database)?;
+    verify_v4_rebind_boundary(client, rebind)
+}
+
+fn reconcile_existing_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    if classify_v4_rebind_boundary(client, rebind)? == V4RebindBoundaryProfile::LegacyF252 {
+        let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
+        client.batch_execute(sql).map_err(map_database)?;
     }
     verify_v4_rebind_boundary(client, rebind)
 }
@@ -2251,13 +2520,66 @@ fn verify_v4_rebind_boundary<C: GenericClient>(
     client: &mut C,
     rebind: &ExtensionManifestEvidence,
 ) -> Result<(), SetupAttemptError> {
+    if classify_v4_rebind_boundary(client, rebind)? != V4RebindBoundaryProfile::Current {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+fn verify_legacy_f252_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    if classify_v4_rebind_boundary(client, rebind)? != V4RebindBoundaryProfile::LegacyF252 {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+fn classify_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<V4RebindBoundaryProfile, SetupAttemptError> {
+    let expected_body = expected_v4_rebind_body(rebind)?;
+    let rows = query_v4_rebind_boundary(client)?;
+    let [row] = rows.as_slice() else {
+        return Err(profile_collision());
+    };
+    let observed_body = v4_rebind_body_with_exact_metadata(row)?;
+    if observed_body.trim() == expected_body {
+        return Ok(V4RebindBoundaryProfile::Current);
+    }
+    if sha256_hex(observed_body.trim().as_bytes()) != LEGACY_F252_WRITER_LEASE_V4_REBIND_BODY_SHA256
+    {
+        return Err(profile_collision());
+    }
+    verify_catalog_profile(
+        client,
+        V4_REBIND_OBJECT_PROFILE_SQL,
+        1,
+        LEGACY_F252_WRITER_LEASE_V4_REBIND_OBJECT_SIGNATURE,
+    )?;
+    verify_catalog_profile(
+        client,
+        V4_REBIND_ACL_PROFILE_SQL,
+        1,
+        LEGACY_F252_WRITER_LEASE_V4_REBIND_ACL_SIGNATURE,
+    )?;
+    Ok(V4RebindBoundaryProfile::LegacyF252)
+}
+
+fn expected_v4_rebind_body(rebind: &ExtensionManifestEvidence) -> Result<&str, SetupAttemptError> {
     let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
     let marker = "$lattice_writer_lease_rebind_v4$";
-    let expected_body = sql
-        .split_once(marker)
+    sql.split_once(marker)
         .and_then(|(_, remainder)| remainder.rsplit_once(marker).map(|(body, _)| body.trim()))
-        .ok_or_else(profile_collision)?;
-    let rows = client
+        .ok_or_else(profile_collision)
+}
+
+fn query_v4_rebind_boundary<C: GenericClient>(
+    client: &mut C,
+) -> Result<Vec<Row>, SetupAttemptError> {
+    client
         .query(
             "SELECT p.prokind::text,l.lanname,r.rolname,p.prosecdef,p.provolatile::text, \
                     p.proparallel::text,pg_catalog.pg_get_function_identity_arguments(p.oid), \
@@ -2270,11 +2592,10 @@ fn verify_v4_rebind_boundary<C: GenericClient>(
               WHERE n.nspname='writer_lease' AND p.proname='writer_lease_rebind_v4'",
             &[],
         )
-        .map_err(map_database)?;
-    if rows.len() != 1 {
-        return Err(profile_collision());
-    }
-    let row = &rows[0];
+        .map_err(map_database)
+}
+
+fn v4_rebind_body_with_exact_metadata(row: &Row) -> Result<String, SetupAttemptError> {
     if row.try_get::<_, String>(0).map_err(map_database)? != "p"
         || row.try_get::<_, String>(1).map_err(map_database)? != "plpgsql"
         || row.try_get::<_, String>(2).map_err(map_database)? != "lattice_migrator"
@@ -2287,12 +2608,11 @@ fn verify_v4_rebind_boundary<C: GenericClient>(
             .is_empty()
         || row.try_get::<_, String>(7).map_err(map_database)?
             != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
-        || row.try_get::<_, String>(8).map_err(map_database)?.trim() != expected_body
         || row.try_get::<_, String>(9).map_err(map_database)? != "LATTICE_WRITER_LEASE_REBIND_V4"
     {
         return Err(profile_collision());
     }
-    Ok(())
+    row.try_get(8).map_err(map_database)
 }
 
 fn install_fresh_v3_current<C: GenericClient>(
@@ -2784,6 +3104,12 @@ enum RuntimeProfile {
     Current,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V4RebindBoundaryProfile {
+    Current,
+    LegacyF252,
+}
+
 fn verify_v3_bridge_profile<C: GenericClient>(
     client: &mut C,
     target: &ExtensionTarget,
@@ -3118,7 +3444,59 @@ fn verify_v4_bridge_profile<C: GenericClient>(
     v3: &ExtensionManifestEvidence,
     v4: &ExtensionManifestEvidence,
 ) -> Result<(), SetupAttemptError> {
-    verify_v4_catalog(client, RuntimeProfile::Quarantined)?;
+    verify_v4_bridge_profile_with_rebind(
+        client,
+        target,
+        database_uuid,
+        v1,
+        v2,
+        v3,
+        v4,
+        V4RebindBoundaryProfile::Current,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_legacy_f252_v4_bridge_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v4_bridge_profile_with_rebind(
+        client,
+        target,
+        database_uuid,
+        v1,
+        v2,
+        v3,
+        v4,
+        V4RebindBoundaryProfile::LegacyF252,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_v4_bridge_profile_with_rebind<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    rebind_profile: V4RebindBoundaryProfile,
+) -> Result<(), SetupAttemptError> {
+    match rebind_profile {
+        V4RebindBoundaryProfile::Current => {
+            verify_v4_catalog(client, RuntimeProfile::Quarantined)?;
+        }
+        V4RebindBoundaryProfile::LegacyF252 => {
+            verify_legacy_f252_v4_bridge_catalog(client)?;
+        }
+    }
     let identity = load_identity_shape(client)?;
     let expected_identity = identity_shape(
         database_uuid,
@@ -3724,28 +4102,11 @@ fn verify_v3_catalog<C: GenericClient>(
 ) -> Result<(), SetupAttemptError> {
     let rebind = verify_embedded_v3_rebind_manifest().map_err(|_| profile_collision())?;
     verify_v3_rebind_boundary(client, &rebind)?;
-    for (query, rows, signature) in [
-        (
-            COLUMN_PROFILE_SQL,
-            73,
-            "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
-        ),
-        (
-            TABLE_ACL_PROFILE_SQL,
-            40,
-            "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
-        ),
-        (
-            COLUMN_ACL_PROFILE_SQL,
-            0,
-            "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
-        ),
-        (
-            TYPE_PROFILE_SQL,
-            10,
-            "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
-        ),
-    ] {
+    let catalog_profiles = match runtime {
+        RuntimeProfile::Quarantined => &V3_BRIDGE_EXPECTED_CATALOG_PROFILES,
+        RuntimeProfile::Current => &V3_CURRENT_EXPECTED_CATALOG_PROFILES,
+    };
+    for &(query, rows, signature) in catalog_profiles {
         verify_catalog_profile(client, query, rows, signature)?;
     }
     let expected_runtime_functions = match runtime {
@@ -3938,31 +4299,48 @@ fn verify_v4_catalog<C: GenericClient>(
     client: &mut C,
     runtime: RuntimeProfile,
 ) -> Result<(), SetupAttemptError> {
+    verify_v4_catalog_with_rebind(client, runtime, V4RebindBoundaryProfile::Current)
+}
+
+fn verify_legacy_f252_v4_bridge_catalog<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), SetupAttemptError> {
+    verify_v4_catalog_with_rebind(
+        client,
+        RuntimeProfile::Quarantined,
+        V4RebindBoundaryProfile::LegacyF252,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_v4_catalog_with_rebind<C: GenericClient>(
+    client: &mut C,
+    runtime: RuntimeProfile,
+    rebind_profile: V4RebindBoundaryProfile,
+) -> Result<(), SetupAttemptError> {
     let rebind = verify_embedded_v4_rebind_manifest().map_err(|_| profile_collision())?;
-    verify_v4_rebind_boundary(client, &rebind)?;
-    for (query, rows, signature) in [
-        (
-            COLUMN_PROFILE_SQL,
-            73,
-            "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
-        ),
-        (
-            TABLE_ACL_PROFILE_SQL,
-            40,
-            "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
-        ),
-        (
-            COLUMN_ACL_PROFILE_SQL,
-            0,
-            "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
-        ),
-        (
-            TYPE_PROFILE_SQL,
-            10,
-            "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
-        ),
-    ] {
-        verify_catalog_profile(client, query, rows, signature)?;
+    match rebind_profile {
+        V4RebindBoundaryProfile::Current => verify_v4_rebind_boundary(client, &rebind)?,
+        V4RebindBoundaryProfile::LegacyF252 => {
+            if runtime != RuntimeProfile::Quarantined {
+                return Err(profile_collision());
+            }
+            verify_legacy_f252_v4_rebind_boundary(client, &rebind)?;
+        }
+    }
+    let catalog_profiles = match runtime {
+        RuntimeProfile::Quarantined => &V4_BRIDGE_EXPECTED_CATALOG_PROFILES,
+        RuntimeProfile::Current => &V4_CURRENT_EXPECTED_CATALOG_PROFILES,
+    };
+    for &(query, rows, signature) in catalog_profiles {
+        let expected_signature = if rebind_profile == V4RebindBoundaryProfile::LegacyF252
+            && query == FUNCTION_PROFILE_SQL
+        {
+            LEGACY_F252_WRITER_LEASE_V4_FUNCTION_SIGNATURE
+        } else {
+            signature
+        };
+        verify_catalog_profile(client, query, rows, expected_signature)?;
     }
     let expected_runtime_functions = match runtime {
         RuntimeProfile::Quarantined => 0_i64,
@@ -5144,5 +5522,24 @@ mod tests {
             .commit()
             .expect("commit read-only catalog measurement");
         println!("TASK076_WRITER_CATALOG_{token_profile}_MEASURE_PASS");
+    }
+
+    #[test]
+    #[ignore = "requires an exact isolated schema-v6 Writer-v3 current fixture"]
+    fn task094_apply_v4_bridge_fixture_when_requested() {
+        let url = std::env::var("LATTICE_WRITER_LEASE_V4_BRIDGE_FIXTURE_URL")
+            .expect("isolated Writer-v3 fixture URL is required");
+        let database_name = std::env::var("LATTICE_WRITER_LEASE_V4_BRIDGE_DATABASE_NAME")
+            .expect("isolated Writer-v3 fixture database name is required");
+        let database_identity =
+            measurement_digest("LATTICE_WRITER_LEASE_V4_BRIDGE_DATABASE_IDENTITY_SHA256");
+        let target = V4ExtensionTarget::new(database_name, database_identity)
+            .expect("exact Writer-v4 bridge target");
+        let mut client = Client::connect(&url, NoTls).expect("Writer-v3 fixture connection");
+        assert_eq!(
+            apply_v4_extension(&mut client, &target).expect("apply exact Writer-v4 bridge"),
+            ExtensionApplyOutcome::Bridged
+        );
+        println!("TASK094_WRITER_V4_BRIDGE_FIXTURE_PASS");
     }
 }

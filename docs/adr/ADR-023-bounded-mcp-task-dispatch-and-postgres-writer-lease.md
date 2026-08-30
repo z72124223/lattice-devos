@@ -1,7 +1,9 @@
 # ADR-023: Bounded MCP Task Dispatch And PostgreSQL Writer Lease
 
-- Status: accepted for TASK-038 Phase 2 and amended for Phase 3 general task
-  intake; each implementation/acceptance claim remains evidence-dependent
+- Status: accepted for TASK-038 Phase 2, amended for Phase 3 general task
+  intake, and amended for the 2026-08-30 pre-deployment historical-ingress
+  compatibility repair; each implementation/acceptance claim remains
+  evidence-dependent
 - Date: 2026-08-09
 - Decision owner: user
 - Related: SPEC-002 v34, SPEC-003 v5, ADR-005, ADR-006, ADR-012,
@@ -355,6 +357,54 @@ calls never migrate or rebind the database. Before backfilling the shared
 ingress namespace, migration fails closed if any historical canary command
 contains a now-recognized secret-shaped `client_request_id`; it neither copies
 that value into the new tables nor completes a partial v7 transition.
+
+### Pre-deployment duplicate-history compatibility amendment
+
+The 2026-08-30 deployment rehearsal proved that pre-v7 command IDs were unique
+only inside a Task Ledger stream. Two distinct durable streams may therefore
+both validly retain `mcp-submit:delivery-run-controlled-compatibility` even
+though schema v7 makes `(ingress_id, client_request_id)` globally unique. They
+are separate historical task identities and must not be deleted, merged,
+renamed, rewritten, or collapsed to an arbitrary winner.
+
+Migration `0008` classifies the complete verified historical candidate set by
+that exact key. A singleton becomes the active ingress claim. Every member of
+a group with cardinality greater than one is instead inserted into the
+migrator-owned `task_ingress_historical_ambiguities` relation with its exact
+stream, event, command, event digest, and command-request digest. The active
+claim table receives no row for that key. Normal runtime has no direct table
+privilege on the ambiguity relation, and each fixed read, prepare, and record
+entrypoint rejects it with SQLSTATE `LTX01` and the static diagnostic
+`LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS`, which the adapter maps to its
+existing command-substitution category. New v7 claims remain globally unique;
+this is compatibility metadata, not a second ingress namespace or a repair
+workflow. A fourth fixed security-definer verifier returns only a boolean and
+lets fresh Migrator, Runtime, Guardian, and ReadOnly sessions rederive the
+singleton/duplicate classification without direct table access. Exact
+relation/column/constraint/index/function/ACL signatures and that boolean
+closure reject catalog, privilege, function, or lineage drift.
+
+The corrected ordinal-8 identity is exact: SQL SHA-256
+`a9059c74722dcbff5345a2732bf1c44f8f2dd682a5eecb57bda2f0d820e9d4a0`,
+334,756 bytes, and global manifest SHA-256
+`584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8`.
+Writer v4 rebind and Memory's read-only v7 bootstrap profile are re-pinned to
+that manifest without changing their semantic rows. A database that already
+records a different ordinal-8 checksum remains a fail-closed manifest mismatch
+and is never reinterpreted or bootstrapped by replaying the old candidate.
+For the exact f252 schema-v6 bridge only, composition first invokes the
+Writer-owned typed v4 apply to replace its verified legacy procedure, then
+reclassifies the profile; Store remains call-only and starts v7 migration only
+after the current Writer bridge is independently verified.
+
+Release evidence must include a production-shaped v6 fixture with two distinct
+streams sharing the historical key, post-DDL failure atomicity, exact lineage
+and no-winner assertions, all three runtime denials, and an `AlreadyCurrent`
+retry from a fresh database client with unchanged durable fingerprints. The
+deployment gate additionally requires a verified physical backup plus isolated
+restore/migration and rollback clones before the live database is changed.
+Synthetic rows, the old failed release artifact, or a same-process no-op do not
+satisfy those gates.
 
 Orchestrator exposes one pure create-only path over the separate
 `TaskIntakeLifecyclePort`. It admits the verified intake once, or returns its

@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.4
+version: 3.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -13,7 +13,9 @@ Provide the sole normal local composition root that constructs the pure Rust
 orchestrator with concrete delivery/task adapters and exposes the bounded Codex
 App MCP stdio surface. The existing `apps/lattice-runtime` package implements
 this module and maps every MCP operation into the same `FullChainService` /
-Orchestrator composition.
+Orchestrator composition. Version 3.5 consumes the Store 1.23 deployment
+compatibility boundary: retained duplicate pre-v7 ingress identities have no
+runtime-selected winner and every shared-ingress entrypoint fails closed.
 
 ## Non-Goals
 
@@ -282,12 +284,13 @@ Orchestrator composition.
     v7 current. It closes migrator credentials, constructs fresh runtime
     clients, verifies foreman plus general-intake replay, and only then reports
     readiness.
-21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.3
-    and PostgreSQL Writer Lease 2.0 closed read-only profiles. It accepts only Store-v5 +
+21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.5
+    and PostgreSQL Writer Lease 2.1 closed read-only profiles. It accepts only Store-v5 +
     Memory `Empty|V2|V3` + Writer `V5FallbackRequired`, Store-v5 + Memory `V3`
     + Writer `V5Bridge`, or Store-v6 + Memory `V3` + Writer
-    `V6BridgePending|V6Current|V6V4Bridge`, or Store-v7 + Memory `V3` + Writer
-    `V7V4Current`. Every other triple fails closed. Only the v5
+    `V6BridgePending|V6Current|V6V4Bridge|V6V4BridgeLegacyF252Rebind`, or
+    Store-v7 + Memory `V3` + Writer `V7V4Current`. Every other triple fails
+    closed. Only the v5
     fallback runs Store verification, Memory apply/verify, Writer-v2
     apply/verify, then exact Writer-v3 bridge. Composition never parses Memory
     or Writer rows or substitutes its own classifier.
@@ -298,7 +301,10 @@ Orchestrator composition.
     prefix before admission observation or mutation; only the Store-owned
     administrative API may advance historical prefixes.
 22. Exact v6 bridge-pending may run only `V6Rebind`; exact v6 current may run
-    only Writer-owned `V4Apply`; exact `V6V4Bridge` may run only Store-owned
+    only Writer-owned `V4Apply`; exact `V6V4BridgeLegacyF252Rebind` may run only
+    the same Writer-owned `V4Apply`, which accepts that one quarantined
+    predecessor, replaces only its fixed procedure, and reclassifies before
+    composition continues. Exact `V6V4Bridge` may run only Store-owned
     `V7Apply`, whose transaction invokes the fixed v4 rebind. Exact Store-v7 +
     Memory-v3 + `V7V4Current` is the sole `V7VerifyOnly` state and performs zero
     migration, rebind, row, or ACL write. Migrator credentials are then closed;
@@ -343,17 +349,18 @@ Orchestrator composition.
 ## Allowed Dependencies
 
 - `lattice-contracts` 1.15, `lattice-ports` 2.3,
-  `orchestrator-runtime` 2.9, Foreman State 1.4, Task Ledger 2.9, PostgreSQL
-  Memory 1.3, Writer Lease domain 1.1, and PostgreSQL Writer Lease 2.0 public APIs.
+  `orchestrator-runtime` 2.9, Foreman State 1.4, Task Ledger 2.10, PostgreSQL
+  Store 1.23, PostgreSQL Memory 1.5, Writer Lease domain 1.1, and PostgreSQL
+  Writer Lease 2.1 public APIs.
 - Concrete Codex, PostgreSQL Task Ledger, bounded workspace/Git, and fixed-test
   adapters required by TASK-032, only for construction and port
   implementation.
 - Concrete exact-snapshot, Graphify 1.0, pure Codebase Memory 1.0, and
-  PostgreSQL Memory 1.3 adapters required by TASK-033/TASK-105, only for
+  PostgreSQL Memory 1.5 adapters required by TASK-033/TASK-105, only for
   construction and typed bootstrap inspection/port implementation.
 - Bounded stdio/JSON/MCP framing, process configuration, hashing, timeout, and
   diagnostics libraries required at the application edge.
-- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 2.0 adapters only
+- Concrete PostgreSQL Task Ledger and PostgreSQL Writer Lease 2.1 adapters only
   for construction behind their typed boundaries.
 - `lattice-hermes-adapter` 1.1 only for production runner construction,
   ephemeral liveness, and lifecycle teardown; it grants no durable truth,
@@ -482,6 +489,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 | 3.2 | 2026-08-25 | SPEC-010, TASK-106 | Accept one closed dependency blocker, prove owned Git binding before block/resume, and expose restart-restored dependency next action without adding a tool or database schema | Explicit user delegation |
 | 3.3 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial registered-project general Task Submit; superseded before release by 3.4 because intake must not reuse Task-Spec/autonomy lifecycle semantics | User-authorized Phase 3 |
 | 3.4 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Use a distinct pre-specification intake identity and admit/load-only port with one create event, no currency/autonomy/progression, append-only Writer-v4/Store-v7 bootstrap closure, and unchanged canary/protected-action gates | User-authorized Phase 3 |
+| 3.5 | 2026-08-30 | ADR-023 deployment compatibility amendment | Bind bootstrap and runtime composition to Store 1.23, Task Ledger 2.10, Memory 1.5, and PostgreSQL Writer Lease 2.1; preserve duplicate pre-v7 histories without a chosen winner and fail closed through the shared ingress boundary | User-authorized deployment hotfix |
 | 3.0 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Consume Writer 1.8's closed preflight before admission effects; enforce the exact Store/Writer cross-product and make v6-current a full fresh-runtime verify-only path with zero durable mutation | Sole-foreman delegation |
 | 2.9 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Make schema-v5 bootstrap strictly Writer-first; an existing exact v3 bridge skips generic Memory verification, while only unsupported foundation enters the complete Store, Memory, Writer-v2, then Writer-v3 fallback | Sole-foreman delegation |
 | 2.8 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Let the Writer-owned v3 boundary recognize an exact existing schema-v5 bridge before the generic Store-v5/Writer-v2 fallback; only exact unsupported foundation may fall back and every other Writer error remains fail-closed | Sole-foreman delegation |

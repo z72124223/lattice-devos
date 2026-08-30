@@ -1,10 +1,10 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 2.0
+version: 2.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -45,6 +45,12 @@ append-only v4 successor for exact Store schema v7. It exposes the closed
 `V6V4Bridge` / `V7V4Current` bootstrap states, the fixed
 `writer_lease_rebind_v4` boundary, and a version-closed `new_v4_v7` runtime
 constructor without relabelling v3 or changing Writer Lease 1.1 semantics.
+Version 2.1 re-pins only the fixed v4 rebind boundary to Postgres Store 1.23's
+corrected exact schema-v7 manifest. Its Writer-owned apply path recognizes the
+exact f252 procedure as one quarantined predecessor, replaces only that
+procedure under the Writer transaction, and rejects every unknown body,
+metadata, object, or ACL profile. Writer v4 schema bytes, lease rows, fencing,
+runtime procedures, and Writer Lease 1.1 semantics do not change.
 
 ## Non-Goals
 
@@ -111,9 +117,13 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   fail-closed result and leaves the schema-v6 database fingerprint unchanged.
 - Expose one repeatable-read, read-only bootstrap profile that returns only
   `V5FallbackRequired`, `V5Bridge`, `V6BridgePending`, or `V6Current` after
-  exact Writer-owned verification, plus `V6V4Bridge` and `V7V4Current` for the
-  append-only v4 successor. Partial/corrupt Writer evidence never maps to
-  fallback, and the session apply gate creates no durable row or ACL change.
+  exact Writer-owned verification, plus `V6V4Bridge`,
+  `V6V4BridgeLegacyF252Rebind`, and `V7V4Current` for the append-only v4
+  successor. The legacy result is only a read-only classification of the exact
+  quarantined f252 procedure profile; it may be acted on only by Writer-owned
+  v4 apply, which reclassifies under its own lock and transaction.
+  Partial/corrupt Writer evidence never maps to fallback, and the session apply
+  gate creates no durable row or ACL change.
 - Construct schema-v6 runtime repositories only through the explicit v3
   constructor and exact `bind_runtime_v3`/`load_for_update_v3` procedures.
   The v2 constructor remains version-closed to its historical profile.
@@ -182,10 +192,14 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
     bootstrap states. A preflight or executor cannot substitute one for the
     other, and an already-installed Writer-v3 bridge verifies rather than
     recreates its fixed rebind procedure on retry.
-19. Writer v4 apply accepts only the exact replay-verified schema-v6/v3-current
-    predecessor and appends one matching v4 `UPGRADED` row. Its fixed rebind
+19. For a new bridge, Writer v4 apply accepts only the exact replay-verified
+    schema-v6/v3-current predecessor and appends one matching v4 `UPGRADED`
+    row. Its fixed rebind
     accepts only that exact `V6V4Bridge` after Store has staged exact schema v7,
-    then appends the matching `REBOUND` row and yields `V7V4Current`.
+    then appends the matching `REBOUND` row and yields `V7V4Current`. An
+    already-bridged v4 profile may be reconciled only when the rebind procedure
+    is the exact f252 predecessor including body, metadata, object signature,
+    and ACL signature; absence or any other drift fails closed.
 20. The v4 ledger admits only exact ordinal pairs `2/3`, `4/5`, or `6/7` for the
     three retained predecessor histories. Skipped generations, schema v8+,
     arbitrary future manifests, and any edit to frozen v3 SQL/rebind bytes fail
@@ -279,6 +293,16 @@ Writer identity, and appends the matching `REBOUND` row atomically. Runtime
 construction uses only `new_v4_v7`. The classifier enumerates exact versions
 5, 6, and 7 rather than accepting a future range.
 
+Version 2.1 changes only the unreleased fixed v4 rebind SQL identity. Its
+schema-v7 manifest literal now names the exact Store 1.23 manifest that
+preserves duplicate pre-v7 ingress history without selecting an active owner.
+The Writer-owned v4 apply may replace only the exact f252 predecessor procedure
+and then re-verifies the complete bridge; a missing or altered procedure,
+metadata, object, or ACL remains a typed closed failure.
+The rebind still verifies the same closed v6 bridge, mutates the same Writer
+identity/ledger/ACL rows in the Store-owned transaction, and admits no future
+or wildcard Store profile.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -320,3 +344,4 @@ synthetic evidence as production authority.
 | 1.7 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Re-pin the still-undeployed rebind boundary to Store 1.18's PostgreSQL-valid equivalent foreman scalar bounds | TASK-105 bounded implementation authority |
 | 1.9 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial proposal to extend Writer v3 through Store v7; superseded before release because deployed predecessor bytes must remain immutable | User Phase 3 authorization |
 | 2.0 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Freeze v3 at schema v6 and add append-only Writer v4, exact `V6V4Bridge`/`V7V4Current`, fixed v4 rebind, and `new_v4_v7` runtime construction | User Phase 3 authorization |
+| 2.1 | 2026-08-30 | ADR-023 deployment compatibility amendment | Re-pin the fixed v4 rebind boundary to Store 1.23's corrected exact v7 manifest and quarantine the exact f252 predecessor for Writer-owned procedure-only reconciliation, without changing Writer schema, lease, fencing, or runtime semantics | User-authorized deployment hotfix |

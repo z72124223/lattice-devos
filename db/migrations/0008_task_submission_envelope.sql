@@ -4733,6 +4733,63 @@ REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_runtime;
 REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_guardian;
 REVOKE ALL ON TABLE control.task_ingress_claims FROM lattice_readonly;
 
+-- A pre-v7 controlled-canary command key was not globally unique across Task
+-- Ledger streams. Preserve every such durable identity when two or more
+-- historical streams map to the same v7 ingress key. This relation is a
+-- migration-owned deny/lineage index: it never selects a winning task and no
+-- runtime role may read or write its physical rows directly.
+CREATE TABLE control.task_ingress_historical_ambiguities (
+    schema_version varchar(64) NOT NULL,
+    ingress_id varchar(64) NOT NULL,
+    client_request_id varchar(64) NOT NULL,
+    request_kind varchar(32) NOT NULL,
+    ingress_request_digest bytea NOT NULL,
+    stream_id bytea NOT NULL,
+    event_sequence numeric(20,0) NOT NULL,
+    event_digest bytea NOT NULL,
+    command_id varchar(128) NOT NULL,
+    command_request_digest bytea NOT NULL,
+    CONSTRAINT task_ingress_historical_ambiguities_pkey
+        PRIMARY KEY (ingress_id, client_request_id, stream_id),
+    CONSTRAINT task_ingress_historical_ambiguities_stream_key
+        UNIQUE (stream_id),
+    CONSTRAINT task_ingress_historical_ambiguities_stream_fk
+        FOREIGN KEY (stream_id) REFERENCES control.task_ledger_streams (stream_id),
+    CONSTRAINT task_ingress_historical_ambiguities_event_fk
+        FOREIGN KEY (stream_id, event_sequence)
+        REFERENCES control.task_ledger_events (stream_id, sequence),
+    CONSTRAINT task_ingress_historical_ambiguities_command_fk
+        FOREIGN KEY (stream_id, command_id)
+        REFERENCES control.task_ledger_commands (stream_id, command_id),
+    CONSTRAINT task_ingress_historical_ambiguities_schema_check
+        CHECK (schema_version = 'lattice.task-ledger.task-ingress-historical-ambiguity/1.0'),
+    CONSTRAINT task_ingress_historical_ambiguities_identity_check
+        CHECK (ingress_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+        AND client_request_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+        AND (client_request_id COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+        AND NOT ((client_request_id COLLATE pg_catalog."C") ~* '-----begin '
+            AND (client_request_id COLLATE pg_catalog."C") ~* 'private key-----')
+        AND (pg_catalog.translate(client_request_id, U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+        AND (client_request_id COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'),
+    CONSTRAINT task_ingress_historical_ambiguities_kind_check
+        CHECK (request_kind = 'CONTROLLED_CODEX_CANARY'),
+    CONSTRAINT task_ingress_historical_ambiguities_digest_check
+        CHECK (pg_catalog.octet_length(ingress_request_digest) = 32
+        AND ingress_request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND pg_catalog.octet_length(stream_id) = 32
+        AND stream_id <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND event_sequence = 1
+        AND pg_catalog.octet_length(event_digest) = 32
+        AND event_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND pg_catalog.octet_length(command_request_digest) = 32
+        AND command_request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'))
+);
+
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM PUBLIC;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_runtime;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_guardian;
+REVOKE ALL ON TABLE control.task_ingress_historical_ambiguities FROM lattice_readonly;
+
 -- Existing controlled-canary task identities predate the shared ingress
 -- locator. Preserve them without rewriting Ledger history: their complete
 -- canonical stream ID is the semantic request digest for the fixed canary
@@ -4769,29 +4826,246 @@ BEGIN
 END
 $lattice_task_ingress_historical_client_request_guard_v1$;
 
+-- A candidate-shaped TASK_CREATED event is durable ingress history only when
+-- the Task Ledger recorded it. Reject contradictory historical audit state
+-- instead of silently freeing the same global request key for reuse.
+DO $lattice_task_ingress_historical_audit_guard_v1$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM control.task_ledger_events AS e
+          JOIN control.task_ledger_commands AS c
+            ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+         WHERE e.sequence=1
+           AND e.event_kind='TASK_CREATED'
+           AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+           AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+           AND e.audit_outcome IS DISTINCT FROM 'RECORDED'
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AUDIT_OUTCOME_REJECTED';
+    END IF;
+END
+$lattice_task_ingress_historical_audit_guard_v1$;
+
+-- An appended mcp-submit command without its exact sequence-one event must not
+-- disappear from the historical keyspace merely because the event-side FK is
+-- one-way. Reject the incomplete durable pair before any backfill is written.
+DO $lattice_task_ingress_historical_command_event_presence_guard_v1$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM control.task_ledger_commands AS c
+          LEFT JOIN control.task_ledger_events AS e
+            ON e.stream_id=c.stream_id AND e.command_id=c.command_id
+         WHERE c.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+           AND c.command_outcome='APPENDED'
+           AND (e.stream_id IS NULL
+             OR e.sequence IS DISTINCT FROM 1
+             OR e.event_kind IS DISTINCT FROM 'TASK_CREATED'
+             OR e.action_id NOT IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+             OR e.audit_outcome IS DISTINCT FROM 'RECORDED')
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_COMMAND_BINDING_REJECTED';
+    END IF;
+END
+$lattice_task_ingress_historical_command_event_presence_guard_v1$;
+
+DO $lattice_task_ingress_historical_command_binding_guard_v1$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+          FROM control.task_ledger_events AS e
+          JOIN control.task_ledger_commands AS c
+            ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+         WHERE e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+           AND (e.sequence IS DISTINCT FROM 1
+             OR e.event_kind IS DISTINCT FROM 'TASK_CREATED'
+             OR e.action_id NOT IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+             OR e.audit_outcome IS DISTINCT FROM 'RECORDED'
+             OR c.event_kind IS DISTINCT FROM 'TASK_CREATED'
+             OR c.action_id NOT IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+             OR ROW(
+                   c.request_digest,c.correlation_id,c.occurred_at,c.event_kind,
+                   c.actor_id,c.action_id,c.audit_outcome,c.reason_code,
+                   c.subject_digest,c.diagnostic,c.has_resource_snapshot,
+                   c.resource_active_agents,c.resource_active_implementers,
+                   c.resource_elapsed_seconds,c.resource_attempt_number,
+                   c.resource_used_model_calls,c.resource_used_external_cost,
+                   c.event_digest
+               ) IS DISTINCT FROM ROW(
+                   e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+                   e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+                   e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+                   e.resource_active_agents,e.resource_active_implementers,
+                   e.resource_elapsed_seconds,e.resource_attempt_number,
+                   e.resource_used_model_calls,e.resource_used_external_cost,
+                   e.event_digest
+               )
+             OR c.command_outcome IS DISTINCT FROM 'APPENDED'
+             OR c.denial_reason IS DISTINCT FROM ''
+             OR c.expected_sequence IS DISTINCT FROM 0
+             OR c.before_sequence IS DISTINCT FROM 0
+             OR c.after_sequence IS DISTINCT FROM e.sequence
+             OR e.previous_event_digest IS DISTINCT FROM pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+             OR c.expected_last_event_digest IS DISTINCT FROM e.previous_event_digest
+             OR c.before_last_event_digest IS DISTINCT FROM e.previous_event_digest
+             OR c.after_last_event_digest IS DISTINCT FROM e.event_digest
+             OR c.expected_resource_revision IS DISTINCT FROM c.before_resource_revision
+             OR c.expected_resource_projection_digest IS DISTINCT FROM c.before_resource_projection_digest
+             OR c.expected_head_digest IS DISTINCT FROM c.before_head_digest
+             OR c.after_resource_revision IS DISTINCT FROM e.resource_revision
+             OR c.after_resource_projection_digest IS DISTINCT FROM e.resource_projection_digest)
+    ) THEN
+        RAISE EXCEPTION USING
+            ERRCODE = '23514',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_COMMAND_BINDING_REJECTED';
+    END IF;
+END
+$lattice_task_ingress_historical_command_binding_guard_v1$;
+
+WITH historical AS (
+    SELECT 'lattice.task-ledger.task-ingress-claim/1.0'::varchar(64) AS schema_version,
+           'lattice_task_submit.v1'::varchar(64) AS ingress_id,
+           pg_catalog.substring(e.command_id::text, 12)::varchar(64) AS client_request_id,
+           'CONTROLLED_CODEX_CANARY'::varchar(32) AS request_kind,
+           e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence,
+           e.event_digest,e.command_id,e.request_digest AS command_request_digest
+      FROM control.task_ledger_events AS e
+      JOIN control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+       AND ROW(
+               c.request_digest,c.correlation_id,c.occurred_at,c.event_kind,
+               c.actor_id,c.action_id,c.audit_outcome,c.reason_code,
+               c.subject_digest,c.diagnostic,c.has_resource_snapshot,
+               c.resource_active_agents,c.resource_active_implementers,
+               c.resource_elapsed_seconds,c.resource_attempt_number,
+               c.resource_used_model_calls,c.resource_used_external_cost,
+               c.event_digest
+           ) IS NOT DISTINCT FROM ROW(
+               e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+               e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+               e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+               e.resource_active_agents,e.resource_active_implementers,
+               e.resource_elapsed_seconds,e.resource_attempt_number,
+               e.resource_used_model_calls,e.resource_used_external_cost,
+               e.event_digest
+           )
+       AND c.command_outcome='APPENDED'
+       AND c.denial_reason=''
+       AND c.expected_sequence=0
+       AND c.before_sequence=0
+       AND c.after_sequence=e.sequence
+       AND e.previous_event_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+       AND c.expected_last_event_digest=e.previous_event_digest
+       AND c.before_last_event_digest=e.previous_event_digest
+       AND c.after_last_event_digest=e.event_digest
+       AND c.expected_resource_revision=c.before_resource_revision
+       AND c.expected_resource_projection_digest=c.before_resource_projection_digest
+       AND c.expected_head_digest=c.before_head_digest
+       AND c.after_resource_revision=e.resource_revision
+       AND c.after_resource_projection_digest=e.resource_projection_digest
+      WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.audit_outcome='RECORDED'
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+       AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
+           AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
+       AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
+), classified AS (
+    SELECT historical.*,
+           count(*) OVER (
+            PARTITION BY historical.ingress_id, historical.client_request_id
+        ) AS historical_identity_count
+      FROM historical
+)
 INSERT INTO control.task_ingress_claims (
     schema_version,ingress_id,client_request_id,request_kind,
     ingress_request_digest,stream_id,event_sequence,event_digest,command_id,
     command_request_digest
 )
-SELECT 'lattice.task-ledger.task-ingress-claim/1.0',
-       'lattice_task_submit.v1',
-       pg_catalog.substring(e.command_id::text, 12),
-       'CONTROLLED_CODEX_CANARY',e.stream_id,e.stream_id,e.sequence,
-       e.event_digest,e.command_id,e.request_digest
-  FROM control.task_ledger_events AS e
-  JOIN control.task_ledger_commands AS c
-    ON c.stream_id=e.stream_id AND c.command_id=e.command_id
-   AND c.request_digest=e.request_digest
- WHERE e.sequence=1
-   AND e.event_kind='TASK_CREATED'
-   AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
-   AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
-   AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
-   AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
-       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
-   AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
-   AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)';
+SELECT classified.schema_version,classified.ingress_id,classified.client_request_id,
+       classified.request_kind,classified.ingress_request_digest,classified.stream_id,
+       classified.event_sequence,classified.event_digest,classified.command_id,
+       classified.command_request_digest
+  FROM classified
+ WHERE classified.historical_identity_count = 1;
+
+WITH historical AS (
+    SELECT 'lattice.task-ledger.task-ingress-historical-ambiguity/1.0'::varchar(64) AS schema_version,
+           'lattice_task_submit.v1'::varchar(64) AS ingress_id,
+           pg_catalog.substring(e.command_id::text, 12)::varchar(64) AS client_request_id,
+           'CONTROLLED_CODEX_CANARY'::varchar(32) AS request_kind,
+           e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence,
+           e.event_digest,e.command_id,e.request_digest AS command_request_digest
+      FROM control.task_ledger_events AS e
+      JOIN control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+       AND ROW(
+               c.request_digest,c.correlation_id,c.occurred_at,c.event_kind,
+               c.actor_id,c.action_id,c.audit_outcome,c.reason_code,
+               c.subject_digest,c.diagnostic,c.has_resource_snapshot,
+               c.resource_active_agents,c.resource_active_implementers,
+               c.resource_elapsed_seconds,c.resource_attempt_number,
+               c.resource_used_model_calls,c.resource_used_external_cost,
+               c.event_digest
+           ) IS NOT DISTINCT FROM ROW(
+               e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+               e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+               e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+               e.resource_active_agents,e.resource_active_implementers,
+               e.resource_elapsed_seconds,e.resource_attempt_number,
+               e.resource_used_model_calls,e.resource_used_external_cost,
+               e.event_digest
+           )
+       AND c.command_outcome='APPENDED'
+       AND c.denial_reason=''
+       AND c.expected_sequence=0
+       AND c.before_sequence=0
+       AND c.after_sequence=e.sequence
+       AND e.previous_event_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+       AND c.expected_last_event_digest=e.previous_event_digest
+       AND c.before_last_event_digest=e.previous_event_digest
+       AND c.after_last_event_digest=e.event_digest
+       AND c.expected_resource_revision=c.before_resource_revision
+       AND c.expected_resource_projection_digest=c.before_resource_projection_digest
+       AND c.expected_head_digest=c.before_head_digest
+       AND c.after_resource_revision=e.resource_revision
+       AND c.after_resource_projection_digest=e.resource_projection_digest
+     WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.audit_outcome='RECORDED'
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+       AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
+           AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
+       AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
+), classified AS (
+    SELECT historical.*,
+           count(*) OVER (
+            PARTITION BY historical.ingress_id, historical.client_request_id
+        ) AS historical_identity_count
+      FROM historical
+)
+INSERT INTO control.task_ingress_historical_ambiguities (
+    schema_version,ingress_id,client_request_id,request_kind,
+    ingress_request_digest,stream_id,event_sequence,event_digest,command_id,
+    command_request_digest
+)
+SELECT classified.schema_version,classified.ingress_id,classified.client_request_id,
+       classified.request_kind,classified.ingress_request_digest,classified.stream_id,
+       classified.event_sequence,classified.event_digest,classified.command_id,
+       classified.command_request_digest
+  FROM classified
+ WHERE classified.historical_identity_count > 1;
 
 CREATE FUNCTION control.task_ingress_prepare_v1(
     p_ingress_id text,
@@ -4857,6 +5131,15 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_ingress_id || ':' || p_client_request_id, 0)
     );
+    IF EXISTS (
+        SELECT 1
+          FROM ONLY control.task_ingress_historical_ambiguities AS a
+         WHERE a.ingress_id=p_ingress_id
+           AND a.client_request_id=p_client_request_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
     SELECT * INTO v_existing
       FROM ONLY control.task_ingress_claims AS c
      WHERE c.ingress_id=p_ingress_id
@@ -4961,6 +5244,15 @@ BEGIN
     PERFORM pg_catalog.pg_advisory_xact_lock(
         pg_catalog.hashtextextended(p_ingress_id || ':' || p_client_request_id, 0)
     );
+    IF EXISTS (
+        SELECT 1
+          FROM ONLY control.task_ingress_historical_ambiguities AS a
+         WHERE a.ingress_id=p_ingress_id
+           AND a.client_request_id=p_client_request_id
+    ) THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
     SELECT * INTO v_existing
       FROM ONLY control.task_ingress_claims AS c
      WHERE c.ingress_id=p_ingress_id
@@ -5024,15 +5316,29 @@ RETURNS TABLE (
     event_digest bytea,command_id text,command_request_digest bytea,
     event_kind text,event_action text,event_audit_outcome text
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
-PARALLEL SAFE
+PARALLEL UNSAFE
 SECURITY DEFINER
 SET search_path = pg_catalog
 SET row_security = on
 SET lock_timeout = '5s'
 SET statement_timeout = '30s'
 AS $lattice_task_ingress_read_by_request_v1$
+BEGIN
+    IF session_user='lattice_runtime_login'
+       AND pg_catalog.current_setting('role')='lattice_runtime'
+       AND EXISTS (
+           SELECT 1
+             FROM ONLY control.task_ingress_historical_ambiguities AS a
+            WHERE a.ingress_id=p_ingress_id
+              AND a.client_request_id=p_client_request_id
+       )
+    THEN
+        RAISE EXCEPTION USING ERRCODE = 'LTX01',
+            MESSAGE = 'LATTICE_TASK_INGRESS_HISTORICAL_AMBIGUOUS';
+    END IF;
+    RETURN QUERY
     SELECT c.schema_version::text,c.ingress_id::text,c.client_request_id::text,
            c.request_kind::text,c.ingress_request_digest,c.stream_id,
            c.event_sequence::text,c.event_digest,c.command_id::text,
@@ -5053,29 +5359,9 @@ AS $lattice_task_ingress_read_by_request_v1$
        AND (pg_catalog.translate(p_client_request_id, U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
        AND (p_client_request_id COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
        AND session_user='lattice_runtime_login'
-       AND pg_catalog.current_setting('role')='lattice_runtime'
+       AND pg_catalog.current_setting('role')='lattice_runtime';
+END
 $lattice_task_ingress_read_by_request_v1$;
-
-REVOKE ALL ON FUNCTION control.task_ingress_prepare_v1(text,text,text,bytea,bytea)
-    FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
-         lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
-         lattice_readonly_login;
-REVOKE ALL ON FUNCTION control.task_ingress_record_v1(
-    text,text,text,text,bytea,bytea,text,bytea,text,bytea
-) FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
-       lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
-       lattice_readonly_login;
-REVOKE ALL ON FUNCTION control.task_ingress_read_by_request_v1(text,text)
-    FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
-         lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
-         lattice_readonly_login;
-GRANT EXECUTE ON FUNCTION control.task_ingress_prepare_v1(text,text,text,bytea,bytea)
-    TO lattice_runtime;
-GRANT EXECUTE ON FUNCTION control.task_ingress_record_v1(
-    text,text,text,text,bytea,bytea,text,bytea,text,bytea
-) TO lattice_runtime;
-GRANT EXECUTE ON FUNCTION control.task_ingress_read_by_request_v1(text,text)
-    TO lattice_runtime;
 
 CREATE TABLE control.task_submission_envelopes (
     schema_version varchar(64) NOT NULL,
@@ -5098,6 +5384,7 @@ CREATE TABLE control.task_submission_envelopes (
     event_digest bytea NOT NULL,
     command_id varchar(128) NOT NULL,
     request_digest bytea NOT NULL,
+    ingress_request_digest bytea NOT NULL,
     PRIMARY KEY (ingress_id, client_request_id),
     UNIQUE (task_ref),
     UNIQUE (stream_id),
@@ -5168,13 +5455,339 @@ CREATE TABLE control.task_submission_envelopes (
         AND pg_catalog.octet_length(event_digest) = 32
         AND event_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
         AND pg_catalog.octet_length(request_digest) = 32
-        AND request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'))
+        AND request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+        AND pg_catalog.octet_length(ingress_request_digest) = 32
+        AND ingress_request_digest <> pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex'))
 );
 
 REVOKE ALL ON TABLE control.task_submission_envelopes FROM PUBLIC;
 REVOKE ALL ON TABLE control.task_submission_envelopes FROM lattice_runtime;
 REVOKE ALL ON TABLE control.task_submission_envelopes FROM lattice_guardian;
 REVOKE ALL ON TABLE control.task_submission_envelopes FROM lattice_readonly;
+
+-- Runtime, Guardian, and ReadOnly cannot inspect migration-owned ambiguity
+-- rows directly. Expose only one fixed boolean closure so every fresh role can
+-- reject lineage drift without learning historical task identities.
+CREATE FUNCTION control.task_ingress_historical_closure_v1()
+RETURNS boolean
+LANGUAGE sql
+STABLE
+PARALLEL UNSAFE
+SECURITY DEFINER
+SET search_path = pg_catalog
+SET row_security = on
+SET lock_timeout = '5s'
+SET statement_timeout = '30s'
+AS $lattice_task_ingress_historical_closure_v1$
+WITH candidate_audit_mismatch AS (
+    SELECT 1
+      FROM ONLY control.task_ledger_events AS e
+      JOIN ONLY control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+     WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND e.audit_outcome IS DISTINCT FROM 'RECORDED'
+), candidate_event_presence_mismatch AS (
+    SELECT 1
+      FROM ONLY control.task_ledger_commands AS c
+      LEFT JOIN ONLY control.task_ledger_events AS e
+        ON e.stream_id=c.stream_id AND e.command_id=c.command_id
+     WHERE c.command_outcome='APPENDED'
+       AND c.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND c.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (e.stream_id IS NULL
+         OR e.sequence IS DISTINCT FROM 1
+         OR e.event_kind IS DISTINCT FROM 'TASK_CREATED'
+         OR e.action_id NOT IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+         OR e.audit_outcome IS DISTINCT FROM 'RECORDED')
+), candidate_binding_mismatch AS (
+    SELECT 1
+      FROM ONLY control.task_ledger_events AS e
+      JOIN ONLY control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+     WHERE e.sequence=1
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (
+           (e.event_kind='TASK_CREATED'
+            AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1'))
+           OR
+           (c.event_kind='TASK_CREATED'
+            AND c.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1'))
+       )
+       AND (ROW(
+               c.request_digest,c.correlation_id,c.occurred_at,c.event_kind,
+               c.actor_id,c.action_id,c.audit_outcome,c.reason_code,
+               c.subject_digest,c.diagnostic,c.has_resource_snapshot,
+               c.resource_active_agents,c.resource_active_implementers,
+               c.resource_elapsed_seconds,c.resource_attempt_number,
+               c.resource_used_model_calls,c.resource_used_external_cost,
+               c.event_digest
+           ) IS DISTINCT FROM ROW(
+               e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+               e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+               e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+               e.resource_active_agents,e.resource_active_implementers,
+               e.resource_elapsed_seconds,e.resource_attempt_number,
+               e.resource_used_model_calls,e.resource_used_external_cost,
+               e.event_digest
+           )
+         OR c.command_outcome IS DISTINCT FROM 'APPENDED'
+         OR c.denial_reason IS DISTINCT FROM ''
+         OR c.expected_sequence IS DISTINCT FROM 0
+         OR c.before_sequence IS DISTINCT FROM 0
+         OR c.after_sequence IS DISTINCT FROM e.sequence
+         OR e.previous_event_digest IS DISTINCT FROM pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+         OR c.expected_last_event_digest IS DISTINCT FROM e.previous_event_digest
+         OR c.before_last_event_digest IS DISTINCT FROM e.previous_event_digest
+         OR c.after_last_event_digest IS DISTINCT FROM e.event_digest
+         OR c.expected_resource_revision IS DISTINCT FROM c.before_resource_revision
+         OR c.expected_resource_projection_digest IS DISTINCT FROM c.before_resource_projection_digest
+         OR c.expected_head_digest IS DISTINCT FROM c.before_head_digest
+         OR c.after_resource_revision IS DISTINCT FROM e.resource_revision
+         OR c.after_resource_projection_digest IS DISTINCT FROM e.resource_projection_digest)
+), historical AS (
+    SELECT 'lattice_task_submit.v1'::varchar(64) AS ingress_id,
+           pg_catalog.substring(e.command_id::text, 12)::varchar(64) AS client_request_id,
+           'CONTROLLED_CODEX_CANARY'::varchar(32) AS request_kind,
+           e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence,
+           e.event_digest,e.command_id,e.request_digest AS command_request_digest
+      FROM ONLY control.task_ledger_events AS e
+      JOIN ONLY control.task_ledger_commands AS c
+        ON c.stream_id=e.stream_id AND c.command_id=e.command_id
+       AND ROW(
+               c.request_digest,c.correlation_id,c.occurred_at,c.event_kind,
+               c.actor_id,c.action_id,c.audit_outcome,c.reason_code,
+               c.subject_digest,c.diagnostic,c.has_resource_snapshot,
+               c.resource_active_agents,c.resource_active_implementers,
+               c.resource_elapsed_seconds,c.resource_attempt_number,
+               c.resource_used_model_calls,c.resource_used_external_cost,
+               c.event_digest
+           ) IS NOT DISTINCT FROM ROW(
+               e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+               e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+               e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+               e.resource_active_agents,e.resource_active_implementers,
+               e.resource_elapsed_seconds,e.resource_attempt_number,
+               e.resource_used_model_calls,e.resource_used_external_cost,
+               e.event_digest
+           )
+       AND c.command_outcome='APPENDED'
+       AND c.denial_reason=''
+       AND c.expected_sequence=0
+       AND c.before_sequence=0
+       AND c.after_sequence=e.sequence
+       AND e.previous_event_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+       AND c.expected_last_event_digest=e.previous_event_digest
+       AND c.before_last_event_digest=e.previous_event_digest
+       AND c.after_last_event_digest=e.event_digest
+       AND c.expected_resource_revision=c.before_resource_revision
+       AND c.expected_resource_projection_digest=c.before_resource_projection_digest
+       AND c.expected_head_digest=c.before_head_digest
+       AND c.after_resource_revision=e.resource_revision
+       AND c.after_resource_projection_digest=e.resource_projection_digest
+     WHERE e.sequence=1
+       AND e.event_kind='TASK_CREATED'
+       AND e.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')
+       AND e.audit_outcome='RECORDED'
+       AND e.command_id::text ~ '^mcp-submit:[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~* '(bearer |(^|[^A-Za-z0-9])sk-|github_pat_|gh[pousr]_|glpat-|npm_|pypi-|xox[abprs]-)'
+       AND NOT ((pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* '-----begin '
+           AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") ~* 'private key-----')
+       AND (pg_catalog.translate(pg_catalog.substring(e.command_id::text, 12), U&'\0085\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000', pg_catalog.repeat(' ',19)) COLLATE pg_catalog."C") !~* '(^|[^A-Za-z0-9_-])(password|passphrase|passwd|pwd|token|access_token|access-token|refresh_token|refresh-token|id_token|id-token|session_token|session-token|api_key|api-key|apikey|client_secret|client-secret|secret|credential|credentials|cookie|set-cookie|authorization)[[:space:]]*["'']?[[:space:]]*[:=]'
+       AND (pg_catalog.substring(e.command_id::text, 12) COLLATE pg_catalog."C") !~ '(^|[^A-Za-z0-9])(AKIA|ASIA)[A-Z0-9]{16}([^A-Za-z0-9]|$)'
+), classified AS (
+    SELECT historical.*,
+           count(*) OVER (
+               PARTITION BY historical.ingress_id,historical.client_request_id
+           ) AS historical_identity_count
+      FROM historical
+), expected_claims AS (
+    SELECT 'lattice.task-ledger.task-ingress-claim/1.0'::varchar(64) AS schema_version,
+           classified.ingress_id,classified.client_request_id,classified.request_kind,
+           classified.ingress_request_digest,classified.stream_id,
+           classified.event_sequence,classified.event_digest,classified.command_id,
+           classified.command_request_digest
+      FROM classified
+     WHERE classified.historical_identity_count=1
+), actual_candidate_claims AS (
+    SELECT c.schema_version,c.ingress_id,c.client_request_id,c.request_kind,
+           c.ingress_request_digest,c.stream_id,c.event_sequence,c.event_digest,
+           c.command_id,c.command_request_digest
+     FROM ONLY control.task_ingress_claims AS c
+     WHERE c.ingress_id='lattice_task_submit.v1'
+       AND NOT (
+           c.request_kind='GENERAL_TASK'
+           AND EXISTS (
+               SELECT 1
+                 FROM ONLY control.task_submission_envelopes AS v
+                 JOIN ONLY control.task_ledger_streams AS s
+                   ON s.stream_id=v.stream_id
+                 JOIN ONLY control.task_ledger_events AS e
+                   ON e.stream_id=v.stream_id AND e.sequence=v.event_sequence
+                  AND e.event_digest=v.event_digest AND e.command_id=v.command_id
+                  AND e.request_digest=v.request_digest
+                 JOIN ONLY control.task_ledger_commands AS m
+                   ON m.stream_id=v.stream_id AND m.command_id=v.command_id
+                  AND m.request_digest=v.request_digest
+                WHERE v.ingress_id=c.ingress_id
+                  AND v.client_request_id=c.client_request_id
+                  AND v.stream_id=c.stream_id
+                  AND v.event_sequence=c.event_sequence
+                  AND v.event_digest=c.event_digest
+                  AND v.command_id=c.command_id
+                  AND v.request_digest=c.command_request_digest
+                  AND v.ingress_request_digest=c.ingress_request_digest
+                  AND v.schema_version='lattice.task-ledger.task-submission/1.0'
+                  AND v.admission_action='GENERAL_TASK_INTAKE_V1'
+                  AND s.project_id=v.project_id
+                  AND s.project_snapshot_id=v.project_snapshot_id
+                  AND s.task_id=v.task_id
+                  AND s.task_revision=v.task_revision
+                  AND s.task_subject_kind='GENERAL_TASK_INTAKE'
+                  AND s.task_subject_digest=v.intake_digest
+                  AND s.task_spec_digest IS NULL
+                  AND s.accounting_currency IS NULL
+                  AND s.sequence=v.event_sequence
+                  AND s.last_event_digest=v.event_digest
+                  AND s.resource_revision=0
+                  AND s.resource_projection_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+                  AND s.active_agents=0 AND s.active_implementers=0
+                  AND s.elapsed_seconds=0 AND s.attempt_number=0
+                  AND s.used_model_calls=0 AND s.used_external_cost='0'
+                  AND s.event_count=1 AND s.command_count=1 AND s.outbox_count=0
+                  AND e.event_kind='TASK_CREATED'
+                  AND e.action_id='GENERAL_TASK_INTAKE_V1'
+                  AND e.audit_outcome='RECORDED'
+                  AND e.reason_code='GENERAL_TASK_INTAKE_RECORDED'
+                  AND e.subject_digest=v.envelope_digest
+                  AND e.diagnostic='null'::jsonb
+                  AND NOT e.has_resource_snapshot
+                  AND e.resource_active_agents=0 AND e.resource_active_implementers=0
+                  AND e.resource_elapsed_seconds=0 AND e.resource_attempt_number=0
+                  AND e.resource_used_model_calls=0 AND e.resource_used_external_cost='0'
+                  AND e.previous_event_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+                  AND e.resource_revision=0
+                  AND e.resource_projection_digest=pg_catalog.decode(pg_catalog.repeat('00',32),'hex')
+                  AND ROW(
+                          m.request_digest,m.correlation_id,m.occurred_at,m.event_kind,
+                          m.actor_id,m.action_id,m.audit_outcome,m.reason_code,
+                          m.subject_digest,m.diagnostic,m.has_resource_snapshot,
+                          m.resource_active_agents,m.resource_active_implementers,
+                          m.resource_elapsed_seconds,m.resource_attempt_number,
+                          m.resource_used_model_calls,m.resource_used_external_cost,
+                          m.event_digest
+                      ) IS NOT DISTINCT FROM ROW(
+                          e.request_digest,e.correlation_id,e.occurred_at,e.event_kind,
+                          e.actor_id,e.action_id,e.audit_outcome,e.reason_code,
+                          e.subject_digest,e.diagnostic,e.has_resource_snapshot,
+                          e.resource_active_agents,e.resource_active_implementers,
+                          e.resource_elapsed_seconds,e.resource_attempt_number,
+                          e.resource_used_model_calls,e.resource_used_external_cost,
+                          e.event_digest
+                      )
+                  AND m.command_outcome='APPENDED'
+                  AND m.denial_reason=''
+                  AND m.expected_sequence=0 AND m.before_sequence=0
+                  AND m.after_sequence=v.event_sequence
+                  AND m.expected_last_event_digest=e.previous_event_digest
+                  AND m.before_last_event_digest=e.previous_event_digest
+                  AND m.after_last_event_digest=e.event_digest
+                  AND m.expected_resource_revision=m.before_resource_revision
+                  AND m.expected_resource_projection_digest=m.before_resource_projection_digest
+                  AND m.expected_head_digest=m.before_head_digest
+                  AND m.after_resource_revision=e.resource_revision
+                  AND m.after_resource_projection_digest=e.resource_projection_digest
+                  AND m.after_head_digest=s.head_digest
+           )
+       )
+), expected_ambiguities AS (
+    SELECT 'lattice.task-ledger.task-ingress-historical-ambiguity/1.0'::varchar(64)
+               AS schema_version,
+           classified.ingress_id,classified.client_request_id,classified.request_kind,
+           classified.ingress_request_digest,classified.stream_id,
+           classified.event_sequence,classified.event_digest,classified.command_id,
+           classified.command_request_digest
+      FROM classified
+     WHERE classified.historical_identity_count>1
+), claim_mismatch AS (
+    (SELECT * FROM expected_claims EXCEPT SELECT * FROM actual_candidate_claims)
+    UNION ALL
+    (SELECT * FROM actual_candidate_claims EXCEPT SELECT * FROM expected_claims)
+), ambiguity_mismatch AS (
+    (SELECT * FROM expected_ambiguities
+     EXCEPT
+     SELECT a.schema_version,a.ingress_id,a.client_request_id,a.request_kind,
+            a.ingress_request_digest,a.stream_id,a.event_sequence,a.event_digest,
+            a.command_id,a.command_request_digest
+       FROM ONLY control.task_ingress_historical_ambiguities AS a)
+    UNION ALL
+    (SELECT a.schema_version,a.ingress_id,a.client_request_id,a.request_kind,
+            a.ingress_request_digest,a.stream_id,a.event_sequence,a.event_digest,
+            a.command_id,a.command_request_digest
+       FROM ONLY control.task_ingress_historical_ambiguities AS a
+     EXCEPT
+     SELECT * FROM expected_ambiguities)
+)
+SELECT (
+           (session_user='lattice_migrator_login'
+                AND pg_catalog.current_setting('role')='lattice_migrator')
+        OR (session_user='lattice_runtime_login'
+                AND pg_catalog.current_setting('role')='lattice_runtime')
+        OR (session_user='lattice_guardian_login'
+                AND pg_catalog.current_setting('role')='lattice_guardian')
+        OR (session_user='lattice_readonly_login'
+                AND pg_catalog.current_setting('role')='lattice_readonly')
+       )
+   AND NOT EXISTS (SELECT 1 FROM candidate_audit_mismatch)
+   AND NOT EXISTS (SELECT 1 FROM candidate_event_presence_mismatch)
+   AND NOT EXISTS (SELECT 1 FROM candidate_binding_mismatch)
+   AND NOT EXISTS (SELECT 1 FROM claim_mismatch)
+   AND NOT EXISTS (SELECT 1 FROM ambiguity_mismatch)
+   AND NOT EXISTS (
+       SELECT 1
+         FROM classified AS duplicate
+         JOIN ONLY control.task_ingress_claims AS c
+           ON c.ingress_id=duplicate.ingress_id
+          AND c.client_request_id=duplicate.client_request_id
+        WHERE duplicate.historical_identity_count>1
+   )
+   AND NOT EXISTS (
+       SELECT 1
+         FROM ONLY control.task_ingress_claims AS c
+         JOIN ONLY control.task_ingress_historical_ambiguities AS a
+           ON a.ingress_id=c.ingress_id
+          AND a.client_request_id=c.client_request_id
+   )
+$lattice_task_ingress_historical_closure_v1$;
+
+REVOKE ALL ON FUNCTION control.task_ingress_prepare_v1(text,text,text,bytea,bytea)
+    FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
+         lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
+         lattice_readonly_login;
+REVOKE ALL ON FUNCTION control.task_ingress_record_v1(
+    text,text,text,text,bytea,bytea,text,bytea,text,bytea
+) FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
+       lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
+       lattice_readonly_login;
+REVOKE ALL ON FUNCTION control.task_ingress_read_by_request_v1(text,text)
+    FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
+         lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
+         lattice_readonly_login;
+REVOKE ALL ON FUNCTION control.task_ingress_historical_closure_v1()
+    FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
+         lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
+         lattice_readonly_login;
+GRANT EXECUTE ON FUNCTION control.task_ingress_prepare_v1(text,text,text,bytea,bytea)
+    TO lattice_runtime;
+GRANT EXECUTE ON FUNCTION control.task_ingress_record_v1(
+    text,text,text,text,bytea,bytea,text,bytea,text,bytea
+) TO lattice_runtime;
+GRANT EXECUTE ON FUNCTION control.task_ingress_read_by_request_v1(text,text)
+    TO lattice_runtime;
+GRANT EXECUTE ON FUNCTION control.task_ingress_historical_closure_v1()
+    TO lattice_migrator, lattice_runtime, lattice_guardian, lattice_readonly;
 
 CREATE FUNCTION control.task_submission_prepare_v1(
     p_ingress_id text,
@@ -5202,7 +5815,8 @@ RETURNS TABLE (
     event_sequence text,
     event_digest bytea,
     command_id text,
-    request_digest bytea
+    request_digest bytea,
+    ingress_request_digest bytea
 )
 LANGUAGE plpgsql
 VOLATILE
@@ -5253,7 +5867,7 @@ BEGIN
             NULL::text,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bytea,
             NULL::text,NULL::text,NULL::text,NULL::text,NULL::text,NULL::bytea,
             NULL::bytea,NULL::text,NULL::text,NULL::bytea,NULL::text,NULL::bytea,
-            NULL::text,NULL::bytea;
+            NULL::text,NULL::bytea,NULL::bytea;
         RETURN;
     END IF;
     RETURN QUERY SELECT true,
@@ -5266,7 +5880,8 @@ BEGIN
         v_existing.intake_digest,v_existing.stream_id,
         v_existing.task_ref::text,v_existing.admission_action::text,
         v_existing.envelope_digest,v_existing.event_sequence::text,
-        v_existing.event_digest,v_existing.command_id::text,v_existing.request_digest;
+        v_existing.event_digest,v_existing.command_id::text,v_existing.request_digest,
+        v_existing.ingress_request_digest;
 END
 $lattice_task_submission_prepare_v1$;
 
@@ -5290,7 +5905,8 @@ CREATE FUNCTION control.task_submission_record_v1(
     p_event_sequence text,
     p_event_digest bytea,
     p_command_id text,
-    p_request_digest bytea
+    p_request_digest bytea,
+    p_ingress_request_digest bytea
 )
 RETURNS text
 LANGUAGE plpgsql
@@ -5363,6 +5979,9 @@ BEGIN
        OR p_intake_digest IS NULL
        OR pg_catalog.octet_length(p_intake_digest) <> 32
        OR p_intake_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
+       OR p_ingress_request_digest IS NULL
+       OR pg_catalog.octet_length(p_ingress_request_digest) <> 32
+       OR p_ingress_request_digest = pg_catalog.decode(pg_catalog.repeat('00', 32), 'hex')
     THEN
         RAISE EXCEPTION USING ERRCODE = 'LCR01';
     END IF;
@@ -5394,6 +6013,7 @@ BEGIN
            OR v_existing.event_digest IS DISTINCT FROM p_event_digest
            OR v_existing.command_id IS DISTINCT FROM p_command_id
            OR v_existing.request_digest IS DISTINCT FROM p_request_digest
+           OR v_existing.ingress_request_digest IS DISTINCT FROM p_ingress_request_digest
         THEN
             RAISE EXCEPTION USING ERRCODE = 'LTX01';
         END IF;
@@ -5430,6 +6050,7 @@ BEGIN
        AND c.client_request_id=p_client_request_id
        AND c.stream_id=p_stream_id
        AND c.request_kind='GENERAL_TASK'
+       AND c.ingress_request_digest=p_ingress_request_digest
        AND c.xmin=pg_catalog.pg_current_xact_id()::xid
      FOR SHARE;
     IF NOT FOUND THEN
@@ -5477,13 +6098,14 @@ BEGIN
         schema_version,ingress_id,client_request_id,objective,project_display_name,
         project_authority_receipt_digest,project_id,project_snapshot_id,task_id,
         task_revision,task_subject_kind,intake_digest,stream_id,task_ref,
-        admission_action,envelope_digest,event_sequence,event_digest,command_id,request_digest
+        admission_action,envelope_digest,event_sequence,event_digest,command_id,request_digest,
+        ingress_request_digest
     ) VALUES (
         p_schema_version,p_ingress_id,p_client_request_id,p_objective,p_project_display_name,
         p_project_authority_receipt_digest,p_project_id,p_project_snapshot_id,p_task_id,
         p_task_revision::numeric,p_task_subject_kind,p_intake_digest,p_stream_id,p_task_ref,
         p_admission_action,p_envelope_digest,p_event_sequence::numeric,p_event_digest,
-        p_command_id,p_request_digest
+        p_command_id,p_request_digest,p_ingress_request_digest
     );
     RETURN 'RECORDED';
 EXCEPTION
@@ -5499,7 +6121,7 @@ RETURNS TABLE (
     project_id text,project_snapshot_id text,task_id text,task_revision text,
     task_subject_kind text,intake_digest bytea,stream_id bytea,task_ref text,
     admission_action text,envelope_digest bytea,event_sequence text,event_digest bytea,
-    command_id text,request_digest bytea
+    command_id text,request_digest bytea,ingress_request_digest bytea
 )
 LANGUAGE sql
 STABLE
@@ -5516,7 +6138,7 @@ AS $lattice_task_submission_read_by_task_ref_v1$
            s.project_snapshot_id::text,s.task_id::text,s.task_revision::text,
            s.task_subject_kind::text,s.intake_digest,s.stream_id,s.task_ref::text,
            s.admission_action::text,s.envelope_digest,s.event_sequence::text,
-           s.event_digest,s.command_id::text,s.request_digest
+           s.event_digest,s.command_id::text,s.request_digest,s.ingress_request_digest
       FROM ONLY control.task_submission_envelopes AS s
      WHERE s.task_ref=p_task_ref
        AND session_user='lattice_runtime_login'
@@ -5533,7 +6155,7 @@ RETURNS TABLE (
     project_id text,project_snapshot_id text,task_id text,task_revision text,
     task_subject_kind text,intake_digest bytea,stream_id bytea,task_ref text,
     admission_action text,envelope_digest bytea,event_sequence text,event_digest bytea,
-    command_id text,request_digest bytea
+    command_id text,request_digest bytea,ingress_request_digest bytea
 )
 LANGUAGE sql
 STABLE
@@ -5550,7 +6172,7 @@ AS $lattice_task_submission_read_by_request_v1$
            s.project_snapshot_id::text,s.task_id::text,s.task_revision::text,
            s.task_subject_kind::text,s.intake_digest,s.stream_id,s.task_ref::text,
            s.admission_action::text,s.envelope_digest,s.event_sequence::text,
-           s.event_digest,s.command_id::text,s.request_digest
+           s.event_digest,s.command_id::text,s.request_digest,s.ingress_request_digest
       FROM ONLY control.task_submission_envelopes AS s
      WHERE s.ingress_id=p_ingress_id AND s.client_request_id=p_client_request_id
        AND p_ingress_id ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'
@@ -5570,7 +6192,7 @@ REVOKE ALL ON FUNCTION control.task_submission_prepare_v1(text,text,bytea)
          lattice_readonly_login;
 REVOKE ALL ON FUNCTION control.task_submission_record_v1(
     text,text,text,text,text,bytea,text,text,text,text,text,bytea,bytea,text,text,
-    bytea,text,bytea,text,bytea
+    bytea,text,bytea,text,bytea,bytea
 ) FROM PUBLIC, lattice_runtime, lattice_guardian, lattice_readonly,
        lattice_migrator_login, lattice_runtime_login, lattice_guardian_login,
        lattice_readonly_login;
@@ -5586,7 +6208,7 @@ GRANT EXECUTE ON FUNCTION control.task_submission_prepare_v1(text,text,bytea)
     TO lattice_runtime;
 GRANT EXECUTE ON FUNCTION control.task_submission_record_v1(
     text,text,text,text,text,bytea,text,text,text,text,text,bytea,bytea,text,text,
-    bytea,text,bytea,text,bytea
+    bytea,text,bytea,text,bytea,bytea
 ) TO lattice_runtime;
 GRANT EXECUTE ON FUNCTION control.task_submission_read_by_task_ref_v1(text)
     TO lattice_runtime;

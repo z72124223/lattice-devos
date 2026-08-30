@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.9
+version: 2.10
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -17,6 +17,11 @@ authoritative Task-created autonomy profile discriminator. Version 2.9 also
 owns the distinct pre-specification general-task subject, canonical submission
 envelope, task reference, and idempotency binding that PostgreSQL persists
 beside the task stream as the single durable control-plane truth.
+Version 2.10 clarifies retained pre-v7 compatibility: a client key that was
+historically valid in more than one stream has no canonical winner. Every
+stream remains immutable, and a v7 lookup or mutation for that ambiguous key
+is command substitution until separately reconciled by a future governed
+operation.
 
 ## Non-Goals
 
@@ -224,6 +229,12 @@ until a separately approved module/ticket owns those mechanics.
     state, an execution-ready Task Spec, a Policy decision, an approval, or a
     writer lease. Persisting it grants no model, process, filesystem, Git,
     payment, external-action, merge, deployment, or release authority.
+33. The v7 unique ingress key governs all new claims but cannot retroactively
+    erase, merge, rename, or choose between distinct pre-v7 streams that
+    retained the same valid command suffix. Such a key is an explicit
+    historical ambiguity: no active claim exists, all exact stream/event/
+    command identities remain durable, and read/prepare/record return command
+    substitution without disclosing a different task.
 
 ## Allowed Dependencies
 
@@ -297,6 +308,13 @@ bytes remain unchanged. Postgres Store 1.22 may persist the shared ingress
 claim and envelope only in the same transaction as the matching Ledger append
 and must replay-verify all three before returning it.
 
+Version 2.10 changes no Task Ledger hash, stream, event, command, receipt, or
+planner bytes. It closes only the interpretation of a production-retained
+pre-v7 duplicate key: neither persistence migration nor runtime may invent a
+winner. Postgres Store 1.23 may retain exact ambiguity lineage as physical
+metadata, while Task Ledger continues to expose the existing static command-
+substitution category for every attempted use of that key.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -312,7 +330,7 @@ and must replay-verify all three before returning it.
 | Mixed historical replay | pre-autonomy streams replay byte-identically without a synthesized event; autonomy-enabled streams require the closed event and unchanged public MCP bytes | Compatibility review | yes |
 | Autonomy atomicity | schema-v5 command, optional event, projection/checkpoint, terminal receipt, and physical receipt persist all-or-none | Engineering | yes |
 | General intake envelope | objective/project/authority/identity substitution, strict text/secret bounds, stable `task_ref`, Debug redaction, distinct subject kind, absent spec/currency, and no-autonomy matrices | Security review | yes |
-| General intake persistence parity | shared canary/general ingress-key collision, exact retry, and changed-key rejection use the same claim/envelope verifier; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
+| General intake persistence parity | shared canary/general ingress-key collision, exact retry, changed-key rejection, and pre-v7 multi-stream ambiguity use the same claim/envelope verifier; ambiguity preserves all exact lineage and exposes no winner; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
 | Schema/event parity | schema-v5 rejects the withdrawn handoff spelling and no unpersistable event remains in the public enum | Compatibility review | yes |
 | Dependency/no-I/O boundary | Cargo tree and forbidden-reference scan | Architecture review | yes |
 | Full verification | workspace format, lint, Rust, and preserved Node tests | Engineering | yes |
@@ -339,3 +357,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Require exact-next foreman generation and narrow the separately approved MCP adapter/status projection without changing Ledger bytes or legacy MCP | Sole-foreman delegation |
 | 2.8 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial general-intake envelope and required-profile model; superseded before release by 2.9 because intake must not fabricate Task-Spec/autonomy semantics | User-authorized Phase 3 |
 | 2.9 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate general intake from Task Spec, remove currency/autonomy/progression, and retain one create-only event in the shared ingress-idempotency namespace | User-authorized Phase 3 |
+| 2.10 | 2026-08-30 | ADR-023 deployment compatibility amendment | Define pre-v7 multi-stream ingress keys as fail-closed ambiguities with no winner while preserving every Task Ledger identity and all existing semantic bytes | User-authorized deployment hotfix |

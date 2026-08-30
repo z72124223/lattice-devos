@@ -50,9 +50,9 @@ const FOREMAN_COORDINATION_SHA256: &str =
 pub(crate) const CURRENT_V6_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
 const TASK_SUBMISSION_ENVELOPE_SHA256: &str =
-    "35be9a1f34fd8209cbf7466b39811f0fad91d9049dd72336af9bcf422d68d067";
+    "a9059c74722dcbff5345a2732bf1c44f8f2dd682a5eecb57bda2f0d820e9d4a0";
 const CURRENT_V7_MANIFEST_SHA256: &str =
-    "7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c";
+    "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
 pub(crate) const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 pub(crate) const REGISTRY_V4_MANIFEST_SHA256: &str =
@@ -301,7 +301,7 @@ static MIGRATION_MANIFEST: [MigrationDescriptor; 8] = [
         id: "0008_task_submission_envelope",
         path: "db/migrations/0008_task_submission_envelope.sql",
         bytes: TASK_SUBMISSION_ENVELOPE_BYTES,
-        byte_length: 298_666,
+        byte_length: 334_756,
         sha256: TASK_SUBMISSION_ENVELOPE_SHA256,
         status: MigrationStatus::Executable,
         transaction_mode: MigrationTransactionMode::RunnerOwned,
