@@ -317,27 +317,27 @@ const TASK_SUBMISSION_PREPARE_SQL: &str = "\
     SELECT found,schema_version,ingress_id,client_request_id,objective,project_display_name,\
            project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
            task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
-           event_sequence,event_digest,command_id,request_digest \
+           event_sequence,event_digest,command_id,request_digest,ingress_request_digest \
       FROM control.task_submission_prepare_v1($1::text,$2::text,$3::bytea)";
 
 const TASK_SUBMISSION_RECORD_SQL: &str = "\
     SELECT control.task_submission_record_v1(\
         $1::text,$2::text,$3::text,$4::text,$5::text,$6::bytea,$7::text,$8::text,\
         $9::text,$10::text,$11::text,$12::bytea,$13::bytea,$14::text,$15::text,\
-        $16::bytea,$17::text,$18::bytea,$19::text,$20::bytea)";
+        $16::bytea,$17::text,$18::bytea,$19::text,$20::bytea,$21::bytea)";
 
 const TASK_SUBMISSION_READ_BY_REF_SQL: &str = "\
     SELECT schema_version,ingress_id,client_request_id,objective,project_display_name,\
            project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
            task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
-           event_sequence,event_digest,command_id,request_digest \
+           event_sequence,event_digest,command_id,request_digest,ingress_request_digest \
       FROM control.task_submission_read_by_task_ref_v1($1::text)";
 
 const TASK_SUBMISSION_READ_BY_REQUEST_SQL: &str = "\
     SELECT schema_version,ingress_id,client_request_id,objective,project_display_name,\
            project_authority_receipt_digest,project_id,project_snapshot_id,task_id,task_revision,\
            task_subject_kind,intake_digest,stream_id,task_ref,admission_action,envelope_digest,\
-           event_sequence,event_digest,command_id,request_digest \
+           event_sequence,event_digest,command_id,request_digest,ingress_request_digest \
       FROM control.task_submission_read_by_request_v1($1::text,$2::text)";
 
 const STORE_PREPARE_V3_SQL: &str = "\
@@ -1992,7 +1992,7 @@ fn parse_submission_row(
     row: &Row,
     offset: usize,
 ) -> PostgresTaskLedgerResult<RetainedTaskSubmission> {
-    if row.len() != offset + 20 {
+    if row.len() != offset + 21 {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
     let task_subject_kind: String = row_value(row, offset + 10)?;
@@ -2025,6 +2025,11 @@ fn parse_submission_row(
     };
     let submission =
         verify_untrusted_task_submission(&raw).map_err(|ledger| map_ledger_error(&ledger))?;
+    let expected_claim = TaskIngressClaim::general_submission(&submission)
+        .map_err(|ledger| map_ledger_error(&ledger))?;
+    if &row_digest(row, offset + 20)? != expected_claim.request_digest() {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
     Ok(RetainedTaskSubmission {
         submission,
         event_sequence: parse_u64_text(&row_value::<String>(row, offset + 16)?)?,
@@ -2049,7 +2054,7 @@ fn prepare_task_submission<C: GenericClient>(
             ],
         )
         .map_err(|database| map_database_error(&database))?;
-    if row.len() != 21 {
+    if row.len() != 22 {
         return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
     }
     let found: bool = row_value(&row, 0)?;
@@ -2091,8 +2096,11 @@ fn record_task_submission<C: GenericClient>(
     let envelope_digest = digest_bytes(submission.envelope_digest())?;
     let event_digest = digest_bytes(event.event_digest())?;
     let request_digest = digest_bytes(event.request_digest())?;
+    let ingress_request_digest = TaskIngressClaim::general_submission(submission)
+        .map_err(|ledger| map_ledger_error(&ledger))?;
+    let ingress_request_digest = digest_bytes(ingress_request_digest.request_digest())?;
     let event_sequence = event.sequence().to_string();
-    let params: [&(dyn ToSql + Sync); 20] = [
+    let params: [&(dyn ToSql + Sync); 21] = [
         &submission.schema_version(),
         &submission.ingress_id(),
         &submission.client_request_id(),
@@ -2113,6 +2121,7 @@ fn record_task_submission<C: GenericClient>(
         &event_digest,
         &event.command_id().as_str(),
         &request_digest,
+        &ingress_request_digest,
     ];
     let row = client
         .query_one(TASK_SUBMISSION_RECORD_SQL, &params)

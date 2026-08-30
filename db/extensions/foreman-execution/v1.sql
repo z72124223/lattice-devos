@@ -32,7 +32,7 @@ CREATE TABLE foreman_execution.extension_identity (
         AND database_name <> 'postgres'
         AND database_uuid::text ~ '^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
         AND global_schema_version = 7
-        AND global_manifest_sha256 = 'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078'
+        AND global_manifest_sha256 = '584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8'
     ),
     CONSTRAINT extension_identity_digest_shapes CHECK (
         extension_sql_sha256 ~ '^[0-9a-f]{64}$'
@@ -62,7 +62,7 @@ CREATE TABLE foreman_execution.extension_ledger (
         AND extension_schema_version = 1
         AND event_kind = 'INSTALLED'
         AND global_schema_version = 7
-        AND global_manifest_sha256 = 'ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078'
+        AND global_manifest_sha256 = '584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8'
     ),
     CONSTRAINT extension_ledger_digest_shapes CHECK (
         extension_sql_sha256 ~ '^[0-9a-f]{64}$'

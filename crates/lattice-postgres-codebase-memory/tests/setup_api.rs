@@ -71,7 +71,7 @@ fn bootstrap_inspector_accepts_only_the_three_frozen_store_profiles() {
     assert_eq!(format!("{:?}", profiles[2]), "V7");
     for required in [
         "const BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION: u16 = 7",
-        "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078",
+        "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8",
         "ExtensionBootstrapGlobalProfile::V7 => \"LATTICE_DEVOS_MEMORY_SCHEMA_V7\"",
         "BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION",
         "BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256",

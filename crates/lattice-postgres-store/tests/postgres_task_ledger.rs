@@ -1199,6 +1199,10 @@ fn prove_task_ingress_claim_races(
             general_first,
         )
         .expect("general first claim");
+    let mut fresh_verifier = connect_as(database, "lattice_migrator");
+    verify_postgres_schema(&mut fresh_verifier, target, DatabaseRole::Migrator)
+        .expect("general task envelope must remain outside historical closure");
+    drop(fresh_verifier);
     let (canary_after_general_command, canary_after_general_claim) =
         controlled_canary_ingress(general_first_id, "TASK-CANARY-AFTER-GENERAL");
     let conflict = ledger
@@ -1486,7 +1490,8 @@ fn prove_runtime_functions_reject_secret_client_ids(database: &str, secret_ids: 
                     'GENERAL_TASK_INTAKE',decode(repeat('22',32),'hex'),\
                     decode(repeat('33',32),'hex'),repeat('1',64),\
                     'GENERAL_TASK_INTAKE_V1',decode(repeat('44',32),'hex'),'1',\
-                    decode(repeat('55',32),'hex'),$3::text,decode(repeat('66',32),'hex'))",
+                    decode(repeat('55',32),'hex'),$3::text,decode(repeat('66',32),'hex'),\
+                    decode(repeat('77',32),'hex'))",
                 &[&ingress_id, secret_id, &command_id],
             )
             .expect_err("submission record must reject a secret-shaped client id");
@@ -1590,7 +1595,8 @@ fn prove_runtime_functions_reject_secret_client_ids(database: &str, secret_ids: 
                     'GENERAL_TASK_INTAKE',decode(repeat('22',32),'hex'),\
                     decode(repeat('33',32),'hex'),repeat('1',64),\
                     'GENERAL_TASK_INTAKE_V1',decode(repeat('44',32),'hex'),'1',\
-                    decode(repeat('55',32),'hex'),$7::text,decode(repeat('66',32),'hex'))",
+                    decode(repeat('55',32),'hex'),$7::text,decode(repeat('66',32),'hex'),\
+                    decode(repeat('77',32),'hex'))",
                 &[
                     &ingress_id,
                     &client_request_id,
@@ -1932,6 +1938,66 @@ fn prove_submission_registry_guards(
     );
 }
 
+fn prove_submission_claim_digest_drift_fails_fresh_verifiers(
+    database: &str,
+    target: &MigrationTarget,
+    submission: &TaskSubmissionEnvelope,
+) {
+    let claim = TaskIngressClaim::general_submission(submission).expect("canonical general claim");
+    let original_digest = hex_bytes(claim.request_digest());
+    let drift_digest = vec![0xab_u8; 32];
+    assert_ne!(original_digest, drift_digest);
+    let mut migrator = connect_as(database, "lattice_migrator");
+    assert_eq!(
+        migrator
+            .execute(
+                "UPDATE ONLY control.task_ingress_claims \
+                    SET ingress_request_digest=$1::bytea \
+                  WHERE ingress_id=$2 AND client_request_id=$3",
+                &[
+                    &drift_digest,
+                    &submission.ingress_id(),
+                    &submission.client_request_id(),
+                ],
+            )
+            .expect("general claim digest drift apply"),
+        1
+    );
+    for role in DatabaseRole::ALL {
+        let mut verifier = connect_as(database, role.as_str());
+        let failure = verify_postgres_schema(&mut verifier, target, role)
+            .expect_err("fresh verifier must reject general claim digest drift");
+        assert_eq!(
+            failure.kind(),
+            lattice_postgres_store::PostgresStoreSetupErrorKind::HistoryMismatch,
+            "general claim digest drift role {}",
+            role.as_str()
+        );
+    }
+    assert_eq!(
+        migrator
+            .execute(
+                "UPDATE ONLY control.task_ingress_claims \
+                    SET ingress_request_digest=$1::bytea \
+                  WHERE ingress_id=$2 AND client_request_id=$3",
+                &[
+                    &original_digest,
+                    &submission.ingress_id(),
+                    &submission.client_request_id(),
+                ],
+            )
+            .expect("general claim digest drift repair"),
+        1
+    );
+    for role in DatabaseRole::ALL {
+        let mut verifier = connect_as(database, role.as_str());
+        let evidence = verify_postgres_schema(&mut verifier, target, role)
+            .expect("fresh verifier after general claim digest repair");
+        assert_eq!(evidence.schema_version(), 7);
+    }
+    println!("TASK_SUBMISSION_GENERAL_CLAIM_DIGEST_DRIFT_REJECTED_BY_FRESH_ROLES");
+}
+
 #[allow(clippy::too_many_lines)]
 fn prove_project_registry_snapshot_width_boundary(
     database: &str,
@@ -2197,6 +2263,7 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
         .expect("same client envelope exact replay");
     assert!(replay.ledger_execution().is_exact_retry());
     assert_eq!(replay.submission().task_ref(), &task_ref);
+    prove_submission_claim_digest_drift_fails_fresh_verifiers(&database, &target, &submission);
 
     let changed = general_submission(
         submission.client_request_id(),

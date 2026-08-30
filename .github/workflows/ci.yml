@@ -21,3 +21,25 @@ jobs:
           cache: npm
       - run: npm ci --ignore-scripts
       - run: npm run verify
+
+  rust-postgres-verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.97.1
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
+      - run: cargo fmt --all -- --check
+      - run: >-
+          cargo test --locked
+          -p lattice-postgres-store
+          -p lattice-postgres-writer-lease
+          -p lattice-postgres-codebase-memory
+      - run: cargo test --locked -p lattice-runtime --test task094_writer_v3_transition
+      - run: >-
+          cargo clippy --locked --all-targets
+          -p lattice-postgres-store
+          -p lattice-postgres-writer-lease
+          -p lattice-postgres-codebase-memory
+          -- -D warnings

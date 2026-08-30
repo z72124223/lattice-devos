@@ -1,4 +1,7 @@
 const MIGRATION: &str = include_str!("../../../db/migrations/0008_task_submission_envelope.sql");
+const TASK094_TRANSITION: &str =
+    include_str!("../../../apps/lattice-runtime/tests/task094_writer_v3_transition.rs");
+const POSTGRES_TASK_LEDGER: &str = include_str!("postgres_task_ledger.rs");
 
 #[test]
 fn schema_v7_owns_one_cross_profile_ingress_claim_keyspace() {
@@ -22,10 +25,12 @@ fn schema_v7_owns_one_cross_profile_ingress_claim_keyspace() {
     );
     assert_eq!(
         MIGRATION
-            .matches("e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence")
+            .matches(
+                "e.stream_id AS ingress_request_digest,e.stream_id,e.sequence AS event_sequence"
+            )
             .count(),
-        2,
-        "singleton and ambiguous historical classifications must retain the original stream identity"
+        3,
+        "singleton claims, ambiguity rows, and the closure verifier must derive from the exact stream"
     );
     assert!(MIGRATION.contains("e.command_id::text ~ '^mcp-submit:"));
 }
@@ -66,6 +71,158 @@ fn historical_duplicate_claims_are_preserved_as_fail_closed_ambiguities() {
             "migration must preserve every historical identity, not select a winner: {forbidden_winner}"
         );
     }
+}
+
+#[test]
+fn production_shaped_v6_duplicate_history_proves_atomic_v7_replay() {
+    for required in [
+        "delivery-run-controlled-compatibility",
+        "TASK-094-DUPLICATE-A",
+        "TASK-094-DUPLICATE-B",
+        "persist_historical_duplicate_canaries_before_v4",
+        "TASK094_DUPLICATE_HISTORY_MUST_NOT_SELECT_WINNER",
+        "TASK094_DUPLICATE_AMBIGUITY_LINKAGE_MUST_BE_EXACT",
+        "POSTGRES_TASK_LEDGER_COMMAND_SUBSTITUTED",
+        "TASK094_DUPLICATE_PREPARE_MUST_FAIL_CLOSED",
+        "TASK094_DUPLICATE_RECORD_MUST_FAIL_CLOSED",
+        "control.task_ingress_historical_ambiguities')::text",
+        "TASK094_FAILED_V7_MUST_NOT_REWRITE_DUPLICATE_HISTORY",
+        "TASK094_STORE_V7_RETRY_MUST_BE_BYTE_EXACT",
+    ] {
+        assert!(
+            TASK094_TRANSITION.contains(required),
+            "missing production-shaped duplicate-history proof: {required}"
+        );
+    }
+}
+
+#[test]
+fn historical_candidates_require_exact_recorded_command_event_binding() {
+    for required in [
+        "LATTICE_TASK_INGRESS_HISTORICAL_AUDIT_OUTCOME_REJECTED",
+        "LATTICE_TASK_INGRESS_HISTORICAL_COMMAND_BINDING_REJECTED",
+        "$lattice_task_ingress_historical_command_event_presence_guard_v1$",
+        "candidate_event_presence_mismatch AS (",
+        "NOT EXISTS (SELECT 1 FROM candidate_event_presence_mismatch)",
+        "LEFT JOIN control.task_ledger_events AS e",
+        "e.stream_id IS NULL",
+        "c.request_digest,c.correlation_id,c.occurred_at,c.event_kind",
+        "c.actor_id,c.action_id,c.audit_outcome,c.reason_code",
+        "c.subject_digest,c.diagnostic,c.has_resource_snapshot",
+        "c.resource_active_agents,c.resource_active_implementers",
+        "c.resource_elapsed_seconds,c.resource_attempt_number",
+        "c.resource_used_model_calls,c.resource_used_external_cost",
+        "c.command_outcome IS DISTINCT FROM 'APPENDED'",
+        "e.sequence IS DISTINCT FROM 1",
+        "c.denial_reason IS DISTINCT FROM ''",
+        "c.expected_sequence IS DISTINCT FROM 0",
+        "c.before_sequence IS DISTINCT FROM 0",
+        "c.after_sequence IS DISTINCT FROM e.sequence",
+        "c.after_last_event_digest IS DISTINCT FROM e.event_digest",
+        "c.after_resource_revision IS DISTINCT FROM e.resource_revision",
+        "c.after_resource_projection_digest IS DISTINCT FROM e.resource_projection_digest",
+        "c.event_kind='TASK_CREATED'",
+        "c.action_id IN ('CONTROLLED_CODEX_CANARY','CONTROLLED_CODEX_CANARY_AUTONOMY_V1')",
+        "WHERE c.ingress_id='lattice_task_submit.v1'",
+        "c.request_kind='GENERAL_TASK'",
+        "FROM ONLY control.task_submission_envelopes AS v",
+        "v.ingress_id=c.ingress_id",
+        "v.client_request_id=c.client_request_id",
+        "v.stream_id=c.stream_id",
+        "v.event_sequence=c.event_sequence",
+        "v.event_digest=c.event_digest",
+        "v.command_id=c.command_id",
+        "v.request_digest=c.command_request_digest",
+        "v.ingress_request_digest=c.ingress_request_digest",
+        "s.task_subject_kind='GENERAL_TASK_INTAKE'",
+        "s.task_subject_digest=v.intake_digest",
+        "s.task_spec_digest IS NULL",
+        "s.accounting_currency IS NULL",
+        "e.subject_digest=v.envelope_digest",
+        "m.command_outcome='APPENDED'",
+        "GRANT EXECUTE ON FUNCTION control.task_ingress_historical_closure_v1()\n    TO lattice_migrator, lattice_runtime, lattice_guardian, lattice_readonly",
+    ] {
+        assert!(
+            MIGRATION.contains(required),
+            "missing historical binding closure: {required}"
+        );
+    }
+    assert_eq!(
+        MIGRATION.matches("IS NOT DISTINCT FROM ROW(").count(),
+        4,
+        "both backfills and both verifier profiles must use the same exact mirrored row binding"
+    );
+    assert!(
+        MIGRATION
+            .find("CREATE TABLE control.task_submission_envelopes")
+            .expect("submission envelope table")
+            < MIGRATION
+                .find("CREATE FUNCTION control.task_ingress_historical_closure_v1()")
+                .expect("historical closure"),
+        "the historical closure must be defined only after its general-task proof table exists"
+    );
+    for marker in [
+        "TASK094_HISTORICAL_AUDIT_OUTCOME_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_COMMAND_ACTOR_BINDING_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_COMMAND_REQUEST_DIGEST_BINDING_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_MISSING_EVENT_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_EVENT_ACTION_INVISIBILITY_MIGRATION_REJECTION_PASS",
+        "TASK094_HISTORICAL_DUAL_ACTION_INVISIBILITY_MIGRATION_REJECTION_PASS",
+        "TASK094_V7_HISTORICAL_AUDIT_OUTCOME_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_EVENT_DELETE_REJECTED",
+        "TASK094_V7_HISTORICAL_ORPHAN_COMMAND_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_COMMAND_ACTOR_BINDING_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_COMMAND_REQUEST_DIGEST_BINDING_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_EVENT_ACTION_INVISIBILITY_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_DUAL_ACTION_INVISIBILITY_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_TRIPLE_RECAST_INVISIBILITY_DRIFT_REJECTED_AND_REPAIRED",
+        "TASK094_V7_HISTORICAL_TRIPLE_RECAST_INGRESS_DIGEST_DRIFT_APPLY",
+        "TASK094_V7_HISTORICAL_FORGED_ENVELOPE_STREAM_SEMANTICS_DRIFT_REJECTED_AND_REPAIRED",
+    ] {
+        assert!(
+            TASK094_TRANSITION.contains(marker),
+            "missing live historical binding proof: {marker}"
+        );
+    }
+    assert!(
+        POSTGRES_TASK_LEDGER
+            .contains("general task envelope must remain outside historical closure")
+    );
+}
+
+#[test]
+fn general_submission_claim_digest_is_durably_linked_and_freshly_verified() {
+    for required in [
+        "ingress_request_digest bytea NOT NULL",
+        "v.ingress_request_digest=c.ingress_request_digest",
+        "p_ingress_request_digest bytea",
+        "v_existing.ingress_request_digest IS DISTINCT FROM p_ingress_request_digest",
+        "c.ingress_request_digest=p_ingress_request_digest",
+        "p_command_id,p_request_digest,p_ingress_request_digest",
+        "s.request_digest,s.ingress_request_digest",
+    ] {
+        assert!(
+            MIGRATION.contains(required),
+            "missing durable general-claim digest link: {required}"
+        );
+    }
+    let store = include_str!("../src/task_ledger.rs");
+    for required in [
+        "event_sequence,event_digest,command_id,request_digest,ingress_request_digest",
+        "if row.len() != offset + 21",
+        "TaskIngressClaim::general_submission(&submission)",
+        "row_digest(row, offset + 20)?",
+        "let params: [&(dyn ToSql + Sync); 21]",
+    ] {
+        assert!(
+            store.contains(required),
+            "Store lost general-claim digest verification: {required}"
+        );
+    }
+    assert!(
+        POSTGRES_TASK_LEDGER
+            .contains("TASK_SUBMISSION_GENERAL_CLAIM_DIGEST_DRIFT_REJECTED_BY_FRESH_ROLES")
+    );
 }
 
 #[test]

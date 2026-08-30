@@ -2228,6 +2228,11 @@ const fn postgres_bootstrap_action(
         (
             MigrationBootstrapProfile::V6,
             MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V6V4BridgeLegacyF252Rebind,
+        ) => Some(PostgresBootstrapAction::V4Apply),
+        (
+            MigrationBootstrapProfile::V6,
+            MemoryBootstrapProfile::V3,
             V3BootstrapProfile::V6V4Bridge,
         ) => Some(PostgresBootstrapAction::V7Apply),
         (
@@ -2406,6 +2411,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             V3BootstrapProfile::V6BridgePending
                             | V3BootstrapProfile::V6Current
                             | V3BootstrapProfile::V6V4Bridge
+                            | V3BootstrapProfile::V6V4BridgeLegacyF252Rebind
                             | V3BootstrapProfile::V7V4Current
                             | V3BootstrapProfile::V7V5Current => {
                                 return Err(LatticedError::new(LatticedErrorKind::WriterLease));
@@ -12877,8 +12883,8 @@ mod tests {
             V4Apply, V5Apply, V6Rebind, V7Apply, V7VerifyOnly, WriterV5Apply,
         };
         use V3BootstrapProfile::{
-            V5Bridge, V5FallbackRequired, V6BridgePending, V6Current, V6V4Bridge, V7V4Current,
-            V7V5Current,
+            V5Bridge, V5FallbackRequired, V6BridgePending, V6Current, V6V4Bridge,
+            V6V4BridgeLegacyF252Rebind, V7V4Current, V7V5Current,
         };
 
         let accepted = [
@@ -12889,6 +12895,7 @@ mod tests {
             ((V6, MemoryV3, V6BridgePending), V6Rebind),
             ((V6, MemoryV3, V6Current), V4Apply),
             ((V6, MemoryV3, V6V4Bridge), V7Apply),
+            ((V6, MemoryV3, V6V4BridgeLegacyF252Rebind), V4Apply),
             ((V7, MemoryV3, V7V4Current), WriterV5Apply),
             ((V7, MemoryV3, V7V5Current), V7VerifyOnly),
         ];
@@ -12900,6 +12907,7 @@ mod tests {
                     V6BridgePending,
                     V6Current,
                     V6V4Bridge,
+                    V6V4BridgeLegacyF252Rebind,
                     V7V4Current,
                     V7V5Current,
                 ] {
@@ -12988,6 +12996,7 @@ mod tests {
         assert!(bootstrap.contains("V3BootstrapProfile::V6BridgePending"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6Current"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6V4Bridge"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V6V4BridgeLegacyF252Rebind"));
         assert!(bootstrap.contains("V3BootstrapProfile::V7V4Current"));
         assert!(bootstrap.contains("V3BootstrapProfile::V7V5Current"));
         assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V7"));

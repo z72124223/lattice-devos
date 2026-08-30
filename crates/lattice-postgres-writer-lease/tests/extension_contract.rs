@@ -80,6 +80,10 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
         format!("{:?}", V3BootstrapProfile::V7V4Current),
         "V7V4Current"
     );
+    assert_eq!(
+        format!("{:?}", V3BootstrapProfile::V6V4BridgeLegacyF252Rebind),
+        "V6V4BridgeLegacyF252Rebind"
+    );
 
     let setup = include_str!("../src/setup.rs");
     let inspector = setup
@@ -97,6 +101,7 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
         "verify_v3_bridge_pending_profile",
         "verify_v3_current_profile",
         "verify_v4_bridge_profile",
+        "verify_legacy_f252_v4_bridge_profile",
         "verify_v4_v7_current_profile",
         "verify_v3_rebind_boundary",
         "verify_replay_safe_history",
@@ -116,6 +121,18 @@ fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
             "read-only preflight contains mutation: {prohibited}"
         );
     }
+    for required in [
+        "V3_BRIDGE_EXPECTED_CATALOG_PROFILES",
+        "V3_CURRENT_EXPECTED_CATALOG_PROFILES",
+        "V4_BRIDGE_EXPECTED_CATALOG_PROFILES",
+        "V4_CURRENT_EXPECTED_CATALOG_PROFILES",
+        "verify_catalog_profile",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact catalog profile gate: {required}"
+        );
+    }
 }
 
 #[test]
@@ -125,7 +142,7 @@ fn v4_profile_names_exact_store_v7_without_future_wildcards() {
     let rebind = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
     for required in [
         "const V7_GLOBAL_MANIFEST_SHA256: &str",
-        "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078",
+        "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8",
         "G7MemoryV3WriterV4Current",
         "V3BootstrapProfile::V7V4Current",
     ] {
@@ -146,7 +163,7 @@ fn v4_profile_names_exact_store_v7_without_future_wildcards() {
             "missing v7 extension constraint {required}"
         );
     }
-    assert!(rebind.contains("ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078"));
+    assert!(rebind.contains("584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8"));
     assert!(rebind.contains("writer_lease_rebind_v4"));
     assert_eq!(extension.matches(")) IS NOT TRUE THEN").count(), 2);
     assert_eq!(rebind.matches(") IS NOT TRUE THEN").count(), 2);
@@ -225,7 +242,7 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
     assert_eq!(v4_rebind.path(), WRITER_LEASE_V4_REBIND_PATH);
     let v4_sql = include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
     for required in [
-        "CREATE PROCEDURE writer_lease.writer_lease_rebind_v4()",
+        "CREATE OR REPLACE PROCEDURE writer_lease.writer_lease_rebind_v4()",
         "$lattice_writer_lease_rebind_v4$",
         "WHEN 2 THEN 3 WHEN 4 THEN 5 WHEN 6 THEN 7",
         "writer_lease_bind_runtime_v4",
@@ -237,7 +254,51 @@ fn task094_exposes_typed_v3_bridge_and_rebind_owner_apis() {
             "missing v4 rebind boundary: {required}"
         );
     }
-    assert!(!v4_sql.contains("CREATE OR REPLACE"));
+}
+
+#[test]
+fn task094_exact_f252_rebind_reconciliation_is_closed() {
+    let setup = include_str!("../src/setup.rs");
+    for required in [
+        "LEGACY_F252_WRITER_LEASE_V4_REBIND_BODY_SHA256",
+        "4834f71b90744dddbf828baa5b1e0c5b3e3efbc64bb1d186b8c48bce8c88da52",
+        "LEGACY_F252_WRITER_LEASE_V4_REBIND_OBJECT_SIGNATURE",
+        "0b5001595269061b484a31710f22e16dbf9d323d50bf67d5a08f949d4c4ddbf8",
+        "LEGACY_F252_WRITER_LEASE_V4_REBIND_ACL_SIGNATURE",
+        "50bfe792c391202917747211e6a28f4319e46285be5ae10b30e3cee79bedad41",
+        "LEGACY_F252_WRITER_LEASE_V4_FUNCTION_SIGNATURE",
+        "3a0d9b1593e0adff27ba54cb080538286ee1bbcc204d2ae4cb23ae1558dda4a8",
+        "install_new_v4_rebind_boundary(&mut transaction, v4_rebind)",
+        "reconcile_existing_v4_rebind_boundary(&mut transaction, v4_rebind)",
+        "sha256_hex(observed_body.trim().as_bytes())",
+        "V4_REBIND_OBJECT_PROFILE_SQL",
+        "V4_REBIND_ACL_PROFILE_SQL",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact f252 v4 reconciliation boundary: {required}"
+        );
+    }
+    let install = setup
+        .split("fn install_new_v4_rebind_boundary")
+        .nth(1)
+        .expect("new v4 rebind installation")
+        .split("fn reconcile_existing_v4_rebind_boundary")
+        .next()
+        .expect("bounded new v4 installation");
+    assert!(install.contains("if !rows.is_empty()"));
+    let reconcile = setup
+        .split("fn reconcile_existing_v4_rebind_boundary")
+        .nth(1)
+        .expect("existing v4 rebind reconciliation")
+        .split("fn verify_v4_rebind_boundary")
+        .next()
+        .expect("bounded existing v4 reconciliation");
+    assert!(
+        reconcile.find("classify_v4_rebind_boundary").unwrap()
+            < reconcile.find("batch_execute(sql)").unwrap()
+    );
+    assert!(!reconcile.contains("rows.is_empty()"));
 }
 
 #[test]

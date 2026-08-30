@@ -1,10 +1,10 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 3.2
+version: 3.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-28
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -24,6 +24,11 @@ and adds the sole typed failed terminal permitted after exact thread/turn
 acceptance but before `turn/started`. Version 3.2 adds the distinct typed
 no-provider-effect retry predecessor approved by SPEC-011 and ADR-028. It
 does not relabel that proof as a provider terminal or completion authority.
+Version 3.3 also clarifies retained pre-v7 compatibility: a client key that was
+historically valid in more than one stream has no canonical winner. Every
+stream remains immutable, and a v7 lookup or mutation for that ambiguous key
+is command substitution until separately reconciled by a future governed
+operation.
 
 ## Non-Goals
 
@@ -292,6 +297,12 @@ until a separately approved module/ticket owns those mechanics.
     execution/terminal sequence. `PRESTART_TERMINAL_FAILED` is accepted only
     after the exact accepted turn, carries that same thread/turn, is always
     `FAILED`, and closes without ever synthesizing `TURN_STARTED`.
+41. The v7 unique ingress key governs all new claims but cannot retroactively
+    erase, merge, rename, or choose between distinct pre-v7 streams that
+    retained the same valid command suffix. Such a key is an explicit
+    historical ambiguity: no active claim exists, all exact stream/event/
+    command identities remain durable, and read/prepare/record return command
+    substitution without disclosing a different task.
 
 ## Allowed Dependencies
 
@@ -386,6 +397,12 @@ for the owner-atomic no-provider-effect closure already approved in SPEC-011
 and ADR-028. Exact terminal evidence remains the ordinary retry predecessor;
 closure evidence is accepted only for bounded attempt admission and never
 changes terminal, verification, completion, or Writer-release semantics.
+Version 3.3 changes no Task Ledger hash, stream, event, command, receipt, or
+planner bytes. It closes only the interpretation of a production-retained
+pre-v7 duplicate key: neither persistence migration nor runtime may invent a
+winner. Postgres Store 1.23 may retain exact ambiguity lineage as physical
+metadata, while Task Ledger continues to expose the existing static command-
+substitution category for every attempted use of that key.
 
 ## Acceptance Gates
 
@@ -402,7 +419,7 @@ changes terminal, verification, completion, or Writer-release semantics.
 | Mixed historical replay | pre-autonomy streams replay byte-identically without a synthesized event; autonomy-enabled streams require the closed event and unchanged public MCP bytes | Compatibility review | yes |
 | Autonomy atomicity | schema-v5 command, optional event, projection/checkpoint, terminal receipt, and physical receipt persist all-or-none | Engineering | yes |
 | General intake envelope | objective/project/authority/identity substitution, strict text/secret bounds, stable `task_ref`, Debug redaction, distinct subject kind, absent spec/currency, and no-autonomy matrices | Security review | yes |
-| General intake persistence parity | shared canary/general ingress-key collision, exact retry, and changed-key rejection use the same claim/envelope verifier; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
+| General intake persistence parity | shared canary/general ingress-key collision, exact retry, changed-key rejection, and pre-v7 multi-stream ambiguity use the same claim/envelope verifier; ambiguity preserves all exact lineage and exposes no winner; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
 | Managed-task runtime child records | unique successor binding, exact retry/substitution, monotonic attempts/fences, exact-terminal or owner-verified no-provider-effect predecessor before retry, closure foreign/fence/digest/packet substitution rejection, immutable thread/turn, verification-after-terminal, canonical adapter export/import, and missing/duplicate/tamper replay matrices | Engineering and Security review | yes |
 | Schema/event parity | schema-v5 rejects the withdrawn handoff spelling and no unpersistable event remains in the public enum | Compatibility review | yes |
 | Dependency/no-I/O boundary | Cargo tree and forbidden-reference scan | Architecture review | yes |
@@ -433,3 +450,4 @@ compatibility plan, security and architecture review, and user authorization.
 | 3.0 | 2026-08-26 | SPEC-011, ADR-028 | Add the pure exactly-once TaskSpec successor lineage and typed worker-attempt, exact lifecycle observation, and independent-verification child-record domains without adding I/O or a second task state machine | Delegated product owner |
 | 3.1 | 2026-08-27 | SPEC-011, ADR-028 durable-core review | Lock exact observation order, add the sole typed failed pre-start terminal without entering Executing, and correct the managed autonomy-required marker contract | Delegated product owner |
 | 3.2 | 2026-08-28 | SPEC-011 v1.7, ADR-028 retained pre-start amendment | Admit attempt N+1 from either the ordinary exact terminal or an owner/task/fence/proof/successor-packet-bound no-provider-effect predecessor, without treating closure as provider terminal or completion authority | User-authorized Phase 4 |
+| 3.3 | 2026-08-30 | ADR-023 deployment compatibility amendment | Define pre-v7 multi-stream ingress keys as fail-closed ambiguities with no winner while preserving every Task Ledger identity and all existing semantic bytes | User-authorized deployment hotfix |

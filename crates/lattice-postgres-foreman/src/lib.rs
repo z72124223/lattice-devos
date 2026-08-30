@@ -51,7 +51,7 @@ pub const FOREMAN_EXTENSION_PATH: &str = "db/extensions/foreman-execution/v1.sql
 pub const REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 7;
 /// Exact compatible global Store-v7 manifest.
 pub const REQUIRED_GLOBAL_MANIFEST_SHA256: &str =
-    "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078";
+    "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
 /// Closed global active-attempt capacity.
 pub const MAX_GLOBAL_ACTIVE_ATTEMPTS: u8 = 4;
 /// Closed per-task active-attempt capacity.
@@ -72,9 +72,9 @@ pub const MAX_ACTIVE_TASK_REPLAY_ROWS: u16 = 256;
 const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/foreman-execution/v1.sql");
 const EXPECTED_EXTENSION_SQL_BYTES: usize = 349_470;
 const EXPECTED_EXTENSION_SQL_SHA256: &str =
-    "d76246facfc30887a7c7a7a1383f8dd902e69fa1ab5441b33e3713ffc1f8c01c";
+    "32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13";
 const EXPECTED_EXTENSION_MANIFEST_SHA256: &str =
-    "3357438eaae0557d193b4cfa9567ae2a157c1e2e341362f59ee2ea95212ea7f0";
+    "0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63";
 const EXTENSION_MANIFEST_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_EXTENSION_MANIFEST_V1\0";
 
 /// Frozen embedded-profile verification failure.

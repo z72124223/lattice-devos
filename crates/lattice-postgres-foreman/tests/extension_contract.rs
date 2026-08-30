@@ -15,16 +15,16 @@ fn embedded_v1_identity_is_exact_and_bound_to_store_v7() {
     assert_eq!(evidence.byte_length(), 349_470);
     assert_eq!(
         evidence.sql_sha256().as_str(),
-        "d76246facfc30887a7c7a7a1383f8dd902e69fa1ab5441b33e3713ffc1f8c01c"
+        "32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13"
     );
     assert_eq!(
         evidence.manifest_sha256().as_str(),
-        "3357438eaae0557d193b4cfa9567ae2a157c1e2e341362f59ee2ea95212ea7f0"
+        "0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63"
     );
     assert_eq!(REQUIRED_GLOBAL_SCHEMA_VERSION, 7);
     assert_eq!(
         REQUIRED_GLOBAL_MANIFEST_SHA256,
-        "ea8ebc1d37510002d508f38df9b627dbf12feea65ecff2521b768524129d7078"
+        "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8"
     );
 }
 

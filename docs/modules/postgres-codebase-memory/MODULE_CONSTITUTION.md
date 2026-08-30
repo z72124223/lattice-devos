@@ -1,10 +1,10 @@
 ---
 module_id: postgres-codebase-memory
 name: LATTICE PostgreSQL Codebase Memory Adapter
-version: 1.4
+version: 1.5
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-30
 ---
 
 ## Mission
@@ -23,6 +23,9 @@ context. It does not inspect Writer state or add durable data.
 Version 1.4 extends only that read-only inspector with the exact Store-v7
 manifest and `LATTICE_DEVOS_MEMORY_SCHEMA_V7` namespace profile. Existing
 Memory-v3 identity remains bound to its retained Store-v5 provenance.
+Version 1.5 re-pins that read-only Store-v7 bootstrap profile to the corrected
+Store 1.23 manifest. No Memory extension bytes, row, receipt, provenance,
+write path, or semantic contract changes.
 
 ## Non-Goals
 
@@ -81,7 +84,7 @@ Memory-v3 identity remains bound to its retained Store-v5 provenance.
    graph-memory, or reflection receipt.
 8. Missing, malformed, unsupported, substituted, or digest-disagreeing profile
    provenance fails closed; the current adapter identity is not a fallback.
-9. Product bootstrap may consume only the typed Memory 1.3 inspector before
+9. Product bootstrap may consume only the typed Memory 1.5 inspector before
    admission changes. Empty means the exact Store-created `memory` namespace,
    owner, schema ACL, comment/security-label closure, and zero objects
    across every namespaced catalog; v2/v3 reuse their full identity, ledger,
@@ -147,6 +150,12 @@ frozen eight-entry manifest digest match exactly and the namespace comment is
 the exact v7 value. Store v5/v6 remain distinct accepted profiles; unknown or
 future Store versions are not inferred.
 
+Version 1.5 likewise adds no Memory migration or mutation. It replaces only
+the exact accepted Store-v7 manifest digest after Store 1.23 corrected its
+pre-deployment historical-ingress migration semantics. Store v5/v6 and
+retained Memory-v3 provenance remain byte-identical; any prior, unknown, or
+future v7 digest fails closed.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -176,3 +185,4 @@ user approval.
 | 1.2 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Verify the exact Writer-v2 bridge companion under the common lock order during Memory-v3 migration without owning or mutating Writer state | User continuation authorization |
 | 1.3 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the read-only closed Memory bootstrap inspector for exact Store-v5/v6 composition without interpreting Writer state | Sole-foreman delegation |
 | 1.4 | 2026-08-26 | ADR-023 Phase 3 amendment | Add the exact Store-v7 read-only bootstrap profile while preserving v5/v6 and retained Memory-v3 provenance | User Phase 3 authorization |
+| 1.5 | 2026-08-30 | ADR-023 deployment compatibility amendment | Re-pin only the exact Store-v7 bootstrap digest to Store 1.23 while preserving all Memory extension bytes and retained provenance | User-authorized deployment hotfix |
