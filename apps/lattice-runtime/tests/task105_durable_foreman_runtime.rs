@@ -2919,6 +2919,134 @@ fn response<'a>(responses: &'a [Value], id: i64) -> &'a Value {
         .unwrap_or_else(|| panic!("TASK105_RESPONSE_MISSING:{id}"))
 }
 
+fn run_focused_dual_process_race(config: &LiveConfig) {
+    let mut race_database = DisposableRaceDatabase::new(config);
+    race_database.initialize();
+    let race = race_database.config();
+    run_latticed_admin(&race, "--postgres-bootstrap", true);
+    race.assert_v8_writer_v5_successor();
+
+    let mut process_a = InteractiveLatticed::start_for(&race);
+    process_a.initialize();
+    let mut process_b = InteractiveLatticed::start_for(&race);
+    process_b.initialize();
+    let mut stream_lock = ForemanStreamLock::acquire(&race);
+    let generation_one = checkpoint(
+        2,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    );
+    process_a.send(&generation_one);
+    stream_lock
+        .wait_for_one_ungranted_waiter_for(Duration::from_secs(35))
+        .expect("TASK105_FOCUSED_FOREMAN_STREAM_WAITER");
+    assert_eq!(
+        race.foreman_counts(),
+        ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
+    );
+
+    let coordination_identity = foreman_coordination_identity().expect("TASK105_FOREMAN_IDENTITY");
+    let mut writer_observer = foreman_writer_repository(&race);
+    let current = writer_observer
+        .current_authority(coordination_identity.project_id())
+        .expect("TASK105_FOCUSED_WRITER_CURRENT")
+        .expect("TASK105_FOCUSED_WRITER_AUTHORITY_MISSING");
+    assert_eq!(
+        current.independent_head().identity().holder_process_id().get(),
+        u64::from(process_a.pid())
+    );
+    let mut authority_cleanup = RaceAuthorityCleanup::new(
+        writer_observer,
+        coordination_identity.project_id().clone(),
+        current.independent_head().clone(),
+    );
+
+    let contender_checkpoint_id = "task105-focused-race-contender";
+    process_b.send(&checkpoint(
+        3,
+        contender_checkpoint_id,
+        1,
+        "ACTIVE",
+        Value::Null,
+        'c',
+    ));
+    assert_foreman_replay_error(
+        &process_b.recv_expected(3, Duration::from_secs(35)),
+        "FOREMAN_REPLAY_UNAVAILABLE",
+    );
+    race.assert_writer_command_absent(contender_checkpoint_id);
+    assert_eq!(
+        race.foreman_counts(),
+        ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
+    );
+
+    stream_lock
+        .release()
+        .expect("TASK105_FOCUSED_FOREMAN_STREAM_UNLOCK");
+    drop(stream_lock);
+    let recorded = process_a.recv_expected(2, Duration::from_secs(35));
+    assert_eq!(recorded["result"]["isError"], false);
+    let first = recorded["result"]["structuredContent"].clone();
+    assert_eq!(first["status"], "RECORDED");
+    assert_eq!(first["exact_retry"], false);
+    authority_cleanup
+        .disarm_after_release()
+        .expect("TASK105_FOCUSED_RACE_AUTHORITY_RELEASED");
+    drop(authority_cleanup);
+    process_a.finish();
+
+    let replayed = process_b.request(&checkpoint(
+        4,
+        "task105-race-checkpoint-1",
+        1,
+        "ACTIVE",
+        Value::Null,
+        'b',
+    ));
+    assert_eq!(replayed["result"]["isError"], false);
+    assert_eq!(replayed["result"]["structuredContent"]["status"], "REPLAYED");
+    assert_eq!(
+        replayed["result"]["structuredContent"]["ledger_digest"],
+        first["ledger_digest"]
+    );
+    assert_eq!(
+        replayed["result"]["structuredContent"]["checkpoint_digest"],
+        first["checkpoint_digest"]
+    );
+
+    let generation_two = process_b.request(&checkpoint(
+        5,
+        "task105-race-checkpoint-2",
+        2,
+        "BLOCKED",
+        json!("TASK-094"),
+        'c',
+    ));
+    assert_eq!(generation_two["result"]["isError"], false);
+    assert_eq!(
+        generation_two["result"]["structuredContent"]["status"],
+        "RECORDED"
+    );
+    assert_eq!(
+        race.foreman_counts(),
+        (
+            [2, 2, 2],
+            ["2".into(), "2".into(), "2".into()],
+            generation_two["result"]["structuredContent"]["ledger_digest"]
+                .as_str()
+                .map(ToOwned::to_owned)
+        )
+    );
+    process_b.finish();
+    race_database
+        .cleanup()
+        .expect("TASK105_FOCUSED_RACE_DATABASE_CLEANUP");
+    println!("TASK105_FOCUSED_DUAL_PROCESS_RACE_PASS");
+}
+
 #[test]
 fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_no_merged_sql_continuation_tokens();
@@ -3015,6 +3143,15 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     let Some(config) = LiveConfig::from_environment() else {
         return;
     };
+    if env::var("LATTICE_TASK105_FOCUSED_DUAL_PROCESS_RACE")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        run_latticed_admin(&config, "--postgres-initialize", true);
+        run_focused_dual_process_race(&config);
+        return;
+    }
     println!("TASK105_STAGE_INITIALIZE_ENTER");
     run_latticed_admin(&config, "--postgres-initialize", true);
     config.prepare_v5_writer_v3_bridge();
