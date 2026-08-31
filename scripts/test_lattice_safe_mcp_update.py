@@ -4,6 +4,7 @@ import msvcrt
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -164,6 +165,12 @@ class SafeMcpUpdateTests(unittest.TestCase):
                     "executable_sha256": MODULE.sha256(executable),
                 },
             )
+
+    def test_commit_archive_rejects_windows_path_escape_names(self):
+        for name in ["/absolute", "../parent", r"C:\\drive-qualified", r"source\\separator"]:
+            member = tarfile.TarInfo(name)
+            member.type = tarfile.REGTYPE
+            self.assertFalse(MODULE.archive_member_is_safe(member), name)
 
     def test_active_locks_are_recorded_at_pre_activation_but_do_not_block_future_process_activation(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -131,6 +131,8 @@ def archive_member_is_safe(member: tarfile.TarInfo) -> bool:
     return (
         not path.is_absolute()
         and ".." not in path.parts
+        and "\\" not in member.name
+        and ":" not in member.name
         and (member.isfile() or member.isdir())
     )
 
