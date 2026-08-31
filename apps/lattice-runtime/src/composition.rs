@@ -371,6 +371,7 @@ pub enum LatticedErrorKind {
     RuntimePostgresProvision,
     RuntimePostgresBoundary,
     RuntimePostgresMigration,
+    RuntimePostgresForeman,
     RuntimePostgresMigrationPermission,
     RuntimePostgresMigrationUnsafeSetting,
     RuntimePostgresVerification,
@@ -422,6 +423,7 @@ impl LatticedErrorKind {
             Self::RuntimePostgresProvision => "LATTICED_RUNTIME_POSTGRES_PROVISION_REJECTED",
             Self::RuntimePostgresBoundary => "LATTICED_RUNTIME_POSTGRES_BOUNDARY_REJECTED",
             Self::RuntimePostgresMigration => "LATTICED_RUNTIME_POSTGRES_MIGRATION_REJECTED",
+            Self::RuntimePostgresForeman => "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED",
             Self::RuntimePostgresMigrationPermission => {
                 "LATTICED_RUNTIME_POSTGRES_MIGRATION_PERMISSION_REJECTED"
             }
@@ -2543,7 +2545,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         Err(_) => {
             admission.restore(&mut migrator)?;
             return Err(LatticedError::new(
-                LatticedErrorKind::RuntimePostgresMigration,
+                LatticedErrorKind::RuntimePostgresForeman,
             ));
         }
     }
@@ -10629,6 +10631,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::RuntimePostgresProvision
         | LatticedErrorKind::RuntimePostgresBoundary
         | LatticedErrorKind::RuntimePostgresMigration
+        | LatticedErrorKind::RuntimePostgresForeman
         | LatticedErrorKind::RuntimePostgresMigrationPermission
         | LatticedErrorKind::RuntimePostgresMigrationUnsafeSetting
         | LatticedErrorKind::RuntimePostgresVerification
@@ -12025,6 +12028,15 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+
+    #[test]
+    fn foreman_bootstrap_failure_has_a_secret_free_stage_code() {
+        assert_eq!(
+            LatticedErrorKind::RuntimePostgresForeman.code(),
+            "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED"
+        );
+    }
+
     use lattice_codebase_memory::{normalize_analysis, plan_retrieval};
     use lattice_contracts::{
         CodeSnapshotEvidence, CodebaseMemoryPersistenceIdentity, DaemonEpoch, GitRefIdentity,
