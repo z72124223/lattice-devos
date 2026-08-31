@@ -2,7 +2,7 @@
 
 - Status: accepted for Phase 4
 - Date: 2026-08-26
-- Amended: 2026-08-28
+- Amended: 2026-08-31 by ADR-029
 - Related: ADR-023, ADR-024, ADR-027, SPEC-009, SPEC-011
 
 ## Decision
@@ -107,13 +107,15 @@ and database role are composed, production Phase 4 enables only the closed
 Policy lane for bounded reversible local execution; a task requiring responsible-
 user approval remains `AWAITING_EXECUTION_APPROVAL`.
 
-The persistence addition is an immutable same-database
-`foreman-execution/v1` extension, not global schema-v8. Store-v7 and migrations
-0001 through 0008 remain byte-for-byte current. The extension is subordinate
-to Task Ledger state, binds the exact Store-v7 manifest/database identity, and
+The persistence addition remains an immutable same-database
+`foreman-execution/v1` extension and does not own the global Store schema.
+ADR-029 supersedes only its Store compatibility boundary: migrations 0001
+through 0009 remain immutable, Store appends the reviewed v8 runtime successor,
+and the extension preserves its Store-v7 installation evidence while appending
+one exact Store-v8 rebind. It remains subordinate to Task Ledger state and
 contains no authoritative task-state column. Normal serving never installs or
-migrates it; only explicit PostgreSQL bootstrap installs or verifies the
-extension profile.
+migrates it; only explicit PostgreSQL bootstrap installs, rebinds, or verifies
+the extension profile.
 
 ## Consequences
 

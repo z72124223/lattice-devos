@@ -1,10 +1,10 @@
 ---
 module_id: postgres-store
 name: LATTICE Postgres Store
-version: 1.23
+version: 1.24
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-30
+last_reviewed: 2026-08-31
 ---
 
 ## Mission
@@ -108,6 +108,13 @@ migrator-owned ambiguity relation and exposes no winner. Runtime read, prepare,
 and record all reject that key with the same static substitution failure. No
 historical stream, event, command, identity, or predecessor migration is
 deleted, merged, rewritten, or re-executed.
+Version 1.24 retains schema-v8 migration `0009` unchanged and appends
+`0010_store_v8_runtime_successor`. The exact nine-entry schema-v8 history is a
+migration predecessor; exact current is the ten-entry schema-v8 manifest.
+Role-aware verification closes the complete principal plus optional
+Writer/Foreman companion catalog before ordinary roles may use the fixed
+Foreman-owned security-definer extension-identity reader. No extension
+ownership moves into Store.
 
 ## Non-Goals
 
@@ -280,9 +287,10 @@ deleted, merged, rewritten, or re-executed.
   database identity, bootstrap admission, effective-role, ACL/ownership, and
   protected-function checks.
 - `inspect_migration_profile` is a read-only migrator-bound classification of
-  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, `V6`, or current
-  `V7`. Partial, colliding, changed, unavailable, or wrong-target evidence is
-  an error; the caller receives no catalog rows or Writer semantics.
+  exact embedded history into `Fresh`, `LegacyPrefix`, `V5`, `V6`, `V7`,
+  `V8LegacyPrefix`, or current `V8`. Partial, colliding, changed, unavailable,
+  cross-paired, or wrong-target evidence is an error; the caller receives no
+  catalog rows or Writer/Foreman semantics.
 - The deterministic fake remains visibly non-durable and preserves Store v1
   behavior. Contracts 1.9 / Ports 1.4 add v2 live durability and explicit
   mutable current-head observation without exposing a driver.
@@ -377,11 +385,14 @@ deleted, merged, rewritten, or re-executed.
   the ordinal. Changed command reuse returns no retained receipt. Every new
   terminal command, including `Denied`, `Blocked`, and exact read-only
   observation, advances the global command ordinal/checkpoint exactly once.
-- `MigrationRunner` recognizes Fresh and exact v1/v2/v3/v4/v5/v6 prefixes.
+- `MigrationRunner` recognizes Fresh and exact v1/v2/v3/v4/v5/v6/v7 plus
+  nine-entry legacy-v8 prefixes.
   Fresh creates only the retained Store-v5 foundation. Product bootstrap then
   composes the independently owned Memory and Writer transitions before the
-  exact v5-to-v6 and v6-to-v7 Store calls; Fresh never installs or rebinds
-  Writer inside the Store transaction.
+  exact v5-to-v6, v6-to-v7, and v7/legacy-v8-to-current-v8 Store calls; Fresh
+  never installs Writer or Foreman inside the Store transaction. Store may
+  invoke only the fixed Writer-owned rebind procedures required by an exact
+  governed successor.
   Exact Registry `0005` advances to autonomy `0006`; autonomy content at
   ordinal `0005` returns `PostgresStoreSetupErrorKind::HistoryMismatch` /
   `STORE_MIGRATION_HISTORY_MISMATCH` before migration DDL and is never repaired.
@@ -1082,6 +1093,7 @@ byte identity remains a manifest mismatch and is never silently reinterpreted.
 | Foreman schema-v6 binding | exact 0007 ordering/hash, fixed child/event linkage, same-transaction fencing, rollback/restart/fresh-process replay and unknown-version/privacy denial | Integration review | yes |
 | Vacant v6 Store head | exact seven-entry history returns the genesis physical head; a six-entry guard is prohibited | Integration review | yes |
 | Schema-v7 migration/profile | immutable 0001..0007 prefix, exact 0008 hash/order, closed subject/claim/envelope/ambiguity shape, production-shaped duplicate history with no winner and exact lineage, three fail-closed runtime entrypoints, exact runtime function/catalog/ACL profile, v6/v4 bridge rebind, fresh-client v7 exact retry, rollback, and partial/extra/drift rejection | Architecture and integration review | yes |
+| Schema-v8 runtime successor | immutable 0001..0009 prefix, exact 0010 hash/order, legacy-nine to current-ten migration, role-aware identity/history reads, exact principal/Writer/Foreman companion closure, fresh-runtime verification, and partial/cross-pair/drift rejection | Architecture and integration review | yes |
 | Future schema taxonomy | exact current prefix plus contiguous exact-next suffix, canonical full-history metadata digest and matching future compatibility return only `STORE_SCHEMA_UNSUPPORTED_FUTURE`; extra/missing/reordered/substituted/gapped/divergent history remains corrupt | Compatibility review | yes |
 | Extension ownership | static/dependency tests prove Store cannot install, directly mutate, replay, parse, or depend on Writer Lease adapters; only the exact same-transaction `writer_lease_assert_current_v1`, v5-to-v6 `writer_lease_rebind_v3()`, and v6/v4-to-v7 `writer_lease_rebind_v4()` boundaries are executable | Architecture review | yes |
 
@@ -1096,6 +1108,7 @@ architecture review, and authorization consistent with protected-action rules.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.24 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Append the Store-v8 runtime successor, exact legacy-v8/current classifiers, and role-aware principal/companion closure while preserving migrations 0001..0009 | User-authorized deployment repair |
 | 1.0 | 2026-08-01 | SPEC-002 v15, ADR-016, TASK-018 | Typed zero-I/O physical transaction contract and visibly non-durable deterministic fake | User MVP-3 execution directive |
 | 1.1 | 2026-08-01 | SPEC-002 v16, ADR-017, TASK-019 | Initial exact-manifest PostgreSQL 17 schema, role, compatibility, and STOPPED-admission foundation | User MVP-3 execution directive |
 | 1.1.1 | 2026-08-01 | SPEC-002 v17, ADR-017 review correction, TASK-019 | Fixed real-login capability mapping, consistent catalog snapshot/inheritance closure, and fail-closed harness creation/cleanup evidence; live ControlStore remains deferred | User MVP-3 execution directive |

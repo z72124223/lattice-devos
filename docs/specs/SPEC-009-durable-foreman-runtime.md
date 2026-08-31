@@ -5,6 +5,7 @@ version: 1
 status: approved
 approved_by: sole_foreman_delegation
 approved_at_local: 2026-08-25
+amended_by: ADR-029
 modules:
   - module_id: foreman-state
     constitution_version: 1.3
@@ -171,6 +172,20 @@ administrative migration API remains available outside the product entry.
 - [ ] Product acceptance runs `npm.cmd run verify`, starts
       `npm.cmd run control:start`, then runs `npm.cmd run control:receipt`; all
       original six MCP tools remain callable and legacy remains exact two.
+
+## Store-v8 deployment amendment
+
+ADR-029 supersedes only this specification's Store/Writer bootstrap terminal
+profile, legacy-prefix rejection, and no-new-migration statements. The current
+profile is the ten-entry Store-v8 manifest with Writer-v5 successor functions
+and a Store-v8-rebound Foreman identity. The exact nine-entry Store-v8 profile
+is the supported `V8LegacyPrefix` predecessor and converges through the same
+explicit, globally serialized `--postgres-bootstrap` path; partial, divergent,
+or future prefixes remain rejected. Migration `0010_store_v8_runtime_successor`
+is the sole approved addition, and migrations `0001` through `0009` remain
+immutable. Normal MCP startup and calls remain migration-free, while the exact
+seven-tool wire contract and durable foreman replay behavior above are
+unchanged.
 
 ## Human decisions
 

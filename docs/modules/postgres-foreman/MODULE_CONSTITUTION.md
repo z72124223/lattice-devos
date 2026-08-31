@@ -1,16 +1,17 @@
 ---
 module_id: postgres-foreman
 name: LATTICE PostgreSQL Foreman Execution Adapter
-version: 1.9
+version: 2.0
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-28
+last_reviewed: 2026-08-31
 ---
 
 ## Mission
 
 Own the explicit same-database `foreman-execution/v1` PostgreSQL extension,
-its exact Store-v7/database binding, catalog and ACL verification, and the
+its exact Store-v7 base or Store-v8 rebound database binding, catalog and ACL
+verification, and the
 durable persistence/replay mechanics for managed worker child evidence and
 recoverable capacity-wait reservations, including one bounded physical
 Artifact Store outbox per task. Version 1.4 also owns the immutable pre-
@@ -34,6 +35,9 @@ Artifact content and domain-separated descriptor digest from exact JSON bytes
 and closed metadata.
 Version 1.9 owns the bounded typed execution-environment descriptor/ref row
 attached to each managed attempt and its exact replay/fresh-process mechanics.
+Version 2.0 preserves the v1 extension schema and Store-v7 installation row,
+then adds one owner-controlled Store-v8 rebind that updates only the singleton
+global binding and appends exact ledger ordinal 2 `REBOUND`.
 
 ## Non-Goals
 
@@ -48,8 +52,9 @@ attached to each managed attempt and its exact replay/fresh-process mechanics.
 
 ## Owned Data
 
-- Exact extension identity and one-entry installation ledger bound to one
-  Store-v7 database identity.
+- Exact extension identity and append-only binding ledger: ordinal 1 installs
+  against Store v7; ordinal 2 alone rebinds the same extension/database
+  identity to exact current Store v8.
 - Immutable promotion intent and promotion, worker-attempt, lifecycle
   observation, verification, artifact-reference, and approval-evidence child
   rows. The intent pins the clean Git base/spec/budget before any successor
@@ -92,10 +97,12 @@ semantics; Approval Verifier owns approval currentness and meaning.
 
 - Embed and verify only `db/extensions/foreman-execution/v1.sql`; never scan a
   migration directory or extend the global Store manifest.
-- Install or verify only through an explicit migrator-owned runner after exact
-  Store schema-v7, manifest, database name, UUID, and derived database identity
-  validation. Exact v1 is a verified no-op; partial, colliding, substituted,
-  future, or drifted profiles fail closed.
+- Install or rebind only through an explicit migrator-owned runner after exact
+  Store schema/manifest, database name, UUID, and derived database identity
+  validation. Fresh install accepts only Store v7; the fixed successor accepts
+  only the exact Store-v7 base on exact current Store v8. Exact rebound v1 is a
+  verified no-op; partial, colliding, substituted, future, or drifted profiles
+  fail closed.
 - Give normal runtime only fixed `SECURITY DEFINER` functions and schema
   `USAGE`; runtime has no direct table, sequence, DDL, or install privilege.
 - Deny the verified-approval ingress to the general Runtime session user before
@@ -112,8 +119,9 @@ semantics; Approval Verifier owns approval currentness and meaning.
   promotion intent bound to the formal intake event, project receipt, base,
   successor/spec/approval/budget/verification digests and deadline. A second
   matching-lineage successor is ambiguous and fails closed.
-- Preparation observations and promotion intents reference only Store-v7's
-  existing unique submission stream and global event-digest keys. Every
+- Preparation observations and promotion intents reference only the retained
+  Store-v7-owned unique submission stream and global event-digest keys, which
+  remain unchanged in Store v8. Every
   record replay and read independently rejoins the exact stream/event pair to
   the same intake task/project/snapshot/receipt; independently valid keys from
   different events are corrupt lineage and raise instead of appearing absent.
@@ -194,10 +202,12 @@ semantics; Approval Verifier owns approval currentness and meaning.
 1. PostgreSQL is the only durable truth, but Task Ledger is the sole task
    workflow authority; no table or function in this module contains
    `task_state` or performs a Task Domain transition.
-2. Store migrations `0001` through `0008`, Store schema v7, and its manifest
-   bytes remain current and unchanged.
-3. Extension identity always agrees with the exact Store-v7 manifest, database
-   UUID, and database identity derived from the explicit target name/run ID.
+2. Store migrations `0001` through `0009` remain immutable; current Store v8
+   appends only its reviewed runtime successor.
+3. Extension identity always agrees with either the exact Store-v7 base or
+   exact current Store-v8 rebound manifest, database UUID, and database
+   identity derived from the explicit target name/run ID. Runtime accepts only
+   the rebound identity.
 4. No child row exists without its exact immutable Task Ledger event, and one
    event cannot be substituted across child records. A staged artifact is not
    a child row and cannot finalize until that event is independently verified.
@@ -287,18 +297,23 @@ semantics; Approval Verifier owns approval currentness and meaning.
 
 ## Failure, Compatibility, And Migration
 
-Version 1.9 accepts only exact Store schema v7 plus manifest
-`7e16a8eb119cf4db9910645cabffef8b99703b7dca8ed5e4a9e193fedcd8d44c`.
+Version 1.9 installation accepts only exact Store schema v7 plus its frozen
+manifest.
 Fresh install and exact no-op are the only administrative successes. Partial,
 extra, ACL-drifted, cross-database, replaced-function, event-substituted, or
 ambiguous state fails closed without repair, downgrade, or automatic startup
-migration. A later global Store version requires an explicit independent
-compatibility decision; it never rewrites this extension identity.
+migration.
 The 1.9 environment binding, 1.8 Approval/artifact hardening, 1.7 observation-
 identity contract, and 1.6 guard change the reviewed extension SQL/profile
 while preserving Store v7. Pre-release disposable 1.6/1.7/1.8 profiles must be rebuilt; an
 existing non-disposable older profile is incompatible and blocks adoption
 until an explicit versioned migration decision. Runtime never repairs it.
+
+Version 2.0 is that explicit compatibility decision. The fixed owner asset
+accepts only the exact one-ledger Store-v7 predecessor while the Store is exact
+current v8, updates the singleton binding, and appends ordinal 2 `REBOUND`.
+It preserves every managed child row and extension SQL object. Exact retry is
+read-only; Runtime rejects the Store-v7 base after Store reaches v8.
 
 ## Acceptance Gates
 
@@ -320,7 +335,7 @@ until an explicit versioned migration decision. Runtime never repairs it.
 | Artifact descriptor ingress | raw-SHA, exact JSON/UTF-8 media, all-byte secret scan, canonical descriptor reconstruction, domain-frame digest, relabel and substitution live negatives | Security review | yes |
 | Evidence quota | atomic per-attempt/per-task count and byte limits, exact replay at limit, and closed rejection tests | Engineering | yes |
 | Artifact crash recovery | real PostgreSQL stage, Ledger append, process/server restart, exact atomic finalize/replay, substitution rejection, and unchanged Task Replay before finalize | Integration review | yes |
-| Global compatibility | unchanged Store-v7 migration/manifest evidence | Compatibility review | yes |
+| Global compatibility | immutable Store-v7 installation evidence plus exact Store-v8 singleton rebind and ordinal-2 ledger append; legacy/current retry, partial/cross-pair/future rejection, and fresh-runtime verification | Compatibility and architecture review | yes |
 | Dependency direction | Cargo metadata and forbidden-dependency scan | Architecture review | yes |
 
 ## Change Policy
@@ -334,6 +349,7 @@ review.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.0 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Preserve extension-v1 data and Store-v7 install evidence, then append the exact Store-v8 binding successor at ledger ordinal 2 | User-authorized deployment repair |
 | 1.9 | 2026-08-28 | SPEC-011 v1.9, ADR-028 WSL2 durable-environment amendment | Persist one canonical secret-free execution-environment descriptor/ref per attempt with database-side digest recomputation, exact replay, substitution denial, and fresh-process restart/reconcile reconstruction | User-authorized Phase 4 WSL2 handoff |
 | 1.8 | 2026-08-28 | SPEC-011 v1.8, ADR-028 approval/artifact security review | Persist replayable Approval-owner snapshots only behind the migrator boundary, deny Runtime verified-approval self-attestation, and recompute managed Artifact content/canonical descriptor identity before insert | User-authorized Phase 4 |
 | 1.7 | 2026-08-28 | SPEC-011 v1.7, credential-isolation review | Persist exact App Server session/home/config identity digest on every observation and permit identity/generation rotation only through durable reconciliation | User-authorized Phase 4 repair |

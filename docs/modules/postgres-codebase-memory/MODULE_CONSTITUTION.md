@@ -1,10 +1,10 @@
 ---
 module_id: postgres-codebase-memory
 name: LATTICE PostgreSQL Codebase Memory Adapter
-version: 1.5
+version: 1.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-30
+last_reviewed: 2026-08-31
 ---
 
 ## Mission
@@ -26,6 +26,10 @@ Memory-v3 identity remains bound to its retained Store-v5 provenance.
 Version 1.5 re-pins that read-only Store-v7 bootstrap profile to the corrected
 Store 1.23 manifest. No Memory extension bytes, row, receipt, provenance,
 write path, or semantic contract changes.
+Version 1.6 extends only the same read-only inspector with exact nine-entry
+legacy-v8 and ten-entry current-v8 Store profiles. Both retain the existing
+`LATTICE_DEVOS_MEMORY_SCHEMA_V7` namespace comment and Memory-v3/Store-v5
+provenance; no Memory-owned byte or row changes.
 
 ## Non-Goals
 
@@ -91,8 +95,8 @@ write path, or semantic contract changes.
    catalog and ACL verifiers. Every profile also verifies the exact global and
    namespace-scoped default-ACL closure. Writer state is not interpreted by
    this API.
-10. The bootstrap inspector accepts only exact Store-v5, Store-v6, or
-    Store-v7 context;
+10. The bootstrap inspector accepts only exact Store-v5, Store-v6, Store-v7,
+    nine-entry legacy Store-v8, or ten-entry current Store-v8 context;
     Memory-v3 identity retains its Store-v5 provenance in each context.
 
 ## Allowed Dependencies
@@ -156,6 +160,11 @@ pre-deployment historical-ingress migration semantics. Store v5/v6 and
 retained Memory-v3 provenance remain byte-identical; any prior, unknown, or
 future v7 digest fails closed.
 
+Version 1.6 adds no Memory migration, comment, identity, ledger, ACL, or
+provenance change. It accepts only the two reviewed Store-v8 manifest digests
+under schema version 8 and the retained exact v7 namespace profile. Cross-pair,
+partial, unknown, and future Store evidence fails closed.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -165,6 +174,7 @@ future v7 digest fails closed.
 | Catalog and ACL | exact schema/table/function/owner/grant verifier plus runtime direct-table denial | Security review | yes |
 | Persistence/replay | exact analysis/retrieval/receipt write and process/database restart replay | Engineering | yes |
 | Global compatibility | unchanged global bytes/hashes and existing Store/Ledger/Registry replay | Compatibility review | yes |
+| Store-v8 bootstrap inspection | exact legacy-nine/current-ten manifests, retained v7 namespace and Memory-v3 provenance, cross-pair/partial/future denial, and zero Memory mutation | Compatibility and architecture review | yes |
 | V3 profile transition | immutable v1/v2 hashes, fresh-v3/exact-v2-upgrade/no-op, and partial/drift/extra rollback matrices | Integration review | yes |
 | Historical receipt identity | v2 provenance backfill, v2/v3 mixed graph/reflection replay, and missing/substituted/current-profile denial | Compatibility review | yes |
 | Dependency direction | Cargo metadata and forbidden-dependency scan | Architecture review | yes |
@@ -180,6 +190,7 @@ user approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.6 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Add read-only exact legacy/current Store-v8 bootstrap contexts while preserving all Memory bytes, comments, identity, ledger, and provenance | User-authorized deployment repair |
 | 1.0 | 2026-08-05 | SPEC-002 v28, ADR-022, TASK-033 | Independent same-database Codebase Memory extension and adapter without global Store migration changes | User continuation authorization |
 | 1.1 | 2026-08-14 | SPEC-002 v32, ADR-022, TASK-075 | Add extension-v3/global-v5 compatibility and retained per-analysis profile replay while preserving v1/v2 bytes and receipts | User-approved TASK-075 reconciliation |
 | 1.2 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-022/023, TASK-076 | Verify the exact Writer-v2 bridge companion under the common lock order during Memory-v3 migration without owning or mutating Writer state | User continuation authorization |

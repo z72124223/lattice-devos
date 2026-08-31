@@ -1,7 +1,7 @@
 ---
 spec_id: SPEC-011
 title: Durable managed general-task foreman closed loop
-version: 1.9
+version: 2.0
 status: approved
 approved_by: delegated_product_owner
 approved_at_local: 2026-08-28
@@ -23,14 +23,18 @@ modules:
   - module_id: codex-adapter
     constitution_version: 1.5
   - module_id: postgres-foreman
-    constitution_version: 1.9
+    constitution_version: 2.0
   - module_id: latticed
-    constitution_version: 3.7
+    constitution_version: 3.9
   - module_id: workspace-git
     constitution_version: 1.2
 ---
 
 # SPEC-011 - Durable managed general-task foreman closed loop
+
+Version 2.0 adopts ADR-029 only for Store-v8 deployment compatibility. It
+does not change managed-task lineage, authorization, execution, review, or
+protected-effect semantics.
 
 ## Problem
 
@@ -52,7 +56,7 @@ verifies the result, and replays the same evidence after restart.
   exact lineage plus a verified clean base ref/commit. Restart reuses it and
   never re-samples mutable HEAD; zero successor is pre-admission, one exact
   successor is replayable, and any other matching-lineage shape fails closed.
-- Foreman intake links use Store-v7's existing unique submission-stream and
+- Foreman intake links use the retained Store-v7-owned unique submission-stream and
   global event-digest keys as separate foreign keys, then revalidate their
   exact pair on every write replay and read. Mixing one valid stream with a
   different valid event is corrupt lineage and must raise before successor or
@@ -61,8 +65,9 @@ verifies the result, and replays the same evidence after restart.
   Worker-attempt child records never define a second task state machine.
 - PostgreSQL Task Ledger and a same-database subordinate foreman extension own
   the durable truth. The extension stores typed child rows and live Approval
-  Verifier/Artifact Store records, binds the exact Store-v7 database and
-  manifest identities, and never stores a second `task_state`. Control catalog
+  Verifier/Artifact Store records, binds the exact current Store-v8 database
+  and manifest identity after its append-only Store-v7 base rebind, and never
+  stores a second `task_state`. Control catalog
   and UI rows are locators or observations only.
 - The server-owned foreman identity remains `SoleForemanBinding`; an observed
   Codex UI task/thread ID is evidence and can never select product authority.

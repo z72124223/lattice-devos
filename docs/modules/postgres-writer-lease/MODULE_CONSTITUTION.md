@@ -1,10 +1,10 @@
 ---
 module_id: postgres-writer-lease
 name: PostgreSQL Writer Lease Repository
-version: 2.2
+version: 2.3
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-30
+last_reviewed: 2026-08-31
 ---
 
 ## Mission
@@ -55,6 +55,11 @@ exact f252 procedure as one quarantined predecessor, replaces only that
 procedure under the Writer transaction, and rejects every unknown body,
 metadata, object, or ACL profile. Writer v4 schema bytes, lease rows, fencing,
 runtime procedures, and Writer Lease 1.1 semantics do not change.
+Version 2.3 adds one owner-controlled Store-v8 successor for Writer v5. The
+immutable v5 identity and ledger retain Store-v7 provenance; only the fixed v5
+runtime bind/load procedures are replaced after exact predecessor proof. The
+bootstrap classifier exposes exact Store-v8 rebind-pending/current states and
+accepts neither ranges nor unknown Store manifests.
 
 ## Non-Goals
 
@@ -126,7 +131,8 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   successor. The legacy result is only a read-only classification of the exact
   quarantined f252 procedure profile; it may be acted on only by Writer-owned
   v4 apply, which reclassifies under its own lock and transaction.
-  `V7V5Current` remains the closed v5 successor.
+  `V7V5RebindPending|V7V5Current` and
+  `V8V5RebindPending|V8V5Current` close the v5 Store-v8 successor.
   Partial/corrupt Writer evidence never maps to fallback, and the session apply
   gate creates no durable row or ACL change.
 - Construct schema-v6 runtime repositories only through the explicit v3
@@ -145,6 +151,10 @@ receipt/head, transition, snapshot, checkpoint, and recovery decision.
   exact v5 bind/load-for-update procedures. Query historical authority only by
   project plus receipt digest after complete owner replay; released history is
   queryable, but historical evidence grants no currentness.
+- Preserve the `new_v5_v7` name and Store-v7 identity as immutable provenance
+  while admitting exact Store-v8 Runtime construction only after the
+  Writer-owned v5 rebind catalog is current. No identity or ledger row is
+  relabelled to Store v8.
 - Use fixed function calls only; expose no generic CRUD, arbitrary row, SQL,
   schema/table name, raw client, migration, or credential API.
 
@@ -331,6 +341,12 @@ The rebind still verifies the same closed v6 bridge, mutates the same Writer
 identity/ledger/ACL rows in the Store-owned transaction, and admits no future
 or wildcard Store profile.
 
+Version 2.3 appends no Writer identity or ledger generation. Its fixed
+Store-v8 asset replaces only `writer_lease_bind_runtime_v5` and
+`writer_lease_load_for_update_v5` after exact V5/V7 history and Store-v8
+principal proof. Retry of the exact rebound catalog is read-only; mixed,
+partial, dependency-drifted, or unknown Store profiles fail closed.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -348,6 +364,7 @@ or wildcard Store profile.
 | Strict v7 runtime | exact `V7V4Current` plus Store-v7/Memory-v3 manifest binding; only `new_v4_v7` and v4 runtime procedures are reachable | Architecture and integration review | yes |
 | Append-only v5 successor | frozen v1-v4 byte/hash equality; exact v4-current predecessor; stopped apply with retained ACTIVE/SUSPECT; ordinal 4/6/8 histories; substitution and future rejection | Compatibility and security review | yes |
 | Strict v5 runtime and history | exact `V7V5Current`; only `new_v5_v7` and v5 runtime procedures; process-handoff replay and released historical-authority lookup fail closed on zero/duplicate/tamper | Architecture and integration review | yes |
+| Store-v8 v5 rebind | frozen v5/V7 identity and ledger, fixed two-procedure successor asset, exact pending/current classification for legacy/current Store v8, retry idempotency, and partial/cross-pair/dependency rejection | Architecture, compatibility, and security review | yes |
 | Full verification | format, strict lint, focused/workspace Rust tests, repository checks, and diff check | Engineering | yes |
 
 ## Change Policy
@@ -363,6 +380,7 @@ synthetic evidence as production authority.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.3 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Add the fixed Writer-v5 Store-v8 runtime-procedure rebind while preserving v5/V7 identity, ledger, semantics, and constructor provenance | User-authorized deployment repair |
 | 1.8 | 2026-08-25 | SPEC-009 v1, ADR-027, TASK-105 live correction | Add a read-only closed bootstrap profile with exact v2/v3 foundation, catalog, rebind-boundary and replay verification; composition receives no Writer rows and every executor reclassifies under lock | TASK-105 bounded implementation authority |
 | 1.0 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Independent exact PostgreSQL extension and repository for Writer Lease 1.1 with atomic replay/currentness and monotonic fencing | User TASK-038-first direction |
 | 1.1 | 2026-08-14 | SPEC-002 v33, SPEC-003 v5, ADR-023, TASK-076 | Preserve v1 history and add the Writer-owned v2 bridge/current profiles for global-v5/Memory-v3 without changing lease semantics or fencing bytes | User continuation authorization |

@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.8
+version: 3.9
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-30
+last_reviewed: 2026-08-31
 ---
 
 ## Mission
@@ -16,6 +16,9 @@ this module and maps every MCP operation into the same `FullChainService` /
 Orchestrator composition. Version 3.5 consumes the Store 1.23 deployment
 compatibility boundary: retained duplicate pre-v7 ingress identities have no
 runtime-selected winner and every shared-ingress entrypoint fails closed.
+Version 3.9 composes the append-only Store-v8 runtime successor, immutable
+Writer-v5 Store-v8 rebind, and Foreman-v1 Store-v8 rebind under one bounded
+bootstrap gate while keeping normal MCP startup verify-only.
 
 ## Non-Goals
 
@@ -295,36 +298,44 @@ runtime-selected winner and every shared-ingress entrypoint fails closed.
 20. Normal no-argument MCP startup and every tool call are migration-free.
     Only explicit `--postgres-bootstrap` may iterate the exact Store/Memory/
     Writer profile closure: complete v5/v6 prerequisites, apply Writer v4 at
-    exact v6 current, apply Store v7 with the fixed v4 rebind, then verify exact
-    v7 current. It closes migrator credentials, constructs fresh runtime
-    clients, verifies foreman plus general-intake replay, and only then reports
-    readiness.
+    exact v6 current, apply Store v7 with the fixed v4 rebind, apply Writer v5,
+    perform its fixed Store-v8 runtime rebind, apply the Store-v8 successor,
+    and install or rebind Foreman v1 to exact Store v8. It closes migrator
+    credentials, constructs fresh runtime clients, verifies Foreman plus Task
+    Ledger replay, and only then reports readiness.
 21. Before changing admission, bootstrap consumes only PostgreSQL Memory 1.5
-    and PostgreSQL Writer Lease 2.1 closed read-only profiles. It accepts only Store-v5 +
+    and PostgreSQL Writer Lease 2.3 closed read-only profiles. It accepts only Store-v5 +
     Memory `Empty|V2|V3` + Writer `V5FallbackRequired`, Store-v5 + Memory `V3`
     + Writer `V5Bridge`, or Store-v6 + Memory `V3` + Writer
     `V6BridgePending|V6Current|V6V4Bridge|V6V4BridgeLegacyF252Rebind`, or
-    Store-v7 + Memory `V3` + Writer `V7V4Current`. Every other triple fails
-    closed. Only the v5
+    Store-v7 + Memory `V3` + Writer
+    `V7V4Current|V7V5RebindPending|V7V5Current`, or exact legacy/current
+    Store-v8 + Memory `V3` + Writer `V8V5RebindPending|V8V5Current`. Every
+    other triple fails closed. Only the v5
     fallback runs Store verification, Memory apply/verify, Writer-v2
     apply/verify, then exact Writer-v3 bridge. Composition never parses Memory
     or Writer rows or substitutes its own classifier.
     A physically fresh Store first requires the Writer-owned inspector to prove
     an exactly absent Writer namespace before Store v5 is created, after which
     the same closed triple is re-inspected. A partial Writer namespace fails
-    before Store schema creation. Product bootstrap rejects every Store legacy
-    prefix before admission observation or mutation; only the Store-owned
-    administrative API may advance historical prefixes.
+    before Store schema creation. Product bootstrap rejects Store legacy
+    prefixes v1-v4 before admission observation or mutation; the exact
+    nine-entry `V8LegacyPrefix` is the sole accepted successor predecessor.
 22. Exact v6 bridge-pending may run only `V6Rebind`; exact v6 current may run
     only Writer-owned `V4Apply`; exact `V6V4BridgeLegacyF252Rebind` may run only
     the same Writer-owned `V4Apply`, which accepts that one quarantined
     predecessor, replaces only its fixed procedure, and reclassifies before
     composition continues. Exact `V6V4Bridge` may run only Store-owned
-    `V7Apply`, whose transaction invokes the fixed v4 rebind. Exact Store-v7 +
-    Memory-v3 + `V7V4Current` is the sole `V7VerifyOnly` state and performs zero
-    migration, rebind, row, or ACL write. Migrator credentials are then closed;
-    fresh Runtime-role Task Ledger and Writer-v4 construction plus replay
-    perform the full Store/runtime verification.
+    `V7Apply`, whose transaction invokes the fixed v4 rebind. Exact
+    Store-v7/Writer-v4 advances only through Writer-v5 apply; exact Writer-v5
+    then advances only through its Store-v8 rebind and Store-owned v8 apply.
+    Exact Store-v8 + Memory-v3 + `V8V5Current` is the sole verify-only terminal
+    state. The coordinator may keep only its idle migrator session holding the
+    outer gate while it installs/rebinds Foreman, restores configured admission,
+    and closes migrator credentials. Fresh Runtime-role Task Ledger replay and
+    Foreman verification then prove readiness; the Store verifier pins the
+    Writer-v5 companion catalog, and normal deployed startup constructs the
+    Writer repository before serving MCP.
 23. Task-ingress idempotency is scoped by the process-owned ingress plus
     `client_request_id` and is shared across controlled-canary and general
     submission. Exact objective/formal-project retries return the retained
@@ -481,8 +492,9 @@ the shared ingress claim, envelope, and one `GENERAL_TASK_INTAKE_V1`
 `TASK_CREATED` event, with no Task Spec, currency, autonomy, progression,
 Writer Lease, or effect. Control remains only a locator; PostgreSQL Project
 Registry and Task Ledger remain authority; canary v2 remains compatible. The
-explicit bootstrap reaches the required schema-v7 profile only through the
-append-only Writer-v4 successor and finishes with fresh-runtime verification.
+explicit bootstrap reaches the required schema-v8 successor only through the
+append-only Writer-v4/v5 and Foreman rebind sequence and finishes with
+fresh-runtime verification.
 
 Version 3.5 composes the optional process-owned managed-foreman lane after that
 unchanged intake boundary. It uses one immutable Task-Spec successor, the
@@ -516,7 +528,7 @@ add an MCP authority or protected-action permission.
 | Durable task control | Task creation/idempotency/audit/status replay from PostgreSQL with fresh-process equality | Engineering | yes |
 | Registered general intake | unique Control locator, live double-read/physical observation, exact Registry authority/currentness, no arbitrary path/default guess, shared-key exact retry/substitution, distinct no-spec/no-currency subject, one create event, v3 `DRAFT` restart replay, and zero autonomy/execution/model/writer effects | Engineering and security review | yes |
 | Managed general foreman | exactly-once promotion, current local authority, atomic capacity claim, exact start, bounded retry/reconcile, independent fixed-command verification, v4 replay, real Codex disposable happy path, and restart without duplicate Agent | Engineering, architecture, and security review | yes |
-| Store-v7 bootstrap closure | exact accepted cross-product, v6 pending rebind, v6 current Writer-v4 apply, v6/v4 bridge Store-v7 apply plus fixed v4 rebind, final v7/v4 verify-only, and fresh runtime-role replay | Architecture and integration review | yes |
+| Store-v8 bootstrap closure | exact accepted cross-product, legacy-v8 compatibility, v6/v7 Writer successors, Store-v8 apply, Foreman rebind, failure-stopped retry, concurrent idempotency, and fresh runtime-role replay | Architecture and integration review | yes |
 | Controlled-canary autonomy profile | required canary marker, exact second receipt, historical optional replay, pending reconciliation, and fresh-`latticed` Status with no extra wire field | Engineering and security review | yes |
 | Writer authority | real PostgreSQL lease/fencing/current-head evidence; no fake/synthetic production path | Security review | yes |
 | Legacy command isolation | `lattice-runtime delivery-run` accepts only the exact scripted fixture; official Codex and MCP/tunnel provenance fail before effects | Compatibility review | yes |
@@ -538,6 +550,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.9 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Serialize the exact Store-v8 runtime successor, Writer-v5 and Foreman-v1 rebinds, stopped failure retry, and fresh-runtime verification without widening MCP startup | User-authorized deployment repair |
 | 3.7 | 2026-08-27 | SPEC-011 durable-core review, ADR-028 | Add supervisor-owned durable intake preparation, immutable pre-successor source intent, unpromoted v4 blocker replay, and process-lifetime effect/Git containment | Delegated product owner |
 | 3.6 | 2026-08-27 | SPEC-011 v1.2, ADR-028 | Require replay-verified unique ACTIVE and CONTINUE Foreman Runtime state before formal managed identity, task claim, or provider dispatch | Delegated product owner |
 | 3.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 live correction | Add the Memory 1.3 and PostgreSQL Writer Lease 1.8 typed read-only bootstrap profiles as the sole pre-admission cross-module contract, including exact empty, predecessor, bridge-pending, current, fresh-absence, and legacy-product-rejection handling | Sole-foreman delegation |
