@@ -1672,7 +1672,10 @@ fn load_verified_stream<C: GenericClient>(
         });
     };
 
-    let subject_offset = if sql_profile == TaskLedgerSqlProfile::V7 {
+    let subject_offset = if matches!(
+        sql_profile,
+        TaskLedgerSqlProfile::V7 | TaskLedgerSqlProfile::V8
+    ) {
         2
     } else {
         0
@@ -1702,7 +1705,10 @@ fn load_verified_stream<C: GenericClient>(
     let task_id = TaskId::new(row_value::<String>(&head_row, 8)?)
         .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
     let task_revision = row_value::<String>(&head_row, 9)?;
-    let identity = if sql_profile == TaskLedgerSqlProfile::V7 {
+    let identity = if matches!(
+        sql_profile,
+        TaskLedgerSqlProfile::V7 | TaskLedgerSqlProfile::V8
+    ) {
         let subject_kind: String = row_value(&head_row, 10)?;
         let subject_digest = row_digest(&head_row, 11)?;
         let task_spec_digest = row_optional_digest(&head_row, 12)?;
@@ -6031,9 +6037,15 @@ mod tests {
             global_ledger_sql_profile(SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION),
             Some(TaskLedgerSqlProfile::V7)
         );
+        assert_eq!(
+            global_ledger_sql_profile(EXTERNAL_ADOPTION_GLOBAL_LEDGER_SCHEMA_VERSION),
+            Some(TaskLedgerSqlProfile::V8)
+        );
         assert!(TaskLedgerSqlProfile::V6.supports_foreman());
         assert!(TaskLedgerSqlProfile::V7.supports_foreman());
         assert!(TaskLedgerSqlProfile::V7.supports_submission());
+        assert!(TaskLedgerSqlProfile::V8.supports_foreman());
+        assert!(TaskLedgerSqlProfile::V8.supports_submission());
         assert!(!TaskLedgerSqlProfile::V6.supports_submission());
         assert!(!TaskLedgerSqlProfile::V5.supports_foreman());
         for version in [0, 1, 2, 4, u16::MAX] {

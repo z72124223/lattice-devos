@@ -72,11 +72,11 @@ fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
         "rebind_existing_v3_extension",
         "apply_v4_extension",
         "apply_v5_extension",
-        "if final_store.schema_version() != 7",
+        "if final_store.schema_version() != 8",
     ] {
         assert!(
             bootstrap.contains(required),
-            "product bootstrap must compose Store, Memory, and Writer before V7: {required}"
+            "product bootstrap must compose Store, Memory, and Writer through V8: {required}"
         );
     }
 }
@@ -104,7 +104,7 @@ fn product_bootstrapped_foreman_uses_active_runtime_store_verification() {
         )
         .expect("general submission acceptance")
         .1;
-    assert!(acceptance.contains("product-bootstrap Store-v7 runtime profile"));
+    assert!(acceptance.contains("product-bootstrap Store-v8 runtime profile"));
     assert!(acceptance.contains("task_submission_composition_tamper"));
     assert!(
         !acceptance.contains("activate submission acceptance runtime"),
@@ -695,6 +695,11 @@ fn schema_v8_appends_digest_bound_external_adoption_without_rewriting_v7() {
     assert!(
         !sql.contains("GRANT SELECT ON TABLE control.external_verified_result_evidence"),
         "runtime must receive a narrow verifier surface, not raw receipt access"
+    );
+    assert_eq!(
+        sql.matches("REFERENCES control.").count(),
+        3,
+        "the immutable adoption binding requires evidence plus exact event and command lineage"
     );
 }
 

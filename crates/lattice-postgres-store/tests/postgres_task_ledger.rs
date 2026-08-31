@@ -2156,7 +2156,7 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
         "general-submission acceptance requires the formal product bootstrap, not Store-owned fresh provisioning"
     );
     let composed = PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target)
-        .expect("product-bootstrap Store-v7 runtime profile");
+        .expect("product-bootstrap Store-v8 runtime profile");
     drop(composed);
 
     let mut tamper_admin = connect_superuser(&database);

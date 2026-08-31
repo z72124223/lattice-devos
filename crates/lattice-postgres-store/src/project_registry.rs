@@ -28,6 +28,7 @@ use crate::{MigrationTarget, PostgresStoreSetupErrorKind};
 
 const FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 5;
 const CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 7;
+const EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 8;
 const REGISTRY_V4_MANIFEST_SHA256: &str =
     "df3f7ca3687afaa0d1f676158725e6d2f06670e0612df7482aa9d4d244b59f0f";
 const REGISTRY_CATALOG_ID: &str = "PROJECT_REGISTRY_V1";
@@ -40,6 +41,7 @@ const EXECUTION_DEADLINE: Duration = Duration::from_secs(45);
 enum RegistrySqlProfile {
     FrozenV5,
     CurrentV7,
+    CurrentV8,
 }
 
 impl RegistrySqlProfile {
@@ -47,6 +49,7 @@ impl RegistrySqlProfile {
         match schema_version {
             FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION => Ok(Self::FrozenV5),
             CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION => Ok(Self::CurrentV7),
+            EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION => Ok(Self::CurrentV8),
             _ => Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt)),
         }
     }
@@ -55,6 +58,7 @@ impl RegistrySqlProfile {
         match self {
             Self::FrozenV5 => FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
             Self::CurrentV7 => CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            Self::CurrentV8 => EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION,
         }
     }
 }
@@ -2178,7 +2182,9 @@ fn retained_command_persistence_from_parts(
     let profile_is_current = schema_version == current.schema_version()
         && matches!(
             current.schema_version(),
-            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION | CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION
+            FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION
+                | CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION
+                | EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION
         )
         && manifest_sha256 == current.manifest_digest().as_str();
     if !profile_is_frozen_v4 && !profile_is_frozen_v5 && !profile_is_current {
@@ -2372,7 +2378,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_sql_profiles_accept_exact_v5_and_v7_only() {
+    fn registry_sql_profiles_accept_exact_v5_v7_and_v8() {
         assert_eq!(
             RegistrySqlProfile::from_schema_version(5),
             Ok(RegistrySqlProfile::FrozenV5)
@@ -2381,7 +2387,11 @@ mod tests {
             RegistrySqlProfile::from_schema_version(7),
             Ok(RegistrySqlProfile::CurrentV7)
         );
-        for unsupported in [0, 1, 3, 4, 6, 8, u16::MAX] {
+        assert_eq!(
+            RegistrySqlProfile::from_schema_version(8),
+            Ok(RegistrySqlProfile::CurrentV8)
+        );
+        for unsupported in [0, 1, 3, 4, 6, u16::MAX] {
             assert_eq!(
                 RegistrySqlProfile::from_schema_version(unsupported),
                 Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))

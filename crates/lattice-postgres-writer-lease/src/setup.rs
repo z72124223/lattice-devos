@@ -33,6 +33,8 @@ const V6_GLOBAL_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
 const V7_GLOBAL_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
+const V8_GLOBAL_MANIFEST_SHA256: &str =
+    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
 const LEGACY_F252_WRITER_LEASE_V4_REBIND_BODY_SHA256: &str =
     "4834f71b90744dddbf828baa5b1e0c5b3e3efbc64bb1d186b8c48bce8c88da52";
 const LEGACY_F252_WRITER_LEASE_V4_REBIND_OBJECT_SIGNATURE: &str =
@@ -829,6 +831,9 @@ pub enum V3BootstrapProfile {
     V7V4Current,
     /// Schema v7 has the exact current Writer-v5 process-handoff profile.
     V7V5Current,
+    /// Schema v8 retains the exact immutable Writer-v5 process-handoff
+    /// identity while the Store adds external-verification evidence.
+    V8V5Current,
 }
 
 /// Closed extension setup/verifier failure classes.
@@ -1461,6 +1466,12 @@ pub fn inspect_v3_bootstrap_profile(
         target.database_identity_digest().clone(),
     )?;
     let v5_successor = v5_target.successor()?;
+    let v8_successor = ExtensionTarget::new(
+        target.database_name().to_owned(),
+        target.database_identity_digest().clone(),
+        fixed_digest(V8_GLOBAL_MANIFEST_SHA256)?,
+        fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+    )?;
     let mut gate = GlobalApplyGate::acquire(client)?;
     let mut transaction = gate
         .client()
@@ -1608,21 +1619,45 @@ pub fn inspect_v3_bootstrap_profile(
             V3BootstrapProfile::V7V4Current
         }
         V3InstalledState::G7MemoryV3WriterV5Current => {
-            let foundation = verify_v7_foundation(&mut transaction, &v5_successor)
-                .map_err(SetupAttemptError::into_public)?;
-            verify_v5_v7_current_profile(
-                &mut transaction,
-                &v5_successor,
-                &foundation.database_uuid,
-                &v1,
-                &v2,
-                &v3,
-                &v4,
-                &v5,
-            )
-            .map_err(SetupAttemptError::into_public)?;
-            verify_replay_safe_history(&mut transaction).map_err(SetupAttemptError::into_public)?;
-            V3BootstrapProfile::V7V5Current
+            match verify_v7_foundation(&mut transaction, &v5_successor) {
+                Ok(foundation) => {
+                    verify_v5_v7_current_profile(
+                        &mut transaction,
+                        &v5_successor,
+                        &foundation.database_uuid,
+                        &v1,
+                        &v2,
+                        &v3,
+                        &v4,
+                        &v5,
+                    )
+                    .map_err(SetupAttemptError::into_public)?;
+                    verify_replay_safe_history(&mut transaction)
+                        .map_err(SetupAttemptError::into_public)?;
+                    V3BootstrapProfile::V7V5Current
+                }
+                Err(SetupAttemptError::Setup(error))
+                    if error.kind() == ExtensionSetupErrorKind::UnsupportedFoundation =>
+                {
+                    let foundation = verify_v8_foundation(&mut transaction, &v8_successor)
+                        .map_err(SetupAttemptError::into_public)?;
+                    verify_v5_v7_current_profile(
+                        &mut transaction,
+                        &v5_successor,
+                        &foundation.database_uuid,
+                        &v1,
+                        &v2,
+                        &v3,
+                        &v4,
+                        &v5,
+                    )
+                    .map_err(SetupAttemptError::into_public)?;
+                    verify_replay_safe_history(&mut transaction)
+                        .map_err(SetupAttemptError::into_public)?;
+                    V3BootstrapProfile::V8V5Current
+                }
+                Err(error) => return Err(error.into_public()),
+            }
         }
     };
     transaction.commit().map_err(map_public_database)?;
@@ -1906,6 +1941,7 @@ enum FoundationProfile {
     G5MemoryV3,
     G6MemoryV3,
     G7MemoryV3,
+    G8MemoryV3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2105,6 +2141,49 @@ fn verify_v7_foundation<C: GenericClient>(
     Ok(FoundationEvidence {
         database_uuid,
         profile: FoundationProfile::G7MemoryV3,
+    })
+}
+
+fn verify_v8_foundation<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+) -> Result<FoundationEvidence, SetupAttemptError> {
+    let row = client
+        .query_one(
+            "SELECT pg_catalog.current_database()::text, d.database_uuid::text, \
+                    pg_catalog.btrim(m.database_identity_sha256)::text, c.current_schema_version, \
+                    pg_catalog.btrim(c.manifest_sha256)::text, m.extension_schema_version, \
+                    pg_catalog.btrim(m.extension_manifest_sha256)::text \
+               FROM ONLY control.database_identity AS d \
+               CROSS JOIN ONLY control.schema_compatibility AS c \
+               CROSS JOIN ONLY memory.codebase_memory_extension_identity AS m \
+              WHERE m.singleton AND m.database_uuid = d.database_uuid",
+            &[],
+        )
+        .map_err(|error| map_database_or(error, ExtensionSetupErrorKind::UnsupportedFoundation))?;
+    let database_name: String = row.try_get(0).map_err(map_database)?;
+    let database_uuid: String = row.try_get(1).map_err(map_database)?;
+    let database_identity: String = row.try_get(2).map_err(map_database)?;
+    let global_version: i16 = row.try_get(3).map_err(map_database)?;
+    let global_manifest: String = row.try_get(4).map_err(map_database)?;
+    let memory_version: i16 = row.try_get(5).map_err(map_database)?;
+    let memory_manifest: String = row.try_get(6).map_err(map_database)?;
+    if database_name != target.database_name()
+        || database_identity != target.database_identity_digest().as_str()
+        || global_version != 8
+        || global_manifest != V8_GLOBAL_MANIFEST_SHA256
+        || global_manifest != target.global_manifest_digest().as_str()
+        || memory_version != 3
+        || memory_manifest != CURRENT_MEMORY_MANIFEST_SHA256
+        || memory_manifest != target.memory_manifest_digest().as_str()
+    {
+        return Err(setup_attempt_error(
+            ExtensionSetupErrorKind::UnsupportedFoundation,
+        ));
+    }
+    Ok(FoundationEvidence {
+        database_uuid,
+        profile: FoundationProfile::G8MemoryV3,
     })
 }
 

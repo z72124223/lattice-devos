@@ -2180,12 +2180,8 @@ pub fn verify_postgres_schema(
     }
     let evidence = if schema_version == POSTGRES_SCHEMA_VERSION {
         let manifest = verify_embedded_manifest()?;
-        let database_uuid = verify_runtime_external_adoption_schema_v8(
-            &mut transaction,
-            target,
-            &manifest,
-            false,
-        )?;
+        let database_uuid =
+            verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, false)?;
         PostgresSchemaEvidence {
             database_uuid,
             manifest_sha256: manifest.manifest_sha256().clone(),
@@ -3517,7 +3513,7 @@ fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    for (index, expected) in [(0, 2_i64), (1, 0), (2, 3), (3, 2), (4, 1)] {
+    for (index, expected) in [(0, 2_i64), (1, 0), (2, 3), (3, 3), (4, 1)] {
         if row_value::<i64>(&profile, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
             != expected
         {
