@@ -1026,6 +1026,74 @@ impl ExternalVerifiedResultAdoption {
     pub const fn result_digest(&self) -> &ContentDigest {
         &self.result_digest
     }
+
+    /// Exports all retained fields as explicitly untrusted persistence data.
+    #[must_use]
+    pub fn to_untrusted(&self) -> UntrustedExternalVerifiedResultAdoption {
+        UntrustedExternalVerifiedResultAdoption {
+            schema_version: EXTERNAL_VERIFIED_RESULT_ADOPTION_SCHEMA.to_owned(),
+            task_ref: self.task_ref.clone(),
+            client_request_id: self.client_request_id.clone(),
+            expected_ledger_head_digest: self.expected_ledger_head_digest.clone(),
+            source_sha: self.source_sha.clone(),
+            target_sha: self.target_sha.clone(),
+            push_merge_receipt_ref: self.push_merge_receipt_ref.clone(),
+            deployment_receipt_ref: self.deployment_receipt_ref.clone(),
+            deployment_artifact_ref: self.deployment_artifact_ref.clone(),
+            independent_acceptance_ref: self.independent_acceptance_ref.clone(),
+            protected_action_approval_refs: self.protected_action_approval_refs.clone(),
+            result_digest: self.result_digest.clone(),
+        }
+    }
+}
+
+/// Raw retained fields for one external verified-result adoption.
+/// Every field remains untrusted until replayed through
+/// [`verify_untrusted_external_verified_result_adoption`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UntrustedExternalVerifiedResultAdoption {
+    pub schema_version: String,
+    pub task_ref: ContentDigest,
+    pub client_request_id: String,
+    pub expected_ledger_head_digest: ContentDigest,
+    pub source_sha: String,
+    pub target_sha: String,
+    pub push_merge_receipt_ref: String,
+    pub deployment_receipt_ref: String,
+    pub deployment_artifact_ref: String,
+    pub independent_acceptance_ref: String,
+    pub protected_action_approval_refs: Vec<String>,
+    pub result_digest: ContentDigest,
+}
+
+/// Reconstructs and verifies one retained external adoption bundle.
+///
+/// # Errors
+///
+/// Rejects unknown schemas, malformed or secret-shaped values, and every
+/// changed input or retained result digest.
+pub fn verify_untrusted_external_verified_result_adoption(
+    raw: &UntrustedExternalVerifiedResultAdoption,
+) -> Result<ExternalVerifiedResultAdoption, LedgerError> {
+    if raw.schema_version != EXTERNAL_VERIFIED_RESULT_ADOPTION_SCHEMA {
+        return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
+    }
+    let verified = ExternalVerifiedResultAdoption::new(
+        raw.task_ref.clone(),
+        raw.client_request_id.clone(),
+        raw.expected_ledger_head_digest.clone(),
+        raw.source_sha.clone(),
+        raw.target_sha.clone(),
+        raw.push_merge_receipt_ref.clone(),
+        raw.deployment_receipt_ref.clone(),
+        raw.deployment_artifact_ref.clone(),
+        raw.independent_acceptance_ref.clone(),
+        raw.protected_action_approval_refs.clone(),
+    )?;
+    if verified.result_digest() != &raw.result_digest {
+        return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
+    }
+    Ok(verified)
 }
 
 /// Closed semantic request families sharing one task-submission ingress keyspace.

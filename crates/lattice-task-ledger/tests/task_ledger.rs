@@ -16,8 +16,9 @@ use lattice_task_ledger::{
     UntrustedAutonomyReceiptRow, VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan,
     classify_task_created_profile, export_untrusted_snapshot, plan_append,
     plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
-    verify_untrusted_autonomy_receipt_rows, verify_untrusted_snapshot,
-    verify_untrusted_snapshot_against_checkpoint, verify_untrusted_task_submission,
+    verify_untrusted_autonomy_receipt_rows, verify_untrusted_external_verified_result_adoption,
+    verify_untrusted_snapshot, verify_untrusted_snapshot_against_checkpoint,
+    verify_untrusted_task_submission,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -290,6 +291,34 @@ fn general_intake_allows_only_the_typed_external_verified_result_adoption_termin
             .expect("ordinary command"),
         ),
         Err(LedgerError::GeneralTaskIntakeCreateOnly)
+    );
+}
+
+#[test]
+fn external_verified_adoption_persistence_rejects_changed_evidence_on_replay() {
+    let adoption = ExternalVerifiedResultAdoption::new(
+        digest('a'),
+        "adoption-replay-1",
+        digest('b'),
+        "1".repeat(40),
+        "2".repeat(40),
+        format!("evidence:sha256:{}", "3".repeat(64)),
+        format!("evidence:sha256:{}", "4".repeat(64)),
+        format!("evidence:sha256:{}", "5".repeat(64)),
+        format!("evidence:sha256:{}", "6".repeat(64)),
+        vec![format!("evidence:sha256:{}", "7".repeat(64))],
+    )
+    .unwrap();
+    let retained = adoption.to_untrusted();
+    assert_eq!(
+        verify_untrusted_external_verified_result_adoption(&retained).unwrap(),
+        adoption
+    );
+    let mut changed = retained;
+    changed.deployment_receipt_ref = format!("evidence:sha256:{}", "8".repeat(64));
+    assert_eq!(
+        verify_untrusted_external_verified_result_adoption(&changed),
+        Err(LedgerError::ExternalVerifiedResultAdoptionMismatch)
     );
 }
 
