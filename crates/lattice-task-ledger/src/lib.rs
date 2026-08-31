@@ -37,6 +37,9 @@ pub const LEDGER_RECORD_SET_SCHEMA_VERSION: &str = "1.0";
 pub const TASK_SUBMISSION_ENVELOPE_SCHEMA: &str = "lattice.task-ledger.task-submission/1.0";
 /// Authoritative cross-profile task-ingress idempotency-claim schema.
 pub const TASK_INGRESS_CLAIM_SCHEMA: &str = "lattice.task-ledger.task-ingress-claim/1.0";
+/// Immutable external-result adoption evidence schema.
+pub const EXTERNAL_VERIFIED_RESULT_ADOPTION_SCHEMA: &str =
+    "lattice.task-ledger.external-verified-result-adoption/1.0";
 
 const TASK_SUBMISSION_HASH_VERSION: &str = "1.0";
 const TASK_SUBMISSION_REF_DOMAIN: &str = "lattice.task-ledger.task-submission-ref";
@@ -49,6 +52,10 @@ const MAX_SUBMISSION_OBJECTIVE_BYTES: usize = 2_048;
 const MAX_SUBMISSION_PROJECT_DISPLAY_NAME_CHARS: usize = 64;
 const MAX_SUBMISSION_PROJECT_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_SUBMISSION_PROJECT_ID_BYTES: usize = 64;
+const MAX_EXTERNAL_RESULT_APPROVAL_REFS: usize = 8;
+const EXTERNAL_RESULT_ADOPTION_ACTION: &str = "ADOPT_VERIFIED_RESULT_V1";
+const EXTERNAL_RESULT_ADOPTION_REASON: &str = "EXTERNAL_VERIFIED_RESULT_ADOPTED";
+const GENERAL_TASK_INTAKE_CORRELATION_ID: &str = "general-task-intake-v1";
 /// Maximum byte length of a Task Ledger project snapshot identifier.
 ///
 /// This covers the Project Registry's maximum canonical authority snapshot:
@@ -96,6 +103,18 @@ pub enum LedgerError {
     UnknownSubmissionEnvelopeVersion,
     /// A retained submission envelope disagrees with its canonical digest or reference.
     SubmissionEnvelopeMismatch,
+    /// One externally verified-result adoption field is malformed.
+    InvalidExternalVerifiedResultAdoption {
+        /// Stable field name; never includes submitted content.
+        field: &'static str,
+    },
+    /// An externally verified-result adoption exceeded a fixed collection bound.
+    ExternalVerifiedResultAdoptionLimitExceeded {
+        /// Stable field name; never includes submitted content.
+        field: &'static str,
+    },
+    /// A retained external verified-result adoption diverged from its digest or event binding.
+    ExternalVerifiedResultAdoptionMismatch,
     /// One authoritative task-ingress claim field is malformed.
     InvalidTaskIngressClaim {
         /// Stable field name; never includes submitted content.
@@ -198,6 +217,15 @@ impl LedgerError {
             Self::SubmissionSecretRejected => "LEDGER_SUBMISSION_SECRET_REJECTED",
             Self::UnknownSubmissionEnvelopeVersion => "LEDGER_UNKNOWN_SUBMISSION_ENVELOPE_VERSION",
             Self::SubmissionEnvelopeMismatch => "LEDGER_SUBMISSION_ENVELOPE_MISMATCH",
+            Self::InvalidExternalVerifiedResultAdoption { .. } => {
+                "LEDGER_EXTERNAL_VERIFIED_RESULT_ADOPTION_INVALID"
+            }
+            Self::ExternalVerifiedResultAdoptionLimitExceeded { .. } => {
+                "LEDGER_EXTERNAL_VERIFIED_RESULT_ADOPTION_LIMIT_EXCEEDED"
+            }
+            Self::ExternalVerifiedResultAdoptionMismatch => {
+                "LEDGER_EXTERNAL_VERIFIED_RESULT_ADOPTION_MISMATCH"
+            }
             Self::InvalidTaskIngressClaim { .. } => "LEDGER_INVALID_TASK_INGRESS_CLAIM",
             Self::UnknownTaskIngressClaimVersion => "LEDGER_UNKNOWN_TASK_INGRESS_CLAIM_VERSION",
             Self::TaskIngressClaimMismatch => "LEDGER_TASK_INGRESS_CLAIM_MISMATCH",
@@ -269,6 +297,21 @@ impl fmt::Display for LedgerError {
             }
             Self::SubmissionEnvelopeMismatch => {
                 formatter.write_str("submission envelope does not match its retained identity")
+            }
+            Self::InvalidExternalVerifiedResultAdoption { field } => {
+                write!(
+                    formatter,
+                    "invalid external verified-result adoption {field}"
+                )
+            }
+            Self::ExternalVerifiedResultAdoptionLimitExceeded { field } => {
+                write!(
+                    formatter,
+                    "external verified-result adoption {field} exceeds its bound"
+                )
+            }
+            Self::ExternalVerifiedResultAdoptionMismatch => {
+                formatter.write_str("external verified-result adoption binding mismatch")
             }
             Self::InvalidTaskIngressClaim { field } => {
                 write!(formatter, "invalid task-ingress claim {field}")
@@ -428,6 +471,8 @@ pub enum LedgerEventKind {
     EffectOutcome,
     /// An immutable evidence digest was recorded.
     EvidenceRecorded,
+    /// A server-verified externally completed result terminalized a create-only intake.
+    ExternalVerifiedResultAdopted,
 }
 
 impl LedgerEventKind {
@@ -444,6 +489,7 @@ impl LedgerEventKind {
             Self::EffectIntent => "EFFECT_INTENT",
             Self::EffectOutcome => "EFFECT_OUTCOME",
             Self::EvidenceRecorded => "EVIDENCE_RECORDED",
+            Self::ExternalVerifiedResultAdopted => "EXTERNAL_VERIFIED_RESULT_ADOPTED",
         }
     }
 
@@ -463,6 +509,7 @@ impl LedgerEventKind {
             "EFFECT_INTENT" => Ok(Self::EffectIntent),
             "EFFECT_OUTCOME" => Ok(Self::EffectOutcome),
             "EVIDENCE_RECORDED" => Ok(Self::EvidenceRecorded),
+            "EXTERNAL_VERIFIED_RESULT_ADOPTED" => Ok(Self::ExternalVerifiedResultAdopted),
             _ => Err(LedgerError::UnknownEventKind),
         }
     }
@@ -771,6 +818,214 @@ pub fn verify_untrusted_task_submission(
         return Err(LedgerError::SubmissionEnvelopeMismatch);
     }
     Ok(verified)
+}
+
+/// Immutable, digest-bound proof bundle for a server-verified external result.
+///
+/// This is not an execution, approval, or deployment command. It binds only
+/// opaque receipt descriptors and Git identities; the repository adapter must
+/// independently resolve and verify every referenced receipt before this type
+/// can be committed as a terminal Ledger event.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExternalVerifiedResultAdoption {
+    task_ref: ContentDigest,
+    client_request_id: String,
+    expected_ledger_head_digest: ContentDigest,
+    source_sha: String,
+    target_sha: String,
+    push_merge_receipt_ref: String,
+    deployment_receipt_ref: String,
+    deployment_artifact_ref: String,
+    independent_acceptance_ref: String,
+    protected_action_approval_refs: Vec<String>,
+    result_digest: ContentDigest,
+}
+
+impl fmt::Debug for ExternalVerifiedResultAdoption {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ExternalVerifiedResultAdoption")
+            .field("schema", &EXTERNAL_VERIFIED_RESULT_ADOPTION_SCHEMA)
+            .field("task_ref", &self.task_ref)
+            .field("client_request_id", &self.client_request_id)
+            .field(
+                "expected_ledger_head_digest",
+                &self.expected_ledger_head_digest,
+            )
+            .field("source_sha", &self.source_sha)
+            .field("target_sha", &self.target_sha)
+            .field("receipt_refs", &"[DIGEST_BOUND]")
+            .field(
+                "approval_ref_count",
+                &self.protected_action_approval_refs.len(),
+            )
+            .field("result_digest", &self.result_digest)
+            .finish()
+    }
+}
+
+impl ExternalVerifiedResultAdoption {
+    /// Validates and canonically binds the complete external-result receipt set.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed or secret-shaped identifiers, non-lowercase Git
+    /// commits, zero digests, empty/duplicate approval references, and every
+    /// mismatch between the caller's expected Ledger head and a later command.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        task_ref: ContentDigest,
+        client_request_id: impl Into<String>,
+        expected_ledger_head_digest: ContentDigest,
+        source_sha: impl Into<String>,
+        target_sha: impl Into<String>,
+        push_merge_receipt_ref: impl Into<String>,
+        deployment_receipt_ref: impl Into<String>,
+        deployment_artifact_ref: impl Into<String>,
+        independent_acceptance_ref: impl Into<String>,
+        protected_action_approval_refs: Vec<String>,
+    ) -> Result<Self, LedgerError> {
+        let client_request_id = client_request_id.into();
+        let source_sha = source_sha.into();
+        let target_sha = target_sha.into();
+        let push_merge_receipt_ref = push_merge_receipt_ref.into();
+        let deployment_receipt_ref = deployment_receipt_ref.into();
+        let deployment_artifact_ref = deployment_artifact_ref.into();
+        let independent_acceptance_ref = independent_acceptance_ref.into();
+        if is_zero_digest(&task_ref) {
+            return Err(LedgerError::InvalidExternalVerifiedResultAdoption { field: "task_ref" });
+        }
+        if !valid_task_ingress_client_request_id(&client_request_id) {
+            return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
+                field: "client_request_id",
+            });
+        }
+        if is_zero_digest(&expected_ledger_head_digest) {
+            return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
+                field: "expected_ledger_head_digest",
+            });
+        }
+        if !valid_git_commit(&source_sha)
+            || !valid_git_commit(&target_sha)
+            || source_sha == target_sha
+        {
+            return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
+                field: "git_commit",
+            });
+        }
+        for (field, value) in [
+            ("push_merge_receipt_ref", &push_merge_receipt_ref),
+            ("deployment_receipt_ref", &deployment_receipt_ref),
+            ("deployment_artifact_ref", &deployment_artifact_ref),
+            ("independent_acceptance_ref", &independent_acceptance_ref),
+        ] {
+            if !valid_evidence_reference(value) {
+                return Err(LedgerError::InvalidExternalVerifiedResultAdoption { field });
+            }
+        }
+        if !(1..=MAX_EXTERNAL_RESULT_APPROVAL_REFS).contains(&protected_action_approval_refs.len())
+        {
+            return Err(LedgerError::ExternalVerifiedResultAdoptionLimitExceeded {
+                field: "protected_action_approval_refs",
+            });
+        }
+        let mut normalized_approvals = BTreeMap::new();
+        for reference in protected_action_approval_refs {
+            if !valid_evidence_reference(&reference) {
+                return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
+                    field: "protected_action_approval_refs",
+                });
+            }
+            if normalized_approvals.insert(reference.clone(), ()).is_some() {
+                return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
+                    field: "protected_action_approval_refs",
+                });
+            }
+        }
+        let protected_action_approval_refs = normalized_approvals.into_keys().collect::<Vec<_>>();
+        let result_digest = hash_value_at_version(
+            "lattice.task-ledger.external-verified-result-adoption",
+            "1.0",
+            &external_verified_result_adoption_value(
+                &task_ref,
+                &client_request_id,
+                &expected_ledger_head_digest,
+                &source_sha,
+                &target_sha,
+                &push_merge_receipt_ref,
+                &deployment_receipt_ref,
+                &deployment_artifact_ref,
+                &independent_acceptance_ref,
+                &protected_action_approval_refs,
+            ),
+        )?;
+        Ok(Self {
+            task_ref,
+            client_request_id,
+            expected_ledger_head_digest,
+            source_sha,
+            target_sha,
+            push_merge_receipt_ref,
+            deployment_receipt_ref,
+            deployment_artifact_ref,
+            independent_acceptance_ref,
+            protected_action_approval_refs,
+            result_digest,
+        })
+    }
+
+    #[must_use]
+    pub const fn task_ref(&self) -> &ContentDigest {
+        &self.task_ref
+    }
+    #[must_use]
+    pub fn client_request_id(&self) -> &str {
+        &self.client_request_id
+    }
+    #[must_use]
+    pub const fn expected_ledger_head_digest(&self) -> &ContentDigest {
+        &self.expected_ledger_head_digest
+    }
+    #[must_use]
+    pub fn source_sha(&self) -> &str {
+        &self.source_sha
+    }
+    #[must_use]
+    pub fn target_sha(&self) -> &str {
+        &self.target_sha
+    }
+    #[must_use]
+    pub fn push_merge_receipt_ref(&self) -> &str {
+        &self.push_merge_receipt_ref
+    }
+    #[must_use]
+    pub fn deployment_receipt_ref(&self) -> &str {
+        &self.deployment_receipt_ref
+    }
+    #[must_use]
+    pub fn deployment_artifact_ref(&self) -> &str {
+        &self.deployment_artifact_ref
+    }
+    #[must_use]
+    pub fn independent_acceptance_ref(&self) -> &str {
+        &self.independent_acceptance_ref
+    }
+    #[must_use]
+    pub fn protected_action_approval_refs(&self) -> &[String] {
+        &self.protected_action_approval_refs
+    }
+
+    /// Stable command identity derived only from the MCP idempotency key.
+    #[must_use]
+    pub fn command_id(&self) -> String {
+        format!("external-result-adoption:{}", self.client_request_id)
+    }
+
+    /// Complete immutable result identity bound into the terminal Ledger event.
+    #[must_use]
+    pub const fn result_digest(&self) -> &ContentDigest {
+        &self.result_digest
+    }
 }
 
 /// Closed semantic request families sharing one task-submission ingress keyspace.
@@ -1859,6 +2114,7 @@ enum AppendConstruction {
     GeneralTaskCreated,
     VerifiedAutonomy,
     VerifiedForeman,
+    VerifiedExternalResultAdoption,
     VerifiedReplay,
 }
 
@@ -2015,6 +2271,45 @@ impl AppendCommand {
         )
     }
 
+    /// Constructs the only terminal event that may close a create-only general
+    /// intake without manufacturing execution or Writer-Lease authority.
+    ///
+    /// The repository adapter must independently verify all referenced
+    /// receipts before constructing this command; this pure boundary binds the
+    /// already-verified bundle to the exact DRAFT Ledger head.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_external_verified_result_adopted(
+        expected_head: TaskLedgerStreamHead,
+        command_id: CommandId,
+        correlation_id: CorrelationId,
+        occurred_at: impl Into<String>,
+        actor_id: ActorId,
+        adoption: &ExternalVerifiedResultAdoption,
+    ) -> Result<Self, LedgerError> {
+        if expected_head.identity().subject_kind() != TaskLedgerSubjectKind::GeneralTaskIntake
+            || expected_head.sequence() != 1
+            || expected_head.head_digest() != adoption.expected_ledger_head_digest()
+            || command_id.as_str() != adoption.command_id()
+        {
+            return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
+        }
+        Self::from_fields(
+            expected_head,
+            command_id,
+            correlation_id,
+            occurred_at,
+            LedgerEventKind::ExternalVerifiedResultAdopted,
+            actor_id,
+            ActionId::new(EXTERNAL_RESULT_ADOPTION_ACTION)?,
+            LedgerOutcome::Recorded,
+            ReasonCode::new(EXTERNAL_RESULT_ADOPTION_REASON)?,
+            adoption.result_digest().clone(),
+            None,
+            None,
+            AppendConstruction::VerifiedExternalResultAdoption,
+        )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn from_fields(
         expected_head: TaskLedgerStreamHead,
@@ -2061,6 +2356,19 @@ impl AppendCommand {
         {
             return Err(LedgerError::InvalidForemanSnapshot);
         }
+        if matches!(kind, LedgerEventKind::ExternalVerifiedResultAdopted)
+            && (!matches!(
+                construction,
+                AppendConstruction::VerifiedExternalResultAdoption
+                    | AppendConstruction::VerifiedReplay
+            ) || action.as_str() != EXTERNAL_RESULT_ADOPTION_ACTION
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != EXTERNAL_RESULT_ADOPTION_REASON
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
+        }
         if matches!(kind, LedgerEventKind::TaskCreated) {
             let profile = classify_task_created_action(action.as_str())?;
             match construction {
@@ -2088,6 +2396,7 @@ impl AppendCommand {
                 | AppendConstruction::GeneralTaskCreated
                 | AppendConstruction::VerifiedAutonomy
                 | AppendConstruction::VerifiedForeman
+                | AppendConstruction::VerifiedExternalResultAdoption
                 | AppendConstruction::VerifiedReplay => {}
             }
         }
@@ -3202,6 +3511,7 @@ pub fn plan_append(
         requested_profile,
         &command.subject_digest,
     )?;
+    let external_adoption = command.kind == LedgerEventKind::ExternalVerifiedResultAdopted;
     match current.identity().subject_kind() {
         TaskLedgerSubjectKind::TaskSpec
             if requested_profile == Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
@@ -3209,7 +3519,8 @@ pub fn plan_append(
             return Err(LedgerError::InvalidStreamHead);
         }
         TaskLedgerSubjectKind::GeneralTaskIntake
-            if requested_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
+            if requested_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+                && !external_adoption =>
         {
             return Err(LedgerError::GeneralTaskIntakeCreateOnly);
         }
@@ -3229,8 +3540,25 @@ pub fn plan_append(
         .transpose()?
         .flatten()
         == Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+        && !external_adoption
     {
         return Err(LedgerError::GeneralTaskIntakeCreateOnly);
+    }
+    if external_adoption {
+        let valid_terminal = current.identity().subject_kind()
+            == TaskLedgerSubjectKind::GeneralTaskIntake
+            && current.events.len() == 1
+            && classify_task_created_profile(&current.events[0])?
+                == Some(TaskCreatedProfile::GeneralTaskIntakeV1)
+            && command.expected_head.sequence() == 1
+            && command.action.as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
+            && command.reason_code.as_str() == EXTERNAL_RESULT_ADOPTION_REASON
+            && command.outcome == LedgerOutcome::Recorded
+            && command.diagnostic.is_none()
+            && command.resource_snapshot.is_none();
+        if !valid_terminal {
+            return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
+        }
     }
     if current.events.len() == 1
         && classify_task_created_profile(&current.events[0])?
@@ -3580,7 +3908,11 @@ pub fn verify_untrusted_autonomy_receipt_rows(
             _ => Err(LedgerError::InvalidAutonomyReceipt),
         },
         Some(TaskCreatedProfile::GeneralTaskIntakeV1) => {
-            if rows.is_empty() && autonomy_events.is_empty() && stream.events().len() == 1 {
+            if rows.is_empty()
+                && autonomy_events.is_empty()
+                && (stream.events().len() == 1
+                    || valid_general_external_adoption_events(stream.events()))
+            {
                 Ok(VerifiedAutonomyReceiptState::NotApplicable)
             } else {
                 Err(LedgerError::GeneralTaskIntakeCreateOnly)
@@ -4804,7 +5136,7 @@ pub fn verify_untrusted_snapshot(
         TaskLedgerSubjectKind::GeneralTaskIntake
             if !events.is_empty()
                 && (retained_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
-                    || events.len() != 1) =>
+                    || !(events.len() == 1 || valid_general_external_adoption_events(&events))) =>
         {
             return Err(LedgerError::GeneralTaskIntakeCreateOnly);
         }
@@ -4915,6 +5247,28 @@ fn validate_autonomy_order(
         return Err(LedgerError::InvalidAutonomyReceipt);
     }
     Ok(())
+}
+
+fn valid_general_external_adoption_events(events: &[LedgerEvent]) -> bool {
+    let [created, terminal] = events else {
+        return false;
+    };
+    let Some(client_request_id) = created.command_id().as_str().strip_prefix("mcp-submit:") else {
+        return false;
+    };
+    classify_task_created_profile(created).ok()
+        == Some(Some(TaskCreatedProfile::GeneralTaskIntakeV1))
+        && valid_task_ingress_client_request_id(client_request_id)
+        && terminal.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
+        && terminal.actor_id() == created.actor_id()
+        && terminal.correlation_id().as_str() == GENERAL_TASK_INTAKE_CORRELATION_ID
+        && terminal.action().as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
+        && terminal.outcome() == LedgerOutcome::Recorded
+        && terminal.reason_code().as_str() == EXTERNAL_RESULT_ADOPTION_REASON
+        && terminal.command_id().as_str() == format!("external-result-adoption:{client_request_id}")
+        && !is_zero_digest(terminal.subject_digest())
+        && terminal.diagnostic().is_none()
+        && terminal.resource_snapshot().is_none()
 }
 
 fn validate_submission_control_id(
@@ -5040,6 +5394,25 @@ fn valid_identifier(value: &str) -> bool {
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b':' | b'/' | b'-')
         })
+}
+
+fn valid_git_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_evidence_reference(value: &str) -> bool {
+    value
+        .strip_prefix("evidence:sha256:")
+        .is_some_and(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        && !recognized_secret_text(value)
 }
 
 fn valid_project_snapshot_identifier(value: &str) -> bool {
@@ -5462,6 +5835,49 @@ fn task_submission_content_value(
         ),
         ("stream_identity", identity_value(identity)),
         ("stream_id", digest_value(stream_id)),
+    ])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn external_verified_result_adoption_value(
+    task_ref: &ContentDigest,
+    client_request_id: &str,
+    expected_ledger_head_digest: &ContentDigest,
+    source_sha: &str,
+    target_sha: &str,
+    push_merge_receipt_ref: &str,
+    deployment_receipt_ref: &str,
+    deployment_artifact_ref: &str,
+    independent_acceptance_ref: &str,
+    protected_action_approval_refs: &[String],
+) -> CanonicalValue {
+    object(vec![
+        ("schema", text(EXTERNAL_VERIFIED_RESULT_ADOPTION_SCHEMA)),
+        ("task_ref", digest_value(task_ref)),
+        ("client_request_id", text(client_request_id)),
+        (
+            "expected_ledger_head_digest",
+            digest_value(expected_ledger_head_digest),
+        ),
+        ("source_sha", text(source_sha)),
+        ("target_sha", text(target_sha)),
+        ("push_merge_receipt_ref", text(push_merge_receipt_ref)),
+        ("deployment_receipt_ref", text(deployment_receipt_ref)),
+        ("deployment_artifact_ref", text(deployment_artifact_ref)),
+        (
+            "independent_acceptance_ref",
+            text(independent_acceptance_ref),
+        ),
+        (
+            "protected_action_approval_refs",
+            CanonicalValue::Array(
+                protected_action_approval_refs
+                    .iter()
+                    .cloned()
+                    .map(CanonicalValue::String)
+                    .collect(),
+            ),
+        ),
     ])
 }
 

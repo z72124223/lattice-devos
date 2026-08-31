@@ -48,6 +48,8 @@ pub const TASK_STATUS_TOOL: &str = "lattice_task_status";
 pub const FOREMAN_CHECKPOINT_TOOL: &str = "lattice_foreman_checkpoint";
 /// Retained exact canary intent accepted alongside bounded general objectives.
 pub const CONTROLLED_CODEX_CANARY_INTENT: &str = "CONTROLLED_CODEX_CANARY";
+/// Closed lifecycle intent for adopting an independently verified external result.
+pub const ADOPT_VERIFIED_RESULT_INTENT: &str = "ADOPT_VERIFIED_RESULT_V1";
 
 const LEGACY_DELIVERY_RUN_DISABLED: &str = "LATTICE_DELIVERY_RUN_REQUIRES_CANONICAL_LATTICED";
 
@@ -1266,6 +1268,72 @@ pub struct TaskSubmitArguments {
     objective: Option<String>,
     project_id: Option<String>,
     project_name: Option<String>,
+    verified_result_adoption: Option<VerifiedResultAdoptionArguments>,
+}
+
+/// Closed, bounded evidence pointers for one externally verified result adoption.
+///
+/// Every reference is an opaque descriptor digest. No evidence payload, path,
+/// command, credential, or caller-selected lifecycle action crosses the MCP
+/// transport boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerifiedResultAdoptionArguments {
+    task_ref: String,
+    expected_ledger_head_digest: String,
+    source_sha: String,
+    target_sha: String,
+    push_merge_receipt_ref: String,
+    deployment_receipt_ref: String,
+    deployment_artifact_ref: String,
+    independent_acceptance_ref: String,
+    protected_action_approval_refs: Vec<String>,
+}
+
+impl VerifiedResultAdoptionArguments {
+    #[must_use]
+    pub fn task_ref(&self) -> &str {
+        &self.task_ref
+    }
+
+    #[must_use]
+    pub fn expected_ledger_head_digest(&self) -> &str {
+        &self.expected_ledger_head_digest
+    }
+
+    #[must_use]
+    pub fn source_sha(&self) -> &str {
+        &self.source_sha
+    }
+
+    #[must_use]
+    pub fn target_sha(&self) -> &str {
+        &self.target_sha
+    }
+
+    #[must_use]
+    pub fn push_merge_receipt_ref(&self) -> &str {
+        &self.push_merge_receipt_ref
+    }
+
+    #[must_use]
+    pub fn deployment_receipt_ref(&self) -> &str {
+        &self.deployment_receipt_ref
+    }
+
+    #[must_use]
+    pub fn deployment_artifact_ref(&self) -> &str {
+        &self.deployment_artifact_ref
+    }
+
+    #[must_use]
+    pub fn independent_acceptance_ref(&self) -> &str {
+        &self.independent_acceptance_ref
+    }
+
+    #[must_use]
+    pub fn protected_action_approval_refs(&self) -> &[String] {
+        &self.protected_action_approval_refs
+    }
 }
 
 impl TaskSubmitArguments {
@@ -1297,6 +1365,90 @@ impl TaskSubmitArguments {
                 objective: None,
                 project_id: None,
                 project_name: None,
+                verified_result_adoption: None,
+            });
+        }
+
+        if intent_value == Some(ADOPT_VERIFIED_RESULT_INTENT) {
+            let exact_fields = [
+                "client_request_id",
+                "intent",
+                "task_ref",
+                "expected_ledger_head_digest",
+                "source_sha",
+                "target_sha",
+                "push_merge_receipt_ref",
+                "deployment_receipt_ref",
+                "deployment_artifact_ref",
+                "independent_acceptance_ref",
+                "protected_action_approval_refs",
+            ];
+            if arguments.len() != exact_fields.len()
+                || exact_fields
+                    .iter()
+                    .any(|field| !arguments.contains_key(*field))
+            {
+                return None;
+            }
+            let text = |field: &str| arguments.get(field).and_then(Value::as_str);
+            let task_ref = text("task_ref")?;
+            let expected_ledger_head_digest = text("expected_ledger_head_digest")?;
+            let source_sha = text("source_sha")?;
+            let target_sha = text("target_sha")?;
+            let push_merge_receipt_ref = text("push_merge_receipt_ref")?;
+            let deployment_receipt_ref = text("deployment_receipt_ref")?;
+            let deployment_artifact_ref = text("deployment_artifact_ref")?;
+            let independent_acceptance_ref = text("independent_acceptance_ref")?;
+            let approvals = arguments
+                .get("protected_action_approval_refs")?
+                .as_array()?;
+            if !valid_task_ref(task_ref)
+                || !valid_task_ref(expected_ledger_head_digest)
+                || !valid_git_sha(source_sha)
+                || !valid_git_sha(target_sha)
+                || !valid_evidence_ref(push_merge_receipt_ref)
+                || !valid_evidence_ref(deployment_receipt_ref)
+                || !valid_evidence_ref(deployment_artifact_ref)
+                || !valid_evidence_ref(independent_acceptance_ref)
+                || !(1..=8).contains(&approvals.len())
+            {
+                return None;
+            }
+            let protected_action_approval_refs = approvals
+                .iter()
+                .map(Value::as_str)
+                .collect::<Option<Vec<_>>>()?;
+            if protected_action_approval_refs
+                .iter()
+                .any(|value| !valid_evidence_ref(value))
+                || protected_action_approval_refs
+                    .iter()
+                    .collect::<HashSet<_>>()
+                    .len()
+                    != protected_action_approval_refs.len()
+            {
+                return None;
+            }
+            return Some(Self {
+                client_request_id: client_request_id.to_owned(),
+                intent: ADOPT_VERIFIED_RESULT_INTENT.to_owned(),
+                objective: None,
+                project_id: None,
+                project_name: None,
+                verified_result_adoption: Some(VerifiedResultAdoptionArguments {
+                    task_ref: task_ref.to_owned(),
+                    expected_ledger_head_digest: expected_ledger_head_digest.to_owned(),
+                    source_sha: source_sha.to_owned(),
+                    target_sha: target_sha.to_owned(),
+                    push_merge_receipt_ref: push_merge_receipt_ref.to_owned(),
+                    deployment_receipt_ref: deployment_receipt_ref.to_owned(),
+                    deployment_artifact_ref: deployment_artifact_ref.to_owned(),
+                    independent_acceptance_ref: independent_acceptance_ref.to_owned(),
+                    protected_action_approval_refs: protected_action_approval_refs
+                        .into_iter()
+                        .map(ToOwned::to_owned)
+                        .collect(),
+                }),
             });
         }
 
@@ -1328,6 +1480,7 @@ impl TaskSubmitArguments {
             objective: Some(objective.to_owned()),
             project_id: project_id.map(ToOwned::to_owned),
             project_name: project_name.map(ToOwned::to_owned),
+            verified_result_adoption: None,
         })
     }
 
@@ -1346,7 +1499,7 @@ impl TaskSubmitArguments {
     /// Distinguishes the retained execution canary from a create-only objective.
     #[must_use]
     pub fn is_controlled_canary(&self) -> bool {
-        self.objective.is_none()
+        self.objective.is_none() && self.verified_result_adoption.is_none()
     }
 
     /// Returns the validated natural-language objective for create-only intake.
@@ -1366,6 +1519,12 @@ impl TaskSubmitArguments {
     #[must_use]
     pub fn project_name(&self) -> Option<&str> {
         self.project_name.as_deref()
+    }
+
+    /// Returns the typed externally verified-result adoption payload, if selected.
+    #[must_use]
+    pub const fn verified_result_adoption(&self) -> Option<&VerifiedResultAdoptionArguments> {
+        self.verified_result_adoption.as_ref()
     }
 }
 
@@ -2829,8 +2988,59 @@ fn task_submit_arguments_schema() -> Value {
                 "additionalProperties": false
             },
             general_task_submit_schema("objective", false),
-            general_task_submit_schema("intent", true)
+            general_task_submit_schema("intent", true),
+            verified_result_adoption_schema()
         ]
+    })
+}
+
+fn verified_result_adoption_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "client_request_id": client_request_id_schema(),
+            "intent": {"type": "string", "enum": [ADOPT_VERIFIED_RESULT_INTENT]},
+            "task_ref": lower_sha256_schema(),
+            "expected_ledger_head_digest": lower_sha256_schema(),
+            "source_sha": git_sha_schema(),
+            "target_sha": git_sha_schema(),
+            "push_merge_receipt_ref": evidence_ref_schema(),
+            "deployment_receipt_ref": evidence_ref_schema(),
+            "deployment_artifact_ref": evidence_ref_schema(),
+            "independent_acceptance_ref": evidence_ref_schema(),
+            "protected_action_approval_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": true,
+                "items": evidence_ref_schema()
+            }
+        },
+        "required": [
+            "client_request_id", "intent", "task_ref", "expected_ledger_head_digest",
+            "source_sha", "target_sha", "push_merge_receipt_ref",
+            "deployment_receipt_ref", "deployment_artifact_ref",
+            "independent_acceptance_ref", "protected_action_approval_refs"
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn git_sha_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 40,
+        "maxLength": 40,
+        "pattern": "^[0-9a-f]{40}$"
+    })
+}
+
+fn evidence_ref_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 80,
+        "maxLength": 80,
+        "pattern": "^evidence:sha256:[0-9a-f]{64}$"
     })
 }
 
@@ -3645,6 +3855,19 @@ fn valid_task_ref(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_git_sha(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn valid_evidence_ref(value: &str) -> bool {
+    value
+        .strip_prefix("evidence:sha256:")
+        .is_some_and(valid_task_ref)
 }
 
 fn closed_task_public_status(

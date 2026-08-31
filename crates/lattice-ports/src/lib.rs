@@ -436,12 +436,16 @@ impl Error for TaskLifecycleError {}
 
 /// Replay-verified projection of one pre-specification general-task intake.
 ///
-/// The type is structurally fixed to `DRAFT` with no result and carries no
-/// Task Spec, currency, autonomy, approval, Writer Lease, or execution field.
+/// Ordinary intake remains structurally `DRAFT`. The only terminal carve-out
+/// is a digest-bound `COMPLETED` projection from the dedicated external result
+/// adoption path; it still carries no Task Spec, currency, autonomy, approval,
+/// Writer Lease, or execution field.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TaskIntakeLifecycleEvidence {
     binding: lattice_contracts::TaskIntakeBinding,
     ledger_head_digest: lattice_contracts::ContentDigest,
+    state: TaskState,
+    result_digest: Option<lattice_contracts::ContentDigest>,
 }
 
 impl TaskIntakeLifecycleEvidence {
@@ -463,6 +467,38 @@ impl TaskIntakeLifecycleEvidence {
         Ok(Self {
             binding,
             ledger_head_digest,
+            state: TaskState::Draft,
+            result_digest: None,
+        })
+    }
+
+    /// Constructs the sole non-executable terminal intake projection.
+    ///
+    /// This constructor grants no mutation authority. Its caller must have
+    /// independently verified the immutable external-result adoption receipt
+    /// and committed its typed terminal Ledger event.
+    ///
+    /// # Errors
+    ///
+    /// Rejects all-zero head or result commitments.
+    pub fn externally_adopted(
+        binding: lattice_contracts::TaskIntakeBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+        result_digest: lattice_contracts::ContentDigest,
+    ) -> TaskLifecycleResult<Self> {
+        if ledger_head_digest.as_str().bytes().all(|byte| byte == b'0')
+            || result_digest.as_str().bytes().all(|byte| byte == b'0')
+        {
+            return Err(TaskLifecycleError::new(
+                TaskLifecycleErrorKind::Corrupt,
+                "LATTICE_TASK_INTAKE_EXTERNAL_RESULT_REJECTED",
+            ));
+        }
+        Ok(Self {
+            binding,
+            ledger_head_digest,
+            state: TaskState::Completed,
+            result_digest: Some(result_digest),
         })
     }
 
@@ -472,16 +508,16 @@ impl TaskIntakeLifecycleEvidence {
         &self.binding
     }
 
-    /// Returns the only state representable by general intake.
+    /// Returns the replay-verified intake state.
     #[must_use]
     pub const fn state(&self) -> TaskState {
-        TaskState::Draft
+        self.state
     }
 
-    /// General intake cannot carry an execution result.
+    /// Returns the digest-bound external terminal result, if adopted.
     #[must_use]
-    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
-        None
+    pub fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.result_digest.as_ref()
     }
 
     /// Returns the verified current Task Ledger head commitment.
@@ -535,16 +571,16 @@ impl TaskIntakeAdmission {
         self.evidence.binding()
     }
 
-    /// Returns the fixed `DRAFT` intake state.
+    /// Returns the replay-verified intake state.
     #[must_use]
     pub const fn state(&self) -> TaskState {
         self.evidence.state()
     }
 
-    /// Intake admission cannot carry an execution result.
+    /// Returns the digest-bound external terminal result, if adopted.
     #[must_use]
-    pub const fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
-        None
+    pub fn result_digest(&self) -> Option<&lattice_contracts::ContentDigest> {
+        self.evidence.result_digest()
     }
 
     /// Consumes the admission wrapper and returns its verified evidence.

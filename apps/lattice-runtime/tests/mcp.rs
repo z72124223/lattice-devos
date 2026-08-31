@@ -100,6 +100,7 @@ impl DeliveryToolService for FakeService {
 
 const CLIENT_REQUEST_ID: &str = "chatgpt-canary-001";
 const CONTROLLED_CODEX_CANARY: &str = "CONTROLLED_CODEX_CANARY";
+const ADOPT_VERIFIED_RESULT: &str = "ADOPT_VERIFIED_RESULT_V1";
 const TASK_REF: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const LEDGER_HEAD_DIGEST: &str = "123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
 const RESULT_DIGEST: &str = "23456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef01";
@@ -581,6 +582,62 @@ fn general_task_input_variant(field: &str, excludes_canary: bool) -> Value {
         schema["properties"][field]["not"] = json!({"enum": [CONTROLLED_CODEX_CANARY]});
     }
     schema
+}
+
+fn verified_result_adoption_input_variant() -> Value {
+    let sha256 = || {
+        json!({
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[0-9a-f]{64}$"
+        })
+    };
+    let git_sha = || {
+        json!({
+            "type": "string",
+            "minLength": 40,
+            "maxLength": 40,
+            "pattern": "^[0-9a-f]{40}$"
+        })
+    };
+    let evidence_ref = || {
+        json!({
+            "type": "string",
+            "minLength": 80,
+            "maxLength": 80,
+            "pattern": "^evidence:sha256:[0-9a-f]{64}$"
+        })
+    };
+    json!({
+        "type": "object",
+        "properties": {
+            "client_request_id": client_request_id_input_schema(),
+            "intent": {"type": "string", "enum": [ADOPT_VERIFIED_RESULT]},
+            "task_ref": sha256(),
+            "expected_ledger_head_digest": sha256(),
+            "source_sha": git_sha(),
+            "target_sha": git_sha(),
+            "push_merge_receipt_ref": evidence_ref(),
+            "deployment_receipt_ref": evidence_ref(),
+            "deployment_artifact_ref": evidence_ref(),
+            "independent_acceptance_ref": evidence_ref(),
+            "protected_action_approval_refs": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "uniqueItems": true,
+                "items": evidence_ref()
+            }
+        },
+        "required": [
+            "client_request_id", "intent", "task_ref", "expected_ledger_head_digest",
+            "source_sha", "target_sha", "push_merge_receipt_ref",
+            "deployment_receipt_ref", "deployment_artifact_ref",
+            "independent_acceptance_ref", "protected_action_approval_refs"
+        ],
+        "additionalProperties": false
+    })
 }
 
 #[derive(Clone)]
@@ -1283,7 +1340,8 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
                     "additionalProperties": false
                 },
                 general_task_input_variant("objective", false),
-                general_task_input_variant("intent", true)
+                general_task_input_variant("intent", true),
+                verified_result_adoption_input_variant()
             ]
         })
     );
@@ -2013,6 +2071,124 @@ fn general_task_submit_uses_the_same_unicode_character_bounds_as_its_json_schema
             .count(),
         64
     );
+}
+
+#[test]
+fn verified_result_adoption_submit_is_a_closed_secret_safe_typed_variant() {
+    let (mut server, submits, _) = task_server();
+    initialize(&mut server);
+    let evidence = |byte: char| format!("evidence:sha256:{}", byte.to_string().repeat(64));
+    let response = server
+        .handle(json!({
+            "jsonrpc": "2.0",
+            "id": "adopt-verified-result",
+            "method": "tools/call",
+            "params": {
+                "name": "lattice_task_submit",
+                "arguments": {
+                    "client_request_id": "adopt-verified-001",
+                    "intent": ADOPT_VERIFIED_RESULT,
+                    "task_ref": TASK_REF,
+                    "expected_ledger_head_digest": LEDGER_HEAD_DIGEST,
+                    "source_sha": "1".repeat(40),
+                    "target_sha": "2".repeat(40),
+                    "push_merge_receipt_ref": evidence('3'),
+                    "deployment_receipt_ref": evidence('4'),
+                    "deployment_artifact_ref": evidence('5'),
+                    "independent_acceptance_ref": evidence('6'),
+                    "protected_action_approval_refs": [evidence('7'), evidence('8')]
+                }
+            }
+        }))
+        .expect("verified-result adoption response");
+
+    assert_eq!(response["result"]["isError"], false);
+    let submits = submits.borrow();
+    assert_eq!(submits.len(), 1);
+    let adoption = submits[0]
+        .verified_result_adoption()
+        .expect("typed adoption variant");
+    assert_eq!(adoption.task_ref(), TASK_REF);
+    assert_eq!(adoption.expected_ledger_head_digest(), LEDGER_HEAD_DIGEST);
+    assert_eq!(adoption.source_sha(), "1".repeat(40));
+    assert_eq!(adoption.target_sha(), "2".repeat(40));
+    assert_eq!(adoption.protected_action_approval_refs().len(), 2);
+    assert_eq!(submits[0].intent(), ADOPT_VERIFIED_RESULT);
+    assert!(submits[0].objective().is_none());
+    assert!(!submits[0].is_controlled_canary());
+}
+
+#[test]
+fn verified_result_adoption_rejects_changed_shape_bounds_duplicates_and_secrets() {
+    let evidence = |byte: char| format!("evidence:sha256:{}", byte.to_string().repeat(64));
+    let valid = || {
+        json!({
+            "client_request_id": "adopt-verified-002",
+            "intent": ADOPT_VERIFIED_RESULT,
+            "task_ref": TASK_REF,
+            "expected_ledger_head_digest": LEDGER_HEAD_DIGEST,
+            "source_sha": "1".repeat(40),
+            "target_sha": "2".repeat(40),
+            "push_merge_receipt_ref": evidence('3'),
+            "deployment_receipt_ref": evidence('4'),
+            "deployment_artifact_ref": evidence('5'),
+            "independent_acceptance_ref": evidence('6'),
+            "protected_action_approval_refs": [evidence('7')]
+        })
+    };
+    let mut invalid = Vec::new();
+    for field in [
+        "task_ref",
+        "expected_ledger_head_digest",
+        "source_sha",
+        "target_sha",
+        "push_merge_receipt_ref",
+        "deployment_receipt_ref",
+        "deployment_artifact_ref",
+        "independent_acceptance_ref",
+        "protected_action_approval_refs",
+    ] {
+        let mut missing = valid();
+        missing.as_object_mut().unwrap().remove(field);
+        invalid.push(missing);
+    }
+    let mut extra = valid();
+    extra["secret"] = json!("do-not-store");
+    invalid.push(extra);
+    let mut bad_sha = valid();
+    bad_sha["source_sha"] = json!("A".repeat(40));
+    invalid.push(bad_sha);
+    let mut bad_ref = valid();
+    bad_ref["deployment_receipt_ref"] = json!("evidence:sha256:sk-do-not-store");
+    invalid.push(bad_ref);
+    let mut no_approvals = valid();
+    no_approvals["protected_action_approval_refs"] = json!([]);
+    invalid.push(no_approvals);
+    let mut duplicate_approvals = valid();
+    duplicate_approvals["protected_action_approval_refs"] = json!([evidence('7'), evidence('7')]);
+    invalid.push(duplicate_approvals);
+    let mut too_many_approvals = valid();
+    too_many_approvals["protected_action_approval_refs"] = json!(
+        (0..9)
+            .map(|i| evidence(char::from(b'a' + i)))
+            .collect::<Vec<_>>()
+    );
+    invalid.push(too_many_approvals);
+
+    for arguments in invalid {
+        let (mut server, submits, _) = task_server();
+        initialize(&mut server);
+        let response = server
+            .handle(json!({
+                "jsonrpc": "2.0",
+                "id": "invalid-adoption",
+                "method": "tools/call",
+                "params": {"name": "lattice_task_submit", "arguments": arguments}
+            }))
+            .expect("invalid adoption response");
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(submits.borrow().is_empty());
+    }
 }
 
 #[test]

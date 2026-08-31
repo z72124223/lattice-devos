@@ -5,12 +5,13 @@ use lattice_contracts::{
     GatewayPeerContext, GatewayReply, GatewayReplyBody, GatewayRequest, GatewayRequestBody,
     GatewaySessionId, GatewayTaskTarget, GraphifyBuildRequest, GraphifyEvidence, HermesEvidence,
     HermesResearchRequest, Invocation, ProjectId, ProjectSnapshotId, RequestId, RuntimeKind,
-    SubjectBinding, TaskId,
+    SubjectBinding, TaskId, TaskIntakeBinding,
 };
 use lattice_ports::{
     CodexPort, GatewayService, GatewayServiceError, GatewayServiceResult, GraphifyPort, HermesPort,
-    PortError, PortErrorKind, PortResult,
+    PortError, PortErrorKind, PortResult, TaskIntakeLifecycleEvidence,
 };
+use lattice_task_domain::TaskState;
 
 struct AllPorts;
 
@@ -184,4 +185,25 @@ fn gateway_service_errors_do_not_misattribute_an_external_component() {
     assert_eq!(error.kind(), PortErrorKind::Malformed);
     assert_eq!(error.code(), "reply-binding");
     assert_eq!(error.to_string(), "GatewayService Malformed: reply-binding");
+}
+
+#[test]
+fn intake_projection_can_expose_only_a_digest_bound_external_terminal_result() {
+    let binding = TaskIntakeBinding::new(
+        ProjectId::new("project-1").expect("project"),
+        ProjectSnapshotId::new("snapshot-1").expect("snapshot"),
+        TaskId::new("TASK-GENERAL-1").expect("task"),
+        "1",
+        digest('a'),
+    )
+    .expect("intake binding");
+    let draft = TaskIntakeLifecycleEvidence::new(binding.clone(), digest('b')).expect("draft");
+    assert_eq!(draft.state(), TaskState::Draft);
+    assert_eq!(draft.result_digest(), None);
+
+    let adopted =
+        TaskIntakeLifecycleEvidence::externally_adopted(binding, digest('c'), digest('d'))
+            .expect("external terminal projection");
+    assert_eq!(adopted.state(), TaskState::Completed);
+    assert_eq!(adopted.result_digest(), Some(&digest('d')));
 }

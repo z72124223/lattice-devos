@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 lattice-cjson = { path = "../lattice-cjson" }
 lattice-contracts = { path = "../lattice-contracts" }
+lattice-task-ledger = { path = "../lattice-task-ledger" }
 sha2 = "=0.11.0"
 time = { version = "=0.3.54", default-features = false, features = ["formatting", "parsing"] }
 

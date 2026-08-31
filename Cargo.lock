@@ -238,6 +238,7 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-task-ledger",
  "sha2",
  "time",
 ]

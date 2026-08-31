@@ -28,10 +28,11 @@ use lattice_task_ledger::{
     AutonomyModel as LedgerAutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
     AutonomyRiskClass as LedgerAutonomyRiskClass, AutonomyTaskKind,
     AutonomyVerification as LedgerAutonomyVerification, CommandId, CommandOutcome, CorrelationId,
-    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile, TaskIngressClaim,
-    TaskIngressRequestKind, TaskSubmissionEnvelope, VerifiedAutonomyReceipt,
-    VerifiedAutonomyReceiptState, VerifiedStream, classify_task_created_profile,
-    plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
+    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile,
+    TaskIngressClaim, TaskIngressRequestKind, TaskSubmissionEnvelope,
+    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream,
+    classify_task_created_profile, plan_autonomy_receipt_append,
+    verify_exact_autonomy_receipt_retry,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
@@ -679,9 +680,9 @@ fn project_intake_evidence(
 ) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence> {
     if stream.identity() != binding.stream_identity()
         || submission.identity() != binding.stream_identity()
-        || stream.head().sequence() != 1
-        || stream.events().len() != 1
-        || stream.commands().len() != 1
+        || !(stream.head().sequence() == 1 || stream.head().sequence() == 2)
+        || stream.events().len() != usize::try_from(stream.head().sequence()).unwrap_or(usize::MAX)
+        || stream.commands().len() != stream.events().len()
         || !stream.outboxes().is_empty()
     {
         return Err(corrupt("LATTICE_TASK_INTAKE_EVIDENCE_REJECTED"));
@@ -701,7 +702,39 @@ fn project_intake_evidence(
     {
         return Err(corrupt("LATTICE_TASK_INTAKE_EVIDENCE_REJECTED"));
     }
-    TaskIntakeLifecycleEvidence::new(binding.clone(), stream.head().head_digest().clone())
+    if stream.events().len() == 1 {
+        return TaskIntakeLifecycleEvidence::new(
+            binding.clone(),
+            stream.head().head_digest().clone(),
+        );
+    }
+
+    let terminal = &stream.events()[1];
+    if terminal.kind() != LedgerEventKind::ExternalVerifiedResultAdopted
+        || terminal.actor_id().as_str() != ingress_peer.actor_id().as_str()
+        || terminal.correlation_id().as_str() != GENERAL_TASK_CORRELATION_ID
+        || terminal.outcome() != LedgerOutcome::Recorded
+        || terminal.action().as_str() != "ADOPT_VERIFIED_RESULT_V1"
+        || terminal.reason_code().as_str() != "EXTERNAL_VERIFIED_RESULT_ADOPTED"
+        || terminal
+            .subject_digest()
+            .as_str()
+            .bytes()
+            .all(|byte| byte == b'0')
+        || terminal.diagnostic().is_some()
+        || terminal.command_id().as_str()
+            != format!(
+                "external-result-adoption:{}",
+                submission.client_request_id()
+            )
+    {
+        return Err(corrupt("LATTICE_TASK_INTAKE_EXTERNAL_RESULT_REJECTED"));
+    }
+    TaskIntakeLifecycleEvidence::externally_adopted(
+        binding.clone(),
+        stream.head().head_digest().clone(),
+        terminal.subject_digest().clone(),
+    )
 }
 
 impl TaskIntakeLifecyclePort for PostgresTaskLifecycle {
@@ -2024,7 +2057,8 @@ mod tests {
         TaskIngressPeerEvidence,
     };
     use lattice_task_ledger::{
-        FakeTaskLedger, verify_untrusted_autonomy_receipt_rows, verify_untrusted_snapshot,
+        ExternalVerifiedResultAdoption, FakeTaskLedger, verify_untrusted_autonomy_receipt_rows,
+        verify_untrusted_snapshot,
     };
 
     #[test]
@@ -3137,6 +3171,64 @@ mod tests {
         assert!(replay.is_exact_replay());
         assert_eq!(replay.state(), TaskState::Draft);
         assert!(replay.result_digest().is_none());
+    }
+
+    #[test]
+    fn general_task_admission_projects_only_the_typed_external_verified_terminal() {
+        let binding = intake_binding();
+        let submission = intake_submission(&binding);
+        let identity = binding.stream_identity().clone();
+        let ingress_peer = ingress_peer('a', 'c');
+        let mut fake = FakeTaskLedger::new();
+        let initial = verified(&fake, &identity);
+        fake.execute(
+            AppendCommand::new_general_task_created(
+                initial.head().clone(),
+                CommandId::new("mcp-submit:client-general-1").unwrap(),
+                CorrelationId::new(GENERAL_TASK_CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:00Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+                &submission,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let draft = verified(&fake, &identity);
+        let adoption = ExternalVerifiedResultAdoption::new(
+            submission.task_ref().clone(),
+            submission.client_request_id(),
+            draft.head().head_digest().clone(),
+            "1".repeat(40),
+            "2".repeat(40),
+            format!("evidence:sha256:{}", "3".repeat(64)),
+            format!("evidence:sha256:{}", "4".repeat(64)),
+            format!("evidence:sha256:{}", "5".repeat(64)),
+            format!("evidence:sha256:{}", "6".repeat(64)),
+            vec![format!("evidence:sha256:{}", "7".repeat(64))],
+        )
+        .unwrap();
+        fake.execute(
+            AppendCommand::new_external_verified_result_adopted(
+                draft.head().clone(),
+                CommandId::new(adoption.command_id()).unwrap(),
+                CorrelationId::new(GENERAL_TASK_CORRELATION_ID).unwrap(),
+                "2000-01-01T00:00:00Z",
+                ActorId::new(ingress_peer.actor_id().as_str()).unwrap(),
+                &adoption,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let evidence = project_intake_evidence(
+            &verified(&fake, &identity),
+            &binding,
+            &ingress_peer,
+            &submission,
+        )
+        .expect("typed external adoption projection");
+        assert_eq!(evidence.state(), TaskState::Completed);
+        assert_eq!(evidence.result_digest(), Some(adoption.result_digest()));
     }
 
     #[test]

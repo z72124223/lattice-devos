@@ -10,14 +10,14 @@ use lattice_task_ledger::{
     ActionId, ActorId, AppendCommand, AutonomyAppendMetadata, AutonomyAuthorityEvidence,
     AutonomyDecisionReason, AutonomyIntent, AutonomyModel, AutonomyObservedTaskState,
     AutonomyRecommendation, AutonomyRiskClass, AutonomyTaskKind, AutonomyVerification, CommandId,
-    CommandOutcome, CorrelationId, Diagnostic, EffectClaimId, FakeTaskLedger, LedgerCheckpoint,
-    LedgerDenial, LedgerError, LedgerEventKind, LedgerOutcome, OutboxAdmissionState, ReasonCode,
-    ResourceSnapshot, TaskCreatedProfile, TaskSubmissionEnvelope, UntrustedAutonomyReceiptRow,
-    VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan, classify_task_created_profile,
-    export_untrusted_snapshot, plan_append, plan_autonomy_receipt_append,
-    verify_exact_autonomy_receipt_retry, verify_untrusted_autonomy_receipt_rows,
-    verify_untrusted_snapshot, verify_untrusted_snapshot_against_checkpoint,
-    verify_untrusted_task_submission,
+    CommandOutcome, CorrelationId, Diagnostic, EffectClaimId, ExternalVerifiedResultAdoption,
+    FakeTaskLedger, LedgerCheckpoint, LedgerDenial, LedgerError, LedgerEventKind, LedgerOutcome,
+    OutboxAdmissionState, ReasonCode, ResourceSnapshot, TaskCreatedProfile, TaskSubmissionEnvelope,
+    UntrustedAutonomyReceiptRow, VerifiedAutonomyReceiptState, VerifiedStream, apply_append_plan,
+    classify_task_created_profile, export_untrusted_snapshot, plan_append,
+    plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
+    verify_untrusted_autonomy_receipt_rows, verify_untrusted_snapshot,
+    verify_untrusted_snapshot_against_checkpoint, verify_untrusted_task_submission,
 };
 
 fn digest(byte: char) -> ContentDigest {
@@ -204,6 +204,90 @@ fn general_task_created_profile_binds_the_submission_digest_and_is_create_only()
                 None,
             )
             .expect("ordinary command")
+        ),
+        Err(LedgerError::GeneralTaskIntakeCreateOnly)
+    );
+}
+
+#[test]
+fn general_intake_allows_only_the_typed_external_verified_result_adoption_terminal() {
+    let submission = general_submission();
+    let vacant = VerifiedStream::vacant(submission.identity().clone(), RuntimeKind::Live)
+        .expect("vacant live stream");
+    let created = apply_append_plan(
+        &vacant,
+        &plan_append(
+            &vacant,
+            AppendCommand::new_general_task_created(
+                vacant.head().clone(),
+                CommandId::new("general-create-adoption-1").expect("command"),
+                CorrelationId::new("general-adoption-correlation-1").expect("correlation"),
+                "2026-08-31T00:00:00Z",
+                ActorId::new("lattice-mcp").expect("actor"),
+                &submission,
+            )
+            .expect("general task-created command"),
+        )
+        .expect("plan intake"),
+    )
+    .expect("apply intake");
+    let evidence = |byte: char| format!("evidence:sha256:{}", byte.to_string().repeat(64));
+    let adoption = ExternalVerifiedResultAdoption::new(
+        submission.task_ref().clone(),
+        "adopt-verified-001",
+        created.head().head_digest().clone(),
+        "1".repeat(40),
+        "2".repeat(40),
+        evidence('3'),
+        evidence('4'),
+        evidence('5'),
+        evidence('6'),
+        vec![evidence('7'), evidence('8')],
+    )
+    .expect("bounded adoption");
+    let command = AppendCommand::new_external_verified_result_adopted(
+        created.head().clone(),
+        CommandId::new(adoption.command_id()).expect("command"),
+        CorrelationId::new("external-result-adoption-v1").expect("correlation"),
+        "2026-08-31T00:00:01Z",
+        ActorId::new("lattice-mcp").expect("actor"),
+        &adoption,
+    )
+    .expect("typed terminal command");
+    let plan = plan_append(&created, command.clone()).expect("typed adoption is allowed");
+    assert_eq!(
+        plan.new_event().expect("terminal event").kind(),
+        LedgerEventKind::ExternalVerifiedResultAdopted
+    );
+    assert_eq!(
+        plan.new_event().expect("terminal event").subject_digest(),
+        adoption.result_digest()
+    );
+    let completed = apply_append_plan(&created, &plan).expect("apply terminal adoption");
+    assert_eq!(completed.events().len(), 2);
+    assert!(
+        plan_append(&completed, command)
+            .expect("exact retry")
+            .is_exact_retry()
+    );
+    assert_eq!(
+        plan_append(
+            &completed,
+            AppendCommand::new(
+                completed.head().clone(),
+                CommandId::new("ordinary-after-adoption").expect("command"),
+                CorrelationId::new("ordinary-after-adoption").expect("correlation"),
+                "2026-08-31T00:00:02Z",
+                LedgerEventKind::EvidenceRecorded,
+                ActorId::new("worker").expect("actor"),
+                ActionId::new("RECORD").expect("action"),
+                LedgerOutcome::Recorded,
+                ReasonCode::new("RECORDED").expect("reason"),
+                digest('b'),
+                None,
+                None,
+            )
+            .expect("ordinary command"),
         ),
         Err(LedgerError::GeneralTaskIntakeCreateOnly)
     );

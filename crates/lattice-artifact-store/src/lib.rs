@@ -1,6 +1,7 @@
 //! Pure project-scoped artifact semantics and deterministic fake composition.
 
 mod aggregate;
+mod external_verified_result;
 mod history;
 mod managed_evidence;
 mod quota;
@@ -12,6 +13,7 @@ mod snapshot_parse;
 mod snapshot_quota;
 
 pub use aggregate::*;
+pub use external_verified_result::*;
 pub use history::*;
 pub use managed_evidence::*;
 pub use quota::*;
