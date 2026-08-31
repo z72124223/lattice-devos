@@ -6737,14 +6737,7 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
     verify_writer_lease_acl_closure(client, expected_missing, expected_usage)
 }
 
-fn verify_writer_lease_acl_closure<C: GenericClient>(
-    client: &mut C,
-    expected_missing: i64,
-    expected_usage: bool,
-) -> Result<(), PostgresStoreSetupError> {
-    let closure = client
-        .query_one(
-            "SELECT \
+const WRITER_LEASE_ACL_CLOSURE_SQL: &str = "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_trigger tr \
                JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -6851,9 +6844,15 @@ fn verify_writer_lease_acl_closure<C: GenericClient>(
                     OR count(*) FILTER (WHERE acl.grantee=t.typowner \
                         AND acl.grantor=t.typowner \
                         AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
-             ) type_acl_drift)",
-            &[],
-        )
+             ) type_acl_drift)";
+
+fn verify_writer_lease_acl_closure<C: GenericClient>(
+    client: &mut C,
+    expected_missing: i64,
+    expected_usage: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let closure = client
+        .query_one(WRITER_LEASE_ACL_CLOSURE_SQL, &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;

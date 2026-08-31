@@ -457,9 +457,9 @@ impl ManagedWorkerObservation {
     #[must_use]
     pub const fn terminal_kind(&self) -> Option<WorkerTerminal> {
         match self.kind {
-            WorkerObservationKind::PrestartTerminalFailed => Some(WorkerTerminal::Failed),
+            WorkerObservationKind::PrestartTerminalFailed
+            | WorkerObservationKind::TerminalFailed => Some(WorkerTerminal::Failed),
             WorkerObservationKind::TerminalCompleted => Some(WorkerTerminal::Completed),
-            WorkerObservationKind::TerminalFailed => Some(WorkerTerminal::Failed),
             WorkerObservationKind::TerminalInterrupted => Some(WorkerTerminal::Interrupted),
             _ => None,
         }
@@ -1360,6 +1360,12 @@ pub trait ManagedReviewEvidenceSink {
     /// Authorizes account/model reads and the reviewer thread only after the
     /// exact WSL2 provider-subtree OPEN marker is durable. Native reviewer
     /// transports never call this boundary.
+    ///
+    /// # Errors
+    ///
+    /// The default implementation returns a reconciliation-required error.
+    /// Concrete sinks may also return validation or provider-guard errors when
+    /// lifecycle evidence or durable authorization cannot be proven.
     fn authorize_provider_dispatch(
         &mut self,
         _open_lifecycle: &VerifiedManagedEvidence,

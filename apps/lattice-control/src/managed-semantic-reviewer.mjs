@@ -128,7 +128,7 @@ function absoluteWorktree(value) {
     && value.length > 0
     && value.length <= 1_024
     && !value.includes("\0")
-    && (path.isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value));
+    && (path.posix.isAbsolute(value) || path.win32.isAbsolute(value));
 }
 
 function exactWorktree(left, right) {

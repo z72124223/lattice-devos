@@ -1218,6 +1218,11 @@ pub struct WorkerObservationInput {
     evidence_digest: ContentDigest,
 }
 
+struct WorkerObservationEvidence {
+    provider_observed_at: Option<String>,
+    evidence_digest: ContentDigest,
+}
+
 impl WorkerObservationInput {
     /// Constructs one secret-free thread/turn observation.
     ///
@@ -1241,8 +1246,10 @@ impl WorkerObservationInput {
             turn_id,
             app_server_generation,
             app_server_identity_digest,
-            None,
-            evidence_digest,
+            WorkerObservationEvidence {
+                provider_observed_at: None,
+                evidence_digest,
+            },
         )
     }
 
@@ -1269,8 +1276,10 @@ impl WorkerObservationInput {
             Some(turn_id),
             app_server_generation,
             app_server_identity_digest,
-            Some(provider_observed_at.into()),
-            evidence_digest,
+            WorkerObservationEvidence {
+                provider_observed_at: Some(provider_observed_at.into()),
+                evidence_digest,
+            },
         )
     }
 
@@ -1281,11 +1290,14 @@ impl WorkerObservationInput {
         turn_id: Option<impl Into<String>>,
         app_server_generation: u64,
         app_server_identity_digest: ContentDigest,
-        provider_observed_at: Option<String>,
-        evidence_digest: ContentDigest,
+        evidence: WorkerObservationEvidence,
     ) -> Result<Self, LedgerError> {
         let thread_id = thread_id.map(Into::into);
         let turn_id = turn_id.map(Into::into);
+        let WorkerObservationEvidence {
+            provider_observed_at,
+            evidence_digest,
+        } = evidence;
         let valid_shape = match kind {
             WorkerObservationKind::ThreadAccepted => thread_id.is_some() && turn_id.is_none(),
             WorkerObservationKind::TurnAccepted
@@ -1632,6 +1644,24 @@ pub fn plan_worker_attempt_append_with_no_provider_effect_predecessor(
     )
 }
 
+fn untrusted_worker_attempt_rows(
+    records: &[VerifiedWorkerAttemptRecord],
+) -> Vec<UntrustedWorkerAttemptRow> {
+    records
+        .iter()
+        .map(VerifiedWorkerAttemptRecord::to_untrusted)
+        .collect()
+}
+
+fn untrusted_worker_observation_rows(
+    records: &[VerifiedWorkerObservationRecord],
+) -> Vec<UntrustedWorkerObservationRow> {
+    records
+        .iter()
+        .map(VerifiedWorkerObservationRecord::to_untrusted)
+        .collect()
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn plan_worker_attempt_append_inner(
     stream: &VerifiedStream,
@@ -1661,10 +1691,7 @@ fn plan_worker_attempt_append_inner(
         let recovered = recover_worker_attempt_record(stream, binding, &metadata, &input)?
             .ok_or(LedgerError::InvalidTaskRuntimeRecord)?;
         let missing_row = retained_row.is_none();
-        let mut rows = existing_attempts
-            .iter()
-            .map(VerifiedWorkerAttemptRecord::to_untrusted)
-            .collect::<Vec<_>>();
+        let mut rows = untrusted_worker_attempt_rows(existing_attempts);
         if missing_row {
             rows.push(recovered.to_untrusted());
         }
@@ -1678,10 +1705,7 @@ fn plan_worker_attempt_append_inner(
             stream,
             binding,
             &attempts,
-            &existing_observations
-                .iter()
-                .map(VerifiedWorkerObservationRecord::to_untrusted)
-                .collect::<Vec<_>>(),
+            &untrusted_worker_observation_rows(existing_observations),
         )?;
         validate_worker_attempt_predecessor(
             binding,
@@ -1699,19 +1723,13 @@ fn plan_worker_attempt_append_inner(
     let attempts = verify_untrusted_worker_attempt_rows(
         stream,
         binding,
-        &existing_attempts
-            .iter()
-            .map(VerifiedWorkerAttemptRecord::to_untrusted)
-            .collect::<Vec<_>>(),
+        &untrusted_worker_attempt_rows(existing_attempts),
     )?;
     let observations = verify_untrusted_worker_observation_rows(
         stream,
         binding,
         &attempts,
-        &existing_observations
-            .iter()
-            .map(VerifiedWorkerObservationRecord::to_untrusted)
-            .collect::<Vec<_>>(),
+        &untrusted_worker_observation_rows(existing_observations),
     )?;
     let expected_number = u64::try_from(attempts.len())
         .ok()
@@ -3636,8 +3654,8 @@ fn advance_observation_lifecycle(
     let next = match (current, payload.kind) {
         (Lifecycle::AwaitingThread, Kind::ThreadAccepted) => Lifecycle::AwaitingTurn,
         (Lifecycle::AwaitingTurn, Kind::TurnAccepted) => Lifecycle::AwaitingExactStart,
-        (Lifecycle::AwaitingExactStart, Kind::TurnStarted) => Lifecycle::Executing,
-        (
+        (Lifecycle::AwaitingExactStart, Kind::TurnStarted)
+        | (
             Lifecycle::Executing,
             Kind::MeaningfulProgress
             | Kind::Heartbeat

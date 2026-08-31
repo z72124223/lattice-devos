@@ -662,14 +662,19 @@ test("a sealed Node loader reads the pinned npm script inode", {
   skip: process.platform !== "linux",
 }, async () => {
   const root = await mkdtemp(path.join(tmpdir(), "lattice-supervisor-node-loader-"));
+  const node = path.join(root, "node");
   const script = path.join(root, "npm-cli.js");
   const displaced = `${script}.sealed`;
   let nodeSeal;
   let scriptSeal;
   try {
-    const nodeBytes = await readFile(process.execPath);
+    // CI toolcache ownership is ambient. Use a task-owned executable fixture so
+    // this test isolates descriptor pinning without weakening seal admission.
+    await copyFile(process.execPath, node);
+    await chmod(node, 0o755);
+    const nodeBytes = await readFile(node);
     nodeSeal = await openExecutableIdentitySeal(
-      process.execPath,
+      node,
       createHash("sha256").update(nodeBytes).digest("hex"),
       "WSL2_TEST_NODE_REJECTED",
     );

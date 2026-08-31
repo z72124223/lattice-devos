@@ -79,7 +79,19 @@ if ($script:WindowsOemCodePage -lt 1 -or $script:WindowsOemCodePage -gt 65535) {
     throw 'PHASE4_WINDOWS_OEM_CODE_PAGE_REJECTED'
 }
 $script:RepositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$script:PostgresBin = 'C:\Program Files\PostgreSQL\17\bin'
+$script:PostgresBin = if (
+    $StaticSelfTestOnly -or
+    $StaticReceiptPersistenceSelfTestOnly -or
+    $StaticMcpPollingSelfTestOnly
+) {
+    Join-Path ([IO.Path]::GetTempPath()) 'lattice-phase4-postgresql-selftest'
+}
+elseif ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+    'C:\Program Files\PostgreSQL\17\bin'
+}
+else {
+    throw 'PHASE4_WINDOWS_LIVE_REQUIRED'
+}
 $script:InitDb = Join-Path $script:PostgresBin 'initdb.exe'
 $script:PgCtl = Join-Path $script:PostgresBin 'pg_ctl.exe'
 $script:Postgres = Join-Path $script:PostgresBin 'postgres.exe'

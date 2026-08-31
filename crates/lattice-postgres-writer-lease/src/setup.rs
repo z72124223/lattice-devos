@@ -5893,14 +5893,7 @@ fn verify_catalog_profile<C: GenericClient>(
     Ok(())
 }
 
-fn verify_namespace_and_effective_acl_closure<C: GenericClient>(
-    client: &mut C,
-    expected_runtime_missing: i64,
-    expected_runtime_usage: bool,
-) -> Result<(), SetupAttemptError> {
-    let row = client
-        .query_one(
-            "SELECT \
+const NAMESPACE_AND_EFFECTIVE_ACL_CLOSURE_SQL: &str = "SELECT \
              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
                JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -5993,9 +5986,15 @@ fn verify_namespace_and_effective_acl_closure<C: GenericClient>(
                   WHERE NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
                     AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
                     AND (pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','USAGE') \
-                      OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE'))))",
-            &[],
-        )
+                      OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE'))))";
+
+fn verify_namespace_and_effective_acl_closure<C: GenericClient>(
+    client: &mut C,
+    expected_runtime_missing: i64,
+    expected_runtime_usage: bool,
+) -> Result<(), SetupAttemptError> {
+    let row = client
+        .query_one(NAMESPACE_AND_EFFECTIVE_ACL_CLOSURE_SQL, &[])
         .map_err(map_database)?;
     let expected_counts = [12_i64, 0, 0, 0, 0, 0, 0, 0, 0, 0, expected_runtime_missing];
     for (index, expected) in expected_counts.into_iter().enumerate() {
