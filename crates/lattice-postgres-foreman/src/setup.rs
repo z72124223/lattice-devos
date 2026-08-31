@@ -12,6 +12,9 @@ use crate::{
 };
 
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
+const EXTERNAL_ADOPTION_GLOBAL_SCHEMA_VERSION: i32 = 8;
+const EXTERNAL_ADOPTION_GLOBAL_MANIFEST_SHA256: &str =
+    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
 const EXTENSION_ADVISORY_LOCK: i64 = 7_212_400_260_826;
 const EXPECTED_TABLE_COUNT: i64 = 17;
 const EXPECTED_FUNCTION_COUNT: i64 = 43;
@@ -378,12 +381,21 @@ fn verify_global_preflight(
     let schema_version: i32 = row.get(1);
     let manifest_sha256: String = row.get(2);
     if database_uuid != target.expected_database_uuid()
-        || schema_version != i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION)
-        || manifest_sha256 != REQUIRED_GLOBAL_MANIFEST_SHA256
+        || !supported_store_profile(schema_version, &manifest_sha256)
     {
         return Err(global_error());
     }
     Ok(())
+}
+
+/// Foreman v1 remains immutably identified with its V7 Store predecessor.
+/// Store V8 only adds external-adoption evidence and leaves Foreman authority
+/// unchanged, so the setup boundary admits that exact successor pair too.
+fn supported_store_profile(schema_version: i32, manifest_sha256: &str) -> bool {
+    (schema_version == i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION)
+        && manifest_sha256 == REQUIRED_GLOBAL_MANIFEST_SHA256)
+        || (schema_version == EXTERNAL_ADOPTION_GLOBAL_SCHEMA_VERSION
+            && manifest_sha256 == EXTERNAL_ADOPTION_GLOBAL_MANIFEST_SHA256)
 }
 
 fn verify_session(
@@ -1369,6 +1381,26 @@ const fn global_error() -> ExtensionSetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn global_preflight_allows_only_exact_v7_or_v8_store_profiles() {
+        assert!(supported_store_profile(
+            i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION),
+            REQUIRED_GLOBAL_MANIFEST_SHA256
+        ));
+        assert!(supported_store_profile(
+            8,
+            "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
+        ));
+        assert!(!supported_store_profile(
+            8,
+            REQUIRED_GLOBAL_MANIFEST_SHA256
+        ));
+        assert!(!supported_store_profile(
+            i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION),
+            "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
+        ));
+    }
 
     #[test]
     #[ignore = "requires the coordinator-owned disposable Foreman extension fixture"]
