@@ -1304,7 +1304,7 @@ impl LiveConfig {
                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
                     (SELECT pg_catalog.count(*) IN (4,6,8) \
                       AND pg_catalog.count(*) FILTER (WHERE extension_schema_version=5 \
-                        AND global_schema_version=7 AND event_kind='ACTIVATED')=1 \
+                        AND global_schema_version=7 AND event_kind='UPGRADED')=1 \
                       FROM ONLY writer_lease.writer_lease_extension_ledger), \
                     pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
                     pg_catalog.has_function_privilege('lattice_runtime', \
