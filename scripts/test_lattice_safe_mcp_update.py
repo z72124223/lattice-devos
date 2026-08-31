@@ -1,7 +1,9 @@
 import importlib.util
+import json
 import msvcrt
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -91,7 +93,79 @@ class SafeMcpUpdateTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 MODULE.verify_candidate(candidate)
 
-    def test_active_locks_are_recorded_but_do_not_block_future_process_activation(self):
+    def test_build_uses_exact_git_archive_not_mutable_worktree(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "LATTICE Test"], check=True)
+            tracked = source / "tracked.txt"
+            tracked.write_text("commit-a\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(source), "add", "tracked.txt"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-qm", "commit a"], check=True)
+            revision = subprocess.check_output(
+                ["git", "-C", str(source), "rev-parse", "HEAD"], text=True
+            ).strip()
+            tracked.write_text("uncommitted-b\n", encoding="utf-8")
+            cache = root / "cache"
+            captured = {}
+            real_run = MODULE.subprocess.run
+
+            def run(command, **kwargs):
+                if command[0] != "cargo":
+                    return real_run(command, **kwargs)
+                captured["cwd"] = Path(kwargs["cwd"])
+                captured["tracked"] = (captured["cwd"] / "tracked.txt").read_text(encoding="utf-8")
+                target = Path(command[command.index("--target-dir") + 1])
+                executable = target / "release" / "latticed.exe"
+                executable.parent.mkdir(parents=True)
+                executable.write_bytes(b"candidate")
+                return subprocess.CompletedProcess(command, 0)
+
+            with patch.object(MODULE.subprocess, "run", side_effect=run):
+                MODULE.build_candidate(source, cache, revision)
+
+            self.assertNotEqual(captured["cwd"], source)
+            self.assertEqual(captured["tracked"], "commit-a\n")
+            self.assertFalse(captured["cwd"].exists(), "commit snapshot must be removed after build")
+
+    def test_unprovenanced_cache_is_rebuilt(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source"
+            source.mkdir()
+            revision = "a" * 40
+            executable = root / "cache" / f"latticed-runtime-{revision[:12]}" / "release" / "latticed.exe"
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"unprovenanced")
+
+            def run(command, **_kwargs):
+                rebuilt = Path(command[command.index("--target-dir") + 1]) / "release" / "latticed.exe"
+                rebuilt.parent.mkdir(parents=True, exist_ok=True)
+                rebuilt.write_bytes(b"rebuilt")
+                return subprocess.CompletedProcess(command, 0)
+
+            with (
+                patch.object(MODULE, "materialize_commit_source") as materialize,
+                patch.object(MODULE.subprocess, "run", side_effect=run) as cargo_run,
+            ):
+                materialize.return_value.__enter__.return_value = source
+                MODULE.build_candidate(source, root / "cache", revision)
+
+            cargo_run.assert_called_once()
+            self.assertNotEqual(executable.read_bytes(), b"unprovenanced")
+            self.assertEqual(
+                json.loads((executable.parents[1] / "lattice-safe-mcp-artifact.v1.json").read_text(encoding="utf-8")),
+                {
+                    "schema_version": "lattice.safe-mcp-artifact.v1",
+                    "revision": revision,
+                    "executable_sha256": MODULE.sha256(executable),
+                },
+            )
+
+    def test_active_locks_are_recorded_at_pre_activation_but_do_not_block_future_process_activation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             codex_home = root / "codex-home"
@@ -105,17 +179,47 @@ class SafeMcpUpdateTests(unittest.TestCase):
 
             with (
                 patch.dict(os.environ, {"CODEX_HOME": str(codex_home), "LOCALAPPDATA": str(root), "LATTICE_SAFE_UPDATE_SOURCE_ROOT": str(source)}, clear=False),
-                patch.object(MODULE, "active_locks", return_value=["active.lock"]),
+                patch.object(MODULE, "active_locks", return_value=["activation-a.lock", "activation-b.lock"]),
                 patch.object(MODULE, "git_head", return_value="a" * 40),
                 patch.object(MODULE, "build_candidate", return_value=candidate) as build,
                 patch.object(MODULE, "verify_candidate") as verify,
                 patch.object(MODULE, "write_receipt", side_effect=lambda _root, status, **fields: receipts.append((status, fields))),
+                patch.object(MODULE.time, "time", return_value=1.5),
             ):
                 self.assertEqual(MODULE.main(), 0)
 
             build.assert_called_once()
             verify.assert_called_once_with(candidate)
-            self.assertEqual(receipts, [("ACTIVATED", {"revision": "a" * 40, "executable_sha256": MODULE.sha256(candidate), "active_lock_count": 1})])
+            self.assertEqual(receipts, [("ACTIVATED", {
+                "revision": "a" * 40,
+                "executable_sha256": MODULE.sha256(candidate),
+                "active_lock_count": 2,
+                "active_lock_observation_stage": "PRE_ACTIVATION",
+                "active_lock_observed_at_unix_ms": 1500,
+            })])
+            self.assertIn(str(candidate).replace("\\", "\\\\"), config.read_text(encoding="utf-8"))
+
+    def test_lock_observation_happens_after_candidate_verification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            config = self.write_config(codex_home, r"C:\\old\\latticed.exe")
+            candidate = root / "candidate.exe"
+            candidate.write_bytes(b"candidate")
+            events = []
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(codex_home), "LOCALAPPDATA": str(root)}, clear=False),
+                patch.object(MODULE, "git_head", return_value="a" * 40),
+                patch.object(MODULE, "build_candidate", return_value=candidate),
+                patch.object(MODULE, "verify_candidate", side_effect=lambda _candidate: events.append("verify")),
+                patch.object(MODULE, "active_locks", side_effect=lambda _home: events.append("locks") or []),
+                patch.object(MODULE, "write_receipt"),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            self.assertLess(events.index("verify"), events.index("locks"))
             self.assertIn(str(candidate).replace("\\", "\\\\"), config.read_text(encoding="utf-8"))
 
 
