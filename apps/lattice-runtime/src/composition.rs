@@ -371,6 +371,7 @@ pub enum LatticedErrorKind {
     RuntimePostgresProvision,
     RuntimePostgresBoundary,
     RuntimePostgresMigration,
+    RuntimePostgresExternalAdoption,
     RuntimePostgresForeman,
     RuntimePostgresMigrationPermission,
     RuntimePostgresMigrationUnsafeSetting,
@@ -423,6 +424,9 @@ impl LatticedErrorKind {
             Self::RuntimePostgresProvision => "LATTICED_RUNTIME_POSTGRES_PROVISION_REJECTED",
             Self::RuntimePostgresBoundary => "LATTICED_RUNTIME_POSTGRES_BOUNDARY_REJECTED",
             Self::RuntimePostgresMigration => "LATTICED_RUNTIME_POSTGRES_MIGRATION_REJECTED",
+            Self::RuntimePostgresExternalAdoption => {
+                "LATTICED_RUNTIME_POSTGRES_EXTERNAL_ADOPTION_REJECTED"
+            }
             Self::RuntimePostgresForeman => "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED",
             Self::RuntimePostgresMigrationPermission => {
                 "LATTICED_RUNTIME_POSTGRES_MIGRATION_PERMISSION_REJECTED"
@@ -2463,7 +2467,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                     }
                     PostgresBootstrapAction::V8Apply => {
                         apply_store_migrations(&mut migrator, &store_target).map_err(|_| {
-                            LatticedError::new(LatticedErrorKind::RuntimePostgresMigration)
+                            LatticedError::new(LatticedErrorKind::RuntimePostgresExternalAdoption)
                         })?;
                     }
                     PostgresBootstrapAction::V8VerifyOnly => {}
@@ -10631,6 +10635,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::RuntimePostgresProvision
         | LatticedErrorKind::RuntimePostgresBoundary
         | LatticedErrorKind::RuntimePostgresMigration
+        | LatticedErrorKind::RuntimePostgresExternalAdoption
         | LatticedErrorKind::RuntimePostgresForeman
         | LatticedErrorKind::RuntimePostgresMigrationPermission
         | LatticedErrorKind::RuntimePostgresMigrationUnsafeSetting
@@ -12034,6 +12039,10 @@ mod tests {
         assert_eq!(
             LatticedErrorKind::RuntimePostgresForeman.code(),
             "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED"
+        );
+        assert_eq!(
+            LatticedErrorKind::RuntimePostgresExternalAdoption.code(),
+            "LATTICED_RUNTIME_POSTGRES_EXTERNAL_ADOPTION_REJECTED"
         );
     }
 
