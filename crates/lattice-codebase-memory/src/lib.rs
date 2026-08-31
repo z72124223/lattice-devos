@@ -12,6 +12,8 @@ use lattice_contracts::{
     NormalizedGraphAnalysis, RankedMemoryRecord,
 };
 
+const MAX_CHANGED_PATHS: usize = 4_096;
+
 /// Pure graph-memory validation, canonicalization, or ranking failure.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CodebaseMemoryError {
@@ -88,11 +90,18 @@ impl ChangedPathNode {
 /// evidence that a node was directly changed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangedPathImpactInput {
+    analysis_digest: ContentDigest,
     changed_paths: Vec<String>,
     nodes: Vec<ChangedPathNode>,
 }
 
 impl ChangedPathImpactInput {
+    /// Exact normalized analysis from which these closed impact seeds were selected.
+    #[must_use]
+    pub const fn analysis_digest(&self) -> &ContentDigest {
+        &self.analysis_digest
+    }
+
     #[must_use]
     pub fn changed_paths(&self) -> &[String] {
         &self.changed_paths
@@ -112,8 +121,8 @@ impl ChangedPathImpactInput {
 ///
 /// # Errors
 ///
-/// Rejects empty, absolute, drive-qualified, backslash, dot, parent, NUL, or
-/// oversized repository-relative paths.
+/// Rejects an oversized collection or empty, absolute, colon, backslash, dot,
+/// parent, control-character, padded, NUL, or oversized repository-relative path.
 pub fn map_changed_paths_to_nodes(
     analysis: &NormalizedGraphAnalysis,
     changed_paths: impl IntoIterator<Item = impl AsRef<str>>,
@@ -122,6 +131,9 @@ pub fn map_changed_paths_to_nodes(
         .into_iter()
         .map(|path| path.as_ref().to_owned())
         .collect::<Vec<_>>();
+    if changed_paths.len() > MAX_CHANGED_PATHS {
+        return Err(CodebaseMemoryError::CapacityExceeded);
+    }
     if changed_paths.iter().any(|path| !valid_changed_path(path)) {
         return Err(CodebaseMemoryError::InvalidChangedPath);
     }
@@ -149,6 +161,7 @@ pub fn map_changed_paths_to_nodes(
     nodes.sort_by(|left, right| left.record_id.as_str().cmp(right.record_id.as_str()));
 
     Ok(ChangedPathImpactInput {
+        analysis_digest: analysis.analysis_digest().clone(),
         changed_paths,
         nodes,
     })
@@ -157,11 +170,12 @@ pub fn map_changed_paths_to_nodes(
 fn valid_changed_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 1_024
+        && path.trim() == path
         && !path.starts_with('/')
         && !path.starts_with('\\')
         && !path.contains('\\')
-        && !path.contains('\0')
-        && !(path.len() >= 2 && path.as_bytes()[1] == b':')
+        && !path.contains(':')
+        && !path.chars().any(char::is_control)
         && path
             .split('/')
             .all(|component| !component.is_empty() && component != "." && component != "..")

@@ -218,12 +218,55 @@ fn changed_paths_map_only_to_direct_nodes_without_reverse_traversal() {
     assert_eq!(input.nodes()[0].relative_path(), "src/lib.rs");
     assert_eq!(input.nodes()[0].subject(), "run_graph_memory");
     assert_eq!(input.nodes()[0].category(), "function");
+    assert_eq!(input.analysis_digest(), analysis.analysis_digest());
     assert!(
         input
             .nodes()
             .iter()
             .all(|node| node.subject() != "CodebaseMemoryPort"),
         "the target of an edge from the changed file must not be reverse-traversed into the seed"
+    );
+}
+
+#[test]
+fn unmapped_changed_paths_remain_bound_to_the_exact_analysis() {
+    let (request_a, snapshot_a, raw_a) = fixture("impact", '1', false);
+    let (request_b, snapshot_b, raw_b) = fixture("impact", '2', false);
+    let analysis_a = normalize_analysis(&request_a, &snapshot_a, &raw_a).expect("analysis a");
+    let analysis_b = normalize_analysis(&request_b, &snapshot_b, &raw_b).expect("analysis b");
+
+    let unmapped_a = map_changed_paths_to_nodes(&analysis_a, ["src/unmapped.rs"])
+        .expect("unmapped input a");
+    let unmapped_b = map_changed_paths_to_nodes(&analysis_b, ["src/unmapped.rs"])
+        .expect("unmapped input b");
+
+    assert!(unmapped_a.nodes().is_empty());
+    assert!(unmapped_b.nodes().is_empty());
+    assert_ne!(unmapped_a, unmapped_b);
+    assert_ne!(unmapped_a.analysis_digest(), unmapped_b.analysis_digest());
+}
+
+#[test]
+fn changed_paths_have_a_fixed_capacity_boundary() {
+    let (request, snapshot, raw) = fixture("impact", '1', false);
+    let analysis = normalize_analysis(&request, &snapshot, &raw).expect("analysis");
+    let within_capacity = (0..4096)
+        .map(|index| format!("src/changed-{index}.rs"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        map_changed_paths_to_nodes(&analysis, within_capacity)
+            .expect("capacity boundary")
+            .changed_paths()
+            .len(),
+        4096
+    );
+
+    let overflow = (0..4097)
+        .map(|index| format!("src/changed-{index}.rs"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        map_changed_paths_to_nodes(&analysis, overflow),
+        Err(CodebaseMemoryError::CapacityExceeded)
     );
 }
 
@@ -240,4 +283,11 @@ fn changed_path_mapping_rejects_non_canonical_git_paths() {
         map_changed_paths_to_nodes(&analysis, [r"src\lib.rs"]),
         Err(CodebaseMemoryError::InvalidChangedPath)
     );
+    for invalid in ["src:lib.rs", " src/lib.rs", "src/lib.rs ", "src/\u{0007}lib.rs"] {
+        assert_eq!(
+            map_changed_paths_to_nodes(&analysis, [invalid]),
+            Err(CodebaseMemoryError::InvalidChangedPath),
+            "{invalid:?} must be rejected"
+        );
+    }
 }
