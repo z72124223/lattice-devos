@@ -157,3 +157,52 @@ END
 $external_verified_result_adoption_preflight_v1$;
 REVOKE ALL ON FUNCTION control.external_verified_result_adoption_preflight_v1(text,text,text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_preflight_v1(text,text,text) TO lattice_runtime;
+
+CREATE FUNCTION control.external_verified_result_adoption_bind_v1(
+    p_stream_id bytea, p_event_sequence text, p_event_digest bytea,
+    p_command_id text, p_request_digest bytea, p_adoption_digest bytea,
+    p_evidence_descriptor_digest bytea
+) RETURNS text
+LANGUAGE plpgsql VOLATILE SECURITY DEFINER
+SET search_path = pg_catalog SET row_security = on SET lock_timeout = '5s' SET statement_timeout = '30s'
+AS $external_verified_result_adoption_bind_v1$
+DECLARE v_existing control.task_external_verified_result_adoptions%ROWTYPE;
+BEGIN
+    IF session_user <> 'lattice_runtime_login' OR pg_catalog.current_setting('role') <> 'lattice_runtime'
+       OR pg_catalog.current_setting('transaction_isolation') <> 'serializable'
+       OR pg_catalog.current_setting('transaction_read_only')::boolean THEN
+        RAISE EXCEPTION USING ERRCODE = 'P0001', MESSAGE = 'EXTERNAL_RESULT_ADOPTION_BINDING_REJECTED';
+    END IF;
+    PERFORM 1 FROM ONLY control.external_verified_result_evidence AS e
+     WHERE e.adoption_digest = p_adoption_digest
+       AND e.descriptor_digest = p_evidence_descriptor_digest FOR SHARE;
+    IF NOT FOUND THEN RETURN 'REJECTED'; END IF;
+    PERFORM 1 FROM ONLY control.task_ledger_events AS e
+     WHERE e.stream_id=p_stream_id AND e.sequence=p_event_sequence::numeric
+       AND e.event_digest=p_event_digest AND e.event_kind='EXTERNAL_VERIFIED_RESULT_ADOPTED' FOR SHARE;
+    IF NOT FOUND THEN RETURN 'REJECTED'; END IF;
+    PERFORM 1 FROM ONLY control.task_ledger_commands AS c
+     WHERE c.stream_id=p_stream_id AND c.command_id=p_command_id
+       AND c.event_digest=p_event_digest AND c.request_digest=p_request_digest
+       AND c.event_kind='EXTERNAL_VERIFIED_RESULT_ADOPTED' FOR SHARE;
+    IF NOT FOUND THEN RETURN 'REJECTED'; END IF;
+    SELECT * INTO v_existing FROM ONLY control.task_external_verified_result_adoptions
+     WHERE stream_id=p_stream_id AND command_id=p_command_id FOR SHARE;
+    IF FOUND THEN
+        IF v_existing.event_sequence=p_event_sequence::numeric
+           AND v_existing.event_digest=p_event_digest
+           AND v_existing.request_digest=p_request_digest
+           AND v_existing.adoption_digest=p_adoption_digest
+           AND v_existing.evidence_descriptor_digest=p_evidence_descriptor_digest THEN RETURN 'REPLAYED'; END IF;
+        RETURN 'REJECTED';
+    END IF;
+    INSERT INTO control.task_external_verified_result_adoptions(
+        stream_id,event_sequence,event_digest,command_id,request_digest,adoption_digest,evidence_descriptor_digest
+    ) VALUES (
+        p_stream_id,p_event_sequence::numeric,p_event_digest,p_command_id,p_request_digest,p_adoption_digest,p_evidence_descriptor_digest
+    );
+    RETURN 'RECORDED';
+END
+$external_verified_result_adoption_bind_v1$;
+REVOKE ALL ON FUNCTION control.external_verified_result_adoption_bind_v1(bytea,text,bytea,text,bytea,bytea,bytea) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_bind_v1(bytea,text,bytea,text,bytea,bytea,bytea) TO lattice_runtime;

@@ -3499,7 +3499,8 @@ fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
                   JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
                  WHERE n.nspname='control' AND p.proname IN (\
                     'external_verified_result_evidence_read_v1',\
-                    'external_verified_result_adoption_preflight_v1') \
+                    'external_verified_result_adoption_preflight_v1',\
+                    'external_verified_result_adoption_bind_v1') \
                    AND p.prosecdef AND pg_catalog.has_function_privilege(\
                      'lattice_runtime',p.oid,'EXECUTE')), \
                 (SELECT count(*)::bigint FROM pg_catalog.pg_constraint k \
@@ -3516,7 +3517,7 @@ fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    for (index, expected) in [(0, 2_i64), (1, 0), (2, 2), (3, 2), (4, 1)] {
+    for (index, expected) in [(0, 2_i64), (1, 0), (2, 3), (3, 2), (4, 1)] {
         if row_value::<i64>(&profile, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
             != expected
         {

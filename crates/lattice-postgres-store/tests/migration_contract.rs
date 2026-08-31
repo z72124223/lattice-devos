@@ -537,7 +537,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
             .expect("exact schema-v8 manifest")
             .manifest_sha256()
             .as_str(),
-        "b1c8ab546ace5da2f0b4ab7af9d49cb7c4771f477617980e09bf0e563efb3030"
+        "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
     );
 
     let registry = &manifest[4];
@@ -679,11 +679,13 @@ fn schema_v8_appends_digest_bound_external_adoption_without_rewriting_v7() {
         "EXTERNAL_VERIFIED_RESULT_ADOPTED",
         "control.external_verified_result_evidence_read_v1",
         "control.external_verified_result_adoption_preflight_v1",
+        "control.external_verified_result_adoption_bind_v1",
         "FOR SHARE",
         "foreman_execution.worker_attempts",
         "writer_lease.writer_lease_heads",
         "REVOKE ALL ON TABLE control.external_verified_result_evidence FROM lattice_runtime",
         "GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_preflight_v1",
+        "GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_bind_v1",
     ] {
         assert!(sql.contains(required), "missing schema-v8 adoption boundary: {required}");
     }
@@ -1708,10 +1710,10 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         adoption.path(),
         "db/migrations/0009_external_verified_result_adoption.sql"
     );
-    assert_eq!(adoption.byte_length(), 9_432);
+    assert_eq!(adoption.byte_length(), 12_438);
     assert_eq!(
         adoption.sha256(),
-        "0e78be0a45dc2696da0550a46771c2c4e62c3a4c10d0a77a652f2eff261e99f9"
+        "587aaff568e4a058055c608ad80aa3a598288bba8cb91905dc9978f7de4f8319"
     );
     assert_eq!(adoption.schema_version(), 8);
     assert_eq!(adoption.reader_compatibility(), 8..=8);

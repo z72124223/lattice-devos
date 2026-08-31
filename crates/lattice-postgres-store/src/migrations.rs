@@ -56,9 +56,9 @@ const TASK_SUBMISSION_ENVELOPE_SHA256: &str =
 const CURRENT_V7_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
 const EXTERNAL_VERIFIED_RESULT_ADOPTION_SHA256: &str =
-    "0e78be0a45dc2696da0550a46771c2c4e62c3a4c10d0a77a652f2eff261e99f9";
+    "587aaff568e4a058055c608ad80aa3a598288bba8cb91905dc9978f7de4f8319";
 const CURRENT_V8_MANIFEST_SHA256: &str =
-    "b1c8ab546ace5da2f0b4ab7af9d49cb7c4771f477617980e09bf0e563efb3030";
+    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
 pub(crate) const CURRENT_V5_MANIFEST_SHA256: &str =
     "f92a51fa19c4fe0ffebfc40f20924bd1209bb2441b1bc69f787bc3c4a925425d";
 pub(crate) const REGISTRY_V4_MANIFEST_SHA256: &str =
@@ -322,7 +322,7 @@ static MIGRATION_MANIFEST: [MigrationDescriptor; 9] = [
         id: "0009_external_verified_result_adoption",
         path: "db/migrations/0009_external_verified_result_adoption.sql",
         bytes: EXTERNAL_VERIFIED_RESULT_ADOPTION_BYTES,
-        byte_length: 9_432,
+        byte_length: 12_438,
         sha256: EXTERNAL_VERIFIED_RESULT_ADOPTION_SHA256,
         status: MigrationStatus::Executable,
         transaction_mode: MigrationTransactionMode::RunnerOwned,
