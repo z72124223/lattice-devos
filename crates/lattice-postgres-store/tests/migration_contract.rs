@@ -187,7 +187,7 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
         .split_once("InstalledManifestState::ExactV6Prefix")
         .expect("exact v6 transition arm")
         .1
-        .split_once("InstalledManifestState::ExactV7Full")
+        .split_once("InstalledManifestState::ExactV7Prefix")
         .expect("exact v7 retry arm")
         .0;
     assert_eq!(
@@ -530,14 +530,14 @@ fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
 #[test]
 fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
     let manifest = migration_manifest();
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
-    assert_eq!(manifest.len(), 8);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
+    assert_eq!(manifest.len(), 9);
     assert_eq!(
         verify_embedded_manifest()
-            .expect("exact schema-v7 manifest")
+            .expect("exact schema-v8 manifest")
             .manifest_sha256()
             .as_str(),
-        "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8"
+        "b1c8ab546ace5da2f0b4ab7af9d49cb7c4771f477617980e09bf0e563efb3030"
     );
 
     let registry = &manifest[4];
@@ -574,8 +574,8 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
 #[test]
 fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
     let manifest = migration_manifest();
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
-    assert_eq!(manifest.len(), 8);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
+    assert_eq!(manifest.len(), 9);
     let intake = &manifest[7];
     assert_eq!(intake.ordinal(), 8);
     assert_eq!(intake.id(), "0008_task_submission_envelope");
@@ -654,6 +654,43 @@ fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
             "missing schema-v7 live drift proof: {required}"
         );
     }
+}
+
+#[test]
+fn schema_v8_appends_digest_bound_external_adoption_without_rewriting_v7() {
+    let manifest = migration_manifest();
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
+    assert_eq!(manifest.len(), 9);
+    let adoption = &manifest[8];
+    assert_eq!(adoption.ordinal(), 9);
+    assert_eq!(adoption.id(), "0009_external_verified_result_adoption");
+    assert_eq!(
+        adoption.path(),
+        "db/migrations/0009_external_verified_result_adoption.sql"
+    );
+    assert_eq!(adoption.schema_version(), 8);
+    assert_eq!(adoption.reader_compatibility(), 8..=8);
+    assert_eq!(adoption.writer_compatibility(), 8..=8);
+
+    let sql = std::str::from_utf8(adoption.bytes()).expect("canonical UTF-8 migration");
+    for required in [
+        "CREATE TABLE control.external_verified_result_evidence",
+        "CREATE TABLE control.task_external_verified_result_adoptions",
+        "EXTERNAL_VERIFIED_RESULT_ADOPTED",
+        "control.external_verified_result_evidence_read_v1",
+        "control.external_verified_result_adoption_preflight_v1",
+        "FOR SHARE",
+        "foreman_execution.worker_attempts",
+        "writer_lease.writer_lease_heads",
+        "REVOKE ALL ON TABLE control.external_verified_result_evidence FROM lattice_runtime",
+        "GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_preflight_v1",
+    ] {
+        assert!(sql.contains(required), "missing schema-v8 adoption boundary: {required}");
+    }
+    assert!(
+        !sql.contains("GRANT SELECT ON TABLE control.external_verified_result_evidence"),
+        "runtime must receive a narrow verifier surface, not raw receipt access"
+    );
 }
 
 #[test]
@@ -1529,7 +1566,7 @@ fn schema_v5_catalog_measurement_has_closed_forbidden_object_diagnostics() {
 #[allow(clippy::too_many_lines)]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 8);
+    assert_eq!(manifest.len(), 9);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -1660,22 +1697,38 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         submission.sha256(),
         "a9059c74722dcbff5345a2732bf1c44f8f2dd682a5eecb57bda2f0d820e9d4a0"
     );
-    assert_eq!(submission.schema_version(), POSTGRES_SCHEMA_VERSION);
+    assert_eq!(submission.schema_version(), 7);
     assert_eq!(submission.reader_compatibility(), 7..=7);
     assert_eq!(submission.writer_compatibility(), 7..=7);
 
-    assert_eq!(evidence.entry_count(), 8);
-    assert_eq!(evidence.executable_count(), 7);
+    let adoption = &manifest[8];
+    assert_eq!(adoption.ordinal(), 9);
+    assert_eq!(adoption.id(), "0009_external_verified_result_adoption");
+    assert_eq!(
+        adoption.path(),
+        "db/migrations/0009_external_verified_result_adoption.sql"
+    );
+    assert_eq!(adoption.byte_length(), 9_432);
+    assert_eq!(
+        adoption.sha256(),
+        "0e78be0a45dc2696da0550a46771c2c4e62c3a4c10d0a77a652f2eff261e99f9"
+    );
+    assert_eq!(adoption.schema_version(), 8);
+    assert_eq!(adoption.reader_compatibility(), 8..=8);
+    assert_eq!(adoption.writer_compatibility(), 8..=8);
+
+    assert_eq!(evidence.entry_count(), 9);
+    assert_eq!(evidence.executable_count(), 8);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
         task_ledger
-            .matches("executable_count: 8 - prefix_len")
+            .matches("executable_count: 9 - prefix_len")
             .count(),
         1,
-        "only the exact-prefix Ledger fixture may derive its executable count from all eight entries"
+        "only the exact-prefix Ledger fixture may derive its executable count from all nine entries"
     );
     assert!(
         task_ledger.contains("executable_count: 5"),
@@ -2403,7 +2456,7 @@ fn live_store_migration_is_fixed_function_gated_and_transaction_control_free() {
 }
 
 #[test]
-fn runner_has_closed_fresh_and_exact_prefix_states_through_v7() {
+fn runner_has_closed_fresh_and_exact_prefix_states_through_v8() {
     let source = include_str!("../src/postgres_setup.rs");
     for required in [
         "enum InstalledManifestState",
@@ -2414,7 +2467,8 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v7() {
         "ExactV4Prefix",
         "ExactV5Prefix",
         "ExactV6Prefix",
-        "ExactV7Full",
+        "ExactV7Prefix",
+        "ExactV8Full",
         "classify_installed_manifest_state",
         "verify_v1_upgrade_source",
         "verify_v2_upgrade_source",
@@ -2428,6 +2482,8 @@ fn runner_has_closed_fresh_and_exact_prefix_states_through_v7() {
         "advance_compatibility_from_v4",
         "advance_compatibility_from_v5",
         "advance_compatibility_from_v6",
+        "advance_compatibility_from_v7",
+        "verify_runtime_external_adoption_schema_v8",
         "LOCK TABLE control.physical_heads IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.terminal_transactions IN ACCESS EXCLUSIVE MODE",
         "LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE",
@@ -2633,7 +2689,7 @@ fn setup_errors_are_closed_static_bounded_and_redacted() {
 fn driver_and_schema_support_are_exact_for_this_foundation() {
     assert_eq!(POSTGRES_DRIVER_VERSION, "0.19.14");
     assert_eq!(SUPPORTED_POSTGRES_MAJOR, 17);
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
 }
 
 #[test]

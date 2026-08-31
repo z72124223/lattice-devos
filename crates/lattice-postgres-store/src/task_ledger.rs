@@ -57,6 +57,7 @@ const LEGACY_GLOBAL_LEDGER_MANIFEST_SHA256: &str =
 const CURRENT_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 5;
 const FOREMAN_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 6;
 const SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 7;
+const EXTERNAL_ADOPTION_GLOBAL_LEDGER_SCHEMA_VERSION: u16 = 8;
 const MAX_LIVE_SERIALIZATION_RETRIES: u8 = 3;
 const LOWER_HEX: &[u8; 16] = b"0123456789abcdef";
 const ZERO_DIGEST_TEXT: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -1343,13 +1344,14 @@ enum TaskLedgerSqlProfile {
     V5,
     V6,
     V7,
+    V8,
 }
 
 impl TaskLedgerSqlProfile {
     const fn ledger_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_PREPARE_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => LEDGER_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => LEDGER_PREPARE_V5_SQL,
         }
     }
 
@@ -1357,34 +1359,34 @@ impl TaskLedgerSqlProfile {
         match self {
             Self::V3 => LEDGER_HEAD_V3_SQL,
             Self::V5 | Self::V6 => LEDGER_HEAD_V5_SQL,
-            Self::V7 => LEDGER_HEAD_V7_SQL,
+            Self::V7 | Self::V8 => LEDGER_HEAD_V7_SQL,
         }
     }
 
     const fn ledger_events_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_EVENTS_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => LEDGER_EVENTS_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => LEDGER_EVENTS_V5_SQL,
         }
     }
 
     const fn ledger_commands_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_COMMANDS_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => LEDGER_COMMANDS_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => LEDGER_COMMANDS_V5_SQL,
         }
     }
 
     const fn ledger_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => LEDGER_FINALIZE_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => LEDGER_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => LEDGER_FINALIZE_V5_SQL,
         }
     }
 
     const fn general_ledger_finalize_sql(self) -> Option<&'static str> {
         match self {
-            Self::V7 => Some(LEDGER_FINALIZE_GENERAL_V7_SQL),
+            Self::V7 | Self::V8 => Some(LEDGER_FINALIZE_GENERAL_V7_SQL),
             Self::V3 | Self::V5 | Self::V6 => None,
         }
     }
@@ -1392,52 +1394,52 @@ impl TaskLedgerSqlProfile {
     const fn store_prepare_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_PREPARE_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => STORE_PREPARE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => STORE_PREPARE_V5_SQL,
         }
     }
 
     const fn store_finalize_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_FINALIZE_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => STORE_FINALIZE_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => STORE_FINALIZE_V5_SQL,
         }
     }
 
     const fn store_current_sql(self) -> &'static str {
         match self {
             Self::V3 => STORE_CURRENT_V3_SQL,
-            Self::V5 | Self::V6 | Self::V7 => STORE_CURRENT_V5_SQL,
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => STORE_CURRENT_V5_SQL,
         }
     }
 
     const fn supports_autonomy(self) -> bool {
-        matches!(self, Self::V5 | Self::V6 | Self::V7)
+        matches!(self, Self::V5 | Self::V6 | Self::V7 | Self::V8)
     }
 
     const fn autonomy_receipts_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 | Self::V6 | Self::V7 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => Some(LEDGER_AUTONOMY_RECEIPTS_SQL),
         }
     }
 
     const fn autonomy_record_sql(self) -> Option<&'static str> {
         match self {
             Self::V3 => None,
-            Self::V5 | Self::V6 | Self::V7 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
+            Self::V5 | Self::V6 | Self::V7 | Self::V8 => Some(LEDGER_RECORD_AUTONOMY_RECEIPT_SQL),
         }
     }
 
     const fn supports_foreman(self) -> bool {
-        matches!(self, Self::V6 | Self::V7)
+        matches!(self, Self::V6 | Self::V7 | Self::V8)
     }
 
     const fn supports_submission(self) -> bool {
-        matches!(self, Self::V7)
+        matches!(self, Self::V7 | Self::V8)
     }
 
     const fn has_global_profile_parameters(self) -> bool {
-        matches!(self, Self::V5 | Self::V6 | Self::V7)
+        matches!(self, Self::V5 | Self::V6 | Self::V7 | Self::V8)
     }
 }
 
@@ -1450,6 +1452,8 @@ fn global_ledger_sql_profile(schema_version: u16) -> Option<TaskLedgerSqlProfile
         Some(TaskLedgerSqlProfile::V6)
     } else if schema_version == SUBMISSION_GLOBAL_LEDGER_SCHEMA_VERSION {
         Some(TaskLedgerSqlProfile::V7)
+    } else if schema_version == EXTERNAL_ADOPTION_GLOBAL_LEDGER_SCHEMA_VERSION {
+        Some(TaskLedgerSqlProfile::V8)
     } else {
         None
     }

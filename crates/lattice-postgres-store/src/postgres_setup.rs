@@ -14,6 +14,7 @@ use crate::migrations::{
     migration_manifest, migration_metadata_sha256, verify_embedded_manifest,
     verify_v1_manifest_prefix, verify_v2_manifest_prefix, verify_v3_manifest_prefix,
     verify_v4_manifest_prefix, verify_v5_manifest_prefix, verify_v6_manifest_prefix,
+    verify_v7_manifest_prefix,
 };
 use crate::schema_v6_profile::{
     FOREMAN_COORDINATION_EVENT_IDENTITY, FOREMAN_COORDINATION_STREAM_IDENTITY,
@@ -1488,6 +1489,7 @@ pub enum MigrationBootstrapProfile {
     V5,
     V6,
     V7,
+    V8,
 }
 
 /// Classifies only an exact embedded migration prefix without changing it.
@@ -1523,7 +1525,8 @@ pub fn inspect_migration_profile(
         | InstalledManifestState::ExactV4Prefix => MigrationBootstrapProfile::LegacyPrefix,
         InstalledManifestState::ExactV5Prefix => MigrationBootstrapProfile::V5,
         InstalledManifestState::ExactV6Prefix => MigrationBootstrapProfile::V6,
-        InstalledManifestState::ExactV7Full => MigrationBootstrapProfile::V7,
+        InstalledManifestState::ExactV7Prefix => MigrationBootstrapProfile::V7,
+        InstalledManifestState::ExactV8Full => MigrationBootstrapProfile::V8,
     };
     preflight_connection(
         &mut transaction,
@@ -1692,7 +1695,8 @@ enum InstalledManifestState {
     ExactV4Prefix,
     ExactV5Prefix,
     ExactV6Prefix,
-    ExactV7Full,
+    ExactV7Prefix,
+    ExactV8Full,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1971,6 +1975,7 @@ pub fn apply_migrations(
     let v4_manifest = verify_v4_manifest_prefix()?;
     let v5_manifest = verify_v5_manifest_prefix()?;
     let v6_manifest = verify_v6_manifest_prefix()?;
+    let v7_manifest = verify_v7_manifest_prefix()?;
     let mut transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::ReadCommitted)
@@ -2066,8 +2071,14 @@ pub fn apply_migrations(
             verify_runtime_submission_schema_v7(&mut transaction, target, &manifest, false)?;
             MigrationApplyOutcome::Applied { executable_count }
         }
-        InstalledManifestState::ExactV7Full => {
-            verify_runtime_submission_schema_v7(&mut transaction, target, &manifest, false)?;
+        InstalledManifestState::ExactV7Prefix => {
+            verify_runtime_submission_schema_v7(&mut transaction, target, &v7_manifest, false)?;
+            let executable_count = apply_missing_entries(&mut transaction, 8)?;
+            advance_compatibility_from_v7(&mut transaction, &v7_manifest, &manifest)?;
+            MigrationApplyOutcome::Applied { executable_count }
+        }
+        InstalledManifestState::ExactV8Full => {
+            verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, false)?;
             MigrationApplyOutcome::AlreadyCurrent
         }
     };
@@ -2088,8 +2099,11 @@ pub fn apply_migrations(
                 SchemaV6WriterProfile::V3Current,
             )?;
         }
-        InstalledManifestState::ExactV6Prefix | InstalledManifestState::ExactV7Full => {
+        InstalledManifestState::ExactV6Prefix => {
             verify_runtime_submission_schema_v7(&mut transaction, target, &manifest, false)?;
+        }
+        InstalledManifestState::ExactV7Prefix | InstalledManifestState::ExactV8Full => {
+            verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, false)?;
         }
         InstalledManifestState::Fresh
         | InstalledManifestState::ExactV1Prefix
@@ -2166,8 +2180,12 @@ pub fn verify_postgres_schema(
     }
     let evidence = if schema_version == POSTGRES_SCHEMA_VERSION {
         let manifest = verify_embedded_manifest()?;
-        let database_uuid =
-            verify_runtime_submission_schema_v7(&mut transaction, target, &manifest, false)?;
+        let database_uuid = verify_runtime_external_adoption_schema_v8(
+            &mut transaction,
+            target,
+            &manifest,
+            false,
+        )?;
         PostgresSchemaEvidence {
             database_uuid,
             manifest_sha256: manifest.manifest_sha256().clone(),
@@ -2260,6 +2278,7 @@ pub(crate) fn verify_runtime_store_schema(
         3 => verify_v3_manifest_prefix()?,
         5 => verify_v5_manifest_prefix()?,
         6 => verify_v6_manifest_prefix()?,
+        7 => verify_v7_manifest_prefix()?,
         POSTGRES_SCHEMA_VERSION => verify_embedded_manifest()?,
         version if version > POSTGRES_SCHEMA_VERSION => {
             return match classify_retained_history(&mut transaction)? {
@@ -2278,7 +2297,7 @@ pub(crate) fn verify_runtime_store_schema(
             ));
         }
     };
-    if matches!(installed_schema_version, 6 | POSTGRES_SCHEMA_VERSION) {
+    if matches!(installed_schema_version, 6 | 7 | POSTGRES_SCHEMA_VERSION) {
         let database_uuid = if installed_schema_version == 6 {
             verify_runtime_foreman_schema_v6(
                 &mut transaction,
@@ -2287,8 +2306,10 @@ pub(crate) fn verify_runtime_store_schema(
                 true,
                 SchemaV6WriterProfile::V3Current,
             )?
-        } else {
+        } else if installed_schema_version == 7 {
             verify_runtime_submission_schema_v7(&mut transaction, target, &manifest, true)?
+        } else {
+            verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, true)?
         };
         preflight_connection(
             &mut transaction,
@@ -3443,6 +3464,73 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     read_database_identity(client, target)
 }
 
+fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    manifest: &ManifestEvidence,
+    runtime_active: bool,
+) -> Result<String, PostgresStoreSetupError> {
+    let rows = read_history_rows(client)?;
+    verify_history_rows(&rows, migration_manifest())?;
+    let compatibility = read_retained_schema_compatibility(client)?;
+    if compatibility.manifest_sha256 != manifest.manifest_sha256().as_str()
+        || compatibility.versions != [8, 8, 8, 8, 8]
+    {
+        return Err(history_error());
+    }
+    let profile = client
+        .query_one(
+            "SELECT \
+                (SELECT count(*)::bigint FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  JOIN pg_catalog.pg_roles owner ON owner.oid=c.relowner \
+                 WHERE n.nspname='control' AND c.relkind='r' \
+                   AND c.relname IN ('external_verified_result_evidence', \
+                                     'task_external_verified_result_adoptions') \
+                   AND owner.rolname='lattice_migrator'), \
+                (SELECT count(*)::bigint FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='control' AND c.relkind='r' \
+                   AND c.relname IN ('external_verified_result_evidence', \
+                                     'task_external_verified_result_adoptions') \
+                   AND pg_catalog.has_table_privilege('lattice_runtime',c.oid, \
+                     'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')), \
+                (SELECT count(*)::bigint FROM pg_catalog.pg_proc p \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='control' AND p.proname IN (\
+                    'external_verified_result_evidence_read_v1',\
+                    'external_verified_result_adoption_preflight_v1') \
+                   AND p.prosecdef AND pg_catalog.has_function_privilege(\
+                     'lattice_runtime',p.oid,'EXECUTE')), \
+                (SELECT count(*)::bigint FROM pg_catalog.pg_constraint k \
+                  JOIN pg_catalog.pg_class c ON c.oid=k.conrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='control' AND c.relname='task_external_verified_result_adoptions' \
+                   AND k.contype='f' AND k.convalidated), \
+                (SELECT count(*)::bigint FROM pg_catalog.pg_constraint k \
+                  JOIN pg_catalog.pg_class c ON c.oid=k.conrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='control' AND c.relname='task_ledger_events' \
+                   AND k.conname='task_ledger_events_closed_values' \
+                   AND pg_catalog.pg_get_constraintdef(k.oid,false) LIKE '%EXTERNAL_VERIFIED_RESULT_ADOPTED%')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for (index, expected) in [(0, 2_i64), (1, 0), (2, 2), (3, 2), (4, 1)] {
+        if row_value::<i64>(&profile, index, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    if runtime_active {
+        verify_runtime_admission_present(client)?;
+    } else {
+        verify_stopped_admission(client)?;
+    }
+    read_database_identity(client, target)
+}
+
 fn preflight_connection<C: GenericClient>(
     client: &mut C,
     target: &MigrationTarget,
@@ -3621,9 +3709,13 @@ fn classify_installed_manifest_state<C: GenericClient>(
                     verify_history_rows(&rows, &migration_manifest()[..7])?;
                     Ok(InstalledManifestState::ExactV6Prefix)
                 }
+                8 => {
+                    verify_history_rows(&rows, &migration_manifest()[..8])?;
+                    Ok(InstalledManifestState::ExactV7Prefix)
+                }
                 length if length == migration_manifest().len() => {
                     verify_history_rows(&rows, migration_manifest())?;
-                    Ok(InstalledManifestState::ExactV7Full)
+                    Ok(InstalledManifestState::ExactV8Full)
                 }
                 length if length > migration_manifest().len() => {
                     match classify_retained_history(client)? {
@@ -3894,6 +3986,38 @@ fn advance_compatibility_from_v6<C: GenericClient>(
             &[
                 &v7_manifest.manifest_sha256().as_str(),
                 &v6_manifest.manifest_sha256().as_str(),
+            ],
+        )
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::CompatibilityMismatch)
+        })?;
+    if updated != 1 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(())
+}
+
+fn advance_compatibility_from_v7<C: GenericClient>(
+    client: &mut C,
+    v7_manifest: &ManifestEvidence,
+    v8_manifest: &ManifestEvidence,
+) -> Result<(), PostgresStoreSetupError> {
+    let updated = client
+        .execute(
+            "UPDATE ONLY control.schema_compatibility \
+             SET manifest_sha256 = $1, current_schema_version = 8, \
+                 min_reader = 8, max_reader = 8, min_writer = 8, max_writer = 8, \
+                 updated_at = clock_timestamp() \
+             WHERE singleton = true \
+               AND manifest_sha256 = $2 \
+               AND current_schema_version = 7 \
+               AND min_reader = 7 AND max_reader = 7 \
+               AND min_writer = 7 AND max_writer = 7",
+            &[
+                &v8_manifest.manifest_sha256().as_str(),
+                &v7_manifest.manifest_sha256().as_str(),
             ],
         )
         .map_err(|error| {

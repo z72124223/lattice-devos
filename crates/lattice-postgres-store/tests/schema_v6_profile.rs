@@ -29,8 +29,8 @@ fn catalog() -> ForemanSchemaV6CatalogAcl {
 
 #[test]
 fn task079_appends_exact_0007_without_changing_the_v5_prefix() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
-    assert_eq!(migration_manifest().len(), 8);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
+    assert_eq!(migration_manifest().len(), 9);
     assert_eq!(
         migration_manifest()[6].id(),
         FOREMAN_COORDINATION_MIGRATION_ID

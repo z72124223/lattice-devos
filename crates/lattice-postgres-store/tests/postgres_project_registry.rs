@@ -2,7 +2,7 @@ use lattice_postgres_store::{POSTGRES_SCHEMA_VERSION, PostgresProjectRegistryErr
 
 #[test]
 fn typed_project_registry_adapter_selects_only_exact_v5_or_v7_profiles() {
-    assert_eq!(POSTGRES_SCHEMA_VERSION, 7);
+    assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
     let source = include_str!("../src/project_registry.rs");
     for contract in [
         "const FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION: u16 = 5;",

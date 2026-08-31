@@ -500,7 +500,7 @@ fn prove_live_upgrade(run_id: &str, suffix: &str, prefix_len: usize, manifest_sh
     assert_eq!(
         apply_migrations(&mut migrator, &target).expect("prefix upgrade"),
         MigrationApplyOutcome::Applied {
-            executable_count: 8 - prefix_len
+            executable_count: 9 - prefix_len
         }
     );
     verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
