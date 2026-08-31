@@ -68,6 +68,7 @@ const TASK_PUBLIC_STATUS_SCHEMA_V2: &str = "lattice.task.status.v2";
 const TASK_PUBLIC_STATUS_SCHEMA_V3: &str = "lattice.task.status.v3";
 const TASK_PUBLIC_STATUS_SCHEMA_V4: &str = "lattice.task.status.v4";
 const TASK_PUBLIC_STATUS_SCHEMA_V5: &str = "lattice.task.status.v5";
+const TASK_PUBLIC_STATUS_SCHEMA_V6: &str = "lattice.task.status.v6";
 const TASK_PUBLIC_STATUS_VALUES: [&str; 5] = [
     "NOT_SUBMITTED",
     "SUBMITTED",
@@ -1189,7 +1190,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_submit_schema".to_owned(),
             CanonicalValue::String(format!(
-                "closed:v2:client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};legacy-intent:{CONTROLLED_CODEX_CANARY_INTENT}|general-objective-or-intent:nfc-no-control-no-secret:chars:1..={MAX_TASK_OBJECTIVE_CHARS}:utf8-bytes:1..={MAX_TASK_OBJECTIVE_BYTES};optional-selector:zero-or-one:project_id:canonical:bytes:2..={MAX_PROJECT_ID_BYTES}|project_name:chars:1..={MAX_PROJECT_NAME_CHARS}:utf8-bytes:1..={MAX_PROJECT_NAME_BYTES}"
+                "closed:v3:client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};legacy-intent:{CONTROLLED_CODEX_CANARY_INTENT}|general-objective-or-intent:nfc-no-control-no-secret:chars:1..={MAX_TASK_OBJECTIVE_CHARS}:utf8-bytes:1..={MAX_TASK_OBJECTIVE_BYTES};optional-selector:zero-or-one:project_id:canonical:bytes:2..={MAX_PROJECT_ID_BYTES}|project_name:chars:1..={MAX_PROJECT_NAME_CHARS}:utf8-bytes:1..={MAX_PROJECT_NAME_BYTES}|external-verified-adoption:{ADOPT_VERIFIED_RESULT_INTENT}:task_ref+expected_head+source_sha+target_sha+four-evidence-refs+approval-refs:1..=8"
             )),
         ),
         (
@@ -1205,7 +1206,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_output_schema".to_owned(),
             CanonicalValue::String(
-                "closed:v2-legacy|v5-general-create-only-redacted|v4-managed-general;v2-status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;v2-task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;v5-status:SUBMITTED;v5-task_state:DRAFT;v4-status:SUBMITTED|RUNNING|BLOCKED|FAILED|AWAITING_MERGE_APPROVAL;v4-task_state:existing-closed-enum;task_ref:lower-sha256;ledger_head_digest:lower-sha256;v2-result_digest:lower-sha256|null;v2-failure_stage:upper-underscore|null;v2-failure_code:upper-underscore|null;v5-result_digest:null;v5-failure_stage:null;v5-failure_code:null;v4-v5:objective_summary:fixed-redacted|objective_digest:lower-sha256|project_id|project_name|project_snapshot_id;v4:worker_running:bool|attempt:null-or-1..3|retry_count:0..2|model:null-or-gpt-5.6-luna-terra-sol|reasoning:null-or-low-medium-high-xhigh-max-ultra|thread_id:null-or-safe-1..256|turn_id:null-or-safe-1..256|last_progress_at:null-or-canonical-utc|blocker:null-or-upper-underscore-1..128|verification_status:NOT_STARTED-RUNNING-PASSED-FAILED|verification_digest:null-or-lower-sha256|evidence_digest:null-or-lower-sha256|resource_observation:null-or-closed-task-cumulative-11-field-nonnegative-token-budget-object-unavailable-cost|next_action:safe-text-1..256|foreman_generation:>=1|foreman_checkpoint_digest:lower-sha256"
+                "closed:v2-legacy|v5-general-create-only-redacted|v6-external-verified-adoption|v4-managed-general;v2-status:NOT_SUBMITTED|RECONCILIATION_REQUIRED|FAILED|COMPLETED;v2-task_state:NOT_SUBMITTED|DRAFT|AWAITING_EXECUTION_APPROVAL|PREPARING|EXECUTING|VERIFYING|REVIEWING|AWAITING_MERGE_APPROVAL|MERGING|COMPLETED|REJECTED|BLOCKED|FAILED|STOPPING|CANCELLED;v5-status:SUBMITTED;v5-task_state:DRAFT;v6-status:COMPLETED;v6-task_state:COMPLETED;v6-result_digest:lower-sha256;v4-status:SUBMITTED|RUNNING|BLOCKED|FAILED|AWAITING_MERGE_APPROVAL;v4-task_state:existing-closed-enum;task_ref:lower-sha256;ledger_head_digest:lower-sha256;v2-result_digest:lower-sha256|null;v2-failure_stage:upper-underscore|null;v2-failure_code:upper-underscore|null;v5-result_digest:null;v5-failure_stage:null;v5-failure_code:null;v4-v5-v6:objective_summary:fixed-redacted|objective_digest:lower-sha256|project_id|project_name|project_snapshot_id;v4:worker_running:bool|attempt:null-or-1..3|retry_count:0..2|model:null-or-gpt-5.6-luna-terra-sol|reasoning:null-or-low-medium-high-xhigh-max-ultra|thread_id:null-or-safe-1..256|turn_id:null-or-safe-1..256|last_progress_at:null-or-canonical-utc|blocker:null-or-upper-underscore-1..128|verification_status:NOT_STARTED-RUNNING-PASSED-FAILED|verification_digest:null-or-lower-sha256|evidence_digest:null-or-lower-sha256|resource_observation:null-or-closed-task-cumulative-11-field-nonnegative-token-budget-object-unavailable-cost|next_action:safe-text-1..256|foreman_generation:>=1|foreman_checkpoint_digest:lower-sha256"
                     .to_owned(),
             ),
         ),
@@ -1762,13 +1763,14 @@ impl TaskPublicStatus {
         ];
         let is_legacy_general_create_only = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V3;
         let is_redacted_general_create_only = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V5;
+        let is_external_verified_adoption = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V6;
         let is_general_create_only =
             is_legacy_general_create_only || is_redacted_general_create_only;
         let is_managed = schema_version == TASK_PUBLIC_STATUS_SCHEMA_V4;
-        let is_general = is_general_create_only || is_managed;
+        let is_general = is_general_create_only || is_external_verified_adoption || is_managed;
         let expected_fields = if is_managed {
             29
-        } else if is_redacted_general_create_only {
+        } else if is_redacted_general_create_only || is_external_verified_adoption {
             13
         } else if is_legacy_general_create_only {
             12
@@ -1782,7 +1784,10 @@ impl TaskPublicStatus {
                 .any(|field| object.contains_key(*field) != is_general)
             || object.contains_key("objective") != is_legacy_general_create_only
             || redacted_objective_fields.iter().any(|field| {
-                object.contains_key(*field) != (is_redacted_general_create_only || is_managed)
+                object.contains_key(*field)
+                    != (is_redacted_general_create_only
+                        || is_external_verified_adoption
+                        || is_managed)
             })
             || managed_fields
                 .iter()
@@ -1826,6 +1831,15 @@ impl TaskPublicStatus {
         {
             return None;
         }
+        if is_external_verified_adoption
+            && (status != "COMPLETED"
+                || task_state != "COMPLETED"
+                || result_digest.is_none()
+                || failure_stage.is_some()
+                || failure_code.is_some())
+        {
+            return None;
+        }
         let (objective, project_id, project_name, project_snapshot_id) = if is_general {
             let project_id = object.get("project_id")?.as_str()?;
             let project_name = object.get("project_name")?.as_str()?;
@@ -1854,7 +1868,8 @@ impl TaskPublicStatus {
         } else {
             (None, None, None, None)
         };
-        let redacted_objective = if is_redacted_general_create_only {
+        let redacted_objective = if is_redacted_general_create_only || is_external_verified_adoption
+        {
             let summary = object.get("objective_summary")?.as_str()?;
             let digest = object.get("objective_digest")?.as_str()?;
             if summary != TASK_PUBLIC_OBJECTIVE_SUMMARY || !valid_task_ref(digest) {
@@ -3219,6 +3234,7 @@ fn task_public_status_schema() -> Value {
         "oneOf": [
             task_public_status_variant_schema(false),
             redacted_general_task_public_status_variant_schema(),
+            adopted_external_result_task_public_status_variant_schema(),
             managed_task_public_status_variant_schema()
         ]
     })
@@ -3246,6 +3262,19 @@ fn redacted_general_task_public_status_variant_schema() -> Value {
             .into_iter()
             .map(|field| json!(field)),
     );
+    schema
+}
+
+fn adopted_external_result_task_public_status_variant_schema() -> Value {
+    let mut schema = redacted_general_task_public_status_variant_schema();
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("adopted task status properties");
+    properties["schema_version"] =
+        json!({"type": "string", "enum": [TASK_PUBLIC_STATUS_SCHEMA_V6]});
+    properties["status"] = json!({"type": "string", "enum": ["COMPLETED"]});
+    properties["task_state"] = json!({"type": "string", "enum": ["COMPLETED"]});
+    properties["result_digest"] = lower_sha256_schema();
     schema
 }
 

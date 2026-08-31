@@ -6734,13 +6734,23 @@ fn general_task_public_status(
     }
     let objective_digest = task_public_objective_digest(submission.objective())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::TaskControl))?;
+    let (schema_version, status, result_digest) = match (evidence.state(), evidence.result_digest())
+    {
+        (TaskState::Draft, None) => ("lattice.task.status.v5", "SUBMITTED", Value::Null),
+        (TaskState::Completed, Some(result_digest)) => (
+            "lattice.task.status.v6",
+            "COMPLETED",
+            json!(result_digest.as_str()),
+        ),
+        _ => return Err(LatticedError::new(LatticedErrorKind::TaskControl)),
+    };
     Ok(json!({
-        "schema_version": "lattice.task.status.v5",
-        "status": "SUBMITTED",
+        "schema_version": schema_version,
+        "status": status,
         "task_state": evidence.state().as_str(),
         "task_ref": submission.task_ref().as_str(),
         "ledger_head_digest": evidence.ledger_head_digest().as_str(),
-        "result_digest": Value::Null,
+        "result_digest": result_digest,
         "failure_stage": Value::Null,
         "failure_code": Value::Null,
         "objective_summary": TASK_PUBLIC_OBJECTIVE_SUMMARY,
@@ -15836,6 +15846,26 @@ mod tests {
             assert!(submitted.get("objective").is_none());
             assert!(!submitted.to_string().contains(objective));
         }
+
+        let submission = general_task_submission(
+            "external-adoption-status",
+            "Confidential verified closure",
+            "Confidential Planning",
+            &authority,
+        )
+        .expect("general submission");
+        let evidence = TaskIntakeLifecycleEvidence::externally_adopted(
+            general_task_binding(&submission).expect("binding"),
+            test_content_digest('e'),
+            test_content_digest('f'),
+        )
+        .expect("external adoption evidence");
+        let adopted =
+            general_task_public_status(&evidence, &submission).expect("adopted projection");
+        assert_eq!(adopted["schema_version"], "lattice.task.status.v6");
+        assert_eq!(adopted["status"], "COMPLETED");
+        assert_eq!(adopted["task_state"], "COMPLETED");
+        assert_eq!(adopted["result_digest"], test_content_digest('f').as_str());
 
         let source = include_str!("composition.rs");
         let producer = source
