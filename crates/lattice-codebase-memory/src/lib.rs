@@ -25,6 +25,8 @@ pub enum CodebaseMemoryError {
     QueryDigestMismatch,
     /// A bounded ordinal, rank, score, or collection cannot be represented.
     CapacityExceeded,
+    /// A Git changed path is not a canonical repository-relative path.
+    InvalidChangedPath,
 }
 
 impl fmt::Display for CodebaseMemoryError {
@@ -41,8 +43,128 @@ impl fmt::Display for CodebaseMemoryError {
                 formatter.write_str("memory query does not match request digest")
             }
             Self::CapacityExceeded => formatter.write_str("graph-memory capacity exceeded"),
+            Self::InvalidChangedPath => {
+                formatter.write_str("invalid repository-relative changed path")
+            }
         }
     }
+}
+
+/// One existing Graphify/Codebase Memory node selected by an exact changed path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedPathNode {
+    relative_path: String,
+    record_id: ContentDigest,
+    subject: String,
+    category: String,
+}
+
+impl ChangedPathNode {
+    #[must_use]
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    #[must_use]
+    pub const fn record_id(&self) -> &ContentDigest {
+        &self.record_id
+    }
+
+    #[must_use]
+    pub fn subject(&self) -> &str {
+        &self.subject
+    }
+
+    #[must_use]
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+}
+
+/// Closed, deterministic impact seeds derived only from exact changed paths.
+///
+/// This value deliberately contains nodes only. It does not traverse incoming
+/// or outgoing graph edges, so later impact stages cannot mistake adjacency for
+/// evidence that a node was directly changed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedPathImpactInput {
+    changed_paths: Vec<String>,
+    nodes: Vec<ChangedPathNode>,
+}
+
+impl ChangedPathImpactInput {
+    #[must_use]
+    pub fn changed_paths(&self) -> &[String] {
+        &self.changed_paths
+    }
+
+    #[must_use]
+    pub fn nodes(&self) -> &[ChangedPathNode] {
+        &self.nodes
+    }
+}
+
+/// Maps Git changed paths to existing graph-memory nodes without graph traversal.
+///
+/// Paths and nodes are sorted and deduplicated, making the result a closed,
+/// deterministic input for a separately owned impact-analysis stage. Changed
+/// paths with no existing node remain visible in `changed_paths` and add no node.
+///
+/// # Errors
+///
+/// Rejects empty, absolute, drive-qualified, backslash, dot, parent, NUL, or
+/// oversized repository-relative paths.
+pub fn map_changed_paths_to_nodes(
+    analysis: &NormalizedGraphAnalysis,
+    changed_paths: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<ChangedPathImpactInput, CodebaseMemoryError> {
+    let mut changed_paths = changed_paths
+        .into_iter()
+        .map(|path| path.as_ref().to_owned())
+        .collect::<Vec<_>>();
+    if changed_paths.iter().any(|path| !valid_changed_path(path)) {
+        return Err(CodebaseMemoryError::InvalidChangedPath);
+    }
+    changed_paths.sort();
+    changed_paths.dedup();
+    let changed = changed_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    let mut nodes = analysis
+        .records()
+        .iter()
+        .filter(|record| {
+            record.graph_kind() == GraphRecordKind::Node
+                && changed.contains(record.provenance().relative_path())
+        })
+        .map(|record| ChangedPathNode {
+            relative_path: record.provenance().relative_path().to_owned(),
+            record_id: record.record_id().clone(),
+            subject: record.subject().to_owned(),
+            category: record.category().to_owned(),
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| left.record_id.as_str().cmp(right.record_id.as_str()));
+
+    Ok(ChangedPathImpactInput {
+        changed_paths,
+        nodes,
+    })
+}
+
+fn valid_changed_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1_024
+        && !path.starts_with('/')
+        && !path.starts_with('\\')
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && !(path.len() >= 2 && path.as_bytes()[1] == b':')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 impl Error for CodebaseMemoryError {}

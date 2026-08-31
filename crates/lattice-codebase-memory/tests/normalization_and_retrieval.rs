@@ -1,4 +1,7 @@
-use lattice_codebase_memory::{digest_query_text, normalize_analysis, plan_retrieval};
+use lattice_codebase_memory::{
+    CodebaseMemoryError, digest_query_text, map_changed_paths_to_nodes, normalize_analysis,
+    plan_retrieval,
+};
 use lattice_contracts::{
     AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId, GraphConfidence,
     GraphMemoryRunRequest, GraphSourceProvenance, GraphifyIdentity, GraphifyRawEdge,
@@ -196,4 +199,45 @@ fn duplicate_canonical_records_are_rejected() {
     .expect("duplicate raw graph is structurally complete");
 
     assert!(normalize_analysis(&request, &snapshot, &duplicate_raw).is_err());
+}
+
+#[test]
+fn changed_paths_map_only_to_direct_nodes_without_reverse_traversal() {
+    let (request, snapshot, raw) = fixture("impact", '1', false);
+    let analysis = normalize_analysis(&request, &snapshot, &raw).expect("analysis");
+
+    let input =
+        map_changed_paths_to_nodes(&analysis, ["src/lib.rs", "src/unmapped.rs", "src/lib.rs"])
+            .expect("closed impact input");
+
+    assert_eq!(
+        input.changed_paths(),
+        &["src/lib.rs".to_owned(), "src/unmapped.rs".to_owned()]
+    );
+    assert_eq!(input.nodes().len(), 1);
+    assert_eq!(input.nodes()[0].relative_path(), "src/lib.rs");
+    assert_eq!(input.nodes()[0].subject(), "run_graph_memory");
+    assert_eq!(input.nodes()[0].category(), "function");
+    assert!(
+        input
+            .nodes()
+            .iter()
+            .all(|node| node.subject() != "CodebaseMemoryPort"),
+        "the target of an edge from the changed file must not be reverse-traversed into the seed"
+    );
+}
+
+#[test]
+fn changed_path_mapping_rejects_non_canonical_git_paths() {
+    let (request, snapshot, raw) = fixture("impact", '1', false);
+    let analysis = normalize_analysis(&request, &snapshot, &raw).expect("analysis");
+
+    assert_eq!(
+        map_changed_paths_to_nodes(&analysis, ["../src/lib.rs"]),
+        Err(CodebaseMemoryError::InvalidChangedPath)
+    );
+    assert_eq!(
+        map_changed_paths_to_nodes(&analysis, [r"src\lib.rs"]),
+        Err(CodebaseMemoryError::InvalidChangedPath)
+    );
 }
