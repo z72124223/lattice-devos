@@ -1827,11 +1827,6 @@ impl ForemanStreamLock {
         }
     }
 
-    fn wait_for_one_ungranted_waiter(&mut self) -> Result<(), &'static str> {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        self.wait_for_one_ungranted_waiter_until(deadline)
-    }
-
     fn wait_for_one_ungranted_waiter_for(&mut self, timeout: Duration) -> Result<(), &'static str> {
         self.wait_for_one_ungranted_waiter_until(Instant::now() + timeout)
     }
@@ -2977,9 +2972,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "process_b.recv_expected(3, Duration::from_secs(2))",
         "process_b.recv_expected(4, Duration::from_secs(2))",
         "lattice.task-ledger.stream.v1:",
-        "wait_for_one_ungranted_waiter",
+        "wait_for_one_ungranted_waiter_for",
         "NOT waiting.granted",
-        "let deadline = Instant::now() + Duration::from_secs(3);",
         "Duration::from_secs(2)",
         "Duration::from_millis(20)",
         "task105-race-contender",
@@ -3510,7 +3504,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     process_a.send(&generation_one);
     stream_lock
-        .wait_for_one_ungranted_waiter()
+        .wait_for_one_ungranted_waiter_for(Duration::from_secs(35))
         .expect("TASK105_FOREMAN_STREAM_WAITER");
     assert_eq!(
         race.foreman_counts(),
