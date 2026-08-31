@@ -27,7 +27,7 @@ use lattice_postgres_store::{
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget as WriterExtensionTarget,
-    PostgresWriterLease, V3BootstrapProfile, V3ExtensionTarget, V4ExtensionTarget,
+    PostgresWriterLease, V3BootstrapProfile, V3ExtensionTarget, V5ExtensionTarget,
     apply_extension as apply_writer_extension, apply_v3_extension, inspect_v3_bootstrap_profile,
     verify_embedded_v1_extension_manifest as verify_writer_v1_manifest,
     verify_embedded_v2_extension_manifest as verify_writer_v2_manifest,
@@ -50,8 +50,8 @@ const LEGACY_V1_MANIFEST_SHA256: &str =
     "9b126a41e542b71d434b5786e35acb66575967d055a6733b9d6bf0b8c9f0eada";
 const WRITER_V3_MANIFEST_SHA256: &str =
     "eab2812fa3d94cd3466d7c003386f805a973fd7def1f16aeb15b52f47dad78e4";
-const WRITER_V4_MANIFEST_SHA256: &str =
-    "73d3e435c5923797076d30cea337d84b94b2e760db6e9727033b68ace592a229";
+const WRITER_V5_MANIFEST_SHA256: &str =
+    "354aa40bc2ed30b7500cffea3a9227d94b766d150798824e39225cf664cca5ad";
 const CURRENT_V7_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
 const FUTURE_V8_MANIFEST_SHA256: &str =
@@ -1055,7 +1055,7 @@ impl LiveConfig {
         }
     }
 
-    fn assert_v7_writer_v4_current(&self) {
+    fn assert_v7_writer_v5_current(&self) {
         let mut client = self.bootstrap_client();
         let row = client
             .query_one(
@@ -1063,34 +1063,34 @@ impl LiveConfig {
                     (SELECT pg_catalog.count(*) FROM ONLY control.migration_history)=8, \
                     (SELECT current_schema_version=7 AND manifest_sha256=$1 \
                       FROM ONLY control.schema_compatibility WHERE singleton), \
-                    (SELECT extension_schema_version=4 \
+                    (SELECT extension_schema_version=5 \
                       AND extension_manifest_sha256=$2 \
                       AND global_schema_version=7 AND global_manifest_sha256=$1 \
                       AND required_memory_schema_version=3 \
                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
-                    (SELECT pg_catalog.count(*) IN (3,5,7) \
-                      AND pg_catalog.count(*) FILTER (WHERE extension_schema_version=4 \
-                        AND global_schema_version=7 AND event_kind='REBOUND')=1 \
+                    (SELECT pg_catalog.count(*) IN (4,6,8) \
+                      AND pg_catalog.count(*) FILTER (WHERE extension_schema_version=5 \
+                        AND global_schema_version=7 AND event_kind='ACTIVATED')=1 \
                       FROM ONLY writer_lease.writer_lease_extension_ledger), \
                     pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE'), \
                     pg_catalog.has_function_privilege('lattice_runtime', \
-                      'writer_lease.writer_lease_bind_runtime_v4(text,bigint,bytea,text,text,text,text,text)', \
+                      'writer_lease.writer_lease_bind_runtime_v5(text,bigint,bytea,text,text,text,text,text)', \
                       'EXECUTE'), \
                     NOT pg_catalog.has_function_privilege('lattice_runtime', \
-                      'writer_lease.writer_lease_bind_runtime_v3(text,bigint,bytea,text,text,text,text,text)', \
+                      'writer_lease.writer_lease_bind_runtime_v4(text,bigint,bytea,text,text,text,text,text)', \
                       'EXECUTE')",
-                &[&CURRENT_V7_MANIFEST_SHA256, &WRITER_V4_MANIFEST_SHA256],
+                &[&CURRENT_V7_MANIFEST_SHA256, &WRITER_V5_MANIFEST_SHA256],
             )
-            .expect("TASK105_V7_WRITER_V4_PROFILE");
+            .expect("TASK105_V7_WRITER_V5_PROFILE");
         for index in 0..7 {
-            assert!(row.get::<_, bool>(index), "TASK105_V7_WRITER_V4_{index}");
+            assert!(row.get::<_, bool>(index), "TASK105_V7_WRITER_V5_{index}");
         }
     }
 
     fn introduce_partial_writer_acl(&self) {
         self.bootstrap_client()
             .batch_execute(
-                "REVOKE EXECUTE ON FUNCTION writer_lease.writer_lease_bind_runtime_v4(\
+                "REVOKE EXECUTE ON FUNCTION writer_lease.writer_lease_bind_runtime_v5(\
                     text,bigint,bytea,text,text,text,text,text) FROM lattice_runtime",
             )
             .expect("TASK105_INTRODUCE_PARTIAL_WRITER");
@@ -1099,7 +1099,7 @@ impl LiveConfig {
     fn repair_partial_writer_acl(&self) {
         self.bootstrap_client()
             .batch_execute(
-                "GRANT EXECUTE ON FUNCTION writer_lease.writer_lease_bind_runtime_v4(\
+                "GRANT EXECUTE ON FUNCTION writer_lease.writer_lease_bind_runtime_v5(\
                     text,bigint,bytea,text,text,text,text,text) TO lattice_runtime",
             )
             .expect("TASK105_REPAIR_PARTIAL_WRITER");
@@ -1118,7 +1118,7 @@ impl LiveConfig {
         self.bootstrap_client()
             .batch_execute(&format!(
                 "UPDATE ONLY writer_lease.writer_lease_extension_identity \
-                 SET extension_manifest_sha256='{WRITER_V4_MANIFEST_SHA256}' WHERE singleton"
+                 SET extension_manifest_sha256='{WRITER_V5_MANIFEST_SHA256}' WHERE singleton"
             ))
             .expect("TASK105_REPAIR_CORRUPT_WRITER");
     }
@@ -1467,9 +1467,9 @@ fn foreman_writer_repository(config: &LiveConfig) -> PostgresWriterLease {
             .as_str(),
     )
     .expect("TASK105_RACE_DATABASE_IDENTITY");
-    let target = V4ExtensionTarget::new(config.database_name(), database_identity)
+    let target = V5ExtensionTarget::new(config.database_name(), database_identity)
         .expect("TASK105_RACE_WRITER_TARGET");
-    PostgresWriterLease::new_v4_v7(
+    PostgresWriterLease::new_v5_v7(
         config.runtime_client(),
         &target,
         &store_authority_from_environment(),
@@ -1826,9 +1826,9 @@ impl WriterContention {
                 .as_str(),
         )
         .expect("TASK105_WRITER_DATABASE_IDENTITY");
-        let target = V4ExtensionTarget::new(config.database_name(), database_identity)
-            .expect("TASK105_WRITER_V4_TARGET");
-        let mut repository = PostgresWriterLease::new_v4_v7(
+        let target = V5ExtensionTarget::new(config.database_name(), database_identity)
+            .expect("TASK105_WRITER_V5_TARGET");
+        let mut repository = PostgresWriterLease::new_v5_v7(
             config.runtime_client(),
             &target,
             &store_authority_from_environment(),
@@ -2649,7 +2649,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     config.assert_v6_writer_v3_current();
     let old_v3_v6_current = config.durable_profile_fingerprint();
     run_latticed_admin(&config, "--postgres-bootstrap", true);
-    config.assert_v7_writer_v4_current();
+    config.assert_v7_writer_v5_current();
     assert_ne!(config.durable_profile_fingerprint(), old_v3_v6_current);
     println!("TASK105_STAGE_V6_V3_CURRENT_TO_V7_V4_PASS");
 
@@ -2669,7 +2669,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(config.durable_profile_fingerprint(), partial);
     config.repair_partial_writer_acl();
-    config.assert_v7_writer_v4_current();
+    config.assert_v7_writer_v5_current();
     println!("TASK105_STAGE_PARTIAL_FAIL_CLOSED_PASS");
 
     config.introduce_corrupt_writer_identity();
@@ -2680,7 +2680,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(config.durable_profile_fingerprint(), corrupt);
     config.repair_corrupt_writer_identity();
-    config.assert_v7_writer_v4_current();
+    config.assert_v7_writer_v5_current();
     println!("TASK105_STAGE_CORRUPT_FAIL_CLOSED_PASS");
 
     let mut unsupported_history = UnsupportedHistory::introduce(&config, true);
@@ -2693,7 +2693,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     unsupported_history
         .restore()
         .expect("TASK105_BOOTSTRAP_UNSUPPORTED_RESTORE");
-    config.assert_v7_writer_v4_current();
+    config.assert_v7_writer_v5_current();
     println!("TASK105_STAGE_UNSUPPORTED_FAIL_CLOSED_PASS");
     println!("TASK105_STAGE_INITIALIZE_PASS");
 
@@ -2946,7 +2946,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     writer_v2.prepare_v5_writer_v2_current();
     writer_v2.assert_v5_writer_v2_current();
     run_latticed_admin(&writer_v2, "--postgres-bootstrap", true);
-    writer_v2.assert_v7_writer_v4_current();
+    writer_v2.assert_v7_writer_v5_current();
     assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_V5_WRITER_V2_EXECUTABLE_PASS");
 
@@ -2963,7 +2963,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     bridge_pending.prepare_v5_memory_v2_writer_v2_bridge_pending();
     bridge_pending.assert_v5_memory_v2_writer_v2_bridge_pending();
     run_latticed_admin(&bridge_pending, "--postgres-bootstrap", true);
-    bridge_pending.assert_v7_writer_v4_current();
+    bridge_pending.assert_v7_writer_v5_current();
     assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_V5_MEMORY_V2_WRITER_PENDING_EXECUTABLE_PASS");
 
@@ -3042,7 +3042,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     println!("TASK105_STAGE_V5_MEMORY_PARTIAL_FAIL_CLOSED_PASS");
 
     run_latticed_admin(&writer_absent, "--postgres-bootstrap", true);
-    writer_absent.assert_v7_writer_v4_current();
+    writer_absent.assert_v7_writer_v5_current();
     assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
 
     writer_absent.revoke_login_database_privileges();
@@ -3063,7 +3063,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     race_database.initialize();
     let race = race_database.config();
     run_latticed_admin(&race, "--postgres-bootstrap", true);
-    race.assert_v7_writer_v4_current();
+    race.assert_v7_writer_v5_current();
     let race_migration = race.migration_fingerprint();
     let race_durable = race.durable_profile_fingerprint();
 

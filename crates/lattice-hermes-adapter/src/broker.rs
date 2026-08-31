@@ -2796,6 +2796,7 @@ pub(crate) struct CodexBrokerTerminal {
     status: String,
 }
 
+#[cfg(windows)]
 impl CodexBrokerTerminal {
     #[cfg(test)]
     pub(crate) const fn agent_message_count(&self) -> u64 {
@@ -2813,6 +2814,7 @@ impl CodexBrokerTerminal {
     }
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CodexBrokerRequest {
     Initialize,
@@ -2820,6 +2822,7 @@ pub(crate) enum CodexBrokerRequest {
     TurnStart,
 }
 
+#[cfg(windows)]
 impl CodexBrokerRequest {
     const fn index(self) -> usize {
         match self {
@@ -2838,6 +2841,7 @@ impl CodexBrokerRequest {
     }
 }
 
+#[cfg(windows)]
 pub(crate) struct CodexBrokerProtocol {
     codex_home: PathBuf,
     cwd: PathBuf,
@@ -2853,6 +2857,7 @@ pub(crate) struct CodexBrokerProtocol {
     terminal_emitted: bool,
 }
 
+#[cfg(windows)]
 impl CodexBrokerProtocol {
     pub(crate) fn new(
         codex_home: PathBuf,

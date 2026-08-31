@@ -297,6 +297,10 @@ fn submission_rejects_sensitive_assignments_before_claim_or_envelope_creation() 
         "api_key\u{a0}:do-not-store",
         "private key----- marker before -----begin marker",
         "使用 AKIAIOSFODNN7EXAMPLE 完成設定",
+        "clone https://alice:hunter2@example.invalid/repo",
+        "fetch http://alice%3Ahunter2@example.invalid/repo",
+        "inspect ssh://git:private@example.invalid/repo",
+        "inspect ssh://git@example.invalid/repo",
     ]
     .into_iter()
     .enumerate()

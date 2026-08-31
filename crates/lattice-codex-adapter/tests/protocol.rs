@@ -83,6 +83,13 @@ fn completed_session(
     }))?;
     session.ingest(json!({"id": 1, "result": {"thread": {"id": "thr_123"}}}))?;
     session.ingest(json!({"id": 2, "result": {"turn": {"id": "turn_456"}}}))?;
+    session.ingest(json!({
+        "method": "turn/started",
+        "params": {
+            "threadId": "thr_123",
+            "turn": {"id": "turn_456", "status": "inProgress"}
+        }
+    }))?;
     for (index, item) in completed_items.into_iter().enumerate() {
         session.ingest(json!({
             "method": "item/completed",
@@ -879,6 +886,15 @@ fn accepts_official_completed_item_stream_with_summary_terminal() {
     session
         .ingest(json!({"id": 2, "result": {"turn": {"id": "turn_456"}}}))
         .expect("turn response is valid");
+    session
+        .ingest(json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thr_123",
+                "turn": {"id": "turn_456", "status": "inProgress"}
+            }
+        }))
+        .expect("exact turn start is valid");
 
     for (id, command) in [
         ("tool_apply", "apply_patch fixture"),

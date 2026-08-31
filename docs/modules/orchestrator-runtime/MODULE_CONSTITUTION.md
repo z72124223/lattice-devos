@@ -1,7 +1,7 @@
 ---
 module_id: orchestrator-runtime
 name: Orchestrator and Runtime Port
-version: 2.9
+version: 3.1
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-26
@@ -19,6 +19,14 @@ own the snapshot, Ledger, Git observation, or Writer authority.
 Version 2.9 additionally owns the one-call create-only order for a verified
 general-task intake; that order uses a separate narrow port and deliberately
 cannot reach Task-Spec lifecycle or execution authority.
+Version 3.0 additionally owns the pure type-staged managed-attempt workflow,
+retained-attempt restart reconciliation, and bounded stall recovery. Concrete
+PostgreSQL, Node/App Server, workspace snapshot, clock, and runtime composition
+remain injected adapters outside this module.
+Version 3.1 clarifies terminal Writer cleanup: a separately durable closed
+`BLOCKED` or `FAILED` decision may release its exact Writer only after no live
+provider effect remains; a retained no-effect closure by itself grants no
+release authority.
 
 ## Non-Goals
 
@@ -45,6 +53,10 @@ cannot reach Task-Spec lifecycle or execution authority.
   and Orchestrator does not own the canonical receipt subject or its hashes.
 - Pure coordination projections plus data-only dispatch and archive decisions;
   neither the snapshot nor decision is durable truth or execution authority.
+- Type-state markers for managed starting versus exact-started execution,
+  managed restart/stall outcomes, and the final
+  `AwaitingMergeApproval` recommendation. These are pure coordination values,
+  not Task-Ledger state or durable authority.
 
 Task Domain owns Task Spec/state legality; Task Ledger/PostgreSQL owns durable
 truth; Policy owns decisions; Gateway IPC owns protocol; Approval Verifier owns
@@ -106,6 +118,36 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   observe server binding/Git and acquire Writer authority, then append under the
   fence and release after known append success. Unknown append stops before
   release; unknown release stops without repeating append.
+- For one managed successor, use `run_managed_workflow` (or its exported staged
+  functions) as the only normal progression owner. The fixed order is:
+  successor admission/replay; durable autonomy; `DRAFT ->
+  AWAITING_EXECUTION_APPROVAL`; current closed execution-authority validation;
+  exact writer acquire/current/assert; `AWAITING_EXECUTION_APPROVAL ->
+  PREPARING`; model availability preflight; current-authority recheck; atomic
+  attempt claim; thread and turn start
+  acceptance; durable exact matching `turn/started`; `PREPARING -> EXECUTING`;
+  execution observations; exact terminal; independent snapshot preparation;
+  durable owner-typed artifact; independent verification; `EXECUTING ->
+  VERIFYING -> REVIEWING -> AWAITING_MERGE_APPROVAL`; then known writer release.
+- `prepare_managed_attempt`, `confirm_managed_exact_start`, and
+  `finish_managed_attempt` expose the same type-staged boundary for composition
+  that must perform non-managed work between stages. A caller cannot obtain a
+  `ManagedExecutingAttempt` from thread/turn RPC acceptance alone.
+- On fresh-process replay of retained worker IDs, call only read exact thread,
+  read exact turn, resume exact turn, and reconcile exact turn, in that order;
+  an exact terminal short-circuits. Never start a replacement thread or turn
+  from the restart path.
+- Stall recovery uses the Foreman State watchdog's closed reason, reconciles
+  retained IDs first, then (only when unresolved) interrupts the exact turn,
+  durably records interrupt request and exact terminal, and returns the bounded
+  retry decision. The coordinator never opens the retry itself.
+- A verification pass recommends only `AWAITING_MERGE_APPROVAL`; it cannot
+  merge, complete, push, deploy, or release. Verification failure and all
+  uncertain/retry/restart paths retain the exact writer lease and fence while
+  reconciliation or bounded repair remains pending. A separately durable
+  closed `BLOCKED` or `FAILED` decision may release the exact Writer only
+  after retained provider effect has been terminally reconciled or proven
+  absent.
 
 ## Invariants
 
@@ -180,6 +222,36 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
     effect must enter the normal Task Domain, current Registry, Policy,
     approval, lease/fence, and downstream gates as a separately governed
     operation.
+27. Managed model availability is checked before current-authority assertion
+    and atomic attempt claim. An unavailable allowlisted model fails closed
+    without consuming an active-attempt slot or silently selecting another
+    model.
+28. A managed task remains `PREPARING` after thread and turn start acceptance.
+    Only a durably recorded exact matching in-progress `turn/started`
+    observation permits the `PREPARING -> EXECUTING` transition.
+29. Managed terminal observation is not task success. It must be durable before
+    independent preparation, whose Artifact-Store-owned evidence must be
+    durably receipt-matched before verification.
+30. Managed verification pass progresses only through `VERIFYING` and
+    `REVIEWING` to `AWAITING_MERGE_APPROVAL`. No managed coordinator reaches
+    `MERGING`, `COMPLETED`, push, deployment, publication, or release.
+31. After writer acquisition, every ambiguous, reconciliation, restart, stall,
+    or still-repairable failure retains the exact lease/fence. Writer release
+    occurs only after a known durable transition to `AWAITING_MERGE_APPROVAL`,
+    or after a separately durable closed decision transitions the task to
+    `BLOCKED` or `FAILED` and exact terminal/no-provider-effect evidence proves
+    that no provider effect remains live. An attempt closure alone, an
+    unresolved Writer mismatch, or retry-budget arithmetic without that
+    durable decision never authorizes release.
+32. Retained-attempt restart performs no start RPC. It reconciles exact stored
+    provider identities first and never turns an unresolved or ambiguous read
+    into a duplicate thread/turn.
+33. Stall is not elapsed time alone. Only a closed Foreman State watchdog reason
+    can enter recovery; exact interrupt must be followed by a durable exact
+    interrupted/failed terminal before a retry is allowed.
+34. Repair retries preserve the task reference, increment attempt/fence through
+    semantic-owner inputs, and are capped by the injected `WorkerBudget`.
+    Exceeding two repair retries returns the closed exhausted decision.
 
 ## Allowed Dependencies
 
@@ -187,6 +259,9 @@ approval authority; Writer Lease owns fencing; Guardian owns activation.
   `lattice-codebase-memory`, `lattice-ports`, and `lattice-writer-lease` 1.1
   public APIs.
 - `lattice-foreman-state` 1.3 closed checkpoint/snapshot/projection values only.
+- `lattice-task-ledger` 3.0 and `lattice-artifact-store` 1.1 values only through
+  the `lattice-ports` managed boundaries; Orchestrator owns neither semantic
+  record construction nor persistence.
 - Injected Registry, Ledger, approval, workspace, runtime, verification,
   review, integration, clock, and ID ports.
 
@@ -232,6 +307,20 @@ envelope remain outside this module; Task Ledger/PostgreSQL remain durable
 truth. Existing canary execution order and every protected-action gate remain
 unchanged.
 
+Version 3.0 adds the pure managed-attempt and high-level lifecycle/writer
+coordinators. It preserves existing public intake/delivery behavior and adds no
+concrete adapter or I/O. Runtime compositions must migrate from manual managed
+task transitions to `run_managed_workflow` or the exported type-staged
+functions so exact-start, artifact-before-verification, retained-ID
+reconciliation, retry budget, merge separation, and writer retention cannot be
+reordered.
+
+Version 3.1 resolves the terminal-cleanup contradiction in version 3.0.
+Durable `BLOCKED`/`FAILED` outcomes with exact no-live-provider evidence may
+release their matching Writer after the transition; ambiguous and repairable
+paths still retain it. This changes no provider, merge, push, deployment, or
+release authority.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -239,6 +328,9 @@ unchanged.
 | Gateway routing | closed action and exact binding tests | Engineering | yes when implemented |
 | Controlled submit | fixed actor/template, complete Task Spec 2.1 validation, exact idempotency/audit, and digest-unity matrices | Engineering | yes |
 | General create-only intake | one admit call, exact replay, binding substitution rejection, structurally Draft/no-result evidence, and compile-time absence of Task-Spec/autonomy/writer/execution ports | Engineering | yes |
+| Managed lifecycle/writer order | admission, writer, authority, Draft-to-Preparing, accepted-vs-exact-start, Executing-to-AwaitingMergeApproval, verified-success release, closed Blocked/Failed cleanup, and ambiguous/repairable failure-retention matrices | Engineering | yes |
+| Managed restart/stall | retained-ID read/read/resume/reconcile without start, closed stall reason, reconcile-first, exact interrupt/terminal, and two-retry budget matrices | Engineering | yes |
+| Managed verification separation | durable terminal, owner-typed artifact receipt, independent verifier pass/fail, and no Merging/Completed/external release | Security review | yes |
 | Writer authority order | fixed admission -> real lease/current head -> workspace -> Codex -> verification -> Git -> release/outcome, with stale/fake/synthetic substitution denial | Security review | yes |
 | Controlled-canary autonomy order | admission -> recommendation -> required receipt -> transition/effect, with missing/late/duplicate/unknown profile suppression; general intake is structurally unreachable from this lane | Security review | yes |
 | Task status replay | fresh-process PostgreSQL projection equality and zero external-effect calls | Engineering | yes |
@@ -259,6 +351,8 @@ SPEC/ADR update, architecture review, and responsible-user authorization.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.1 | 2026-08-28 | SPEC-011 v1.6, independent Phase 4 recovery review | Permit exact Writer cleanup only after separately durable closed Blocked/Failed decisions with no-live-provider evidence, while preserving retention for ambiguous and repairable paths | User-authorized Phase 4 repair |
+| 3.0 | 2026-08-26 | SPEC-011, ADR-028 | Add pure managed lifecycle/writer, exact-start, restart reconciliation, bounded stall/retry, artifact-backed verification, and merge-separation coordination | User-authorized Phase 4 |
 | 2.9 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate one-call general intake from Task-Spec lifecycle and remove autonomy/writer/execution classification | User-authorized Phase 3 |
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Order replay-first foreman checkpoint, Writer acquire, fenced append and known-success release with explicit unknown-outcome stops | Sole-foreman delegation |
 | 2.8 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial general-intake coordinator; superseded before release by 2.9 because it incorrectly reused Task-Spec lifecycle/autonomy types | User-authorized Phase 3 |

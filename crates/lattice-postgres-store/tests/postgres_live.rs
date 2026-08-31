@@ -6601,6 +6601,8 @@ fn prove_catalog_and_permission_denials(
     prove_external_public_acl_drift(config, admin);
     prove_external_function_acl_drift(config, admin);
     prove_external_function_fixed_acl_drift(config, admin);
+    prove_external_function_empty_acl_safe(config, admin);
+    prove_external_function_empty_acl_owner_drift(config, admin);
     prove_non_migrator_default_acl_drift(config, admin);
     prove_login_owner_dependency_drift(config, admin);
     prove_large_object_acl_drift(config, admin);
@@ -6866,6 +6868,57 @@ fn prove_external_function_fixed_acl_drift(config: &LiveConfig, admin: &mut Clie
         &capability_target,
         PostgresStoreSetupErrorKind::PermissionDenied,
     );
+}
+
+fn prove_external_function_empty_acl_owner_drift(config: &LiveConfig, admin: &mut Client) {
+    let target = migrated_database(config, admin, "ext_owner_func");
+    let mut fixture = config.connect(
+        target.database_name(),
+        "task019-external-owner-function-fixture",
+    );
+    fixture
+        .batch_execute(
+            "SET ROLE lattice_migrator; \
+             CREATE FUNCTION public.task019_external_owner_function() RETURNS integer \
+             LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT 4'; \
+             REVOKE ALL ON FUNCTION public.task019_external_owner_function() \
+             FROM PUBLIC, lattice_migrator; \
+             RESET ROLE",
+        )
+        .unwrap_or_else(|_| panic!("TASK019_EXTERNAL_OWNER_FUNCTION_FIXTURE_FAILED"));
+    drop(fixture);
+    expect_verify_kind(
+        config,
+        &target,
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    );
+}
+
+fn prove_external_function_empty_acl_safe(config: &LiveConfig, admin: &mut Client) {
+    let target = migrated_database(config, admin, "ext_safe_func");
+    let mut fixture = config.connect(
+        target.database_name(),
+        "task019-external-safe-empty-function-fixture",
+    );
+    fixture
+        .batch_execute(
+            "CREATE FUNCTION public.task019_external_safe_empty_function() RETURNS integer \
+             LANGUAGE sql IMMUTABLE AS 'SELECT 5'; \
+             REVOKE ALL ON FUNCTION public.task019_external_safe_empty_function() \
+             FROM PUBLIC, task019_harness",
+        )
+        .unwrap_or_else(|_| panic!("TASK019_EXTERNAL_SAFE_EMPTY_FUNCTION_FIXTURE_FAILED"));
+    drop(fixture);
+    let mut verifier = config.role_client(
+        target.database_name(),
+        DatabaseRole::Migrator,
+        REQUIRED_APPLICATION_NAME,
+    );
+    must_setup(verify_postgres_schema(
+        &mut verifier,
+        &target,
+        DatabaseRole::Migrator,
+    ));
 }
 
 fn prove_non_migrator_default_acl_drift(config: &LiveConfig, admin: &mut Client) {

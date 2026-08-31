@@ -94,7 +94,10 @@ fn connect_superuser(database: &str) -> Client {
                 .parse::<u16>()
                 .expect("port"),
         )
-        .user("task019_harness")
+        .user(
+            &std::env::var("LATTICE_TASK_SUBMISSION_SUPERUSER")
+                .unwrap_or_else(|_| "task019_harness".to_owned()),
+        )
         .password(required_environment("LATTICE_TASK019_PASSWORD"))
         .dbname(database)
         .application_name("lattice-devos-task050-provision")
@@ -1196,8 +1199,7 @@ fn prove_task_ingress_claim_races(
             general_first,
         )
         .expect("general first claim");
-    let mut fresh_verifier = connect_as(database, "lattice_migrator");
-    verify_postgres_schema(&mut fresh_verifier, target, DatabaseRole::Migrator)
+    let fresh_verifier = PostgresTaskLedger::new(connect_as(database, "lattice_runtime"), target)
         .expect("general task envelope must remain outside historical closure");
     drop(fresh_verifier);
     let (canary_after_general_command, canary_after_general_claim) =
@@ -1986,12 +1988,9 @@ fn prove_submission_claim_digest_drift_fails_fresh_verifiers(
             .expect("general claim digest drift repair"),
         1
     );
-    for role in DatabaseRole::ALL {
-        let mut verifier = connect_as(database, role.as_str());
-        let evidence = verify_postgres_schema(&mut verifier, target, role)
-            .expect("fresh verifier after general claim digest repair");
-        assert_eq!(evidence.schema_version(), 7);
-    }
+    let repaired = PostgresTaskLedger::new(connect_as(database, "lattice_runtime"), target)
+        .expect("fresh runtime constructor after general claim digest repair");
+    drop(repaired);
     println!("TASK_SUBMISSION_GENERAL_CLAIM_DIGEST_DRIFT_REJECTED_BY_FRESH_ROLES");
 }
 
@@ -2151,32 +2150,30 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
     let database = required_environment("LATTICE_TASK_SUBMISSION_DATABASE");
     let run_id = required_environment("LATTICE_TASK_SUBMISSION_RUN_ID");
     let target = MigrationTarget::new(database.clone(), run_id.clone()).expect("submission target");
-    if std::env::var("LATTICE_TASK_SUBMISSION_PROVISION_FRESH")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        provision_fresh_database(&target);
-        set_exact_database_access(&database);
-    }
-    let mut migrator = connect_as(&database, "lattice_migrator");
-    let evidence = verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
-        .expect("schema-v7 submission profile");
-    assert_eq!(evidence.schema_version(), 7);
     assert_eq!(
-        migrator
-            .execute(
-                "UPDATE ONLY control.runtime_admission SET admission_mode='ACTIVE', \
-                 daemon_instance_id='task050-fresh-process', daemon_epoch=50, \
-                 authority_revision=50, observation_digest=$1::bytea, \
-                 authority_head_digest=$2::bytea, updated_at=clock_timestamp() \
-                 WHERE singleton=true",
-                &[&hex_bytes(&digest('a')), &hex_bytes(&digest('b'))],
-            )
-            .expect("activate submission acceptance runtime"),
-        1
+        std::env::var("LATTICE_TASK_SUBMISSION_PROVISION_FRESH").as_deref(),
+        Ok("0"),
+        "general-submission acceptance requires the formal product bootstrap, not Store-owned fresh provisioning"
     );
-    drop(migrator);
+    let composed = PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target)
+        .expect("product-bootstrap Store-v7 runtime profile");
+    drop(composed);
+
+    let mut tamper_admin = connect_superuser(&database);
+    tamper_admin
+        .batch_execute(
+            "CREATE TABLE control.task_submission_composition_tamper (id bigint NOT NULL)",
+        )
+        .expect("install Store-owned catalog tamper");
+    assert!(
+        PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target).is_err(),
+        "a product-installed foreman extension must not make Store-owned catalog drift acceptable"
+    );
+    tamper_admin
+        .batch_execute("DROP TABLE control.task_submission_composition_tamper")
+        .expect("remove Store-owned catalog tamper");
+    drop(tamper_admin);
+
     let project = provision_general_project(&database, &target);
 
     let atomic_identity = general_submission_identity(&project, "TASK-GENERAL-ATOMIC");
@@ -2318,6 +2315,24 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
     drop(reconnected);
 
     prove_task_ingress_claim_races(&database, &run_id, &target, &project);
+}
+
+#[test]
+#[ignore = "requires an exact product-installed Store-v7 plus managed Foreman extension"]
+fn exact_managed_foreman_extension_remains_store_v7_compatible_when_provisioned() {
+    if std::env::var("LATTICE_STORE_FOREMAN_COMPOSITION_LIVE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    let database = format!("lattice_task019_{}_base", &run_id[..8]);
+    let target = MigrationTarget::new(database.clone(), run_id).expect("composition target");
+
+    PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target)
+        .expect("exact managed Foreman profile must remain Store-v7 compatible");
 }
 
 #[test]

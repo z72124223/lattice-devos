@@ -1,7 +1,7 @@
 ---
 module_id: task-ledger
 name: Task Ledger
-version: 2.10
+version: 3.3
 status: active
 owner: LATTICE maintainers
 last_reviewed: 2026-08-30
@@ -13,11 +13,18 @@ Own the versioned event, hash-chain, exact command-receipt, verified replay,
 resource-projection, effect-intent outbox-admission, pure append-plan, and
 complete checkpoint semantics, including the closed autonomy-receipt event,
 the fixed foreman stream/event append plan and child-row verifier, and the
-authoritative Task-created autonomy profile discriminator. Version 2.9 also
+authoritative Task-created autonomy profile discriminator. Version 3.0 also
 owns the distinct pre-specification general-task subject, canonical submission
 envelope, task reference, and idempotency binding that PostgreSQL persists
-beside the task stream as the single durable control-plane truth.
-Version 2.10 clarifies retained pre-v7 compatibility: a client key that was
+beside the task stream as the single durable control-plane truth, plus the pure
+intake-to-TaskSpec successor linkage and typed worker-attempt, exact lifecycle
+observation, and independent-verification child-record semantics approved by
+SPEC-011 and ADR-028. Version 3.1 fixes the exact observation-order contract
+and adds the sole typed failed terminal permitted after exact thread/turn
+acceptance but before `turn/started`. Version 3.2 adds the distinct typed
+no-provider-effect retry predecessor approved by SPEC-011 and ADR-028. It
+does not relabel that proof as a provider terminal or completion authority.
+Version 3.3 also clarifies retained pre-v7 compatibility: a client key that was
 historically valid in more than one stream has no canonical winner. Every
 stream remains immutable, and a v7 lookup or mutation for that ambiguous key
 is command substitution until separately reconciled by a future governed
@@ -71,6 +78,19 @@ operation.
 - The fixed `FOREMAN_COORDINATION` stream identity and versioned
   `FOREMAN_SNAPSHOT_RECORDED` event, including payload digest, exact-next generation
   order, exact command retry, and typed child-row replay verification.
+- The immutable general-intake-to-TaskSpec successor binding committed by one
+  `EVIDENCE_RECORDED` event, including the public task reference, both stream
+  and creation-event digests, Project Registry receipt, TaskSpec, approval
+  subject, budget, verification policy, and canonical binding digest.
+- Typed worker-attempt rows committed by `EFFECT_INTENT`, exact provider
+  thread/turn observation rows committed by `EVIDENCE_RECORDED` or
+  `EFFECT_OUTCOME`, and independent-verification rows committed by
+  `EVIDENCE_RECORDED`. These rows own evidence ordering and hash linkage only;
+  they do not own Task Domain state, provider control, approval, Writer Lease,
+  scheduling, or Artifact Store bytes.
+- The closed `PRESTART_TERMINAL_FAILED` observation. It represents only an
+  exact recovered failed terminal after thread and turn acceptance and before
+  `turn/started`; it is terminal evidence but never an `EXECUTING` transition.
 The TASK-013 fake owns only disposable process-memory test state. Postgres
 Store 1.3 owns physical durable rows, locks, transactions, indexes, projection
 persistence, and outbox-admission persistence without acquiring event meaning.
@@ -131,6 +151,19 @@ until a separately approved module/ticket owns those mechanics.
   `GENERAL_TASK_INTAKE_RECORDED`, no diagnostic payload, and the envelope digest
   as its subject. Replay requires exactly that one event and no autonomy,
   transition, result, resource, outbox, or other effect record.
+- Plan and replay one exactly-once intake-to-TaskSpec successor binding without
+  appending executable work to the create-only intake stream.
+- Plan and replay monotonic worker attempts, exact thread/turn observations,
+  and independent verification child rows against their matching Ledger event,
+  command, request, expected head, and canonical payload digest.
+- Enforce the exact observation order `THREAD_ACCEPTED -> TURN_ACCEPTED ->
+  TURN_STARTED -> ... -> TERMINAL`, with the sole pre-start exception
+  `THREAD_ACCEPTED -> TURN_ACCEPTED -> PRESTART_TERMINAL_FAILED`. Completed or
+  interrupted pre-start terminals and every pre-start `EXECUTING` projection
+  are invalid.
+- Export every managed-task record as complete typed scalars plus canonical
+  payload bytes/digest, and reconstruct an explicitly untrusted row without
+  reflection or accepting arbitrary authoritative JSON.
 
 ## Invariants
 
@@ -181,12 +214,13 @@ until a separately approved module/ticket owns those mechanics.
     receipt. Their events, commands, receipts, projections, checkpoints, and
     hash domains replay byte-identically; an already present valid V1 receipt
     remains replayable.
-21. `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` is the only current
-    autonomy-receipt-required marker. It contains exactly one autonomy receipt
-    event immediately after `TASK_CREATED` and before any later event or
-    external effect. Other values in its reserved namespace, duplicate,
-    missing-before-progress, late, reordered, or substituted receipts fail
-    closed. Other action families are `NotApplicable`, not unknown profiles.
+21. The current autonomy-receipt-required markers are exactly
+    `CONTROLLED_CODEX_CANARY_AUTONOMY_V1` and `MANAGED_GENERAL_TASK_V1`. Each
+    contains exactly one autonomy receipt event immediately after
+    `TASK_CREATED` and before any later event or external effect. Historical
+    controlled-canary and `GENERAL_TASK_INTAKE_V1` are not applicable. Other
+    reserved values, duplicate, missing-before-progress, late, reordered, or
+    substituted receipts fail closed.
 22. A `GENERAL_TASK_INTAKE` identity contains a non-zero neutral intake digest
     and no Task Spec digest or accounting currency. It accepts only one
     `GENERAL_TASK_INTAKE_V1` `TASK_CREATED` event; autonomy state is exactly
@@ -229,7 +263,41 @@ until a separately approved module/ticket owns those mechanics.
     state, an execution-ready Task Spec, a Policy decision, an approval, or a
     writer lease. Persisting it grants no model, process, filesystem, Git,
     payment, external-action, merge, deployment, or release authority.
-33. The v7 unique ingress key governs all new claims but cannot retroactively
+33. One verified create-only intake links to at most one TaskSpec successor for
+    the same Project Registry snapshot and Task ID. Exact command retry is
+    byte-equal; changed task, stream, TaskSpec, approval subject, budget,
+    verification policy, or linkage is substitution.
+34. The successor binding is committed by exactly one matching
+    `EVIDENCE_RECORDED` event. Missing, duplicate, unknown-schema, reordered,
+    cross-stream, or digest-changed binding rows fail replay.
+35. Worker attempt numbers begin at one and advance by exactly one. Writer
+    fences strictly increase and attempt IDs never repeat. Attempt N+1 is
+    invalid until attempt N has either exact terminal observation evidence or
+    one owner-verified no-provider-effect predecessor that binds the same task,
+    prior attempt and fence, immutable original blocker, distinct
+    reconciliation-proof digest, and exact successor packet digest. Missing,
+    foreign, digest-colliding, substituted, or replay-changed predecessor
+    evidence fails closed. The no-provider-effect predecessor is not a Codex
+    terminal and cannot authorize verification, completion, Writer release,
+    merge, deployment, or publication.
+36. The first observation binds one provider thread; a later observation may
+    add one turn, but neither identifier may ever change for that attempt.
+37. A worker-attempt row binds one `EFFECT_INTENT`; a nonterminal observation
+    binds `EVIDENCE_RECORDED`; a terminal observation binds `EFFECT_OUTCOME`;
+    and a verification binds `EVIDENCE_RECORDED`. The child payload digest is
+    the exact event subject digest.
+38. Verification rows require a prior exact terminal for the same attempt and
+    commit only closed profile, Git/evidence/result/review digests. They never
+    accept a command, path, prompt, raw provider output, or artifact bytes.
+39. Managed-task child rows are evidence beneath the one successor Task Domain
+    stream. Their lifecycle labels cannot transition, authorize, complete, or
+    create a second task state machine.
+40. `THREAD_ACCEPTED` alone binds no turn and `TURN_ACCEPTED` does not prove
+    execution. `TURN_STARTED` is the only observation that opens the normal
+    execution/terminal sequence. `PRESTART_TERMINAL_FAILED` is accepted only
+    after the exact accepted turn, carries that same thread/turn, is always
+    `FAILED`, and closes without ever synthesizing `TURN_STARTED`.
+41. The v7 unique ingress key governs all new claims but cannot retroactively
     erase, merge, rename, or choose between distinct pre-v7 streams that
     retained the same valid command suffix. Such a key is an explicit
     historical ambiguity: no active claim exists, all exact stream/event/
@@ -242,8 +310,9 @@ until a separately approved module/ticket owns those mechanics.
 - `lattice-contracts` 1.15 immutable shared values and Task Ledger receipt/head
   representations, whose Ledger-specific semantics remain unchanged from 1.3.
 - `lattice-cjson` 1.0 canonical-byte/hash mechanics only.
-- `lattice-foreman-state` 1.3 only for the closed snapshot/checkpoint input and
-  replay-projection semantics owned by that module.
+- `lattice-foreman-state` 1.5 only for the closed snapshot/checkpoint input,
+  replay-projection semantics, worker-model allowlist, and reasoning-effort
+  values owned by that module.
 - exact `time` 0.3.54 parsing/formatting only for caller-supplied canonical UTC
   RFC 3339 timestamps; no clock reads.
 
@@ -308,7 +377,27 @@ bytes remain unchanged. Postgres Store 1.22 may persist the shared ingress
 claim and envelope only in the same transaction as the matching Ledger append
 and must replay-verify all three before returning it.
 
-Version 2.10 changes no Task Ledger hash, stream, event, command, receipt, or
+Version 3.0 preserves all historical stream/event/head/checkpoint bytes and the
+create-only intake rule. It adds only closed new action families and typed
+child-record hash domains for the unique TaskSpec successor lineage, monotonic
+worker attempts, exact provider observations, and independent verification.
+The same-database `foreman-execution/v1` extension owns physical uniqueness,
+atomicity, locks, and rows while Store-v7 and migrations 0001 through 0008 stay
+unchanged; this module remains pure and rejects every missing or substituted
+row during replay.
+
+Version 3.1 preserves prior hash domains and physical row shapes while
+tightening the semantic observation verifier. It adds the typed pre-start
+failed-terminal spelling and corrects the required-autonomy profile list to
+include the managed successor marker.
+
+Version 3.2 preserves every prior event, terminal-observation, head, checkpoint,
+and physical row meaning. It adds a separate typed retry-predecessor verifier
+for the owner-atomic no-provider-effect closure already approved in SPEC-011
+and ADR-028. Exact terminal evidence remains the ordinary retry predecessor;
+closure evidence is accepted only for bounded attempt admission and never
+changes terminal, verification, completion, or Writer-release semantics.
+Version 3.3 changes no Task Ledger hash, stream, event, command, receipt, or
 planner bytes. It closes only the interpretation of a production-retained
 pre-v7 duplicate key: neither persistence migration nor runtime may invent a
 winner. Postgres Store 1.23 may retain exact ambiguity lineage as physical
@@ -331,6 +420,7 @@ substitution category for every attempted use of that key.
 | Autonomy atomicity | schema-v5 command, optional event, projection/checkpoint, terminal receipt, and physical receipt persist all-or-none | Engineering | yes |
 | General intake envelope | objective/project/authority/identity substitution, strict text/secret bounds, stable `task_ref`, Debug redaction, distinct subject kind, absent spec/currency, and no-autonomy matrices | Security review | yes |
 | General intake persistence parity | shared canary/general ingress-key collision, exact retry, changed-key rejection, and pre-v7 multi-stream ambiguity use the same claim/envelope verifier; ambiguity preserves all exact lineage and exposes no winner; claim plus envelope plus one `TASK_CREATED` append commit all-or-none and replay across restart; Registry snapshots accept the closed 159-byte maximum and reject 160 bytes | Engineering | yes |
+| Managed-task runtime child records | unique successor binding, exact retry/substitution, monotonic attempts/fences, exact-terminal or owner-verified no-provider-effect predecessor before retry, closure foreign/fence/digest/packet substitution rejection, immutable thread/turn, verification-after-terminal, canonical adapter export/import, and missing/duplicate/tamper replay matrices | Engineering and Security review | yes |
 | Schema/event parity | schema-v5 rejects the withdrawn handoff spelling and no unpersistable event remains in the public enum | Compatibility review | yes |
 | Dependency/no-I/O boundary | Cargo tree and forbidden-reference scan | Architecture review | yes |
 | Full verification | workspace format, lint, Rust, and preserved Node tests | Engineering | yes |
@@ -357,4 +447,7 @@ compatibility plan, security and architecture review, and user authorization.
 | 2.7 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Require exact-next foreman generation and narrow the separately approved MCP adapter/status projection without changing Ledger bytes or legacy MCP | Sole-foreman delegation |
 | 2.8 | 2026-08-26 | ADR-023 Phase 3 amendment | Initial general-intake envelope and required-profile model; superseded before release by 2.9 because intake must not fabricate Task-Spec/autonomy semantics | User-authorized Phase 3 |
 | 2.9 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Separate general intake from Task Spec, remove currency/autonomy/progression, and retain one create-only event in the shared ingress-idempotency namespace | User-authorized Phase 3 |
-| 2.10 | 2026-08-30 | ADR-023 deployment compatibility amendment | Define pre-v7 multi-stream ingress keys as fail-closed ambiguities with no winner while preserving every Task Ledger identity and all existing semantic bytes | User-authorized deployment hotfix |
+| 3.0 | 2026-08-26 | SPEC-011, ADR-028 | Add the pure exactly-once TaskSpec successor lineage and typed worker-attempt, exact lifecycle observation, and independent-verification child-record domains without adding I/O or a second task state machine | Delegated product owner |
+| 3.1 | 2026-08-27 | SPEC-011, ADR-028 durable-core review | Lock exact observation order, add the sole typed failed pre-start terminal without entering Executing, and correct the managed autonomy-required marker contract | Delegated product owner |
+| 3.2 | 2026-08-28 | SPEC-011 v1.7, ADR-028 retained pre-start amendment | Admit attempt N+1 from either the ordinary exact terminal or an owner/task/fence/proof/successor-packet-bound no-provider-effect predecessor, without treating closure as provider terminal or completion authority | User-authorized Phase 4 |
+| 3.3 | 2026-08-30 | ADR-023 deployment compatibility amendment | Define pre-v7 multi-stream ingress keys as fail-closed ambiguities with no winner while preserving every Task Ledger identity and all existing semantic bytes | User-authorized deployment hotfix |

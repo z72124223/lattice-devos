@@ -2,10 +2,11 @@
 
 - Status: accepted for TASK-014 under the user's 2026-07-29 directive to
   continue the approved LATTICE plan through MVP-3
+- Amended: 2026-08-27 for SPEC-011 Phase 4 process-restart recovery
 - Date: 2026-07-29
 - Decision owner: user
-- Related: SPEC-002 v10, ADR-002, ADR-005, ADR-006, ADR-008, ADR-009,
-  TASK-014
+- Related: SPEC-002 v10, SPEC-011, ADR-002, ADR-005, ADR-006, ADR-008,
+  ADR-009, ADR-028, TASK-014
 
 ## Context
 
@@ -75,6 +76,38 @@ token is never reused.
 The owner validates injected time, daemon/admission observation, and recovery
 evidence. It does not read a clock, inspect a process, advance an epoch, or
 change runtime admission.
+
+## Phase 4 Process Handoff Amendment
+
+SPEC-011 restart recovery adds one explicit `ProcessHandoff` transition. It is
+not an `Acquire`, an implicit lease steal, or a new worker attempt. It replaces
+only the holder OS-process ID and process-start identity after typed
+`ProcessDeath` evidence exactly matches the retained holder. Project,
+Registry snapshot, task, Task Spec, attempt, lease, holder, worktree, daemon
+instance/epoch, acquired time, and fencing token remain unchanged; revision,
+heartbeat, expiry, transition chain, and command receipt advance atomically.
+
+`ProcessHandoff` is admitted only while runtime admission is `ACTIVE`, only
+against the exact current head, and only within the same daemon
+instance/epoch. For an `ACTIVE` lease, observation must strictly follow the
+last heartbeat and precede the retained expiry. For a `SUSPECT` lease,
+observation must be at or after the retained expiry. The replacement expiry
+must be strictly later than both the observation and retained expiry. An exact
+retry returns the same receipt; command substitution, leadership evidence,
+same process identity, stale head, PID/start mismatch, or counter exhaustion
+fails closed.
+
+This amendment preserves the original rule that expiry alone cannot revoke or
+steal authority: a handoff always requires independently authenticated death
+evidence for the exact PID/start/daemon tuple. If that evidence is unavailable,
+the legal path remains exact terminal reconciliation followed by revoke and a
+new `Acquire`, which allocates a new fence and belongs to a new attempt.
+
+Owner-verified replay may also locate one historical authority receipt by exact
+project and receipt digest, including after release. Only transition-produced
+receipts are eligible; zero, duplicate, malformed, truncated, or substituted
+history fails closed. This historical lookup proves the old intent binding but
+does not make the receipt current or authorize a new effect.
 
 ## Idempotency And Replay
 
@@ -153,6 +186,8 @@ state transitions, hashing, idempotency, recovery, or fencing allocation.
 - Caller-consistent forged lease facts no longer satisfy Policy.
 - Fence rollback, wrap, and reuse become explicit fail-closed conditions.
 - Expiry no longer silently steals a live holder's authority.
+- Same-attempt OS-process restart is an explicit evidence-bound handoff that
+  preserves the existing fence; it cannot be represented as `Acquire`.
 - The fake and later PostgreSQL store share one semantic core.
 - AC-05 remains open until real multi-connection, DB-clock, restart,
   stale-connection, and same-transaction mutation evidence exists.

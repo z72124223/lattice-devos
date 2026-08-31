@@ -119,7 +119,7 @@ fn completed_task_status() -> Value {
 
 fn submitted_general_task_status() -> Value {
     json!({
-        "schema_version": "lattice.task.status.v3",
+        "schema_version": "lattice.task.status.v5",
         "status": "SUBMITTED",
         "task_state": "DRAFT",
         "task_ref": TASK_REF,
@@ -127,10 +127,57 @@ fn submitted_general_task_status() -> Value {
         "result_digest": null,
         "failure_stage": null,
         "failure_code": null,
-        "objective": "完成角色系統",
+        "objective_summary": "Objective retained; digest only.",
+        "objective_digest": RESULT_DIGEST,
         "project_id": "legacy-project-id",
         "project_name": "AI 劇本",
         "project_snapshot_id": "legacy-project-id:snapshot:1"
+    })
+}
+
+fn managed_general_task_status() -> Value {
+    json!({
+        "schema_version": "lattice.task.status.v4",
+        "status": "RUNNING",
+        "task_state": "EXECUTING",
+        "task_ref": TASK_REF,
+        "ledger_head_digest": LEDGER_HEAD_DIGEST,
+        "result_digest": null,
+        "failure_stage": null,
+        "failure_code": null,
+        "objective_summary": "Objective retained; digest only.",
+        "objective_digest": RESULT_DIGEST,
+        "project_id": "legacy-project-id",
+        "project_name": "AI 劇本",
+        "project_snapshot_id": "legacy-project-id:snapshot:1",
+        "worker_running": true,
+        "attempt": 1,
+        "retry_count": 0,
+        "model": "gpt-5.6-terra",
+        "reasoning": "medium",
+        "thread_id": "019c-thread-1",
+        "turn_id": "019c-turn-1",
+        "last_progress_at": "2026-08-26T12:34:56Z",
+        "blocker": null,
+        "verification_status": "RUNNING",
+        "verification_digest": null,
+        "evidence_digest": RESULT_DIGEST,
+        "resource_observation": {
+            "scope": "TASK_CUMULATIVE",
+            "attempts_observed": 1,
+            "model_calls": 1,
+            "remaining_model_calls": 5,
+            "remaining_total_tokens": 99840,
+            "input_tokens": 120,
+            "cached_input_tokens": 20,
+            "output_tokens": 40,
+            "reasoning_output_tokens": null,
+            "total_tokens": 160,
+            "external_cost_status": "UNAVAILABLE"
+        },
+        "next_action": "Wait for independent verification.",
+        "foreman_generation": 2,
+        "foreman_checkpoint_digest": LEDGER_HEAD_DIGEST
     })
 }
 
@@ -195,8 +242,39 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
 
 fn task_public_output_schema() -> Value {
     json!({
-        "oneOf": [task_public_output_variant(false), task_public_output_variant(true)]
+        "oneOf": [
+            task_public_output_variant(false),
+            redacted_task_public_output_variant(),
+            managed_task_public_output_variant()
+        ]
     })
+}
+
+fn redacted_task_public_output_variant() -> Value {
+    let mut schema = task_public_output_variant(true);
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("redacted status properties");
+    properties.remove("objective");
+    properties.insert(
+        "objective_summary".to_owned(),
+        json!({"type": "string", "enum": ["Objective retained; digest only."]}),
+    );
+    properties.insert(
+        "objective_digest".to_owned(),
+        json!({"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}),
+    );
+    properties["schema_version"] = json!({"type": "string", "enum": ["lattice.task.status.v5"]});
+    let required = schema["required"]
+        .as_array_mut()
+        .expect("redacted required fields");
+    required.retain(|field| field.as_str() != Some("objective"));
+    required.extend(
+        ["objective_summary", "objective_digest"]
+            .into_iter()
+            .map(|field| json!(field)),
+    );
+    schema
 }
 
 fn task_public_output_variant(general: bool) -> Value {
@@ -287,6 +365,177 @@ fn task_public_output_variant(general: bool) -> Value {
         "properties": properties,
         "required": required,
         "additionalProperties": false
+    })
+}
+
+fn managed_task_public_output_variant() -> Value {
+    let mut schema = task_public_output_variant(true);
+    let properties = schema["properties"]
+        .as_object_mut()
+        .expect("managed status properties");
+    properties.remove("objective");
+    properties.insert(
+        "objective_summary".to_owned(),
+        json!({"type": "string", "enum": ["Objective retained; digest only."]}),
+    );
+    properties.insert(
+        "objective_digest".to_owned(),
+        json!({"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}),
+    );
+    properties["schema_version"] = json!({"type": "string", "enum": ["lattice.task.status.v4"]});
+    properties["status"] = json!({
+        "type": "string",
+        "enum": ["SUBMITTED", "RUNNING", "BLOCKED", "FAILED", "AWAITING_MERGE_APPROVAL"]
+    });
+    properties["task_state"] = json!({
+        "type": "string",
+        "enum": [
+            "NOT_SUBMITTED", "DRAFT", "AWAITING_EXECUTION_APPROVAL", "PREPARING",
+            "EXECUTING", "VERIFYING", "REVIEWING", "AWAITING_MERGE_APPROVAL",
+            "MERGING", "COMPLETED", "REJECTED", "BLOCKED", "FAILED", "STOPPING",
+            "CANCELLED"
+        ]
+    });
+    properties["result_digest"] = json!({
+        "anyOf": [
+            {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+        ]
+    });
+    for field in ["failure_stage", "failure_code"] {
+        properties[field] = json!({
+            "anyOf": [
+                {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"},
+                {"type": "null"}
+            ]
+        });
+    }
+    properties.insert("worker_running".to_owned(), json!({"type": "boolean"}));
+    properties.insert(
+        "attempt".to_owned(),
+        json!({"anyOf": [{"type": "integer", "minimum": 1, "maximum": 3}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "retry_count".to_owned(),
+        json!({"type": "integer", "minimum": 0, "maximum": 2}),
+    );
+    properties.insert(
+        "model".to_owned(),
+        json!({"anyOf": [{"type": "string", "enum": ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "reasoning".to_owned(),
+        json!({"anyOf": [{"type": "string", "enum": ["low", "medium", "high", "xhigh", "max", "ultra"]}, {"type": "null"}]}),
+    );
+    let identifier = json!({
+        "anyOf": [
+            {"type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+            {"type": "null"}
+        ]
+    });
+    properties.insert("thread_id".to_owned(), identifier.clone());
+    properties.insert("turn_id".to_owned(), identifier);
+    properties.insert(
+        "last_progress_at".to_owned(),
+        json!({"anyOf": [{"type": "string", "format": "date-time", "pattern": "Z$"}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "blocker".to_owned(),
+        json!({"anyOf": [{"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Z0-9_]+$"}, {"type": "null"}]}),
+    );
+    properties.insert(
+        "verification_status".to_owned(),
+        json!({"type": "string", "enum": ["NOT_STARTED", "RUNNING", "PASSED", "FAILED"]}),
+    );
+    let nullable_sha = json!({
+        "anyOf": [
+            {"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"},
+            {"type": "null"}
+        ]
+    });
+    properties.insert("verification_digest".to_owned(), nullable_sha.clone());
+    properties.insert("evidence_digest".to_owned(), nullable_sha);
+    properties.insert(
+        "resource_observation".to_owned(),
+        json!({
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "scope": {"type": "string", "enum": ["TASK_CUMULATIVE"]},
+                        "attempts_observed": {"type": "integer", "minimum": 0},
+                        "model_calls": {"type": "integer", "minimum": 0},
+                        "remaining_model_calls": {"type": "integer", "minimum": 0},
+                        "remaining_total_tokens": nullable_non_negative_integer_schema(),
+                        "input_tokens": nullable_non_negative_integer_schema(),
+                        "cached_input_tokens": nullable_non_negative_integer_schema(),
+                        "output_tokens": nullable_non_negative_integer_schema(),
+                        "reasoning_output_tokens": nullable_non_negative_integer_schema(),
+                        "total_tokens": nullable_non_negative_integer_schema(),
+                        "external_cost_status": {"type": "string", "enum": ["UNAVAILABLE"]}
+                    },
+                    "required": [
+                        "scope", "attempts_observed", "model_calls",
+                        "remaining_model_calls", "remaining_total_tokens",
+                        "input_tokens", "cached_input_tokens", "output_tokens",
+                        "reasoning_output_tokens", "total_tokens", "external_cost_status"
+                    ],
+                    "additionalProperties": false
+                },
+                {"type": "null"}
+            ]
+        }),
+    );
+    properties.insert(
+        "next_action".to_owned(),
+        json!({"type": "string", "minLength": 1, "maxLength": 256}),
+    );
+    properties.insert(
+        "foreman_generation".to_owned(),
+        json!({"type": "integer", "minimum": 1}),
+    );
+    properties.insert(
+        "foreman_checkpoint_digest".to_owned(),
+        json!({"type": "string", "minLength": 64, "maxLength": 64, "pattern": "^[0-9a-f]{64}$"}),
+    );
+
+    let required = schema["required"]
+        .as_array_mut()
+        .expect("managed required fields");
+    required.retain(|field| field.as_str() != Some("objective"));
+    required.extend(
+        [
+            "objective_summary",
+            "objective_digest",
+            "worker_running",
+            "attempt",
+            "retry_count",
+            "model",
+            "reasoning",
+            "thread_id",
+            "turn_id",
+            "last_progress_at",
+            "blocker",
+            "verification_status",
+            "verification_digest",
+            "evidence_digest",
+            "resource_observation",
+            "next_action",
+            "foreman_generation",
+            "foreman_checkpoint_digest",
+        ]
+        .into_iter()
+        .map(|field| json!(field)),
+    );
+    schema
+}
+
+fn nullable_non_negative_integer_schema() -> Value {
+    json!({
+        "anyOf": [
+            {"type": "integer", "minimum": 0},
+            {"type": "null"}
+        ]
     })
 }
 
@@ -1773,6 +2022,7 @@ fn task_tools_emit_only_closed_public_status_shapes() {
     let accepted = [
         completed_task_status(),
         submitted_general_task_status(),
+        managed_general_task_status(),
         maximum_snapshot,
         json!({
             "schema_version": "lattice.task.status.v2",
@@ -1803,6 +2053,381 @@ fn task_tools_emit_only_closed_public_status_shapes() {
             assert_eq!(
                 response["result"]["structuredContent"], *output,
                 "{tool_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn task_tools_emit_redacted_v5_and_reject_legacy_objective_disclosure() {
+    let redacted = submitted_general_task_status();
+    for tool_name in ["lattice_task_submit", "lattice_task_status"] {
+        let response = call_task_tool_with_output(tool_name, redacted.clone());
+        assert_eq!(response["result"]["isError"], false, "{tool_name}");
+        let projection = &response["result"]["structuredContent"];
+        assert_eq!(projection["schema_version"], "lattice.task.status.v5");
+        assert_eq!(
+            projection["objective_summary"],
+            "Objective retained; digest only."
+        );
+        assert_eq!(projection["objective_digest"], RESULT_DIGEST);
+        assert!(projection.get("objective").is_none());
+
+        let legacy = json!({
+            "schema_version": "lattice.task.status.v3",
+            "status": "SUBMITTED",
+            "task_state": "DRAFT",
+            "task_ref": TASK_REF,
+            "ledger_head_digest": LEDGER_HEAD_DIGEST,
+            "result_digest": null,
+            "failure_stage": null,
+            "failure_code": null,
+            "objective": "Internal acquisition codename Quiet Orchard",
+            "project_id": "legacy-project-id",
+            "project_name": "AI 劇本",
+            "project_snapshot_id": "legacy-project-id:snapshot:1"
+        });
+        let rejected = call_task_tool_with_output(tool_name, legacy);
+        assert_eq!(rejected["result"]["isError"], true, "{tool_name}");
+        assert_eq!(
+            rejected["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_PUBLIC_STATUS_REJECTED"
+        );
+    }
+}
+
+#[test]
+fn redacted_v5_rejects_objective_or_unclosed_redaction_fields() {
+    let mut invalid = Vec::new();
+    let mut disclosed = submitted_general_task_status();
+    disclosed["objective"] = json!("private roadmap milestone Juniper");
+    invalid.push(disclosed);
+    let mut summary = submitted_general_task_status();
+    summary["objective_summary"] = json!("private roadmap milestone Juniper");
+    invalid.push(summary);
+    let mut digest = submitted_general_task_status();
+    digest["objective_digest"] = json!("A".repeat(64));
+    invalid.push(digest);
+
+    for output in invalid {
+        let response = call_task_tool_with_output("lattice_task_status", output);
+        assert_eq!(response["result"]["isError"], true);
+        assert_eq!(
+            response["result"]["structuredContent"]["code"],
+            "LATTICE_TASK_PUBLIC_STATUS_REJECTED"
+        );
+    }
+}
+
+#[test]
+fn managed_task_status_v4_accepts_closed_phases_and_nullable_worker_evidence() {
+    let mut nullable = managed_general_task_status();
+    nullable["status"] = json!("SUBMITTED");
+    nullable["task_state"] = json!("AWAITING_EXECUTION_APPROVAL");
+    nullable["worker_running"] = json!(false);
+    for field in [
+        "attempt",
+        "model",
+        "reasoning",
+        "thread_id",
+        "turn_id",
+        "last_progress_at",
+        "blocker",
+        "verification_digest",
+        "evidence_digest",
+        "resource_observation",
+    ] {
+        nullable[field] = Value::Null;
+    }
+    nullable["retry_count"] = json!(0);
+    nullable["verification_status"] = json!("NOT_STARTED");
+    nullable["next_action"] = json!("Approve bounded local execution.");
+
+    let mut accepted = vec![managed_general_task_status(), nullable];
+    for (status, state) in [
+        ("SUBMITTED", "DRAFT"),
+        ("RUNNING", "VERIFYING"),
+        ("BLOCKED", "BLOCKED"),
+        ("FAILED", "FAILED"),
+        ("AWAITING_MERGE_APPROVAL", "AWAITING_MERGE_APPROVAL"),
+    ] {
+        let mut value = managed_general_task_status();
+        value["status"] = json!(status);
+        value["task_state"] = json!(state);
+        accepted.push(value);
+    }
+
+    for tool_name in ["lattice_task_submit", "lattice_task_status"] {
+        for output in &accepted {
+            let response = call_task_tool_with_output(tool_name, output.clone());
+            assert_eq!(
+                response["result"]["isError"], false,
+                "{tool_name}: {output}"
+            );
+            assert_eq!(
+                response["result"]["structuredContent"], *output,
+                "{tool_name}: {output}"
+            );
+        }
+    }
+}
+
+#[test]
+fn managed_task_status_v4_rejects_non_closed_or_unsafe_projection_fields() {
+    let replace = |field: &str, replacement: Value| {
+        let mut value = managed_general_task_status();
+        value[field] = replacement;
+        value
+    };
+    let mut invalid = Vec::<(String, Value)>::new();
+    for field in [
+        "objective_summary",
+        "objective_digest",
+        "worker_running",
+        "attempt",
+        "retry_count",
+        "model",
+        "reasoning",
+        "thread_id",
+        "turn_id",
+        "last_progress_at",
+        "blocker",
+        "verification_status",
+        "verification_digest",
+        "evidence_digest",
+        "resource_observation",
+        "next_action",
+        "foreman_generation",
+        "foreman_checkpoint_digest",
+    ] {
+        let mut value = managed_general_task_status();
+        value
+            .as_object_mut()
+            .expect("managed status object")
+            .remove(field);
+        invalid.push((format!("missing-{field}"), value));
+    }
+    for (label, field, replacement) in [
+        ("schema", "schema_version", json!("lattice.task.status.v5")),
+        ("status", "status", json!("COMPLETED")),
+        ("task-state", "task_state", json!("UNKNOWN")),
+        ("objective-summary-empty", "objective_summary", json!("")),
+        (
+            "objective-summary-not-fixed",
+            "objective_summary",
+            json!("Apply one bounded local change"),
+        ),
+        (
+            "objective-summary-secret",
+            "objective_summary",
+            json!("clone https://alice:hunter2@example.invalid/repo"),
+        ),
+        (
+            "objective-digest",
+            "objective_digest",
+            json!("A".repeat(64)),
+        ),
+        ("running-type", "worker_running", json!("true")),
+        ("attempt-zero", "attempt", json!(0)),
+        ("attempt-four", "attempt", json!(4)),
+        ("attempt-fraction", "attempt", json!(1.5)),
+        ("retry-negative", "retry_count", json!(-1)),
+        ("retry-three", "retry_count", json!(3)),
+        ("model", "model", json!("gpt-5.5")),
+        ("reasoning", "reasoning", json!("extreme")),
+        ("thread-empty", "thread_id", json!("")),
+        ("thread-path", "thread_id", json!("thread/../../secret")),
+        ("thread-long", "thread_id", json!("a".repeat(257))),
+        ("turn-control", "turn_id", json!("turn\nsecret")),
+        (
+            "progress-offset",
+            "last_progress_at",
+            json!("2026-08-26T20:34:56+08:00"),
+        ),
+        (
+            "progress-invalid",
+            "last_progress_at",
+            json!("2026-99-99T12:34:56Z"),
+        ),
+        ("blocker-lower", "blocker", json!("heartbeat_timeout")),
+        ("blocker-long", "blocker", json!("A".repeat(129))),
+        (
+            "verification-status",
+            "verification_status",
+            json!("COMPLETE"),
+        ),
+        (
+            "verification-digest",
+            "verification_digest",
+            json!("A".repeat(64)),
+        ),
+        ("evidence-digest", "evidence_digest", json!("abc")),
+        ("next-empty", "next_action", json!("")),
+        ("next-untrimmed", "next_action", json!(" wait")),
+        ("next-control", "next_action", json!("wait\nnow")),
+        ("next-long", "next_action", json!("界".repeat(257))),
+        (
+            "next-secret",
+            "next_action",
+            json!("authorization: Bearer do-not-echo"),
+        ),
+        ("generation-zero", "foreman_generation", json!(0)),
+        ("generation-fraction", "foreman_generation", json!(1.5)),
+        (
+            "checkpoint-digest",
+            "foreman_checkpoint_digest",
+            json!("A".repeat(64)),
+        ),
+    ] {
+        invalid.push((label.to_owned(), replace(field, replacement)));
+    }
+
+    for (label, resource) in [
+        (
+            "resource-negative",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": -1,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "UNAVAILABLE"
+            }),
+        ),
+        (
+            "resource-fraction",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": 1.5,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "UNAVAILABLE"
+            }),
+        ),
+        (
+            "resource-cost-status",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "AVAILABLE"
+            }),
+        ),
+        (
+            "resource-extra",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "UNAVAILABLE",
+                "cost_micros": 0
+            }),
+        ),
+        (
+            "resource-missing",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "external_cost_status": "UNAVAILABLE"
+            }),
+        ),
+        (
+            "resource-scope",
+            json!({
+                "scope": "LATEST_ATTEMPT",
+                "attempts_observed": 1,
+                "model_calls": 1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": 99840,
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "UNAVAILABLE"
+            }),
+        ),
+        (
+            "resource-negative-model-calls",
+            json!({
+                "scope": "TASK_CUMULATIVE",
+                "attempts_observed": 1,
+                "model_calls": -1,
+                "remaining_model_calls": 5,
+                "remaining_total_tokens": null,
+                "input_tokens": null,
+                "cached_input_tokens": null,
+                "output_tokens": null,
+                "reasoning_output_tokens": null,
+                "total_tokens": null,
+                "external_cost_status": "UNAVAILABLE"
+            }),
+        ),
+    ] {
+        invalid.push((label.to_owned(), replace("resource_observation", resource)));
+    }
+    let mut extra = managed_general_task_status();
+    extra
+        .as_object_mut()
+        .expect("managed status object")
+        .insert("path".to_owned(), json!(r"C:\secret"));
+    invalid.push(("extra-field".to_owned(), extra));
+    let mut leaked_objective = managed_general_task_status();
+    leaked_objective
+        .as_object_mut()
+        .expect("managed status object")
+        .insert(
+            "objective".to_owned(),
+            json!("clone https://alice:hunter2@example.invalid/repo"),
+        );
+    invalid.push(("managed-objective-disclosure".to_owned(), leaked_objective));
+
+    for tool_name in ["lattice_task_submit", "lattice_task_status"] {
+        for (label, output) in &invalid {
+            let response = call_task_tool_with_output(tool_name, output.clone());
+            assert_eq!(
+                response["result"]["isError"], true,
+                "{tool_name}/{label}: {output}"
+            );
+            assert_eq!(
+                response["result"]["structuredContent"],
+                json!({
+                    "status": "ERROR",
+                    "code": "LATTICE_TASK_PUBLIC_STATUS_REJECTED"
+                }),
+                "{tool_name}/{label}: {output}"
             );
         }
     }
@@ -2052,6 +2677,10 @@ fn task_submit_rejects_invalid_or_dangerous_arguments_before_dispatch() {
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "private key----- marker before -----begin marker"}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "access_key=AKIAIOSFODNN7EXAMPLE"}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "使用 AKIAIOSFODNN7EXAMPLE 完成設定"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "clone https://alice:hunter2@example.invalid/repo"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "fetch http://alice%3Ahunter2@example.invalid/repo"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "inspect ssh://git:private@example.invalid/repo"}),
+        json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "inspect ssh://git@example.invalid/repo"}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_id": "not/a/project"}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_id": "sk-do-not-use"}),
         json!({"client_request_id": CLIENT_REQUEST_ID, "objective": "valid", "project_name": " AI 劇本"}),

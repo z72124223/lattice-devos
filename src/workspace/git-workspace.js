@@ -511,6 +511,102 @@ export class GitWorkspace {
     });
   }
 
+  /**
+   * Creates one owned task worktree or replays the exact existing ownership.
+   *
+   * This is intentionally stricter than `createWorktree`: an existing target
+   * is accepted only when its immutable ownership marker, common Git
+   * directory, branch, base ancestry, and current HEAD all match the request.
+   * No worktree is ever removed or reset while reconciling a replay.
+   */
+  async createOrReplayWorktree({
+    task_id,
+    worktree_id,
+    base_commit_sha,
+    require_clean = true,
+    create_if_missing = true,
+  }) {
+    await this.#ensureRoots();
+    const taskId = task_id;
+    const worktreeId = safeWorktreeId(worktree_id);
+    const baseCommit = safeHash(base_commit_sha, "base_commit_sha");
+    if (
+      typeof require_clean !== "boolean"
+      || typeof create_if_missing !== "boolean"
+    ) {
+      workspaceFailure(
+        "INVALID_GIT_WORKSPACE",
+        "require_clean and create_if_missing must be boolean.",
+      );
+    }
+    const target = path.join(this.#worktreeRoot, worktreeId.toLowerCase());
+    const ownershipPath = this.#ownershipPath(worktreeId);
+    const [targetStat, markerStat] = await Promise.all([
+      optionalLstat(target),
+      optionalLstat(ownershipPath),
+    ]);
+    if (targetStat === null && markerStat === null) {
+      if (!create_if_missing) {
+        workspaceFailure(
+          "WORKTREE_REPLAY_REQUIRED",
+          "A retained managed worktree must already exist for exact replay.",
+        );
+      }
+      const created = await this.createWorktree({
+        task_id: taskId,
+        worktree_id: worktreeId,
+        base_commit_sha: baseCommit,
+      });
+      return deepFreeze({ ...created, replayed: false });
+    }
+    if (targetStat === null || markerStat === null) {
+      workspaceFailure(
+        "WORKTREE_REPLAY_INCOMPLETE",
+        "Worktree and ownership marker must either both exist or both be absent.",
+      );
+    }
+    const { marker } = await this.#readOwnership(worktreeId);
+    if (
+      marker.task_id !== taskId ||
+      marker.base_commit_sha !== baseCommit ||
+      marker.branch !== safeTaskBranch(taskId)
+    ) {
+      workspaceFailure(
+        "WORKTREE_REPLAY_MISMATCH",
+        "Existing worktree ownership does not match the requested task and base.",
+      );
+    }
+    await this.#verifyOwnedWorktreeIdentity(marker);
+    const actualHead = (
+      await this.#git(["rev-parse", "--verify", "HEAD^{commit}"], marker.worktree_path)
+    ).stdout.trim().toLowerCase();
+    if (actualHead !== baseCommit) {
+      workspaceFailure(
+        "WORKTREE_REPLAY_HEAD_DRIFT",
+        "Existing managed worktree HEAD no longer matches its retained base.",
+      );
+    }
+    if (require_clean) {
+      const status = (
+        await this.#git(
+          ["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+          marker.worktree_path,
+        )
+      ).stdout;
+      if (status.length > 0) {
+        workspaceFailure(
+          "WORKTREE_REPLAY_DIRTY",
+          "An unpersisted managed worktree replay must remain clean.",
+        );
+      }
+    }
+    return deepFreeze({
+      ...marker,
+      path: marker.worktree_path,
+      replayed: true,
+    });
+  }
+
   async changedFiles({ worktree_id, worktreePath, base_commit_sha }) {
     const worktreeId = safeWorktreeId(worktree_id);
     const { marker } = await this.#readOwnership(worktreeId);

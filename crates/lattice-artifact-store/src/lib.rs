@@ -2,6 +2,7 @@
 
 mod aggregate;
 mod history;
+mod managed_evidence;
 mod quota;
 mod quota_owner;
 mod semantics;
@@ -12,6 +13,7 @@ mod snapshot_quota;
 
 pub use aggregate::*;
 pub use history::*;
+pub use managed_evidence::*;
 pub use quota::*;
 pub use semantics::*;
 pub use snapshot::*;

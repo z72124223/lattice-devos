@@ -1,10 +1,10 @@
 ---
 module_id: lattice-ports
 name: LATTICE I/O Ports
-version: 2.3
+version: 2.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-26
+last_reviewed: 2026-08-28
 ---
 
 ## Mission
@@ -15,6 +15,16 @@ typed physical control store, durable delivery ledger, bounded workspace/Git
 lane, fixed-test lane, authoritative Task lifecycle repository lane, and the
 narrow foreman snapshot append/replay boundary. It separately exposes a
 create/status-only general-task intake lane that cannot express execution.
+Version 2.4 adds narrow managed-foreman repository, exact Codex worker, and
+independent verification ports. These ports transport Task-Ledger-,
+Artifact-Store-, and Foreman-State-owned verified values without owning a
+second task state machine, foreman database, or workspace command surface.
+Version 2.5 makes those one-way semantic-owner imports explicit and keeps all
+orchestrator, adapter, database, process, and filesystem dependencies forbidden.
+Version 2.6 records the managed repository's sole non-terminal retry boundary:
+an owner-verified no-provider-effect closure may transport the exact Task
+Ledger retry predecessor, but can never be represented as a provider terminal,
+verification result, completion, or Writer-release authority.
 
 ## Non-Goals
 
@@ -38,6 +48,11 @@ create/status-only general-task intake lane that cannot express execution.
 - No runtime, durable, product, credential, or provider-session data.
 - The foreman port error boundary and typed append/load method shape only; it
   owns neither snapshot state nor persistence.
+- Managed-port error classification and the provider-facing observation,
+  reconciliation, artifact receipt, and digest-only verification transport
+  shapes. Task Ledger remains semantic owner of execution binding, attempt,
+  observation, and verification records; Artifact Store remains semantic
+  owner of managed evidence.
 
 ## Public Contracts
 
@@ -81,6 +96,29 @@ create/status-only general-task intake lane that cannot express execution.
   loads verified snapshots for fresh reconstruction. It exposes no SQL,
   dashboard, diagnostic JSON, transcript, secret, generic event fragment, or
   independent current-state mutation.
+- `ManagedForemanRepositoryPort` asserts current execution authority, atomically
+  claims one Task-Ledger-owned attempt, appends exact provider observations,
+  durably records one owner-typed Artifact Store object, and records the
+  independent verification result. It exposes no SQL, second foreman state,
+  arbitrary event, prompt, shell, path, or unverified artifact reference.
+- The managed repository may close one retained pre-start ambiguity only from
+  owner-verified no-provider-effect evidence bound to the same task, prior
+  attempt, Writer fence, immutable blocker, distinct reconciliation-proof
+  descriptor, and exact successor packet/evidence reference. That closure is a
+  typed Task Ledger retry predecessor only. It is not `WorkerTerminal`, cannot
+  enter verification, and grants no Writer release, completion, merge,
+  deployment, publication, or replacement provider effect.
+- `ManagedCodexWorkerPort` separates model availability, thread-start accepted,
+  turn-start accepted, exact matching `turn/started`, execution observation,
+  exact terminal, retained-ID read/resume/reconcile, and exact interrupt. An
+  accepted RPC cannot be represented as execution, and no implicit model
+  fallback exists.
+- `ManagedVerificationPort` has two phases: independent preparation returns a
+  `VerifiedManagedEvidence` plus a request derived from its descriptor; only
+  after the repository returns a matching durable artifact receipt may the
+  verifier execute. Its request contains only closed profile/command
+  identities and Git/evidence digests, never objective text, shell text,
+  arguments, environment, worktree, or path.
 - `WorkspaceGitPort` prepares/inspects the preconfigured bounded workspace and
   creates a local commit only from typed passing scope/test evidence. It
   exposes no arbitrary command or caller-selected path.
@@ -98,9 +136,12 @@ create/status-only general-task intake lane that cannot express execution.
 
 ## Invariants
 
-1. This crate depends only on `lattice-contracts` and Task Domain 2.2. The Task
-   Domain dependency is limited to the closed `TaskState` value used by
-   `TaskLifecyclePort`; no validation/planning implementation enters Ports.
+1. This crate depends only on `lattice-contracts`, Task Domain, Task Ledger,
+   Artifact Store, and Foreman State. Task Domain is limited to the closed
+   `TaskState` value; the three semantic-owner imports are limited to verified
+   transport values used by the managed ports. No validation/planning
+   implementation, orchestrator, concrete adapter, database, process,
+   filesystem, shell, or MCP implementation enters Ports.
 2. OpenClaw is an inbound gateway client, never a second control core or an
    outbound provider selected by orchestration.
 3. Traits expose no concrete database, filesystem, or process type.
@@ -168,13 +209,39 @@ create/status-only general-task intake lane that cannot express execution.
 25. The intake port exposes exactly `admit` and read-only `load`; no method can
     transition, append a result/receipt, acquire writer authority, or invoke an
     effect.
+26. Managed port failures distinguish known failure, ambiguous outcome, and
+    reconciliation-required outcome. None is success and none authorizes a
+    replacement provider effect.
+27. Managed bindings, attempts, observations, and verification records use the
+    Task-Ledger-owned verified types. Ports does not copy their enums, state,
+    digest construction, or transition rules.
+28. Provider start acceptance and exact matching `turn/started` are separate
+    observations. Only the latter may satisfy an orchestrator execution gate.
+29. A worker terminal carries no artifact or verification claim. Verification
+    preparation occurs only after that terminal is durable; its
+    `VerifiedManagedEvidence` must be durably recorded and receipt-matched
+    before independent verification.
+30. Managed verification accepts only closed identity and digest values. No
+    untrusted objective, shell, command argument, environment, workspace path,
+    remote URL, credential, prompt, or transcript crosses the port.
+31. Retained provider identities have distinct read, resume, reconcile, and
+    exact-interrupt methods; starting a replacement worker is not a
+    reconciliation operation.
+32. A no-provider-effect closure and an exact worker terminal are disjoint
+    predecessor types. Attempt N+1 must transport the exact evidence reference,
+    worktree, fence, model lineage, and continuation bound by its verified
+    predecessor; foreign, missing, digest-colliding, or substituted closure or
+    terminal evidence fails before a new provider claim.
 
 ## Allowed Dependencies
 
 - `lattice-contracts`.
 - `lattice-task-domain` 2.2 only for the closed `TaskState` representation in
   Task lifecycle request/evidence signatures.
-- `lattice-foreman-state` 1.4 only for validated snapshot/projection values.
+- `lattice-foreman-state` 1.6 only for validated snapshot/projection values.
+- `lattice-task-ledger` 3.2 only for verified managed binding, attempt,
+  observation, and verification transport values.
+- `lattice-artifact-store` 1.1 only for owner-verified managed evidence values.
 - Rust standard library.
 
 ## Forbidden Dependencies
@@ -223,6 +290,24 @@ Contracts-owned non-executable binding. Existing `TaskLifecyclePort` remains
 Task-Spec-only and source-compatible; no persistence, transition, autonomy,
 writer, Policy, model, or execution authority enters Ports.
 
+Version 2.4 adds the managed foreman repository, exact Codex worker, and
+independent verification boundaries. The new dependencies are one-way imports
+of Task Ledger and Artifact Store semantic-owner values. Existing port contracts
+remain source-compatible; no concrete runtime, PostgreSQL, Node, process,
+filesystem, shell, or second lifecycle implementation is added.
+
+Version 2.5 corrects the dependency declaration to match the already approved
+managed-port surface and actual Cargo graph: Foreman State is also a one-way
+semantic-owner import. This is not authority transfer to Ports; Task Ledger,
+Artifact Store, and Foreman State retain their own value semantics, while Ports
+continues to own only trait and error boundaries.
+
+Version 2.6 makes the already implemented closure method's public meaning
+explicit and updates the semantic-owner pins to Foreman State 1.6 and Task
+Ledger 3.2. It adds no new effect or state owner: the port transports the
+Ledger-owned predecessor and closed repository outcome, while Orchestrator
+alone orders retry and the concrete adapter alone performs I/O.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
@@ -232,8 +317,11 @@ writer, Policy, model, or execution authority enters Ports.
 | Delivery effect traits | compile-time lane separation plus intent/outcome, fixed-test, scope-before-commit, and unknown-outcome matrices | Engineering | yes |
 | Task lifecycle trait | compile-time exact admit/transition/result/load separation, typed failure/replay evidence, and no raw event/SQL/cache surface | Engineering | yes |
 | Task intake trait | compile-time admit/load-only shape, TaskIntakeBinding isolation, Draft/no-result evidence, and absence of autonomy/writer/execution methods | Engineering | yes |
+| Managed exact-worker ports | model-availability, accepted-vs-exact-start, retained-ID reconcile, exact interrupt/terminal, and error-class matrices | Engineering | yes |
+| Managed artifact/verification ports | terminal-before-preparation, owner-verified artifact-before-verifier, digest-only request, and tamper rejection matrices | Security review | yes |
+| Managed retry predecessor | exact terminal and no-provider-effect closure remain disjoint; exact evidence/worktree/fence/model/continuation substitution matrices deny before a replacement claim | Engineering and Security review | yes |
 | Lease-bound writer | complete spec/intent/workspace/lease/fence mutation matrix and generic-writer non-wiring proof | Security review | yes |
-| Dependency direction | Cargo metadata proves only Contracts plus Task Domain's closed `TaskState`, with no adapter/orchestrator/I/O dependency | Architecture review | yes |
+| Dependency direction | Cargo metadata proves only Contracts, Task Domain, Task Ledger, Artifact Store, and Foreman State, with no adapter/orchestrator/I/O dependency; managed imports are verified transport values only | Architecture review | yes |
 | Full Rust verification | workspace format, lint, and tests | Engineering | yes |
 
 ## Change Policy
@@ -246,6 +334,9 @@ approval.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 2.6 | 2026-08-28 | SPEC-011 v1.8, ADR-028, Task Ledger 3.2 | Define the typed no-provider-effect closure as the sole non-terminal retry predecessor transport, forbid terminal/completion authority, and update Foreman State/Task Ledger semantic-owner pins | User-authorized Phase 4 |
+| 2.5 | 2026-08-28 | SPEC-011, ADR-028 dependency review | Make the approved one-way Task Ledger, Artifact Store, and Foreman State semantic-owner imports match the actual managed-port Cargo graph without admitting orchestration or I/O | User-authorized Phase 4 |
+| 2.4 | 2026-08-26 | SPEC-011, ADR-028 | Add narrow managed repository, exact Codex worker, and two-phase artifact-backed independent verification ports without a second state owner | User-authorized Phase 4 |
 | 2.3 | 2026-08-26 | ADR-023 Phase 3 P1 correction | Add a separate admit/load-only general intake lane with structurally non-executable evidence | User-authorized Phase 3 |
 | 2.0 | 2026-08-21 | SPEC-006 v3, ADR-024/025, TASK-079/087 | Add a narrow typed foreman append/replay port; no SQL, dashboard or second truth surface | Fixed-foreman delegation |
 | 2.1 | 2026-08-25 | SPEC-009, ADR-027, TASK-105 | Add replay-before-observation checkpoint lookup while retaining one Ledger truth and closed errors | Sole-foreman delegation |

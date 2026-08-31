@@ -1,5 +1,17 @@
 //! Abstract I/O ports for LATTICE orchestration.
 
+mod managed_foreman;
+
+pub use lattice_artifact_store::{
+    ManagedEvidenceInput, ManagedEvidenceKind, VerifiedManagedEvidence,
+};
+pub use lattice_task_ledger::{
+    VerificationOutcome, VerifiedTaskExecutionBinding, VerifiedTaskVerificationRecord,
+    VerifiedWorkerAttemptRecord, VerifiedWorkerObservationRecord, WorkerObservationInput,
+    WorkerObservationKind,
+};
+pub use managed_foreman::*;
+
 use std::error::Error;
 use std::fmt;
 

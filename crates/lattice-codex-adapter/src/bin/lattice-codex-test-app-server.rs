@@ -97,6 +97,11 @@ fn run_app_server() -> Result<(), ()> {
         "{{\"id\":2,\"result\":{{\"turn\":{{\"id\":\"turn-scripted\"}}}}}}"
     )
     .map_err(|_| ())?;
+    writeln!(
+        output,
+        "{{\"method\":\"turn/started\",\"params\":{{\"threadId\":\"thread-scripted\",\"turn\":{{\"id\":\"turn-scripted\",\"status\":\"inProgress\"}}}}}}"
+    )
+    .map_err(|_| ())?;
     output.flush().map_err(|_| ())?;
 
     match mode.as_str() {

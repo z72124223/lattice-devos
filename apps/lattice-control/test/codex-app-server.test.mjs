@@ -3,7 +3,117 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import process from "node:process";
 import test from "node:test";
-import { CodexAppServer } from "../src/codex-app-server.mjs";
+import {
+  CodexAppServer,
+  resolveCodexAppServerLaunch,
+} from "../src/codex-app-server.mjs";
+import {
+  buildLegacyWsl2CodexLaunchFixture,
+  executionEnvironmentIdentity,
+  validateWsl2ExecutionEnvironment,
+} from "../src/wsl2-execution-domain.mjs";
+
+const wslDigest = (kind, value) => `${kind}:sha256:${value.repeat(64)}`;
+
+test("legacy WSL2 launch is fixture-only and keeps gateway and Linux Codex separate", () => {
+  const descriptor = {
+    schema: "lattice.execution-environment.wsl2-linux/1.0",
+    kind: "WSL2_LINUX",
+    distribution: "Ubuntu",
+    gateway: {
+      windows_path: String.raw`C:\Windows\System32\wsl.exe`,
+      version: "10.0.19041.4522",
+      sha256: "4".repeat(64),
+    },
+    linux: {
+      launcher_path: "/opt/codex/bin/codex",
+      launcher_version: "codex-cli 0.146.0",
+      launcher_sha256: "2".repeat(64),
+      node_path: "/usr/bin/node",
+      node_version: "v22.22.1",
+      node_sha256: "d".repeat(64),
+      git_path: "/usr/bin/git",
+      git_version: "git version 2.53.0",
+      git_sha256: "5".repeat(64),
+      supervisor_path: "/mnt/c/lattice/wsl2-codex-supervisor.mjs",
+      supervisor_sha256: "6".repeat(64),
+      codex_home: "/home/zk/lattice/codex-home",
+      config_digest: wslDigest("codex-config", "a"),
+      cwd: "/home/zk/lattice/repository",
+      repository_identity: wslDigest("repository", "b"),
+      dbus_run_session_path: "/usr/bin/dbus-run-session",
+      dbus_run_session_sha256: "7".repeat(64),
+      setsid_path: "/usr/bin/setsid",
+      setsid_sha256: "8".repeat(64),
+      keyring_daemon_path: "/home/zk/lattice/keyring/gnome-keyring-daemon",
+      keyring_daemon_sha256: "9".repeat(64),
+      keyring_library_path: "/home/zk/lattice/keyring/lib",
+      xdg_runtime_dir: "/home/zk/lattice/keyring/run",
+    },
+    path_mapping: {
+      windows_path: String.raw`\\wsl.localhost\Ubuntu\home\zk\lattice\repository`,
+      linux_path: "/home/zk/lattice/repository",
+      digest: wslDigest("path-mapping", "c"),
+    },
+    identity_digest: null,
+  };
+  descriptor.identity_digest = executionEnvironmentIdentity(descriptor);
+  assert.throws(() => validateWsl2ExecutionEnvironment(descriptor), {
+    code: "WSL2_EXECUTION_ENVIRONMENT_REJECTED",
+  });
+  const launch = buildLegacyWsl2CodexLaunchFixture(descriptor, { fence: "f".repeat(64) });
+  assert.equal(launch.fixtureOnly, true);
+  assert.equal(launch.command, descriptor.gateway.windows_path);
+  assert.equal(launch.args.includes(descriptor.linux.launcher_path), true);
+  assert.notEqual(descriptor.linux.launcher_path, launch.command);
+  assert.throws(
+    () => buildLegacyWsl2CodexLaunchFixture({
+      ...descriptor,
+      linux: { ...descriptor.linux, cwd: "/mnt/c/Users/f7212/repository" },
+    }),
+    { code: "WSL2_EXECUTION_ENVIRONMENT_REJECTED" },
+  );
+});
+
+test("Windows command launch is closed to explicit scripted acceptance", () => {
+  const environment = {
+    SystemRoot: String.raw`C:\Windows`,
+    ComSpec: String.raw`C:\Windows\System32\cmd.exe`,
+    LATTICE_DELIVERY_CODEX_MODE: "SCRIPTED_ACCEPTANCE",
+  };
+  assert.deepEqual(
+    resolveCodexAppServerLaunch(String.raw`C:\fixture-safe\scripted-codex.cmd`, {
+      platform: "win32",
+      env: environment,
+    }),
+    {
+      command: environment.ComSpec,
+      args: [
+        "/d",
+        "/s",
+        "/c",
+        "call",
+        String.raw`C:\fixture-safe\scripted-codex.cmd`,
+        "app-server",
+        "--stdio",
+      ],
+    },
+  );
+  assert.throws(
+    () => resolveCodexAppServerLaunch(String.raw`C:\fixture-safe\scripted-codex.cmd`, {
+      platform: "win32",
+      env: { ...environment, LATTICE_DELIVERY_CODEX_MODE: "OFFICIAL_CODEX_APP_SERVER" },
+    }),
+    { code: "CODEX_APP_SERVER_SCRIPT_REJECTED" },
+  );
+  assert.throws(
+    () => resolveCodexAppServerLaunch(String.raw`C:\fixture&unsafe\scripted-codex.cmd`, {
+      platform: "win32",
+      env: environment,
+    }),
+    { code: "CODEX_APP_SERVER_SCRIPT_REJECTED" },
+  );
+});
 
 class FakeProcess extends EventEmitter {
   stdin = new PassThrough();
@@ -50,6 +160,417 @@ function sendServerMessage(child, message) {
 function nextMacrotask() {
   return new Promise((resolve) => setImmediate(resolve));
 }
+
+function productionWslLaunchSpec(fence = "f".repeat(64)) {
+  const unit = `lattice-wsl2-${"1".repeat(16)}-provider-${fence.slice(0, 12)}.service`;
+  const executionEnvironmentRef = wslDigest("execution-environment", "e");
+  const credentialSealDigest = wslDigest("credential-seal", "d");
+  return {
+    command: String.raw`C:\Windows\System32\wsl.exe`,
+    args: [
+      "--role", "PROVIDER",
+      "--fence", fence,
+      "--unit", unit,
+      "--execution-environment-ref", executionEnvironmentRef,
+      "--credential-seal-digest", credentialSealDigest,
+      "--timeout-ms", "1000",
+      "--stdout-limit-bytes", "262144",
+      "--stderr-limit-bytes", "262144",
+      "--attempt", "1",
+      "--retry-of", "NONE",
+      "--reconnect-of", "NONE",
+      "--", "app-server",
+    ],
+    processFence: fence,
+    serviceUnit: unit,
+    gracefulClose: true,
+    codexIdentity: {
+      schema: "lattice.wsl2-codex-launch/1.1",
+      execution_environment_ref: executionEnvironmentRef,
+      credential_seal_digest: credentialSealDigest,
+      process_fence: fence,
+    },
+  };
+}
+
+function replaceWslLaunchOption(launchSpec, name, value) {
+  const replaced = structuredClone(launchSpec);
+  const index = replaced.args.indexOf(`--${name}`);
+  assert.notEqual(index, -1, `missing WSL launch option: ${name}`);
+  replaced.args[index + 1] = value;
+  return replaced;
+}
+
+function wslProcessMarker(launchSpec, overrides = {}) {
+  return {
+    schema: "lattice.wsl2-process-fence/1.1",
+    fence: launchSpec.processFence,
+    unit: launchSpec.serviceUnit,
+    execution_environment_ref: launchSpec.codexIdentity.execution_environment_ref,
+    credential_seal_digest: launchSpec.codexIdentity.credential_seal_digest,
+    boot_id_digest: `wsl-boot:sha256:${"a".repeat(64)}`,
+    pid: 123,
+    process_start_ticks: "456",
+    process_group_id: 123,
+    cgroup_path: `/user.slice/user-1000.slice/user@1000.service/app.slice/${launchSpec.serviceUnit}`,
+    cgroup_version: 2,
+    delegated: false,
+    attempt: 1,
+    retry_of: null,
+    reconnect_of: null,
+    ...overrides,
+  };
+}
+
+function wslSubtreeExitReceipt(launchSpec, marker, overrides = {}) {
+  const seal = (pathname, index, extra = {}) => ({
+    ...extra,
+    path: pathname,
+    resolved_path: pathname,
+    sha256: String(index).repeat(64),
+    device: "2049",
+    inode: String(30000 + index),
+    owner_uid: index < 4 ? 0 : 1000,
+    mode: 0o500,
+    size: 4096,
+  });
+  return {
+    schema: "lattice.wsl2-subtree-exit/1.2",
+    fence: marker.fence,
+    unit: marker.unit,
+    execution_environment_ref: marker.execution_environment_ref,
+    credential_seal_digest: marker.credential_seal_digest,
+    cgroup_path: marker.cgroup_path,
+    zero_descendants: true,
+    credential_seal_intact: true,
+    credential_watch_intact: true,
+    keyring_daemon_sha256: "7".repeat(64),
+    keyring_library_manifest_digest: wslDigest("keyring-library-manifest", "8"),
+    tool_input_identities: {
+      executable: seal("/home/zk/task/codex", 1),
+      verifier_tool: null,
+      sandbox_helper: seal("/usr/bin/bwrap", 2),
+      node_runtime: null,
+      rustc: null,
+      rustdoc: null,
+      keyring_daemon: seal("/home/zk/task/keyring-daemon", 7),
+      keyring_libraries: [
+        seal("/home/zk/task/keyring/libgck-1.so.0.0.0", 8,
+          { manifest_path: "libgck-1.so.0.0.0" }),
+        seal("/home/zk/task/keyring/libgcr-base-3.so.1.0.0", 9,
+          { manifest_path: "libgcr-base-3.so.1.0.0" }),
+      ],
+    },
+    stdout_bytes: 128,
+    stderr_bytes: 256,
+    stdout_limit_bytes: 262144,
+    stderr_limit_bytes: 262144,
+    output_bound_exceeded: false,
+    timeout_ms: 1000,
+    timed_out: false,
+    interrupted: false,
+    stdin_bytes: 0,
+    stdin_sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    stdin_complete: true,
+    attempt: marker.attempt,
+    retry_of: marker.retry_of,
+    reconnect_of: marker.reconnect_of,
+    exit_code: 0,
+    exit_signal: null,
+    ...overrides,
+  };
+}
+
+async function runWslPostExitProbe(_launchSpec, marker) {
+  return {
+    schema: "lattice.wsl2-provider-outer-post-exit/1.0",
+    unit: marker.unit,
+    fence: marker.fence,
+    cgroup_path: marker.cgroup_path,
+    boot_id_digest: marker.boot_id_digest,
+    active_state: "inactive",
+    sub_state: "dead",
+    result: "success",
+    delegate: "no",
+    cgroup_exists: false,
+    populated: null,
+  };
+}
+
+test("WSL2 readiness awaits the exact 1.1 process marker after initialize", async () => {
+  const launchSpec = productionWslLaunchSpec();
+  const marker = wslProcessMarker(launchSpec);
+  const child = new FakeProcess();
+  observeClientMessages(child, (message) => {
+    if (message.method !== "initialize") return;
+    sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+    setTimeout(() => child.stderr.write(`${JSON.stringify(marker)}\n`), 25);
+  });
+  child.stdin.once("finish", () => {
+    child.stderr.write(`${JSON.stringify(wslSubtreeExitReceipt(launchSpec, marker))}\n`);
+    child.stderr.end();
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+  });
+  const codex = new CodexAppServer({
+    launchSpec,
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+    lifecycleTimeoutMs: 250,
+    runPostExitProbe: runWslPostExitProbe,
+  });
+
+  let connected = false;
+  const connection = codex.connect().then(() => { connected = true; });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(connected, false, "initialize alone cannot outrun the WSL2 fence marker");
+  await connection;
+  assert.equal(codex.connected, true);
+  await codex.close();
+});
+
+test("WSL2 attempt-one claimed-dispatch reconnect is accepted but retry is rejected before spawn", async () => {
+  const reconnectRef = wslDigest("attempt-receipt", "7");
+  const reconnectSpec = replaceWslLaunchOption(
+    productionWslLaunchSpec(), "reconnect-of", reconnectRef,
+  );
+  const reconnectMarker = wslProcessMarker(reconnectSpec, { reconnect_of: reconnectRef });
+  const child = new FakeProcess();
+  observeClientMessages(child, (message) => {
+    if (message.method !== "initialize") return;
+    child.stderr.write(`${JSON.stringify(reconnectMarker)}\n`);
+    sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+  });
+  child.stdin.once("finish", () => {
+    child.stderr.write(`${JSON.stringify(
+      wslSubtreeExitReceipt(reconnectSpec, reconnectMarker),
+    )}\n`);
+    child.stderr.end();
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+  });
+  const reconnect = new CodexAppServer({
+    launchSpec: reconnectSpec,
+    spawnProcess: () => child,
+    requestTimeoutMs: 1_000,
+    lifecycleTimeoutMs: 250,
+    runPostExitProbe: runWslPostExitProbe,
+  });
+  await reconnect.connect();
+  await reconnect.close();
+
+  let spawnCount = 0;
+  const retrySpec = replaceWslLaunchOption(
+    productionWslLaunchSpec(), "retry-of", wslDigest("attempt-receipt", "8"),
+  );
+  const retry = new CodexAppServer({
+    launchSpec: retrySpec,
+    spawnProcess: () => {
+      spawnCount += 1;
+      return new FakeProcess();
+    },
+  });
+  await assert.rejects(retry.connect(), { code: "CODEX_APP_SERVER_LAUNCH_REJECTED" });
+  assert.equal(spawnCount, 0);
+
+  const wrongNamespace = new CodexAppServer({
+    launchSpec: replaceWslLaunchOption(
+      productionWslLaunchSpec(), "reconnect-of", wslDigest("verifier-receipt", "9"),
+    ),
+    spawnProcess: () => {
+      spawnCount += 1;
+      return new FakeProcess();
+    },
+  });
+  await assert.rejects(wrongNamespace.connect(), {
+    code: "CODEX_APP_SERVER_LAUNCH_REJECTED",
+  });
+  assert.equal(spawnCount, 0);
+
+  let ambiguousSpec = replaceWslLaunchOption(productionWslLaunchSpec(), "attempt", "2");
+  ambiguousSpec = replaceWslLaunchOption(
+    ambiguousSpec, "retry-of", wslDigest("attempt-receipt", "8"),
+  );
+  ambiguousSpec = replaceWslLaunchOption(
+    ambiguousSpec, "reconnect-of", wslDigest("attempt-receipt", "9"),
+  );
+  const ambiguous = new CodexAppServer({
+    launchSpec: ambiguousSpec,
+    spawnProcess: () => {
+      spawnCount += 1;
+      return new FakeProcess();
+    },
+  });
+  await assert.rejects(ambiguous.connect(), { code: "CODEX_APP_SERVER_LAUNCH_REJECTED" });
+  assert.equal(spawnCount, 0);
+});
+
+test("WSL2 readiness rejects stale, substituted, missing, or exited process markers", async () => {
+  const launchSpec = productionWslLaunchSpec();
+  const invalidMarkers = [
+    { schema: "lattice.wsl2-process-fence/1.0" },
+    { unit: `${launchSpec.serviceUnit}.substituted` },
+    { execution_environment_ref: wslDigest("execution-environment", "9") },
+    { credential_seal_digest: wslDigest("credential-seal", "8") },
+    { cgroup_path: `/user.slice/../${launchSpec.serviceUnit}` },
+    { attempt: 2, retry_of: wslDigest("attempt-receipt", "7") },
+    { unexpected: true },
+  ];
+  for (const overrides of invalidMarkers) {
+    const child = new FakeProcess();
+    observeClientMessages(child, (message) => {
+      if (message.method !== "initialize") return;
+      child.stderr.write(`${JSON.stringify(wslProcessMarker(launchSpec, overrides))}\n`);
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+    });
+    child.stdin.once("finish", () => {
+      child.stderr.end();
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    });
+    const codex = new CodexAppServer({
+      launchSpec,
+      spawnProcess: () => child,
+      requestTimeoutMs: 1_000,
+      lifecycleTimeoutMs: 250,
+    });
+    await assert.rejects(codex.connect(), { code: "CODEX_APP_SERVER_PROCESS_FENCE_REQUIRED" });
+  }
+
+  for (const mode of ["timeout", "exit"]) {
+    const child = new FakeProcess();
+    observeClientMessages(child, (message) => {
+      if (message.method !== "initialize") return;
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+      if (mode === "exit") {
+        setImmediate(() => {
+          child.stderr.end();
+          child.exitCode = 73;
+          child.emit("exit", 73, null);
+        });
+      }
+    });
+    child.stdin.once("finish", () => {
+      child.stderr.end();
+      if (child.exitCode === null) {
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+      }
+    });
+    const codex = new CodexAppServer({
+      launchSpec,
+      spawnProcess: () => child,
+      requestTimeoutMs: 1_000,
+      lifecycleTimeoutMs: 20,
+    });
+    await assert.rejects(codex.connect(), {
+      code: mode === "exit"
+        ? "CODEX_APP_SERVER_PROCESS_EXITED"
+        : "CODEX_APP_SERVER_PROCESS_FENCE_REQUIRED",
+    });
+  }
+});
+
+test("WSL2 close accepts only one exact safe 1.1 subtree receipt after stderr drain", async () => {
+  const invalidReceipts = [
+    null,
+    { schema: "lattice.wsl2-subtree-exit/1.0" },
+    { fence: "0".repeat(64) },
+    { unit: "lattice-wsl2-substituted.service" },
+    { execution_environment_ref: wslDigest("execution-environment", "9") },
+    { credential_seal_digest: wslDigest("credential-seal", "8") },
+    { cgroup_path: "/user.slice/substituted.service" },
+    { zero_descendants: false },
+    { credential_seal_intact: false },
+    { stdout_bytes: 262145 },
+    { stderr_limit_bytes: 131072 },
+    { output_bound_exceeded: true },
+    { timeout_ms: 2000 },
+    { timed_out: true },
+    { interrupted: true },
+    { attempt: 2, retry_of: wslDigest("attempt-receipt", "7") },
+    { reconnect_of: wslDigest("attempt-receipt", "6") },
+    { exit_code: -1 },
+    { unexpected: true },
+  ];
+  for (const overrides of invalidReceipts) {
+    const launchSpec = productionWslLaunchSpec();
+    const marker = wslProcessMarker(launchSpec);
+    const child = new FakeProcess();
+    let launches = 0;
+    observeClientMessages(child, (message) => {
+      if (message.method !== "initialize") return;
+      child.stderr.write(`${JSON.stringify(marker)}\n`);
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+    });
+    child.stdin.once("finish", () => {
+      if (overrides !== null) {
+        child.stderr.write(`${JSON.stringify(wslSubtreeExitReceipt(
+          launchSpec, marker, overrides,
+        ))}\n`);
+      }
+      child.stderr.end();
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    });
+    const codex = new CodexAppServer({
+      launchSpec,
+      spawnProcess: () => {
+        launches += 1;
+        return child;
+      },
+      requestTimeoutMs: 1_000,
+      lifecycleTimeoutMs: 250,
+    });
+    await codex.connect();
+    await assert.rejects(codex.close(), { code: "CODEX_APP_SERVER_SUBTREE_EXIT_REQUIRED" });
+    if (overrides === null) {
+      await assert.rejects(codex.close(), { code: "CODEX_APP_SERVER_SUBTREE_EXIT_REQUIRED" });
+      await assert.rejects(codex.connect(), { code: "CODEX_APP_SERVER_SUBTREE_EXIT_REQUIRED" });
+      assert.equal(launches, 1, "an unresolved subtree receipt must fence replacement spawn");
+    }
+  }
+});
+
+test("WSL2 process-domain control rejects duplicate markers and exit receipts", async () => {
+  for (const duplicate of ["marker", "receipt"]) {
+    const launchSpec = productionWslLaunchSpec();
+    const marker = wslProcessMarker(launchSpec);
+    const receipt = wslSubtreeExitReceipt(launchSpec, marker);
+    const child = new FakeProcess();
+    observeClientMessages(child, (message) => {
+      if (message.method !== "initialize") return;
+      child.stderr.write(`${JSON.stringify(marker)}\n`);
+      if (duplicate === "marker") child.stderr.write(`${JSON.stringify(marker)}\n`);
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "unix" } });
+    });
+    child.stdin.once("finish", () => {
+      if (duplicate === "receipt") {
+        child.stderr.write(`${JSON.stringify(receipt)}\n`);
+        child.stderr.write(`${JSON.stringify(receipt)}\n`);
+      }
+      child.stderr.end();
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    });
+    const codex = new CodexAppServer({
+      launchSpec,
+      spawnProcess: () => child,
+      requestTimeoutMs: 1_000,
+      lifecycleTimeoutMs: 250,
+    });
+    if (duplicate === "marker") {
+      await assert.rejects(codex.connect(), {
+        code: "CODEX_APP_SERVER_PROCESS_FENCE_REQUIRED",
+      });
+    } else {
+      await codex.connect();
+      await assert.rejects(codex.close(), {
+        code: "CODEX_APP_SERVER_SUBTREE_EXIT_REQUIRED",
+      });
+    }
+  }
+});
 
 function createInitializedConnector(onMessage = () => {}, options = {}) {
   const child = new FakeProcess();
@@ -111,6 +632,81 @@ test("uses the official JSONL handshake and model listing without starting a tur
   } else {
     assert.equal(launches[0].command, "codex");
   }
+  await codex.close();
+});
+
+test("account readiness is sanitized and bound to the exact App Server generation", async () => {
+  const { codex, messages } = createInitializedConnector((message, child) => {
+    if (message.method === "account/read") {
+      sendServerMessage(child, {
+        id: message.id,
+        result: {
+          account: {
+            type: "chatgpt",
+            email: "must-not-leave-connector@example.invalid",
+            planType: "pro",
+          },
+          requiresOpenaiAuth: true,
+          providerPrivateData: "must-not-leave-connector",
+        },
+      });
+    }
+  }, { sessionIdentityFactory: () => "app-server-session:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+
+  const readiness = await codex.readAuthReadiness();
+
+  assert.deepEqual(readiness, {
+    schema: "lattice.codex-auth-readiness/1.0",
+    ready: true,
+    authMode: "chatgpt",
+    appServerGeneration: 1,
+    appServerSessionId: "app-server-session:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  });
+  assert.equal(JSON.stringify(readiness).includes("example.invalid"), false);
+  assert.equal(JSON.stringify(readiness).includes("providerPrivateData"), false);
+  assert.deepEqual(
+    messages.find(({ method }) => method === "account/read")?.params,
+    { refreshToken: false },
+  );
+  await codex.close();
+});
+
+test("provider effects fail closed when the exact App Server identity changed", async () => {
+  const { codex, messages } = createInitializedConnector((message, child) => {
+    if (message.method === "account/read") {
+      sendServerMessage(child, {
+        id: message.id,
+        result: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
+      });
+    }
+  }, { sessionIdentityFactory: () => "app-server-session:sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" });
+
+  const readiness = await codex.readAuthReadiness();
+  await assert.rejects(
+    codex.startThread({
+      cwd: String.raw`C:\workspace`,
+      effectIdentity: {
+        expectedGeneration: readiness.appServerGeneration + 1,
+        expectedSessionId: readiness.appServerSessionId,
+      },
+    }),
+    { code: "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED" },
+  );
+  await assert.rejects(
+    codex.startThread({
+      cwd: String.raw`C:\workspace`,
+      effectIdentity: {
+        expectedGeneration: readiness.appServerGeneration,
+        expectedSessionId: "app-server-session:sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      },
+    }),
+    { code: "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED" },
+  );
+  assert.equal(
+    messages.filter(({ method }) => method === "thread/start").length,
+    0,
+    "no provider effect may be emitted after identity drift",
+  );
   await codex.close();
 });
 
@@ -233,6 +829,38 @@ test("a timed out RPC is rejected and removed from the public pending count", as
     clearTimeout(guardTimer);
     await codex.close();
     await Promise.allSettled([models]);
+  }
+});
+
+test("a numeric App Server RPC rejection keeps a safe connector code and exact method", async () => {
+  const { child, codex } = createInitializedConnector((message, server) => {
+    if (message.method === "turn/start") {
+      sendServerMessage(server, {
+        id: message.id,
+        error: {
+          code: -32602,
+          message: "UNTRUSTED_PROVIDER_MESSAGE_SENTINEL",
+          data: { unsafe: "UNTRUSTED_PROVIDER_DATA_SENTINEL" },
+        },
+      });
+    }
+  });
+
+  try {
+    await assert.rejects(
+      codex.startTurn("thread-rpc-rejected", "UNTRUSTED_PROMPT_SENTINEL"),
+      (error) => {
+        assert.equal(error.code, "CODEX_APP_SERVER_RPC_REJECTED");
+        assert.equal(error.rpcCode, -32602);
+        assert.equal(error.method, "turn/start");
+        assert.equal(error.requestId, 2);
+        return true;
+      },
+    );
+    assert.equal(codex.pendingRequestCount, 0);
+  } finally {
+    await codex.close();
+    child.destroy?.();
   }
 });
 
@@ -518,12 +1146,76 @@ test("readThread returns only an exact thread with non-empty turns", async () =>
   }
 });
 
-test("resume rejects empty or non-terminal loaded rollouts before reconciliation read", async () => {
+test("thread/list uses the closed dispatch filters and validates its bounded page", async () => {
+  const cwd = "C:\\disposable\\managed";
+  const { codex, messages } = createInitializedConnector((message, server) => {
+    if (message.method !== "thread/list") return;
+    sendServerMessage(server, {
+      id: message.id,
+      result: {
+        data: [{ id: "thread-listed", cwd, createdAt: 1_787_714_825, turns: [] }],
+        nextCursor: null,
+      },
+    });
+  });
+
+  try {
+    assert.deepEqual(await codex.listThreads({
+      cwd,
+      sourceKinds: ["appServer"],
+      archived: false,
+      sortKey: "created_at",
+      sortDirection: "desc",
+      limit: 100,
+      useStateDbOnly: true,
+    }), {
+      data: [{ id: "thread-listed", cwd, createdAt: 1_787_714_825, turns: [] }],
+      nextCursor: null,
+    });
+    assert.deepEqual(messages.find(({ method }) => method === "thread/list")?.params, {
+      cwd,
+      cursor: null,
+      limit: 100,
+      sortKey: "created_at",
+      sortDirection: "desc",
+      archived: false,
+      useStateDbOnly: true,
+      sourceKinds: ["appServer"],
+    });
+  } finally {
+    await codex.close();
+  }
+});
+
+test("empty thread recovery requires the same exact empty rollout twice", async () => {
+  const { codex, messages } = createInitializedConnector((message, server) => {
+    if (message.method === "thread/resume" || message.method === "thread/read") {
+      sendServerMessage(server, {
+        id: message.id,
+        result: { thread: { id: message.params.threadId, turns: [] } },
+      });
+    }
+  });
+
+  try {
+    assert.deepEqual(await codex.resumeEmptyThread("thread-empty-recoverable"), {
+      id: "thread-empty-recoverable",
+      turns: [],
+    });
+    assert.deepEqual(
+      messages.filter(({ method }) => method === "thread/resume" || method === "thread/read")
+        .map(({ method }) => method),
+      ["thread/resume", "thread/read"],
+    );
+  } finally {
+    await codex.close();
+  }
+});
+
+test("resume rejects an empty loaded rollout before reconciliation read", async () => {
   const { codex, messages } = createInitializedConnector((message, server) => {
     if (message.method === "thread/resume") {
-      const turns = message.params.threadId === "thread-empty"
-        ? []
-        : [{ id: "turn-active", status: "inProgress" }];
+      const turns = [];
       sendServerMessage(server, {
         id: message.id,
         result: { thread: { id: message.params.threadId, turns } },
@@ -537,14 +1229,36 @@ test("resume rejects empty or non-terminal loaded rollouts before reconciliation
   });
 
   try {
-    for (const threadId of ["thread-empty", "thread-active"]) {
-      await assert.rejects(
-        codex.resumeThread(threadId),
-        /not recoverable|reconciliation|empty rollout|terminal turn/iu,
-      );
-    }
-    assert.equal(messages.filter(({ method }) => method === "thread/resume").length, 2);
+    await assert.rejects(
+      codex.resumeThread("thread-empty"),
+      /not recoverable|reconciliation|empty rollout/iu,
+    );
+    assert.equal(messages.filter(({ method }) => method === "thread/resume").length, 1);
     assert.equal(messages.some(({ method }) => method === "thread/read"), false);
+  } finally {
+    await codex.close();
+  }
+});
+
+test("fresh-process resume reconciles and restores one exact active turn", async () => {
+  const persistedThread = {
+    id: "thread-active",
+    turns: [{ id: "turn-active", status: "inProgress" }],
+  };
+  const { codex, messages } = createInitializedConnector((message, server) => {
+    if (message.method === "thread/resume" || message.method === "thread/read") {
+      sendServerMessage(server, { id: message.id, result: { thread: persistedThread } });
+    }
+  });
+
+  try {
+    assert.deepEqual(
+      await codex.resumeThread(persistedThread.id, { expectedTurnId: "turn-active" }),
+      persistedThread,
+    );
+    assert.equal(codex.isTurnActive("thread-active", "turn-active"), true);
+    assert.equal(messages.filter(({ method }) => method === "thread/resume").length, 1);
+    assert.equal(messages.filter(({ method }) => method === "thread/read").length, 1);
   } finally {
     await codex.close();
   }
@@ -696,6 +1410,147 @@ test("owned close emits one disconnect so shared work can fail closed", async ()
   await nextMacrotask();
 
   assert.deepEqual(disconnects, [{ code: null, signal: "client-close" }]);
+});
+
+test("unexpected App Server exit and transport error reject active waits with typed transport codes", async () => {
+  for (const failure of [
+    { kind: "exit", expected: "CODEX_APP_SERVER_PROCESS_EXITED" },
+    { kind: "error", expected: "CODEX_APP_SERVER_TRANSPORT_ERROR" },
+  ]) {
+    const { child, codex } = createInitializedConnector();
+    await codex.connect();
+    const terminal = codex.waitForTurnCompleted("thread-exact", "turn-exact", {
+      timeoutMs: 1_000,
+    });
+    if (failure.kind === "exit") {
+      child.exitCode = 91;
+      child.emit("exit", 91, null);
+    } else {
+      const cause = new Error("simulated stdio transport failure");
+      cause.code = "EPIPE";
+      child.emit("error", cause);
+    }
+    await assert.rejects(terminal, (error) => error.code === failure.expected);
+    assert.equal(codex.connected, false);
+  }
+});
+
+test("owned close resolves only after the exact App Server process exits", async () => {
+  const child = new FakeProcess();
+  child.pid = 4242;
+  child.kill = function kill() {
+    this.killCount += 1;
+    setTimeout(() => {
+      this.exitCode = 0;
+      this.emit("exit", 0, null);
+    }, 25);
+    return true;
+  };
+  const codex = new CodexAppServer({
+    codexBin: "codex-test",
+    lifecycleTimeoutMs: 250,
+    spawnProcess: () => child,
+  });
+  observeClientMessages(child, (message) => {
+    if (message.method === "initialize") {
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "windows" } });
+    }
+  });
+
+  await codex.connect();
+  let resolved = false;
+  const closing = codex.close().then((receipt) => {
+    resolved = true;
+    return receipt;
+  });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(resolved, false);
+  assert.equal(child.exitCode, null);
+  const receipt = await closing;
+  assert.deepEqual(receipt, {
+    exited: true,
+    processId: 4242,
+    code: 0,
+    signal: null,
+  });
+  assert.equal(child.killCount, 1);
+  assert.equal(codex.connected, false);
+});
+
+test("owned close fails closed when the App Server exit cannot be observed", async () => {
+  const child = new FakeProcess();
+  let launches = 0;
+  child.pid = 4343;
+  child.kill = function kill() {
+    this.killCount += 1;
+    return true;
+  };
+  const codex = new CodexAppServer({
+    codexBin: "codex-test",
+    lifecycleTimeoutMs: 20,
+    spawnProcess: () => {
+      launches += 1;
+      return child;
+    },
+  });
+  observeClientMessages(child, (message) => {
+    if (message.method === "initialize") {
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "windows" } });
+    }
+  });
+
+  await codex.connect();
+  await assert.rejects(
+    codex.close(),
+    (error) => error.code === "CODEX_APP_SERVER_CLOSE_TIMEOUT",
+  );
+  assert.equal(child.exitCode, null);
+  assert.equal(child.killCount, 1);
+  await assert.rejects(
+    codex.connect(),
+    (error) => error.code === "CODEX_APP_SERVER_CLOSE_PENDING",
+  );
+  assert.equal(launches, 1, "a live unclosed child must fence every replacement spawn");
+  child.exitCode = 0;
+  child.emit("exit", 0, null);
+  await nextMacrotask();
+});
+
+test("transport error without exact exit cannot turn a repeated close into a false receipt", async () => {
+  const child = new FakeProcess();
+  let launches = 0;
+  child.pid = 4444;
+  child.kill = function kill() {
+    this.killCount += 1;
+    const cause = new Error("simulated kill transport error");
+    cause.code = "EIO";
+    queueMicrotask(() => this.emit("error", cause));
+    return false;
+  };
+  const codex = new CodexAppServer({
+    codexBin: "codex-test",
+    lifecycleTimeoutMs: 20,
+    spawnProcess: () => {
+      launches += 1;
+      return child;
+    },
+  });
+  observeClientMessages(child, (message) => {
+    if (message.method === "initialize") {
+      sendServerMessage(child, { id: message.id, result: { platformFamily: "windows" } });
+    }
+  });
+
+  await codex.connect();
+  await assert.rejects(codex.close(), (error) => error.code === "CODEX_APP_SERVER_CLOSE_TIMEOUT");
+  await assert.rejects(codex.close(), (error) => error.code === "CODEX_APP_SERVER_CLOSE_TIMEOUT");
+  await assert.rejects(codex.connect(), (error) => error.code === "CODEX_APP_SERVER_CLOSE_PENDING");
+  assert.equal(child.exitCode, null);
+  assert.equal(launches, 1);
+
+  child.exitCode = 0;
+  child.emit("exit", 0, null);
+  await nextMacrotask();
 });
 
 test("late output from an exited generation cannot settle or activate a reconnect", async () => {

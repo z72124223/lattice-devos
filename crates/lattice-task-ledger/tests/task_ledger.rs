@@ -209,6 +209,62 @@ fn general_task_created_profile_binds_the_submission_digest_and_is_create_only()
     );
 }
 
+#[test]
+fn managed_general_task_created_binds_exact_spec_digest_and_requires_receipt() {
+    let identity = identity("project-1", "TASK-MANAGED-1");
+    let expected_spec_digest = identity
+        .task_spec_digest()
+        .expect("managed successor is TaskSpec-bound")
+        .clone();
+    let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).expect("vacant live stream");
+    let command = AppendCommand::new_managed_general_task_created(
+        vacant.head().clone(),
+        CommandId::new("managed-create-1").expect("command"),
+        CorrelationId::new("managed-correlation-1").expect("correlation"),
+        "2026-08-26T00:00:00Z",
+        ActorId::new("lattice-foreman").expect("actor"),
+        ReasonCode::new("MANAGED_GENERAL_TASK_ACCEPTED").expect("reason"),
+    )
+    .expect("managed task-created command");
+
+    assert_eq!(command.action().as_str(), "MANAGED_GENERAL_TASK_V1");
+    assert_eq!(command.subject_digest(), &expected_spec_digest);
+    assert!(command.diagnostic().is_none());
+    assert!(TaskCreatedProfile::ManagedGeneralTaskV1.requires_autonomy_receipt());
+
+    let plan = plan_append(&vacant, command).expect("plan managed task creation");
+    let created = apply_append_plan(&vacant, &plan).expect("apply managed task creation");
+    assert_eq!(
+        classify_task_created_profile(&created.events()[0]).expect("known managed profile"),
+        Some(TaskCreatedProfile::ManagedGeneralTaskV1)
+    );
+    assert_eq!(created.events()[0].subject_digest(), &expected_spec_digest);
+    assert_eq!(
+        verify_untrusted_autonomy_receipt_rows(&created, &[]).expect("pending receipt state"),
+        VerifiedAutonomyReceiptState::PendingRequiredReceipt
+    );
+
+    let ordinary = AppendCommand::new(
+        created.head().clone(),
+        CommandId::new("managed-skip-receipt").expect("command"),
+        CorrelationId::new("managed-correlation-1").expect("correlation"),
+        "2026-08-26T00:00:01Z",
+        LedgerEventKind::EvidenceRecorded,
+        ActorId::new("worker").expect("actor"),
+        ActionId::new("RECORD").expect("action"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("RECORDED").expect("reason"),
+        digest('b'),
+        None,
+        None,
+    )
+    .expect("ordinary command");
+    assert_eq!(
+        plan_append(&created, ordinary),
+        Err(LedgerError::InvalidAutonomyReceipt)
+    );
+}
+
 fn writer_authority(identity: &TaskLedgerStreamIdentity) -> WriterLeaseAuthorityHead {
     writer_authority_variant(identity, 1, 'e')
 }
@@ -591,6 +647,28 @@ fn generic_append_cannot_select_controlled_task_profile() {
     )
     .expect_err("generic append must not choose a governed task-created profile");
     assert_eq!(error.code(), "LEDGER_UNKNOWN_TASK_CREATED_PROFILE");
+}
+
+#[test]
+fn generic_append_cannot_mint_managed_general_task_profile() {
+    let zero =
+        FakeTaskLedger::zero_head(identity("project-1", "TASK-MANAGED-1")).expect("zero head");
+    let error = AppendCommand::new(
+        zero,
+        CommandId::new("forged-managed-profile").expect("command"),
+        CorrelationId::new("correlation-1").expect("correlation"),
+        "2026-08-26T00:00:00Z",
+        LedgerEventKind::TaskCreated,
+        ActorId::new("caller-controlled").expect("actor"),
+        ActionId::new(TaskCreatedProfile::ManagedGeneralTaskV1.action()).expect("action"),
+        LedgerOutcome::Recorded,
+        ReasonCode::new("MANAGED_GENERAL_TASK_ACCEPTED").expect("reason"),
+        digest('a'),
+        None,
+        None,
+    )
+    .expect_err("generic append must not mint the reserved managed profile");
+    assert_eq!(error, LedgerError::UnknownTaskCreatedProfile);
 }
 
 #[test]

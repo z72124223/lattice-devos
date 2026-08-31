@@ -113,19 +113,22 @@ function Import-LatticeConfigEnvironment {
 function Initialize-LatticeRuntimeCodexHome {
     param([Parameter(Mandatory = $true)][string]$Path)
 
-    $authSource = Join-Path $env:USERPROFILE '.codex\auth.json'
-    if (-not (Test-Path -LiteralPath $authSource -PathType Leaf)) {
-        throw 'LATTICE_RUNTIME_CODEX_AUTH_MISSING'
-    }
     $markerPath = Join-Path $Path '.lattice-codex-home-v1'
     $configPath = Join-Path $Path 'config.toml'
     $authPath = Join-Path $Path 'auth.json'
     $markerBytes = [Text.Encoding]::UTF8.GetBytes("lattice.codex-home.v1`n")
     $configBytes = [Text.UTF8Encoding]::new($false).GetBytes((@(
+        'cli_auth_credentials_store = "keyring"',
         'approval_policy = "never"',
         'sandbox_mode = "workspace-write"',
         'model = "gpt-5.6-sol"',
         'model_reasoning_effort = "low"',
+        '',
+        '[shell_environment_policy]',
+        'inherit = "all"',
+        'ignore_default_excludes = false',
+        'include_only = ["SystemRoot", "WINDIR", "ComSpec", "PATH", "PATHEXT", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "TEMP", "TMP", "LANG", "LC_ALL"]',
+        'experimental_use_profile = false',
         '',
         '[windows]',
         'sandbox = "unelevated"',
@@ -138,18 +141,24 @@ function Initialize-LatticeRuntimeCodexHome {
     if ($items.Count -eq 0) {
         [IO.File]::WriteAllBytes($markerPath, $markerBytes)
         [IO.File]::WriteAllBytes($configPath, $configBytes)
-        [IO.File]::Copy($authSource, $authPath, $false)
     }
+    if (Test-Path -LiteralPath $authPath) {
+        throw 'LATTICE_RUNTIME_CODEX_PLAINTEXT_AUTH_DENIED'
+    }
+    $markerItem = Get-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+    $configItem = Get-Item -LiteralPath $configPath -Force -ErrorAction SilentlyContinue
     if (
-        -not (Test-Path -LiteralPath $markerPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
-        -not (Test-Path -LiteralPath $authPath -PathType Leaf) -or
-        [Convert]::ToBase64String([IO.File]::ReadAllBytes($markerPath)) -ne [Convert]::ToBase64String($markerBytes)
+        $null -eq $markerItem -or $markerItem.PSIsContainer -or
+        ($markerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        $null -eq $configItem -or $configItem.PSIsContainer -or
+        ($configItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($markerPath)) -ne
+            [Convert]::ToBase64String($markerBytes) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -ne
+            [Convert]::ToBase64String($configBytes)
     ) {
         throw 'LATTICE_RUNTIME_CODEX_HOME_REJECTED'
     }
-    [IO.File]::WriteAllBytes($configPath, $configBytes)
-    [IO.File]::Copy($authSource, $authPath, $true)
 }
 
 function Start-LatticePostgres {
@@ -201,7 +210,7 @@ if ($LASTEXITCODE -ne 0 -or -not [string]::IsNullOrEmpty($dirty)) {
 $graphWorkRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-graphify'
 $dependencyWorktreeRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\dependency-worktrees'
 $runtimeTaskRoot = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-delivery'
-$runtimeTaskCodexHome = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-codex-home'
+$runtimeTaskCodexHome = Join-Path $env:LOCALAPPDATA 'LATTICE\runtime-codex-home-keyring-v1'
 New-Item -ItemType Directory -Path $graphWorkRoot, $dependencyWorktreeRoot, $runtimeTaskRoot, $runtimeTaskCodexHome -Force | Out-Null
 Initialize-LatticeRuntimeCodexHome -Path $runtimeTaskCodexHome
 $runtimeConfig = @{

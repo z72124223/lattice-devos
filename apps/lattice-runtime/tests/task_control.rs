@@ -476,7 +476,9 @@ fn stale_writer_cannot_append_after_reacquire_in_the_same_transaction_when_provi
     let mut migrator = connect_as(&database, "lattice_migrator");
     assert!(matches!(
         apply_extension(&mut migrator, &extension_target).expect("apply writer extension"),
-        ExtensionApplyOutcome::Installed | ExtensionApplyOutcome::AlreadyCurrent
+        ExtensionApplyOutcome::Installed
+            | ExtensionApplyOutcome::Upgraded
+            | ExtensionApplyOutcome::AlreadyCurrent
     ));
     verify_extension(&mut migrator, &extension_target).expect("writer extension profile");
 

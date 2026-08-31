@@ -49,6 +49,8 @@ const WRITER_LEASE_V3_SQL_SHA256: &str =
     "677c010a61e5945bcc6b96ca9f3d9e57830dc42f4cfbd46ea76d5e9d8b9262a0";
 const WRITER_LEASE_V4_SQL_SHA256: &str =
     "51996b50c9a7d3696f8319613d35acae6257c5802b63dc4a809873721a22da09";
+const WRITER_LEASE_V5_SQL_SHA256: &str =
+    "c8193b47ef764d54a445a3f481331f642d0ce67b3a148c7c00fb3ca26d7ad12a";
 const WRITER_LEASE_V1_SQL: &str = include_str!("../../../db/extensions/writer-lease/v1.sql");
 const WRITER_LEASE_V2_SQL: &str = include_str!("../../../db/extensions/writer-lease/v2.sql");
 const WRITER_LEASE_V3_SQL: &str = include_str!("../../../db/extensions/writer-lease/v3.sql");
@@ -57,6 +59,7 @@ const WRITER_LEASE_V3_REBIND_SQL: &str =
 const WRITER_LEASE_V4_SQL: &str = include_str!("../../../db/extensions/writer-lease/v4.sql");
 const WRITER_LEASE_V4_REBIND_SQL: &str =
     include_str!("../../../db/extensions/writer-lease/v4-rebind.sql");
+const WRITER_LEASE_V5_SQL: &str = include_str!("../../../db/extensions/writer-lease/v5.sql");
 const CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION: i16 = 5;
 const CATALOG_SIGNATURE_DOMAIN: &[u8] = b"LATTICE_POSTGRES_CATALOG_SIGNATURE_V1\0";
 const V1_EXPECTED_RELATION_SIGNATURE: &str =
@@ -863,6 +866,18 @@ const WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES: [&str; 10] = [
     "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
     "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
     "42db5b1428da3e9e6aa96f770dd1996893fdcdf4f88b275d1ddb28ae8df12309",
+    "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
+    "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
+];
+const WRITER_LEASE_V5_CURRENT_CATALOG_SIGNATURES: [&str; 10] = [
+    "7f60105269127d4351cdd00cdff7d8cb23230c2420ce4cd24ff3746ac7763e37",
+    "560e93c2a765db0024c0e74d25a51b90cfc72b204601139de8fdb688d48c0610",
+    "348feffe66ee0e4cb8f26183f0515c11a792a18ec0e761dfd410b6e09c16a5dd",
+    "66b315513cbf50c3c7dbc143eb7061c6dbb823d7eac853c50f83434caf1a1022",
+    "2ec0db61c83d6090bbad13beaad2d07e9362d75a4853346e80e988aee3cd1252",
+    "a2e1be8a403a96b679c18ddfa75e476fa1d6ceeccc1ccf62ff6424b2c259ef7b",
+    "b99ef0c0ea5b550ae5e805d29b0020e31c1800a016b0de82cda566d7b25e9569",
+    "d33ac72256c97191ffbb7f7e74d9908b92d9b9fc865801c3f3301c50fdd4e34b",
     "a7ccfc938fbf121a9b807070f69bd5b851be6aa89a8261043ef07336ea7b8dbd",
     "1d6642e77600a93da5b00dda0ee64c15474b4ca2741c51ca760597e7f90ac003",
 ];
@@ -2345,6 +2360,29 @@ enum SchemaV6WriterProfile {
 const SCHEMA_V6_WRITER_V3_DANGEROUS_FUNCTION_COUNT: i64 = 35;
 const SCHEMA_V6_WRITER_V4_BRIDGE_DANGEROUS_FUNCTION_COUNT: i64 = 28;
 const SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT: i64 = 44;
+const MANAGED_FOREMAN_RUNTIME_FUNCTION_COUNT: i64 = 39;
+const MANAGED_FOREMAN_EXTENSION_ID: &str = "lattice-postgres-foreman";
+const MANAGED_FOREMAN_EXTENSION_SCHEMA_VERSION: i16 = 1;
+const MANAGED_FOREMAN_EXTENSION_PATH: &str = "db/extensions/foreman-execution/v1.sql";
+const MANAGED_FOREMAN_EXTENSION_SQL_BYTES: i64 = 349_546;
+const MANAGED_FOREMAN_EXTENSION_SQL_SHA256: &str =
+    "46e186d54b65fbd55f7d5f48c693707287e0d723bd10c3077412d484c19ead6e";
+const MANAGED_FOREMAN_EXTENSION_MANIFEST_SHA256: &str =
+    "2a487f0f32c45542d0ee02a37881f55466ca892f530967d95f661a27594279dd";
+const MANAGED_FOREMAN_FUNCTION_CATALOG_DOMAIN: &[u8] =
+    b"LATTICE_POSTGRES_FOREMAN_FUNCTION_CATALOG_V1\0";
+const MANAGED_FOREMAN_TABLE_CATALOG_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_TABLE_CATALOG_V2\0";
+const MANAGED_FOREMAN_FUNCTION_CATALOG_SHA256: &str =
+    "8d8dd263498cab48b1164bf456f5d3b314d575ee9a186460715beea02bc8bfec";
+const MANAGED_FOREMAN_TABLE_CATALOG_SHA256: &str =
+    "42f151dd9f52ba1e82a2aac392234f2b285c18e9bd71a00372f7c7b4a1237eb5";
+const MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT: i64 = 12;
+
+#[derive(Debug)]
+struct ManagedForemanPrincipalProfile {
+    relation_oids: Vec<i64>,
+    function_oids: Vec<i64>,
+}
 const SCHEMA_V6_OWNED_CATALOG_SIGNATURES: [&str; 9] = [
     "dc5d05955070ecd8da9fc783cdb98091be7c960def04fd9e83cf77d7c5b00cf7",
     "5f68d85f2a5cc41d72984644284ceb73da1f6214dbd31f508fcdced961d2c517",
@@ -2579,7 +2617,7 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     } else {
         verify_stopped_admission(client)?;
     }
-    verify_exact_principal_database_boundary(client, expected_dangerous_functions, true)?;
+    verify_exact_principal_database_boundary(client, expected_dangerous_functions, true, None)?;
     read_database_identity(client, target)
 }
 
@@ -2652,6 +2690,538 @@ fn verify_v7_ingress_ambiguity_profile<C: GenericClient>(
     Ok(())
 }
 
+const MANAGED_FOREMAN_FUNCTION_CATALOG_SQL: &str = r"
+    WITH function_profile AS (
+        SELECT 1 AS kind,p.proname::text AS function_name,
+               pg_catalog.pg_get_function_identity_arguments(p.oid)::text
+                   AS identity_arguments,''::text AS item_key,
+               pg_catalog.json_build_array(
+                   'FUNCTION_PROFILE',p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   pg_catalog.pg_get_function_result(p.oid),
+                   pg_catalog.pg_get_functiondef(p.oid),owner.rolname,
+                   pg_catalog.has_function_privilege(
+                       'lattice_runtime',p.oid,'EXECUTE'),
+                   EXISTS (SELECT 1 FROM pg_catalog.aclexplode(
+                       COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner)))
+                       AS public_acl WHERE public_acl.grantee=0
+                       AND public_acl.privilege_type='EXECUTE')
+               )::text AS value
+          FROM pg_catalog.pg_proc AS p
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace
+          JOIN pg_catalog.pg_roles AS owner ON owner.oid=p.proowner
+         WHERE n.nspname='foreman_execution'
+        UNION ALL
+        SELECT 2,p.proname::text,
+               pg_catalog.pg_get_function_identity_arguments(p.oid)::text,
+               pg_catalog.json_build_array(
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text,
+               pg_catalog.json_build_array(
+                   'FUNCTION_ACL',p.proname,
+                   pg_catalog.pg_get_function_identity_arguments(p.oid),
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text
+          FROM pg_catalog.pg_proc AS p
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+               COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))) AS acl
+          LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid=acl.grantee
+          JOIN pg_catalog.pg_roles AS grantor ON grantor.oid=acl.grantor
+         WHERE n.nspname='foreman_execution'
+    )
+    SELECT value FROM function_profile
+    ORDER BY kind,function_name,identity_arguments,item_key
+";
+
+const MANAGED_FOREMAN_TABLE_CATALOG_SQL: &str = r"
+    WITH profile AS (
+        SELECT 0 AS kind,n.nspname::text AS relation_name,''::text AS item_key,
+               pg_catalog.json_build_array(
+                   'SCHEMA_PROFILE',n.nspname,schema_owner.rolname,
+                   pg_catalog.obj_description(n.oid,'pg_namespace'))::text AS value
+          FROM pg_catalog.pg_namespace AS n
+          JOIN pg_catalog.pg_roles AS schema_owner ON schema_owner.oid = n.nspowner
+         WHERE n.nspname='foreman_execution'
+        UNION ALL
+        SELECT 1,n.nspname::text,
+               pg_catalog.json_build_array(
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text,
+               pg_catalog.json_build_array(
+                   'SCHEMA_ACL',n.nspname,
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text
+          FROM pg_catalog.pg_namespace AS n
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+                COALESCE(n.nspacl, pg_catalog.acldefault('n',n.nspowner))) AS acl
+          LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid=acl.grantee
+          JOIN pg_catalog.pg_roles AS grantor ON grantor.oid=acl.grantor
+         WHERE n.nspname='foreman_execution'
+        UNION ALL
+        SELECT 2,c.relname::text,''::text,
+               pg_catalog.json_build_array(
+                   'TABLE',c.relname,owner.rolname,c.relrowsecurity,
+                   c.relforcerowsecurity,c.relreplident,c.relpersistence,
+                   COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>'),
+                   COALESCE(pg_catalog.array_to_string(toast.reloptions,','),'<NULL>'),
+                   pg_catalog.obj_description(c.oid,'pg_class'))::text
+          FROM pg_catalog.pg_class AS c
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+          JOIN pg_catalog.pg_roles AS owner ON owner.oid=c.relowner
+          LEFT JOIN pg_catalog.pg_class AS toast ON toast.oid=c.reltoastrelid
+         WHERE n.nspname='foreman_execution' AND c.relkind='r'
+        UNION ALL
+        SELECT 3,c.relname::text,pg_catalog.lpad(a.attnum::text,5,'0'),
+               pg_catalog.json_build_array(
+                   'COLUMN',c.relname,a.attnum,a.attname,
+                   pg_catalog.format_type(a.atttypid,a.atttypmod),
+                   coll_ns.nspname,coll.collname,a.attnotnull,a.attisdropped,a.attidentity,
+                   a.attgenerated,a.attstorage,a.attcompression,a.attstattarget,
+                   COALESCE(pg_catalog.array_to_string(a.attoptions,','),'<NULL>'),
+                   pg_catalog.pg_get_expr(d.adbin,d.adrelid),
+                   pg_catalog.col_description(c.oid,a.attnum))::text
+          FROM pg_catalog.pg_class AS c
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+          JOIN pg_catalog.pg_attribute AS a
+            ON a.attrelid=c.oid AND a.attnum>0
+          LEFT JOIN pg_catalog.pg_attrdef AS d
+            ON d.adrelid=c.oid AND d.adnum=a.attnum
+          LEFT JOIN pg_catalog.pg_collation AS coll ON coll.oid=a.attcollation
+          LEFT JOIN pg_catalog.pg_namespace AS coll_ns ON coll_ns.oid=coll.collnamespace
+         WHERE n.nspname='foreman_execution' AND c.relkind='r'
+        UNION ALL
+        SELECT 4,c.relname::text,k.conname::text,
+               pg_catalog.json_build_array(
+                   'CONSTRAINT',c.relname,k.conname,k.contype,
+                   pg_catalog.pg_get_constraintdef(k.oid,false),
+                   pg_catalog.obj_description(k.oid,'pg_constraint'))::text
+          FROM pg_catalog.pg_constraint AS k
+          JOIN pg_catalog.pg_class AS c ON c.oid=k.conrelid
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+         WHERE n.nspname='foreman_execution'
+        UNION ALL
+        SELECT 5,t.relname::text,i.relname::text,
+               pg_catalog.json_build_array(
+                   'INDEX',t.relname,i.relname,
+                   pg_catalog.pg_get_indexdef(i.oid),
+                   COALESCE(pg_catalog.array_to_string(i.reloptions,','),'<NULL>'),
+                   pg_catalog.obj_description(i.oid,'pg_class'))::text
+          FROM pg_catalog.pg_index AS x
+          JOIN pg_catalog.pg_class AS i ON i.oid=x.indexrelid
+          JOIN pg_catalog.pg_class AS t ON t.oid=x.indrelid
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=t.relnamespace
+         WHERE n.nspname='foreman_execution'
+        UNION ALL
+        SELECT 6,c.relname::text,
+               pg_catalog.json_build_array(
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text,
+               pg_catalog.json_build_array(
+                   'TABLE_ACL',c.relname,
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text
+          FROM pg_catalog.pg_class AS c
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+          CROSS JOIN LATERAL pg_catalog.aclexplode(
+               COALESCE(c.relacl,pg_catalog.acldefault('r',c.relowner))) AS acl
+          LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid=acl.grantee
+          JOIN pg_catalog.pg_roles AS grantor ON grantor.oid=acl.grantor
+         WHERE n.nspname='foreman_execution' AND c.relkind='r'
+        UNION ALL
+        SELECT 7,c.relname::text,
+               pg_catalog.lpad(a.attnum::text,5,'0') || ':' ||
+               pg_catalog.json_build_array(
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text,
+               pg_catalog.json_build_array(
+                   'TABLE_COLUMN_ACL',c.relname,a.attnum,a.attname,
+                   CASE WHEN acl.grantee=0 THEN 'PUBLIC'
+                        ELSE grantee.rolname END,grantor.rolname,
+                   acl.privilege_type,acl.is_grantable)::text
+          FROM pg_catalog.pg_class AS c
+          JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+          JOIN pg_catalog.pg_attribute AS a
+            ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+          CROSS JOIN LATERAL pg_catalog.aclexplode(a.attacl) AS acl
+          LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid=acl.grantee
+          JOIN pg_catalog.pg_roles AS grantor ON grantor.oid=acl.grantor
+         WHERE n.nspname='foreman_execution' AND c.relkind='r'
+    )
+    SELECT value FROM profile ORDER BY kind,relation_name,item_key
+";
+
+fn managed_foreman_catalog_digest<C: GenericClient>(
+    client: &mut C,
+    query: &str,
+    domain: &[u8],
+) -> Result<String, PostgresStoreSetupError> {
+    let rows = client
+        .query(query, &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for row in &rows {
+        let value = row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+        hasher.update(
+            u64::try_from(value.len())
+                .map_err(|_| catalog_error())?
+                .to_be_bytes(),
+        );
+        hasher.update(value.as_bytes());
+    }
+    Ok(hex_digest(hasher.finalize().as_ref()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_optional_managed_foreman_extension<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    manifest: &ManifestEvidence,
+) -> Result<Option<ManagedForemanPrincipalProfile>, PostgresStoreSetupError> {
+    let presence = client
+        .query_one(
+            "SELECT pg_catalog.to_regnamespace('foreman_execution') IS NOT NULL, \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='foreman_execution'), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='foreman_execution'), \
+                    (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                     WHERE n.nspname='foreman_execution' \
+                       AND c.relname='extension_identity' AND c.relkind='r')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let schema_exists =
+        row_value::<bool>(&presence, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let relations = row_value::<i64>(&presence, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let functions = row_value::<i64>(&presence, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let identity_tables =
+        row_value::<i64>(&presence, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    if !schema_exists && relations == 0 && functions == 0 && identity_tables == 0 {
+        return Ok(None);
+    }
+    if !schema_exists || relations != 58 || functions != 43 || identity_tables != 1 {
+        return Err(catalog_error());
+    }
+
+    // Hash every function definition and every modeled table/index/ACL row
+    // before invoking the extension-owned SECURITY DEFINER identity reader.
+    let function_digest = managed_foreman_catalog_digest(
+        client,
+        MANAGED_FOREMAN_FUNCTION_CATALOG_SQL,
+        MANAGED_FOREMAN_FUNCTION_CATALOG_DOMAIN,
+    )?;
+    let table_digest = managed_foreman_catalog_digest(
+        client,
+        MANAGED_FOREMAN_TABLE_CATALOG_SQL,
+        MANAGED_FOREMAN_TABLE_CATALOG_DOMAIN,
+    )?;
+    if function_digest != MANAGED_FOREMAN_FUNCTION_CATALOG_SHA256
+        || table_digest != MANAGED_FOREMAN_TABLE_CATALOG_SHA256
+    {
+        return Err(catalog_error());
+    }
+
+    let current_role = client
+        .query_one("SELECT current_user::text", &[])
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+        })?;
+    let current_role = row_value::<String>(
+        &current_role,
+        0,
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    )?;
+    if !matches!(
+        current_role.as_str(),
+        "lattice_migrator" | "lattice_runtime" | "lattice_guardian" | "lattice_readonly"
+    ) {
+        return Err(permission_error());
+    }
+    // Every closed Store capability role receives only this SECURITY DEFINER
+    // identity reader. The complete executable and ACL profile was hashed
+    // above before this invocation, and all four roles pin the same identity.
+    {
+        let identity = client
+            .query(
+                "SELECT extension_id, extension_schema_version, extension_path, \
+                        extension_sql_bytes, extension_sql_sha256, \
+                        extension_manifest_sha256, database_name, database_uuid, \
+                        database_identity_sha256, global_schema_version, \
+                        global_manifest_sha256 \
+                   FROM foreman_execution.read_extension_identity_v1()",
+                &[],
+            )
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog)
+            })?;
+        if identity.len() != 1 {
+            return Err(catalog_error());
+        }
+        let identity = &identity[0];
+        if row_value::<String>(identity, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != MANAGED_FOREMAN_EXTENSION_ID
+            || row_value::<i16>(identity, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != MANAGED_FOREMAN_EXTENSION_SCHEMA_VERSION
+            || row_value::<String>(identity, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != MANAGED_FOREMAN_EXTENSION_PATH
+            || row_value::<i64>(identity, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != MANAGED_FOREMAN_EXTENSION_SQL_BYTES
+            || row_value::<String>(identity, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != MANAGED_FOREMAN_EXTENSION_SQL_SHA256
+            || row_value::<String>(identity, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != MANAGED_FOREMAN_EXTENSION_MANIFEST_SHA256
+            || row_value::<String>(identity, 6, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != target.database_name()
+            || row_value::<String>(identity, 7, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != target.expected_database_uuid()
+            || row_value::<String>(identity, 8, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != target.expected_database_identity_sha256().as_str()
+            || row_value::<i16>(identity, 9, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != i16::try_from(POSTGRES_SCHEMA_VERSION).map_err(|_| catalog_error())?
+            || row_value::<String>(identity, 10, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != manifest.manifest_sha256().as_str()
+        {
+            return Err(catalog_error());
+        }
+    }
+
+    let shape = client
+        .query_one(
+            "SELECT \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND c.relkind='r'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND c.relkind='i'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='foreman_execution'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  JOIN pg_catalog.pg_roles r ON r.oid=c.relowner \
+                 WHERE n.nspname='foreman_execution' AND c.relkind='r' \
+                   AND r.rolname='lattice_migrator'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                  JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+                 WHERE n.nspname='foreman_execution' \
+                   AND r.rolname='lattice_migrator' AND p.prosecdef \
+                   AND p.proconfig=ARRAY['search_path=pg_catalog']::text[]), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND c.relkind='r' \
+                   AND pg_catalog.has_table_privilege('lattice_runtime',c.oid, \
+                     'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_proc p \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='foreman_execution' \
+                   AND pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')), \
+                (SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace n \
+                  CROSS JOIN LATERAL pg_catalog.aclexplode( \
+                    COALESCE(n.nspacl,pg_catalog.acldefault('n',n.nspowner))) a \
+                 WHERE n.nspname='foreman_execution' AND a.grantee=0 \
+                   AND a.privilege_type='USAGE')), \
+                pg_catalog.has_schema_privilege('lattice_runtime','foreman_execution','USAGE'), \
+                pg_catalog.has_schema_privilege('lattice_runtime','foreman_execution','CREATE'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND NOT t.tgisinternal), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND t.tgisinternal), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND t.tgisinternal \
+                   AND t.tgenabled='O' AND t.tgconstraint<>0), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  JOIN pg_catalog.pg_constraint con ON con.oid=t.tgconstraint \
+                  JOIN pg_catalog.pg_namespace cn ON cn.oid=con.connamespace \
+                 WHERE n.nspname IN ('control','memory','readmodel') \
+                   AND cn.nspname='foreman_execution' AND t.tgisinternal \
+                   AND t.tgenabled='O' AND t.tgconstraint<>0), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                 WHERE n.nspname='foreman_execution' \
+                   AND (NOT t.typisdefined OR t.typtype IN ('d','e','p','r','m'))), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                 WHERE n.nspname='foreman_execution'), \
+                ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite w \
+                   JOIN pg_catalog.pg_class c ON c.oid=w.ev_class \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='foreman_execution' AND w.rulename<>'_RETURN') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p \
+                   JOIN pg_catalog.pg_class c ON c.oid=p.polrelid \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i \
+                   JOIN pg_catalog.pg_class child ON child.oid=i.inhrelid \
+                   JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid=child.relnamespace \
+                   JOIN pg_catalog.pg_class parent ON parent.oid=i.inhparent \
+                   JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace \
+                  WHERE child_ns.nspname='foreman_execution' \
+                     OR parent_ns.nspname='foreman_execution'))",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for (source_index, expected) in [
+        (0, 17_i64),
+        (1, 41),
+        (2, 43),
+        (3, 17),
+        (4, 43),
+        (5, 0),
+        (6, MANAGED_FOREMAN_RUNTIME_FUNCTION_COUNT),
+        (10, 0),
+        (11, 92),
+        (12, 92),
+        (13, MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT),
+        (14, 0),
+        (15, 34),
+        (16, 0),
+    ] {
+        let observed = row_value::<i64>(
+            &shape,
+            source_index,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?;
+        if observed != expected {
+            return Err(catalog_error());
+        }
+    }
+    for (index, expected) in [(7, false), (8, true), (9, false)] {
+        let observed =
+            row_value::<bool>(&shape, index, PostgresStoreSetupErrorKind::PermissionDenied)?;
+        if observed != expected {
+            return Err(permission_error());
+        }
+    }
+
+    let unmodeled = client
+        .query_one(
+            "SELECT \
+             ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.connamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.oprnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opcnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.opfnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.stxnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.cfgnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.dictnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='foreman_execution') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='foreman_execution')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl d \
+               JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace \
+              WHERE n.nspname='foreman_execution'), \
+             (SELECT pg_catalog.count(*) FROM ( \
+                SELECT t.oid \
+                  FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                  LEFT JOIN LATERAL pg_catalog.aclexplode( \
+                    COALESCE(t.typacl,pg_catalog.acldefault('T',t.typowner))) acl ON TRUE \
+                 WHERE n.nspname='foreman_execution' \
+                 GROUP BY t.oid,t.typowner \
+                HAVING pg_catalog.count(acl.privilege_type)<>2 \
+                    OR pg_catalog.count(*) FILTER (WHERE acl.grantee=0 \
+                        AND acl.grantor=t.typowner \
+                        AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+                    OR pg_catalog.count(*) FILTER (WHERE acl.grantee=t.typowner \
+                        AND acl.grantor=t.typowner \
+                        AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+             ) type_acl_drift), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_cast c \
+              WHERE c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                    JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                   WHERE n.nspname='foreman_execution') \
+                 OR c.casttarget IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                    JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                   WHERE n.nspname='foreman_execution') \
+                  OR c.castfunc IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                     JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                    WHERE n.nspname='foreman_execution')), \
+             (SELECT pg_catalog.count(*) FROM pg_catalog.pg_transform tr \
+              WHERE tr.trftype IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                    JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                   WHERE n.nspname='foreman_execution') \
+                 OR tr.trffromsql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                   WHERE n.nspname='foreman_execution') \
+                 OR tr.trftosql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                    JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                   WHERE n.nspname='foreman_execution'))",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for index in 0..5 {
+        let observed = row_value::<i64>(
+            &unmodeled,
+            index,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?;
+        if observed != 0 {
+            return Err(catalog_error());
+        }
+    }
+
+    let relation_oids = client
+        .query(
+            "SELECT c.oid::bigint FROM pg_catalog.pg_class c \
+              JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+             WHERE n.nspname='foreman_execution' ORDER BY c.oid",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .iter()
+        .map(|row| row_value::<i64>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    let function_oids = client
+        .query(
+            "SELECT p.oid::bigint FROM pg_catalog.pg_proc p \
+              JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+             WHERE n.nspname='foreman_execution' ORDER BY p.oid",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .iter()
+        .map(|row| row_value::<i64>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
+        .collect::<Result<Vec<_>, _>>()?;
+    if relation_oids.len() != 58 || function_oids.len() != 43 {
+        return Err(catalog_error());
+    }
+    Ok(Some(ManagedForemanPrincipalProfile {
+        relation_oids,
+        function_oids,
+    }))
+}
+
 #[allow(clippy::too_many_lines)]
 fn verify_runtime_submission_schema_v7<C: GenericClient>(
     client: &mut C,
@@ -2676,10 +3246,12 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     }
     verify_owned_catalog_signature_profile(client, &SCHEMA_V7_OWNED_CATALOG_SIGNATURES)?;
     verify_schema_header_comments(client, "V7")?;
-    verify_schema_v6_v7_forbidden_object_profile(
-        client,
-        &SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS,
-    )?;
+    let managed_foreman = verify_optional_managed_foreman_extension(client, target, manifest)?;
+    let mut expected_forbidden_objects = SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS;
+    if managed_foreman.is_some() {
+        expected_forbidden_objects[7] += MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT;
+    }
+    verify_schema_v6_v7_forbidden_object_profile(client, &expected_forbidden_objects)?;
     verify_exact_default_acl_signature(client)?;
     verify_autonomy_receipt_profile(client)?;
     verify_forbidden_namespace_objects(client)?;
@@ -2793,16 +3365,44 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    if row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 5
-        || row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != 15
-        || row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)? != 7
-        || !row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?
-    {
+    let writer_tables = row_value::<i64>(&writer, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let writer_functions =
+        row_value::<i64>(&writer, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let writer_runtime_functions =
+        row_value::<i64>(&writer, 2, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    let writer_usage =
+        row_value::<bool>(&writer, 3, PostgresStoreSetupErrorKind::PermissionDenied)?;
+    if writer_tables != 5 || writer_runtime_functions != 7 || !writer_usage {
         return Err(catalog_error());
     }
-    verify_writer_lease_exact_catalog_profile(client, &WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES)?;
-    verify_writer_lease_v4_functions(client, true)?;
-    verify_writer_lease_acl_closure(client, 8, true)?;
+    // Runtime has no table privilege in the Writer namespace by design. The
+    // exact function count selects only the frozen v4 predecessor or its v5
+    // append-only successor; the selected verifier then pins every function
+    // body, comment, ACL, owner, argument list, and embedded SQL digest.
+    let writer_v5 = match writer_functions {
+        15 => {
+            verify_writer_lease_exact_catalog_profile(
+                client,
+                &WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES,
+            )?;
+            verify_writer_lease_v4_functions(client, true)?;
+            verify_writer_lease_acl_closure(client, 8, true)?;
+            false
+        }
+        17 => {
+            verify_writer_lease_exact_catalog_profile(
+                client,
+                &WRITER_LEASE_V5_CURRENT_CATALOG_SIGNATURES,
+            )?;
+            verify_writer_lease_v5_functions(client)?;
+            verify_writer_lease_acl_closure(client, 10, true)?;
+            true
+        }
+        _ => return Err(catalog_error()),
+    };
+    if managed_foreman.is_some() && !writer_v5 {
+        return Err(catalog_error());
+    }
 
     let migration = &migration_manifest()[6];
     let candidate = ForemanSchemaV6Candidate::from_migration_bytes(
@@ -2828,10 +3428,17 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     } else {
         verify_stopped_admission(client)?;
     }
+    let expected_dangerous_functions = SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT
+        + if managed_foreman.is_some() {
+            MANAGED_FOREMAN_RUNTIME_FUNCTION_COUNT
+        } else {
+            0
+        };
     verify_exact_principal_database_boundary(
         client,
-        SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT,
+        expected_dangerous_functions,
         true,
+        managed_foreman.as_ref(),
     )?;
     read_database_identity(client, target)
 }
@@ -4112,7 +4719,8 @@ fn verify_writer_lease_v3_bridge_catalog<C: GenericClient>(
             return Err(PostgresStoreSetupError::new(error_kind));
         }
     }
-    verify_writer_lease_v3_functions(client, false)
+    verify_writer_lease_v3_functions(client, false)?;
+    verify_writer_lease_acl_closure(client, 12, false)
 }
 
 fn verify_v1_store_empty<C: GenericClient>(client: &mut C) -> Result<(), PostgresStoreSetupError> {
@@ -4841,7 +5449,27 @@ fn verify_writer_lease_v1_profile<C: GenericClient>(
               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
                 JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
-                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_cast c \
+                WHERE c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR c.casttarget IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR c.castfunc IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease')) + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_transform tr \
+                WHERE tr.trftype IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trffromsql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trftosql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease'))), \
              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
                CROSS JOIN pg_catalog.pg_roles roles \
@@ -5788,6 +6416,315 @@ fn verify_writer_lease_v4_functions<C: GenericClient>(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
+fn verify_writer_lease_v5_functions<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    if WRITER_LEASE_V5_SQL.len() != 20_740
+        || hex_digest(Sha256::digest(WRITER_LEASE_V5_SQL.as_bytes()).as_ref())
+            != WRITER_LEASE_V5_SQL_SHA256
+        || WRITER_LEASE_V4_REBIND_SQL.is_empty()
+    {
+        return Err(catalog_error());
+    }
+    verify_writer_lease_v5_transition_constraint(client)?;
+    let rows = client
+        .query(
+            "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
+                    p.provolatile::text,p.proparallel::text, \
+                    pg_catalog.oidvectortypes(p.proargtypes), \
+                    COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'), \
+                    pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE'), \
+                    p.prosrc::text,COALESCE(pg_catalog.obj_description(p.oid,'pg_proc'),'<NULL>') \
+               FROM pg_catalog.pg_proc p \
+               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               JOIN pg_catalog.pg_language l ON l.oid=p.prolang \
+               JOIN pg_catalog.pg_roles r ON r.oid=p.proowner \
+              WHERE n.nspname='writer_lease' \
+              ORDER BY p.proname,pg_catalog.pg_get_function_identity_arguments(p.oid)",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let allowed = |name: &str| {
+        matches!(
+            name,
+            "writer_lease_assert_current_v1"
+                | "writer_lease_bind_runtime_v5"
+                | "writer_lease_commit_plan_v1"
+                | "writer_lease_load_commands_v1"
+                | "writer_lease_load_current_v1"
+                | "writer_lease_load_for_update_v5"
+                | "writer_lease_load_transitions_v1"
+        )
+    };
+    let expected = [
+        (
+            "writer_lease_assert_current_v1",
+            "f",
+            "s",
+            "s",
+            "text, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, bytea",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v1",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v2",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v3",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v4",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_bind_runtime_v5",
+            "f",
+            "s",
+            "s",
+            "text, bigint, bytea, text, text, text, text, text",
+            true,
+        ),
+        (
+            "writer_lease_commit_plan_v1",
+            "f",
+            "v",
+            "u",
+            "text, bigint, bytea, bigint, bytea, text, bytea, text, text, bigint, bytea, bytea, bytea, bytea, bigint, bigint, bigint, bytea, text, bytea, text, text, text, bytea, text, text, text, text, bigint, bytea, text, bigint, bigint, text, bigint, text, bytea, bytea, bytea, bytea, bytea, text, text, bytea, bytea, bytea, text, bytea",
+            true,
+        ),
+        ("writer_lease_load_commands_v1", "f", "s", "s", "text", true),
+        ("writer_lease_load_current_v1", "f", "s", "s", "text", true),
+        (
+            "writer_lease_load_for_update_v1",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v2",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v3",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v4",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_for_update_v5",
+            "f",
+            "v",
+            "u",
+            "text, bytea, bytea, bytea, text",
+            true,
+        ),
+        (
+            "writer_lease_load_transitions_v1",
+            "f",
+            "s",
+            "s",
+            "text",
+            true,
+        ),
+        ("writer_lease_rebind_v3", "p", "v", "u", "", false),
+        ("writer_lease_rebind_v4", "p", "v", "u", "", false),
+    ];
+    if rows.len() != expected.len() {
+        return Err(catalog_error());
+    }
+    for (row, (name, kind, volatility, parallel, args, security_definer)) in
+        rows.iter().zip(expected)
+    {
+        if row_value::<String>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != name
+            || row_value::<String>(row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)? != kind
+            || row_value::<String>(row, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "plpgsql"
+            || row_value::<String>(row, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "lattice_migrator"
+            || row_value::<bool>(row, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != security_definer
+            || row_value::<String>(row, 5, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != volatility
+            || row_value::<String>(row, 6, PostgresStoreSetupErrorKind::CorruptCatalog)? != parallel
+            || row_value::<String>(row, 7, PostgresStoreSetupErrorKind::CorruptCatalog)? != args
+            || row_value::<String>(row, 8, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != "search_path=pg_catalog,row_security=on,lock_timeout=5s,statement_timeout=30s"
+            || row_value::<bool>(row, 9, PostgresStoreSetupErrorKind::PermissionDenied)?
+                != allowed(name)
+        {
+            return Err(catalog_error());
+        }
+        let (sql, delimiter, comment) = match name {
+            "writer_lease_bind_runtime_v2" | "writer_lease_load_for_update_v2" => (
+                WRITER_LEASE_V2_SQL,
+                if name == "writer_lease_bind_runtime_v2" {
+                    "lattice_writer_lease_bind_runtime_v2"
+                } else {
+                    "lattice_writer_lease_load_for_update_v2"
+                },
+                None,
+            ),
+            "writer_lease_bind_runtime_v3" | "writer_lease_load_for_update_v3" => (
+                WRITER_LEASE_V3_SQL,
+                if name == "writer_lease_bind_runtime_v3" {
+                    "lattice_writer_lease_bind_runtime_v3"
+                } else {
+                    "lattice_writer_lease_load_for_update_v3"
+                },
+                if name == "writer_lease_bind_runtime_v3" {
+                    Some("TASK087_GLOBAL_SCHEMA_V6_FOREMAN_COORDINATION_FOREMAN_SNAPSHOT_RECORDED")
+                } else {
+                    None
+                },
+            ),
+            "writer_lease_bind_runtime_v4" | "writer_lease_load_for_update_v4" => (
+                WRITER_LEASE_V4_SQL,
+                if name == "writer_lease_bind_runtime_v4" {
+                    "lattice_writer_lease_bind_runtime_v4"
+                } else {
+                    "lattice_writer_lease_load_for_update_v4"
+                },
+                if name == "writer_lease_bind_runtime_v4" {
+                    Some("PHASE3_GLOBAL_SCHEMA_V7_GENERAL_TASK_INTAKE")
+                } else {
+                    None
+                },
+            ),
+            "writer_lease_bind_runtime_v5" | "writer_lease_load_for_update_v5" => (
+                WRITER_LEASE_V5_SQL,
+                if name == "writer_lease_bind_runtime_v5" {
+                    "lattice_writer_lease_bind_runtime_v5"
+                } else {
+                    "lattice_writer_lease_load_for_update_v5"
+                },
+                Some("PHASE4_EXACT_PROCESS_HANDOFF"),
+            ),
+            "writer_lease_rebind_v3" => (
+                WRITER_LEASE_V3_REBIND_SQL,
+                "lattice_writer_lease_rebind_v3",
+                Some("LATTICE_WRITER_LEASE_REBIND_V3"),
+            ),
+            "writer_lease_rebind_v4" => (
+                WRITER_LEASE_V4_REBIND_SQL,
+                "lattice_writer_lease_rebind_v4",
+                Some("LATTICE_WRITER_LEASE_REBIND_V4"),
+            ),
+            _ => (
+                WRITER_LEASE_V1_SQL,
+                match name {
+                    "writer_lease_assert_current_v1" => "lattice_writer_lease_assert_current_v1",
+                    "writer_lease_bind_runtime_v1" => "lattice_writer_lease_bind_runtime_v1",
+                    "writer_lease_commit_plan_v1" => "lattice_writer_lease_commit_plan_v1",
+                    "writer_lease_load_commands_v1" => "lattice_writer_lease_load_commands_v1",
+                    "writer_lease_load_current_v1" => "lattice_writer_lease_load_current_v1",
+                    "writer_lease_load_for_update_v1" => "lattice_writer_lease_load_for_update_v1",
+                    "writer_lease_load_transitions_v1" => {
+                        "lattice_writer_lease_load_transitions_v1"
+                    }
+                    _ => return Err(catalog_error()),
+                },
+                None,
+            ),
+        };
+        if row_value::<String>(row, 10, PostgresStoreSetupErrorKind::CorruptCatalog)?
+            != embedded_writer_function_source(sql, delimiter)?
+            || row_value::<String>(row, 11, PostgresStoreSetupErrorKind::CorruptCatalog)?
+                != comment.unwrap_or("<NULL>")
+        {
+            return Err(catalog_error());
+        }
+    }
+    let closure = client
+        .query_one(
+            "SELECT \
+             (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+               WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
+                 'lattice_runtime',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER,MAINTAIN')), \
+             (SELECT count(*) FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+               CROSS JOIN pg_catalog.pg_roles r WHERE n.nspname='writer_lease' AND NOT r.rolsuper \
+                 AND r.rolname !~ '^pg_' AND r.rolname NOT IN ('lattice_migrator','lattice_runtime') \
+                 AND pg_catalog.has_function_privilege(r.rolname,p.oid,'EXECUTE')), \
+             pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','CREATE')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied))?;
+    if row_value::<i64>(&closure, 0, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<i64>(&closure, 1, PostgresStoreSetupErrorKind::PermissionDenied)? != 0
+        || row_value::<bool>(&closure, 2, PostgresStoreSetupErrorKind::PermissionDenied)?
+    {
+        return Err(permission_error());
+    }
+    Ok(())
+}
+
+fn verify_writer_lease_v5_transition_constraint<C: GenericClient>(
+    client: &mut C,
+) -> Result<(), PostgresStoreSetupError> {
+    let row = client
+        .query_one(
+            "SELECT pg_catalog.count(*), \
+                    pg_catalog.max(pg_catalog.pg_get_constraintdef(c.oid,false)) \
+               FROM pg_catalog.pg_constraint c \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace \
+              WHERE n.nspname='writer_lease' \
+                AND c.conname IN ('writer_lease_transitions_identity', \
+                                  'writer_lease_transitions_identity_v5')",
+            &[],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    let definition =
+        row_value::<Option<String>>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    if row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 1
+        || definition.as_deref().is_none_or(|definition| {
+            !definition.contains("transition_kind")
+                || !definition.contains("PROCESS_HANDOFF")
+                || !definition.contains("MARK_SUSPECT")
+                || !definition.contains("REVOKE")
+        })
+    {
+        return Err(catalog_error());
+    }
+    Ok(())
+}
+
 fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
     client: &mut C,
     runtime: WriterLeaseV2RuntimeProfile,
@@ -5800,14 +6737,7 @@ fn verify_writer_lease_v2_acl_closure<C: GenericClient>(
     verify_writer_lease_acl_closure(client, expected_missing, expected_usage)
 }
 
-fn verify_writer_lease_acl_closure<C: GenericClient>(
-    client: &mut C,
-    expected_missing: i64,
-    expected_usage: bool,
-) -> Result<(), PostgresStoreSetupError> {
-    let closure = client
-        .query_one(
-            "SELECT \
+const WRITER_LEASE_ACL_CLOSURE_SQL: &str = "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_trigger tr \
                JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -5854,7 +6784,27 @@ fn verify_writer_lease_acl_closure<C: GenericClient>(
               (SELECT count(*) FROM pg_catalog.pg_ts_parser x \
                 JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
               (SELECT count(*) FROM pg_catalog.pg_ts_template x \
-                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT count(*) FROM pg_catalog.pg_cast c \
+                WHERE c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR c.casttarget IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                    OR c.castfunc IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                      WHERE n.nspname='writer_lease')) + \
+              (SELECT count(*) FROM pg_catalog.pg_transform tr \
+                WHERE tr.trftype IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trffromsql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trftosql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease'))), \
              (SELECT count(*) FROM pg_catalog.pg_proc p \
                JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
                CROSS JOIN pg_catalog.pg_roles roles \
@@ -5878,9 +6828,31 @@ fn verify_writer_lease_acl_closure<C: GenericClient>(
               WHERE NOT roles.rolsuper AND roles.rolname !~ '^pg_' \
                 AND roles.rolname NOT IN ('lattice_migrator','lattice_runtime') \
                 AND (pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','USAGE') \
-                  OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE')))",
-            &[],
-        )
+                  OR pg_catalog.has_schema_privilege(roles.rolname,'writer_lease','CREATE'))), \
+             (SELECT count(*) FROM ( \
+                SELECT t.oid \
+                  FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                  LEFT JOIN LATERAL pg_catalog.aclexplode( \
+                    COALESCE(t.typacl,pg_catalog.acldefault('T',t.typowner))) acl ON TRUE \
+                 WHERE n.nspname='writer_lease' \
+                 GROUP BY t.oid,t.typowner \
+                HAVING count(acl.privilege_type)<>2 \
+                    OR count(*) FILTER (WHERE acl.grantee=0 \
+                        AND acl.grantor=t.typowner \
+                        AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+                    OR count(*) FILTER (WHERE acl.grantee=t.typowner \
+                        AND acl.grantor=t.typowner \
+                        AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+             ) type_acl_drift)";
+
+fn verify_writer_lease_acl_closure<C: GenericClient>(
+    client: &mut C,
+    expected_missing: i64,
+    expected_usage: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let closure = client
+        .query_one(WRITER_LEASE_ACL_CLOSURE_SQL, &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
@@ -5912,7 +6884,14 @@ fn verify_writer_lease_acl_closure_counts(
             return Err(catalog_error());
         }
     }
-    for (index, expected) in [(5, 0_i64), (8, 0), (9, 0), (10, expected_missing), (11, 0)] {
+    for (index, expected) in [
+        (5, 0_i64),
+        (8, 0),
+        (9, 0),
+        (10, expected_missing),
+        (11, 0),
+        (12, 0),
+    ] {
         if row_value::<i64>(
             closure,
             index,
@@ -6610,11 +7589,31 @@ fn verify_forbidden_namespace_objects<C: GenericClient>(
              (SELECT count(*) FROM pg_opclass o JOIN pg_namespace n ON n.oid = o.opcnamespace \
               WHERE n.nspname IN ('control', 'memory', 'readmodel')), \
              (SELECT count(*) FROM pg_opfamily o JOIN pg_namespace n ON n.oid = o.opfnamespace \
-              WHERE n.nspname IN ('control', 'memory', 'readmodel'))",
+              WHERE n.nspname IN ('control', 'memory', 'readmodel')), \
+             (SELECT count(*) FROM pg_cast c \
+               JOIN pg_type source_type ON source_type.oid=c.castsource \
+               JOIN pg_namespace source_ns ON source_ns.oid=source_type.typnamespace \
+               JOIN pg_type target_type ON target_type.oid=c.casttarget \
+               JOIN pg_namespace target_ns ON target_ns.oid=target_type.typnamespace \
+               LEFT JOIN pg_proc function_proc ON function_proc.oid=c.castfunc \
+               LEFT JOIN pg_namespace function_ns ON function_ns.oid=function_proc.pronamespace \
+              WHERE source_ns.nspname IN ('control', 'memory', 'readmodel') \
+                 OR target_ns.nspname IN ('control', 'memory', 'readmodel') \
+                 OR function_ns.nspname IN ('control', 'memory', 'readmodel')), \
+             (SELECT count(*) FROM pg_transform tr \
+               JOIN pg_type transformed_type ON transformed_type.oid=tr.trftype \
+               JOIN pg_namespace transformed_ns ON transformed_ns.oid=transformed_type.typnamespace \
+               LEFT JOIN pg_proc from_proc ON from_proc.oid=tr.trffromsql \
+               LEFT JOIN pg_namespace from_ns ON from_ns.oid=from_proc.pronamespace \
+               LEFT JOIN pg_proc to_proc ON to_proc.oid=tr.trftosql \
+               LEFT JOIN pg_namespace to_ns ON to_ns.oid=to_proc.pronamespace \
+              WHERE transformed_ns.nspname IN ('control', 'memory', 'readmodel') \
+                 OR from_ns.nspname IN ('control', 'memory', 'readmodel') \
+                 OR to_ns.nspname IN ('control', 'memory', 'readmodel'))",
             &[],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    for index in 0..10 {
+    for index in 0..12 {
         if row_value::<i64>(&row, index, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0 {
             return Err(catalog_error());
         }
@@ -6959,11 +7958,16 @@ fn verify_exact_principal_database_boundary<C: GenericClient>(
     client: &mut C,
     expected_dangerous_functions: i64,
     writer_lease_is_owned: bool,
+    managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     if verify_exact_principal_database_core(client)? != expected_dangerous_functions {
         return Err(permission_error());
     }
-    verify_cluster_wide_acl_closure_for_writer_lease(client, writer_lease_is_owned)
+    verify_cluster_wide_acl_closure_for_owned_extensions(
+        client,
+        writer_lease_is_owned,
+        managed_foreman,
+    )
 }
 
 fn expected_dangerous_function_count(profile: CatalogProfile, v3_prefix: bool) -> i64 {
@@ -7014,17 +8018,20 @@ fn verify_cluster_wide_acl_closure<C: GenericClient>(
             | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
             | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
     );
-    verify_cluster_wide_acl_closure_for_writer_lease(client, writer_lease_is_owned)
+    verify_cluster_wide_acl_closure_for_owned_extensions(client, writer_lease_is_owned, None)
 }
 
-fn verify_cluster_wide_acl_closure_for_writer_lease<C: GenericClient>(
+fn verify_cluster_wide_acl_closure_for_owned_extensions<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
+    managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
         .query_one(
             "SELECT count(*) FROM pg_parameter_acl p \
-             CROSS JOIN LATERAL aclexplode(p.paracl) acl \
+             CROSS JOIN LATERAL aclexplode(CASE \
+                 WHEN cardinality(p.paracl)=0 THEN NULL::aclitem[] \
+                 ELSE p.paracl END) acl \
              WHERE acl.grantee = 0 \
                 OR acl.grantee IN (SELECT oid FROM pg_roles \
                     WHERE rolname IN ('lattice_migrator', 'lattice_runtime', \
@@ -7048,7 +8055,10 @@ fn verify_cluster_wide_acl_closure_for_writer_lease<C: GenericClient>(
     let public_database_grants = client
         .query_one(
             "SELECT count(*) FROM pg_database d \
-             CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) acl \
+             CROSS JOIN LATERAL aclexplode(CASE \
+                 WHEN cardinality(COALESCE(d.datacl, acldefault('d', d.datdba)))=0 \
+                   THEN NULL::aclitem[] \
+                 ELSE COALESCE(d.datacl, acldefault('d', d.datdba)) END) acl \
              WHERE acl.grantee = 0",
             &[],
         )
@@ -7063,16 +8073,117 @@ fn verify_cluster_wide_acl_closure_for_writer_lease<C: GenericClient>(
     {
         return Err(permission_error());
     }
-    verify_external_relation_principal_closure(client, writer_lease_is_owned)?;
-    verify_external_function_principal_closure(client, writer_lease_is_owned)?;
+    verify_managed_extension_dependency_closure(
+        client,
+        writer_lease_is_owned,
+        managed_foreman.is_some(),
+    )?;
+    verify_external_relation_principal_closure(client, writer_lease_is_owned, managed_foreman)?;
+    verify_external_function_principal_closure(client, writer_lease_is_owned, managed_foreman)?;
     verify_pre_role_system_function_boundary(client)?;
     verify_large_object_boundary(client)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_managed_extension_dependency_closure<C: GenericClient>(
+    client: &mut C,
+    writer_lease_is_owned: bool,
+    foreman_is_owned: bool,
+) -> Result<(), PostgresStoreSetupError> {
+    let forbidden = client
+        .query_one(
+            "WITH managed_namespaces(objid) AS ( \
+                SELECT n.oid FROM pg_namespace n \
+                 WHERE n.nspname IN ('control','memory','readmodel') \
+                    OR ($1 AND n.nspname='writer_lease') \
+                    OR ($2 AND n.nspname='foreman_execution') \
+            ), managed_relations(objid) AS ( \
+                SELECT c.oid FROM pg_class c \
+                 WHERE c.relnamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_constraints(objid) AS ( \
+                SELECT c.oid FROM pg_constraint c \
+                 WHERE c.connamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_toast_relations(objid) AS ( \
+                SELECT c.reltoastrelid FROM pg_class c \
+                 WHERE c.oid IN (SELECT objid FROM managed_relations) \
+                   AND c.reltoastrelid<>0 \
+                UNION \
+                SELECT i.indexrelid FROM pg_index i \
+                 WHERE i.indrelid IN ( \
+                    SELECT c.reltoastrelid FROM pg_class c \
+                     WHERE c.oid IN (SELECT objid FROM managed_relations) \
+                       AND c.reltoastrelid<>0) \
+            ), managed_functions(objid) AS ( \
+                SELECT p.oid FROM pg_proc p \
+                 WHERE p.pronamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_types(objid) AS ( \
+                SELECT t.oid FROM pg_type t \
+                 WHERE t.typnamespace IN (SELECT objid FROM managed_namespaces) \
+                    OR t.typrelid IN (SELECT objid FROM managed_toast_relations) \
+            ), managed_casts(objid) AS ( \
+                SELECT c.oid FROM pg_cast c \
+                 WHERE c.castsource IN (SELECT objid FROM managed_types) \
+                    OR c.casttarget IN (SELECT objid FROM managed_types) \
+                    OR c.castfunc IN (SELECT objid FROM managed_functions) \
+            ), managed_transforms(objid) AS ( \
+                SELECT tr.oid FROM pg_transform tr \
+                 WHERE tr.trftype IN (SELECT objid FROM managed_types) \
+                    OR tr.trffromsql IN (SELECT objid FROM managed_functions) \
+                    OR tr.trftosql IN (SELECT objid FROM managed_functions) \
+            ), managed(classid,objid) AS ( \
+                SELECT 'pg_namespace'::regclass::oid,objid FROM managed_namespaces \
+                UNION \
+                SELECT 'pg_class'::regclass::oid,objid FROM managed_relations \
+                UNION \
+                SELECT 'pg_class'::regclass::oid,objid FROM managed_toast_relations \
+                UNION \
+                SELECT 'pg_proc'::regclass::oid,objid FROM managed_functions \
+                UNION \
+                SELECT 'pg_type'::regclass::oid,objid FROM managed_types \
+                UNION \
+                SELECT 'pg_cast'::regclass::oid,objid FROM managed_casts \
+                UNION \
+                SELECT 'pg_transform'::regclass::oid,objid FROM managed_transforms \
+                UNION \
+                SELECT 'pg_constraint'::regclass::oid,objid FROM managed_constraints \
+                UNION \
+                SELECT 'pg_attrdef'::regclass::oid,a.oid FROM pg_attrdef a \
+                 WHERE a.adrelid IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_trigger'::regclass::oid,t.oid FROM pg_trigger t \
+                 WHERE t.tgrelid IN (SELECT objid FROM managed_relations) \
+                    OR t.tgconstraint IN (SELECT objid FROM managed_constraints) \
+                UNION \
+                SELECT 'pg_rewrite'::regclass::oid,r.oid FROM pg_rewrite r \
+                 WHERE r.ev_class IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_policy'::regclass::oid,p.oid FROM pg_policy p \
+                 WHERE p.polrelid IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_statistic_ext'::regclass::oid,s.oid FROM pg_statistic_ext s \
+                 WHERE s.stxnamespace IN (SELECT objid FROM managed_namespaces) \
+            ) \
+            SELECT count(*) FROM pg_depend d \
+              JOIN managed dependent \
+                ON dependent.classid=d.classid AND dependent.objid=d.objid \
+             WHERE d.deptype IN ('e','x')",
+            &[&writer_lease_is_owned, &foreman_is_owned],
+        )
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0 {
+        return Err(catalog_error());
+    }
+    Ok(())
 }
 
 fn verify_external_relation_principal_closure<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
+    managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
+    let foreman_relation_oids = managed_foreman
+        .map(|profile| profile.relation_oids.clone())
+        .unwrap_or_default();
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -7089,20 +8200,25 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
                    AND n.nspname <> 'information_schema' \
                    AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
                    AND (NOT $1 OR n.nspname <> 'writer_lease') \
+                   AND c.oid::bigint <> ALL($2::bigint[]) \
              ) \
              SELECT \
                (SELECT count(*) FROM external_relations c \
                 WHERE c.relowner IN (SELECT oid FROM fixed_principals)), \
                (SELECT count(*) FROM external_relations c \
-                CROSS JOIN LATERAL aclexplode(c.relacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(c.relacl)=0 THEN NULL::aclitem[] \
+                    ELSE c.relacl END) acl \
                 WHERE acl.grantee = 0 \
                    OR acl.grantee IN (SELECT oid FROM fixed_principals)), \
                (SELECT count(*) FROM pg_attribute a \
                 JOIN external_relations c ON c.oid = a.attrelid \
-                CROSS JOIN LATERAL aclexplode(a.attacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(a.attacl)=0 THEN NULL::aclitem[] \
+                    ELSE a.attacl END) acl \
                 WHERE acl.grantee = 0 \
                    OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[&writer_lease_is_owned],
+            &[&writer_lease_is_owned, &foreman_relation_oids],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -7123,7 +8239,11 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
 fn verify_external_function_principal_closure<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
+    managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
+    let foreman_function_oids = managed_foreman
+        .map(|profile| profile.function_oids.clone())
+        .unwrap_or_default();
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -7135,16 +8255,22 @@ fn verify_external_function_principal_closure<C: GenericClient>(
              ) \
              SELECT count(*) FROM pg_proc p \
              JOIN pg_namespace n ON n.oid = p.pronamespace \
-             CROSS JOIN LATERAL aclexplode( \
-                 COALESCE(p.proacl, acldefault('f', p.proowner)) \
-             ) acl \
+             LEFT JOIN LATERAL aclexplode( \
+                 CASE \
+                   WHEN cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0 \
+                     THEN NULL::aclitem[] \
+                   ELSE COALESCE(p.proacl, acldefault('f', p.proowner)) \
+                 END \
+             ) acl ON TRUE \
              WHERE n.nspname !~ '^pg_' \
                AND n.nspname <> 'information_schema' \
                AND n.nspname NOT IN ('control', 'memory', 'readmodel') \
                AND (NOT $1 OR n.nspname <> 'writer_lease') \
-               AND (acl.grantee = 0 \
+               AND p.oid::bigint <> ALL($2::bigint[]) \
+               AND (p.proowner IN (SELECT oid FROM fixed_principals) \
+                    OR acl.grantee = 0 \
                     OR acl.grantee IN (SELECT oid FROM fixed_principals))",
-            &[&writer_lease_is_owned],
+            &[&writer_lease_is_owned, &foreman_function_oids],
         )
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
@@ -7202,8 +8328,10 @@ fn verify_pre_role_system_function_boundary<C: GenericClient>(
                (SELECT count(*) FROM resolved WHERE function_oid IS NULL), \
                (SELECT count(*) FROM resolved r \
                 JOIN pg_proc p ON p.oid = r.function_oid \
-                CROSS JOIN LATERAL aclexplode( \
-                    COALESCE(p.proacl, acldefault('f', p.proowner)) \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0 \
+                      THEN NULL::aclitem[] \
+                    ELSE COALESCE(p.proacl, acldefault('f', p.proowner)) END \
                 ) acl WHERE acl.grantee = 0), \
                (SELECT count(*) FROM resolved r CROSS JOIN fixed_roles f \
                 WHERE has_function_privilege(f.role_name, r.function_oid, 'EXECUTE') \
@@ -7211,7 +8339,10 @@ fn verify_pre_role_system_function_boundary<C: GenericClient>(
                (SELECT count(*) FROM resolved r \
                 JOIN pg_proc p ON p.oid = r.function_oid \
                 WHERE (SELECT count(*) \
-                       FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl \
+                       FROM aclexplode(CASE \
+                           WHEN cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0 \
+                             THEN NULL::aclitem[] \
+                           ELSE COALESCE(p.proacl, acldefault('f', p.proowner)) END) acl \
                        JOIN pg_roles grantee ON grantee.oid = acl.grantee \
                        WHERE grantee.rolname IN ('lattice_migrator', 'lattice_runtime', \
                            'lattice_guardian', 'lattice_readonly', \
@@ -7220,7 +8351,10 @@ fn verify_pre_role_system_function_boundary<C: GenericClient>(
                        <> CASE WHEN r.allowed_role IS NULL THEN 0 ELSE 1 END \
                    OR (r.allowed_role IS NOT NULL AND NOT EXISTS ( \
                        SELECT 1 \
-                       FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl \
+                       FROM aclexplode(CASE \
+                           WHEN cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0 \
+                             THEN NULL::aclitem[] \
+                           ELSE COALESCE(p.proacl, acldefault('f', p.proowner)) END) acl \
                        JOIN pg_roles grantee ON grantee.oid = acl.grantee \
                        WHERE grantee.rolname = r.allowed_role \
                          AND acl.privilege_type = 'EXECUTE' \
@@ -7260,7 +8394,9 @@ fn verify_large_object_boundary<C: GenericClient>(
                (SELECT count(*) FROM pg_largeobject_metadata l \
                 WHERE l.lomowner IN (SELECT oid FROM fixed_principals)), \
                (SELECT count(*) FROM pg_largeobject_metadata l \
-                CROSS JOIN LATERAL aclexplode(l.lomacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(l.lomacl)=0 THEN NULL::aclitem[] \
+                    ELSE l.lomacl END) acl \
                 WHERE acl.grantee = 0 \
                    OR acl.grantee IN (SELECT oid FROM fixed_principals))",
             &[],
@@ -7355,27 +8491,53 @@ fn verify_login_object_closure<C: GenericClient>(
                  AND d.deptype = 'o'), \
               (SELECT count(*) FROM ( \
                 SELECT acl.grantee FROM pg_namespace n \
-                CROSS JOIN LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(COALESCE(n.nspacl, acldefault('n', n.nspowner)))=0 \
+                      THEN NULL::aclitem[] \
+                    ELSE COALESCE(n.nspacl, acldefault('n', n.nspowner)) END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_class c \
-                CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(COALESCE(c.relacl, acldefault('r', c.relowner)))=0 \
+                      THEN NULL::aclitem[] \
+                    ELSE COALESCE(c.relacl, acldefault('r', c.relowner)) END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_proc p \
-                CROSS JOIN LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0 \
+                      THEN NULL::aclitem[] \
+                    ELSE COALESCE(p.proacl, acldefault('f', p.proowner)) END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_type t \
-                CROSS JOIN LATERAL aclexplode(COALESCE(t.typacl, acldefault('T', t.typowner))) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(COALESCE(t.typacl, acldefault('T', t.typowner)))=0 \
+                      THEN NULL::aclitem[] \
+                    ELSE COALESCE(t.typacl, acldefault('T', t.typowner)) END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_attribute a \
-                CROSS JOIN LATERAL aclexplode(a.attacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(a.attacl)=0 THEN NULL::aclitem[] \
+                    ELSE a.attacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_language l \
-                CROSS JOIN LATERAL aclexplode(l.lanacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(l.lanacl)=0 THEN NULL::aclitem[] \
+                    ELSE l.lanacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_foreign_data_wrapper f \
-                CROSS JOIN LATERAL aclexplode(f.fdwacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(f.fdwacl)=0 THEN NULL::aclitem[] \
+                    ELSE f.fdwacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_foreign_server s \
-                CROSS JOIN LATERAL aclexplode(s.srvacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(s.srvacl)=0 THEN NULL::aclitem[] \
+                    ELSE s.srvacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_tablespace s \
-                CROSS JOIN LATERAL aclexplode(s.spcacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(s.spcacl)=0 THEN NULL::aclitem[] \
+                    ELSE s.spcacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_largeobject_metadata l \
-                CROSS JOIN LATERAL aclexplode(l.lomacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(l.lomacl)=0 THEN NULL::aclitem[] \
+                    ELSE l.lomacl END) acl \
                 UNION ALL SELECT acl.grantee FROM pg_default_acl d \
-                CROSS JOIN LATERAL aclexplode(d.defaclacl) acl \
+                CROSS JOIN LATERAL aclexplode(CASE \
+                    WHEN cardinality(d.defaclacl)=0 THEN NULL::aclitem[] \
+                    ELSE d.defaclacl END) acl \
               ) direct_acl \
               WHERE direct_acl.grantee IN (SELECT oid FROM pg_roles \
                   WHERE rolname LIKE 'lattice\\_%\\_login' ESCAPE '\\'))",
@@ -7405,7 +8567,10 @@ fn verify_login_database_acl<C: GenericClient>(
             "SELECT d.datname, d.datname = current_database(), grantee.rolname, \
              acl.privilege_type, acl.is_grantable, grantor.rolname \
              FROM pg_database d \
-             CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) acl \
+             CROSS JOIN LATERAL aclexplode(CASE \
+                 WHEN cardinality(COALESCE(d.datacl, acldefault('d', d.datdba)))=0 \
+                   THEN NULL::aclitem[] \
+                 ELSE COALESCE(d.datacl, acldefault('d', d.datdba)) END) acl \
              JOIN pg_roles grantee ON grantee.oid = acl.grantee \
              JOIN pg_roles grantor ON grantor.oid = acl.grantor \
              WHERE grantee.rolname IN ('lattice_migrator_login', \
@@ -7639,17 +8804,27 @@ fn verify_effective_default_privileges<C: GenericClient>(
               AND d.defaclnamespace = 0 \
               AND d.defaclobjtype = expected.default_acl_type \
              CROSS JOIN LATERAL aclexplode( \
-                 COALESCE(d.defaclacl, acldefault(expected.acldefault_type, r.oid)) \
+                 CASE \
+                   WHEN cardinality(COALESCE(d.defaclacl, \
+                       acldefault(expected.acldefault_type, r.oid)))=0 \
+                     THEN NULL::aclitem[] \
+                   ELSE COALESCE(d.defaclacl, \
+                       acldefault(expected.acldefault_type, r.oid)) \
+                 END \
              ) a \
              WHERE a.grantee = 0), \
              (SELECT count(*) FROM pg_default_acl d \
              JOIN pg_namespace n ON n.oid = d.defaclnamespace \
-             CROSS JOIN LATERAL aclexplode(d.defaclacl) a \
+             CROSS JOIN LATERAL aclexplode(CASE \
+                 WHEN cardinality(d.defaclacl)=0 THEN NULL::aclitem[] \
+                 ELSE d.defaclacl END) a \
              WHERE d.defaclrole = 'lattice_migrator'::regrole \
              AND n.nspname IN ('control', 'memory', 'readmodel') \
              AND a.grantee = 0), \
              (SELECT count(*) FROM pg_default_acl d \
-              CROSS JOIN LATERAL aclexplode(d.defaclacl) a \
+              CROSS JOIN LATERAL aclexplode(CASE \
+                  WHEN cardinality(d.defaclacl)=0 THEN NULL::aclitem[] \
+                  ELSE d.defaclacl END) a \
               WHERE a.grantee = 0), \
              (SELECT count(*) FROM pg_default_acl d \
               WHERE d.defaclrole <> 'lattice_migrator'::regrole)",

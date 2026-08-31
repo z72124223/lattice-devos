@@ -5,9 +5,9 @@ use std::error::Error;
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -17,10 +17,6 @@ use sha2::{Digest, Sha256};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 
-#[cfg(not(windows))]
-use std::io;
-#[cfg(not(windows))]
-use std::process::ExitStatus;
 #[cfg(not(windows))]
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 
@@ -43,10 +39,17 @@ const PROTOCOL_QUIET_WINDOW: Duration = Duration::from_millis(10);
 pub const CODEX_HOME_OWNERSHIP_MARKER_NAME: &str = ".lattice-codex-home-v1";
 /// Exact marker contents written only by LATTICE workspace provisioning.
 pub const CODEX_HOME_OWNERSHIP_MARKER_BYTES: &[u8] = b"lattice.codex-home.v1\n";
-const CODEX_HOME_CONFIG_BYTES: &[u8] = b"approval_policy = \"never\"\n\
+pub const CODEX_HOME_CONFIG_BYTES: &[u8] = b"cli_auth_credentials_store = \"keyring\"\n\
+approval_policy = \"never\"\n\
 sandbox_mode = \"workspace-write\"\n\
 model = \"gpt-5.6-sol\"\n\
 model_reasoning_effort = \"low\"\n\
+\n\
+[shell_environment_policy]\n\
+inherit = \"all\"\n\
+ignore_default_excludes = false\n\
+include_only = [\"SystemRoot\", \"WINDIR\", \"ComSpec\", \"PATH\", \"PATHEXT\", \"PROCESSOR_ARCHITECTURE\", \"NUMBER_OF_PROCESSORS\", \"TEMP\", \"TMP\", \"LANG\", \"LC_ALL\"]\n\
+experimental_use_profile = false\n\
 \n\
 [windows]\n\
 sandbox = \"unelevated\"\n\
@@ -60,6 +63,135 @@ pub struct PinnedCodexResources {
     managed_package_root: PathBuf,
     resources_directory: PathBuf,
     digests: PinnedCodexResourceDigests,
+}
+
+/// Immutable byte identity for a managed bridge's Codex executable.
+///
+/// A managed worker may never resolve `codex` from `PATH`: construction pins
+/// the canonical absolute file and every bridge spawn rechecks the same bytes
+/// together with the LATTICE-owned minimal home configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedCodexSpawnIdentity {
+    launcher: PathBuf,
+    launcher_sha256: String,
+    codex_home: PathBuf,
+    codex_home_digest: String,
+    config_digest: String,
+}
+
+impl ManagedCodexSpawnIdentity {
+    /// Captures the canonical file and its current SHA-256 before a managed
+    /// worker/reviewer is admitted.
+    pub fn capture(
+        launcher: impl Into<PathBuf>,
+        codex_home: &Path,
+        working_directory: &Path,
+    ) -> Result<Self, AppServerRunError> {
+        let configured = launcher.into();
+        let launcher = std::fs::canonicalize(&configured)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidLauncher))?;
+        let metadata = std::fs::symlink_metadata(&launcher)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidLauncher))?;
+        if !configured.is_absolute()
+            || !metadata.file_type().is_file()
+            || metadata_is_reparse(&metadata)
+        {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidLauncher,
+            ));
+        }
+        let launcher_sha256 = launcher_sha256(&launcher)?;
+        let canonical_codex_home = std::fs::canonicalize(codex_home)
+            .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::InvalidCodexHome))?;
+        let codex_home_digest = managed_path_digest(&canonical_codex_home);
+        let config_digest = managed_config_digest(codex_home)?;
+        let identity = Self {
+            launcher,
+            launcher_sha256,
+            codex_home: canonical_codex_home,
+            codex_home_digest,
+            config_digest,
+        };
+        identity.verify_context(codex_home, working_directory)?;
+        Ok(identity)
+    }
+
+    /// Rechecks the non-executable context for a launcher whose immutable byte
+    /// identity is held by an external deny-write/delete bundle seal.
+    ///
+    /// This does not verify launcher bytes. Callers must pair it with their
+    /// already-verified process-lifetime seal for this exact launcher/digest.
+    pub fn verify_context(
+        &self,
+        codex_home: &Path,
+        working_directory: &Path,
+    ) -> Result<(), AppServerRunError> {
+        if std::fs::canonicalize(&self.launcher).ok().as_deref() != Some(self.launcher.as_path()) {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::LauncherChanged,
+            ));
+        }
+        if std::fs::canonicalize(codex_home).ok().as_deref() != Some(self.codex_home.as_path()) {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidCodexHome,
+            ));
+        }
+        let config = AppServerRunConfig::new(
+            self.launcher.clone(),
+            self.launcher_sha256.clone(),
+            codex_home.to_path_buf(),
+            working_directory.to_path_buf(),
+            "managed boundary identity probe",
+            Duration::from_secs(1),
+            None,
+        )?;
+        validate_owned_codex_home(&config)?;
+        if managed_config_digest(codex_home)? != self.config_digest {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::InvalidCodexHome,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Rechecks the pinned bytes and minimal owned home immediately before a
+    /// bridge process can create an App Server child.
+    pub fn verify(
+        &self,
+        codex_home: &Path,
+        working_directory: &Path,
+    ) -> Result<(), AppServerRunError> {
+        if launcher_sha256(&self.launcher)? != self.launcher_sha256 {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::LauncherChanged,
+            ));
+        }
+        self.verify_context(codex_home, working_directory)
+    }
+
+    /// Returns the exact canonical executable passed to the bridge.
+    #[must_use]
+    pub fn launcher(&self) -> &Path {
+        &self.launcher
+    }
+
+    /// Returns the fixed lower-case SHA-256 identity.
+    #[must_use]
+    pub fn launcher_sha256(&self) -> &str {
+        &self.launcher_sha256
+    }
+
+    /// Returns the opaque stable identity of the exact server-owned Codex home.
+    #[must_use]
+    pub fn codex_home_digest(&self) -> &str {
+        &self.codex_home_digest
+    }
+
+    /// Returns the opaque byte identity of the exact managed Codex config.
+    #[must_use]
+    pub fn config_digest(&self) -> &str {
+        &self.config_digest
+    }
 }
 
 /// Exact SHA-256 identities for every executable and manifest in one Codex bundle.
@@ -318,6 +450,7 @@ pub enum AppServerRunErrorKind {
     CodexHomeOwnershipMissing,
     CodexHomeOverlap,
     AmbientCodexHomeDenied,
+    PlaintextCodexAuthDenied,
     InvalidWorkingDirectory,
     InvalidPrompt,
     InvalidTimeout,
@@ -377,6 +510,151 @@ pub struct AppServerRunEvidence {
     thread_id: String,
     turn_id: String,
     outcome: TurnOutcome,
+}
+
+/// Interactive child process contained by the same platform-owned process-tree
+/// boundary as the production Codex App Server runner.
+///
+/// On Windows the child is created suspended, assigned to a private
+/// kill-on-close Job Object, and only then resumed. Dropping this value or
+/// calling [`Self::terminate_and_reap`] therefore contains every descendant;
+/// callers never scan or kill ambient PIDs.
+#[derive(Debug)]
+pub struct SupervisedDuplexChild {
+    inner: OwnedChild,
+}
+
+impl SupervisedDuplexChild {
+    /// Spawns one absolute executable with piped stdin/stdout and a closed
+    /// diagnostic channel, inheriting the parent environment before applying
+    /// the command's explicit overrides and removals.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process cannot be created inside the owned
+    /// process-tree boundary or its exact pipe configuration is unavailable.
+    pub fn spawn(command: &mut Command) -> Result<Self, AppServerRunError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        spawn_owned_child(
+            command,
+            OwnedChildStdio::ManagedDuplex,
+            OwnedChildEnvironment::InheritParent,
+        )
+        .map(|inner| Self { inner })
+    }
+
+    /// Spawns one absolute executable with only the command's explicit
+    /// environment entries. The parent environment is not inherited.
+    ///
+    /// This explicit API is required because Rust's stable [`Command`] API
+    /// does not expose whether [`Command::env_clear`] was previously called.
+    /// The adapter reapplies the explicit entries over a cleared command on
+    /// every platform and independently builds an empty-base environment block
+    /// for the Windows `CreateProcessW` path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process cannot be created inside the owned
+    /// process-tree boundary or its exact pipe configuration is unavailable.
+    pub fn spawn_cleared(command: &mut Command) -> Result<Self, AppServerRunError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        spawn_owned_child(
+            command,
+            OwnedChildStdio::ManagedDuplex,
+            OwnedChildEnvironment::Cleared,
+        )
+        .map(|inner| Self { inner })
+    }
+
+    /// Spawns one contained command with independent bounded-output channels.
+    /// Callers must drain stdout and stderr concurrently, then explicitly reap
+    /// the complete owned subtree before treating either stream as evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process cannot be created inside the owned
+    /// process-tree boundary or any exact pipe is unavailable.
+    pub fn spawn_with_stderr(command: &mut Command) -> Result<Self, AppServerRunError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        spawn_owned_child(
+            command,
+            OwnedChildStdio::Duplex,
+            OwnedChildEnvironment::InheritParent,
+        )
+        .map(|inner| Self { inner })
+    }
+
+    /// Spawns one contained command with independent bounded-output channels
+    /// and only the command's explicit environment entries.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process cannot be created inside the owned
+    /// process-tree boundary or any exact pipe is unavailable.
+    pub fn spawn_with_stderr_cleared(command: &mut Command) -> Result<Self, AppServerRunError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        spawn_owned_child(
+            command,
+            OwnedChildStdio::Duplex,
+            OwnedChildEnvironment::Cleared,
+        )
+        .map(|inner| Self { inner })
+    }
+
+    /// Takes the only writable control channel to the supervised child.
+    pub fn take_stdin(&mut self) -> Option<Box<dyn Write + Send>> {
+        self.inner
+            .take_stdin()
+            .map(|stream| Box::new(stream) as Box<dyn Write + Send>)
+    }
+
+    /// Takes the only readable evidence channel from the supervised child.
+    pub fn take_stdout(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.inner
+            .take_stdout()
+            .map(|stream| Box::new(stream) as Box<dyn Read + Send>)
+    }
+
+    /// Takes the only readable diagnostic channel when constructed through
+    /// [`Self::spawn_with_stderr`].
+    pub fn take_stderr(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.inner
+            .take_stderr()
+            .map(|stream| Box::new(stream) as Box<dyn Read + Send>)
+    }
+
+    /// Observes whether the supervised root exited without changing ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an operating-system I/O error when the exact child status
+    /// cannot be queried.
+    pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+        self.inner.try_wait()
+    }
+
+    /// Terminates the owned process tree and proves it was reaped within the
+    /// adapter's closed cleanup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owned process tree cannot be terminated or
+    /// zero active descendants cannot be proven before the cleanup deadline.
+    pub fn terminate_and_reap(&mut self) -> Result<(), AppServerRunError> {
+        self.inner.terminate_and_reap()
+    }
 }
 
 impl AppServerRunEvidence {
@@ -484,7 +762,11 @@ fn run_app_server_with_sandbox_temp(
     if let Some(sandbox_temp) = sandbox_temp {
         sandbox_temp.configure(&mut command);
     }
-    let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Duplex)?;
+    let mut child = spawn_owned_child(
+        &mut command,
+        OwnedChildStdio::Duplex,
+        OwnedChildEnvironment::InheritParent,
+    )?;
     let result = ensure_before_deadline(deadline)
         .and_then(|()| verify_app_server_identity(config, before_spawn))
         .and_then(|()| ensure_before_deadline(deadline))
@@ -534,7 +816,12 @@ fn run_windows_sandbox_preflight(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     ensure_before_sandbox_deadline(caller_deadline, bootstrap_deadline)?;
-    let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Null).map_err(|error| {
+    let mut child = spawn_owned_child(
+        &mut command,
+        OwnedChildStdio::Null,
+        OwnedChildEnvironment::InheritParent,
+    )
+    .map_err(|error| {
         if error.kind() == AppServerRunErrorKind::SpawnFailed {
             AppServerRunError::new(AppServerRunErrorKind::FsSandboxBootstrapFailed)
         } else {
@@ -612,8 +899,33 @@ pub(crate) fn cleanup_sandbox_temp(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OwnedChildStdio {
     Duplex,
+    ManagedDuplex,
     Stdout,
     Null,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OwnedChildEnvironment {
+    InheritParent,
+    Cleared,
+}
+
+fn enforce_owned_child_environment(command: &mut Command, environment: OwnedChildEnvironment) {
+    if environment != OwnedChildEnvironment::Cleared {
+        return;
+    }
+    let explicit = command
+        .get_envs()
+        .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
+        .collect::<Vec<_>>();
+    command.env_clear();
+    for (name, value) in explicit {
+        if let Some(value) = value {
+            command.env(name, value);
+        } else {
+            command.env_remove(name);
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -623,17 +935,21 @@ pub(crate) use windows_job::OwnedChild;
 pub(crate) fn spawn_owned_child(
     command: &mut Command,
     stdio: OwnedChildStdio,
+    environment: OwnedChildEnvironment,
 ) -> Result<OwnedChild, AppServerRunError> {
-    windows_job::spawn(command, stdio)
+    enforce_owned_child_environment(command, environment);
+    windows_job::spawn(command, stdio, environment)
 }
 
 #[cfg(all(test, windows))]
 fn spawn_windows_owned_command_with_pre_resume(
-    command: &Command,
+    command: &mut Command,
     stdio: OwnedChildStdio,
+    environment: OwnedChildEnvironment,
     pre_resume: impl FnOnce() -> Result<(), AppServerRunError>,
 ) -> Result<OwnedChild, AppServerRunError> {
-    windows_job::spawn_with_pre_resume(command, stdio, pre_resume)
+    enforce_owned_child_environment(command, environment);
+    windows_job::spawn_with_pre_resume(command, stdio, environment, pre_resume)
 }
 
 #[cfg(not(windows))]
@@ -692,8 +1008,10 @@ impl Drop for OwnedChild {
 pub(crate) fn spawn_owned_child(
     command: &mut Command,
     stdio: OwnedChildStdio,
+    environment: OwnedChildEnvironment,
 ) -> Result<OwnedChild, AppServerRunError> {
     let _ = stdio;
+    enforce_owned_child_environment(command, environment);
     command
         .spawn()
         .map(|child| OwnedChild {
@@ -783,7 +1101,10 @@ mod windows_job {
         STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
     };
 
-    use super::{AppServerRunError, AppServerRunErrorKind, CHILD_CLEANUP_TIMEOUT, OwnedChildStdio};
+    use super::{
+        AppServerRunError, AppServerRunErrorKind, CHILD_CLEANUP_TIMEOUT, OwnedChildEnvironment,
+        OwnedChildStdio,
+    };
 
     const PROCESS_TEARDOWN_EXIT_CODE: u32 = 0xC0DE_0380;
 
@@ -867,13 +1188,15 @@ mod windows_job {
     pub(crate) fn spawn(
         command: &Command,
         stdio: OwnedChildStdio,
+        environment: OwnedChildEnvironment,
     ) -> Result<OwnedChild, AppServerRunError> {
-        spawn_with_pre_resume(command, stdio, || Ok(()))
+        spawn_with_pre_resume(command, stdio, environment, || Ok(()))
     }
 
     pub(crate) fn spawn_with_pre_resume(
         command: &Command,
         stdio: OwnedChildStdio,
+        environment: OwnedChildEnvironment,
         pre_resume: impl FnOnce() -> Result<(), AppServerRunError>,
     ) -> Result<OwnedChild, AppServerRunError> {
         let redirects = RedirectHandles::create(stdio)?;
@@ -887,7 +1210,7 @@ mod windows_job {
             command.get_program(),
             command.get_args().map(OsStr::to_os_string),
         )?;
-        let environment = command_environment(command)?;
+        let environment = command_environment(command, environment)?;
         let executable = wide_null(command.get_program())?;
         let current_directory = command
             .get_current_dir()
@@ -989,19 +1312,24 @@ mod windows_job {
 
     impl RedirectHandles {
         fn create(stdio: OwnedChildStdio) -> Result<Self, AppServerRunError> {
-            let (child_stdin, parent_stdin) = if stdio == OwnedChildStdio::Duplex {
+            let (child_stdin, parent_stdin) = if matches!(
+                stdio,
+                OwnedChildStdio::Duplex | OwnedChildStdio::ManagedDuplex
+            ) {
                 let (child_reader, parent_writer) = create_anonymous_pipe(true)?;
                 (child_reader, Some(parent_writer))
             } else {
                 (open_null(GENERIC_READ)?, None)
             };
-            let (child_stdout, parent_stdout) =
-                if matches!(stdio, OwnedChildStdio::Duplex | OwnedChildStdio::Stdout) {
-                    let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
-                    (child_writer, Some(parent_reader))
-                } else {
-                    (open_null(GENERIC_WRITE)?, None)
-                };
+            let (child_stdout, parent_stdout) = if matches!(
+                stdio,
+                OwnedChildStdio::Duplex | OwnedChildStdio::ManagedDuplex | OwnedChildStdio::Stdout
+            ) {
+                let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
+                (child_writer, Some(parent_reader))
+            } else {
+                (open_null(GENERIC_WRITE)?, None)
+            };
             let (child_stderr, parent_stderr) = if stdio == OwnedChildStdio::Duplex {
                 let (parent_reader, child_writer) = create_anonymous_pipe(false)?;
                 (child_writer, Some(parent_reader))
@@ -1330,13 +1658,19 @@ mod windows_job {
         Ok(())
     }
 
-    fn command_environment(command: &Command) -> Result<Vec<u16>, AppServerRunError> {
+    fn command_environment(
+        command: &Command,
+        mode: OwnedChildEnvironment,
+    ) -> Result<Vec<u16>, AppServerRunError> {
         // Windows may expose `=C:`-style current-directory records. They are
         // shell bookkeeping, not application configuration, and are omitted
         // from this explicit child environment block.
-        let mut environment = std::env::vars_os()
-            .filter(|(name, _)| !name.to_string_lossy().starts_with('='))
-            .collect::<Vec<_>>();
+        let mut environment = match mode {
+            OwnedChildEnvironment::InheritParent => std::env::vars_os()
+                .filter(|(name, _)| !name.to_string_lossy().starts_with('='))
+                .collect::<Vec<_>>(),
+            OwnedChildEnvironment::Cleared => Vec::new(),
+        };
         for (name, value) in command.get_envs() {
             environment.retain(|(existing, _)| {
                 !existing
@@ -1843,8 +2177,11 @@ pub(crate) fn configure_pinned_child_environment(
         return Ok(());
     };
     let resources_directory = resources.resources_directory();
-    let ambient = env::var_os("PATH");
-    let child_path = pinned_child_path(resources_directory, ambient.as_deref())?;
+    let system_root = env::var_os("SystemRoot")
+        .or_else(|| env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .ok_or_else(|| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcePathInvalid))?;
+    let child_path = pinned_child_path(resources_directory, &system_root)?;
     command
         .env(
             "CODEX_MANAGED_PACKAGE_ROOT",
@@ -1856,22 +2193,32 @@ pub(crate) fn configure_pinned_child_environment(
 
 fn pinned_child_path(
     resources_directory: &Path,
-    ambient: Option<&OsStr>,
+    system_root: &Path,
 ) -> Result<OsString, AppServerRunError> {
-    let paths = std::iter::once(resources_directory.to_path_buf()).chain(
-        ambient
-            .into_iter()
-            .flat_map(env::split_paths)
-            .filter(|path| {
-                !same_existing_directory(path, resources_directory)
-                    && !path.file_name().is_some_and(|name| {
-                        name.to_string_lossy()
-                            .eq_ignore_ascii_case("codex-resources")
-                    })
-                    && !path.join("codex-windows-sandbox-setup.exe").is_file()
-                    && !path.join("codex-command-runner.exe").is_file()
-            }),
-    );
+    if !resources_directory.is_absolute() || !system_root.is_absolute() {
+        return Err(AppServerRunError::new(
+            AppServerRunErrorKind::PinnedResourcePathInvalid,
+        ));
+    }
+    let mut paths = vec![
+        resources_directory.to_path_buf(),
+        system_root.join("System32"),
+        system_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0"),
+    ];
+    for path in &paths {
+        if ["codex", "codex.exe", "codex.cmd", "codex.ps1"]
+            .iter()
+            .any(|name| path.join(name).exists())
+        {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::PinnedResourcePathInvalid,
+            ));
+        }
+    }
+    paths.dedup();
     env::join_paths(paths)
         .map_err(|_| AppServerRunError::new(AppServerRunErrorKind::PinnedResourcePathInvalid))
 }
@@ -2016,14 +2363,17 @@ pub(crate) fn validate_owned_codex_home(
     }
 
     let auth_state = config.codex_home().join("auth.json");
-    validate_isolated_home_file(&auth_state, AppServerRunErrorKind::InvalidCodexHome)?;
+    match std::fs::symlink_metadata(&auth_state) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        _ => {
+            return Err(AppServerRunError::new(
+                AppServerRunErrorKind::PlaintextCodexAuthDenied,
+            ));
+        }
+    }
     let config_path = config.codex_home().join("config.toml");
     validate_isolated_home_file(&config_path, AppServerRunErrorKind::InvalidCodexHome)?;
-    if !restore_owned_codex_home_config(
-        &config_path,
-        config.codex_home(),
-        config.working_directory(),
-    ) {
+    if std::fs::read(&config_path).ok().as_deref() != Some(CODEX_HOME_CONFIG_BYTES) {
         return Err(AppServerRunError::new(
             AppServerRunErrorKind::InvalidCodexHome,
         ));
@@ -2048,57 +2398,6 @@ pub(crate) fn validate_owned_codex_home(
     }
 
     Ok(())
-}
-
-fn restore_owned_codex_home_config(
-    config_path: &Path,
-    codex_home: &Path,
-    working_directory: &Path,
-) -> bool {
-    let Ok(bytes) = std::fs::read(config_path) else {
-        return false;
-    };
-    if bytes.as_slice() == CODEX_HOME_CONFIG_BYTES {
-        return true;
-    }
-
-    let prefix = format!(
-        "{}\n[projects.'",
-        String::from_utf8_lossy(CODEX_HOME_CONFIG_BYTES)
-    );
-    let suffix = "']\ntrust_level = \"trusted\"\n";
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return false;
-    };
-    let Some(trusted_worktree) = text
-        .strip_prefix(&prefix)
-        .and_then(|text| text.strip_suffix(suffix))
-    else {
-        return false;
-    };
-    let trusted_worktree = trusted_worktree.to_ascii_lowercase();
-    let current_worktree = working_directory.to_string_lossy().to_ascii_lowercase();
-    let prior_delivery_worktree = codex_home
-        .parent()
-        .map(|root| root.join("runtime-delivery"))
-        .map(|root| root.to_string_lossy().to_ascii_lowercase())
-        .is_some_and(|root| is_lattice_delivery_worktree(&trusted_worktree, &root));
-    if trusted_worktree != current_worktree && !prior_delivery_worktree {
-        return false;
-    }
-    std::fs::write(config_path, CODEX_HOME_CONFIG_BYTES).is_ok()
-}
-
-fn is_lattice_delivery_worktree(path: &str, runtime_delivery_root: &str) -> bool {
-    let Some(relative) = path.strip_prefix(&format!("{runtime_delivery_root}\\")) else {
-        return false;
-    };
-    let Some(task) = relative.strip_suffix("\\repo") else {
-        return false;
-    };
-    task.len() == 69
-        && task.starts_with("task-")
-        && task[5..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_isolated_home_file(
@@ -2144,6 +2443,35 @@ fn ensure_before_deadline(deadline: Instant) -> Result<(), AppServerRunError> {
 
 fn launcher_sha256(path: &Path) -> Result<String, AppServerRunError> {
     file_sha256(path, AppServerRunErrorKind::LauncherReadFailed)
+}
+
+fn managed_path_digest(path: &Path) -> String {
+    let rendered = path.to_string_lossy().replace('\\', "/");
+    let normalized = if cfg!(windows) {
+        rendered.to_ascii_lowercase()
+    } else {
+        rendered
+    };
+    format!("codex-home:sha256:{}", bytes_sha256(normalized.as_bytes()))
+}
+
+fn managed_config_digest(codex_home: &Path) -> Result<String, AppServerRunError> {
+    file_sha256(
+        &codex_home.join("config.toml"),
+        AppServerRunErrorKind::InvalidCodexHome,
+    )
+    .map(|digest| format!("codex-config:sha256:{digest}"))
+}
+
+fn bytes_sha256(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut digest, "{byte:02x}").expect("writing to String is infallible");
+    }
+    digest
 }
 
 fn file_sha256(
@@ -2219,20 +2547,25 @@ mod resource_environment_tests {
             .expect("valid digest bundle"),
         )
         .expect("absolute pinned resource binding");
-        let ambient = std::env::join_paths([
-            Path::new(r"C:\global\codex-0.144.6\codex-resources"),
-            Path::new(r"C:\WindowsApps\CodexDesktop\codex-resources"),
-            Path::new(r"C:\Windows\System32"),
-        ])
-        .expect("hostile ambient path fixture");
-        let child_path = pinned_child_path(resources.resources_directory(), Some(&ambient))
-            .expect("pinned child path");
+        let child_path =
+            pinned_child_path(resources.resources_directory(), Path::new(r"C:\Windows"))
+                .expect("pinned child path");
         let child_paths = std::env::split_paths(&child_path).collect::<Vec<_>>();
 
         assert_eq!(child_paths.first(), Some(&resources_directory));
         assert_eq!(
             child_paths,
-            vec![resources_directory, PathBuf::from(r"C:\Windows\System32")]
+            vec![
+                resources_directory,
+                PathBuf::from(r"C:\Windows\System32"),
+                PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0"),
+            ]
+        );
+        assert!(
+            child_paths
+                .iter()
+                .all(|path| !path.to_string_lossy().contains("global")),
+            "ambient PATH must never be part of the managed child allowlist"
         );
 
         let mut command = Command::new("unused");
@@ -2309,8 +2642,8 @@ mod windows_containment_tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        AppServerRunError, AppServerRunErrorKind, OwnedChildStdio, spawn_owned_child,
-        spawn_windows_owned_command_with_pre_resume, stop_owned_child,
+        AppServerRunError, AppServerRunErrorKind, OwnedChildEnvironment, OwnedChildStdio,
+        SupervisedDuplexChild, spawn_windows_owned_command_with_pre_resume,
     };
 
     static NEXT_MARKER: AtomicU64 = AtomicU64::new(1);
@@ -2342,8 +2675,11 @@ mod windows_containment_tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let error =
-            spawn_windows_owned_command_with_pre_resume(&command, OwnedChildStdio::Null, || {
+        let error = spawn_windows_owned_command_with_pre_resume(
+            &mut command,
+            OwnedChildStdio::Null,
+            OwnedChildEnvironment::InheritParent,
+            || {
                 assert!(
                     !marker.exists(),
                     "the suspended child executed before Job assignment completed"
@@ -2351,15 +2687,16 @@ mod windows_containment_tests {
                 Err(AppServerRunError::new(
                     AppServerRunErrorKind::JobObjectFailed,
                 ))
-            })
-            .expect_err("injected pre-resume failure must fail closed");
+            },
+        )
+        .expect_err("injected pre-resume failure must fail closed");
 
         assert_eq!(error.kind(), AppServerRunErrorKind::JobObjectFailed);
         assert!(!marker.exists(), "a pre-resume failure resumed the child");
     }
 
     #[test]
-    fn parent_exit_with_live_descendant_is_terminated_to_zero_before_return() {
+    fn supervised_duplex_parent_exit_reaps_live_descendant_to_zero() {
         let sequence = NEXT_MARKER.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "lattice-codex-job-accounting-{}-{sequence}",
@@ -2395,8 +2732,8 @@ mod windows_containment_tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
 
-        let mut child = spawn_owned_child(&mut command, OwnedChildStdio::Null)
-            .expect("spawn assigned suspended root");
+        let mut child =
+            SupervisedDuplexChild::spawn(&mut command).expect("spawn assigned suspended root");
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if child.try_wait().expect("observe owned root").is_some() {
@@ -2407,13 +2744,15 @@ mod windows_containment_tests {
         }
         assert!(pid.exists(), "root exited before recording its descendant");
         assert!(
-            child.active_processes().expect("query retained Job") > 0,
+            child.inner.active_processes().expect("query retained Job") > 0,
             "the exited root must leave its blocked descendant active"
         );
 
-        stop_owned_child(&mut child).expect("terminate retained Job and prove zero members");
+        child
+            .terminate_and_reap()
+            .expect("terminate retained Job and prove zero members");
         assert_eq!(
-            child.active_processes().expect("query reaped Job"),
+            child.inner.active_processes().expect("query reaped Job"),
             0,
             "cleanup returned before Job accounting reached zero"
         );

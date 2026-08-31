@@ -1,10 +1,10 @@
 ---
 module_id: writer-lease
 name: Writer Lease
-version: 1.1
+version: 1.2
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-09
+last_reviewed: 2026-08-27
 ---
 
 ## Mission
@@ -12,7 +12,9 @@ last_reviewed: 2026-08-09
 Own deterministic project-writer lease state, monotonic fencing allocation,
 exact command receipts, expiry/suspect/recovery semantics, canonical aggregate
 snapshot/checkpoint bytes, pure replay, and the repository contract that every
-live persistence adapter must reuse.
+live persistence adapter must reuse. Version 1.2 adds exact same-attempt
+OS-process handoff and owner-verified historical authority lookup without
+creating a second lease or reissuing a fence.
 
 ## Non-Goals
 
@@ -34,6 +36,8 @@ live persistence adapter must reuse.
 - Canonical command requests, transition records, terminal receipts, and
   untrusted/verified aggregate snapshots.
 - Typed holder-death and replaced-leadership recovery evidence meaning.
+- The explicit `ProcessHandoff` transition that replaces only a dead holder's
+  PID/process-start identity while preserving logical lease and fence lineage.
 - Canonical complete untrusted aggregate snapshot bytes and independently
   protected checkpoint bytes, including their exact version/hash domains.
 - The abstract `WriterLeaseRepository` execute/current-authority/assert-current
@@ -44,8 +48,9 @@ live persistence adapter must reuse.
 
 ## Public Contracts
 
-- Plan one acquire, heartbeat, suspect, exact release, or evidence-bound revoke
-  against one complete expected owner head without I/O.
+- Plan one acquire, heartbeat, suspect, exact process handoff, exact release,
+  or evidence-bound revoke against one complete expected owner head without
+  I/O.
 - Apply only a verified plan whose exact precondition still matches.
 - Verify and reconstruct an untrusted complete aggregate snapshot.
 - Execute the same planner/verifier through a deterministic `RuntimeKind::Fake`
@@ -65,23 +70,31 @@ live persistence adapter must reuse.
   authority, fencing high-water, transition high-water, and command high-water.
   Concrete repositories may return it only after their own physical replay;
   `None` and a released `Some { current_authority: None, ... }` are distinct.
+- Locate one transition-produced historical authority receipt by its exact
+  digest after complete verified replay, including after release. Historical
+  lookup is read-only and grants no currentness or effect authority.
 
 ## Invariants
 
 1. A project has at most one `ACTIVE` or `SUSPECT` product writer.
 2. Identity binds project/snapshot/task/revision/spec/attempt, lease/holder/
-   worktree/process-start, daemon instance/epoch, and fencing token.
+   worktree/process-start, daemon instance/epoch, and fencing token. Only an
+   exact `ProcessHandoff` may replace PID/process-start while preserving every
+   other logical identity field and the same fence.
 3. Epochs, fencing tokens, and revisions are in `1..=i64::MAX`; allocation
    checks overflow before any mutation and never wraps, rolls back, or reuses.
-4. Acquire and heartbeat require `ACTIVE` runtime admission. Draining permits
-   exact release/recovery but not heartbeat. Canary and stopped admit no
-   user-project transition. Reconciliation-required permits only typed
-   recovery.
+4. Acquire, heartbeat, and process handoff require `ACTIVE` runtime admission.
+   Draining permits exact release/recovery but not heartbeat or handoff. Canary
+   and stopped admit no user-project transition. Reconciliation-required
+   permits only typed recovery.
 5. `observed_at >= expires_at` can mark an active lease suspect. Expiry alone
    never proves death and never revokes.
-6. A suspect lease cannot heartbeat back to active.
+6. A suspect lease cannot heartbeat back to active. It may return to active
+   only through an exact process handoff with matching holder-death evidence at
+   or after expiry.
 7. Revoke requires exact holder-death or strictly newer daemon-leadership
-   evidence bound to the current identity.
+   evidence bound to the current identity. Process handoff accepts only exact
+   holder-death evidence and preserves daemon instance/epoch.
 8. Exact command retry returns the identical terminal receipt before stale-head
    evaluation. Changed content under one command ID rejects permanently.
 9. A denied command changes no lease state, fence, revision, transition, or
@@ -109,6 +122,14 @@ live persistence adapter must reuse.
 16. A live repository result is current only when its independently loaded
     project head/checkpoint matches the verified replay. Persistence evidence
     never changes lease semantic meaning.
+17. Process handoff preserves project/task/spec/attempt/lease/holder/worktree,
+    daemon instance/epoch, acquired time, and fencing token; it changes only
+    PID/process-start plus revision/heartbeat/expiry, and requires exact head,
+    nonzero evidence, a distinct successor process identity, and strictly
+    advancing time/expiry bounds.
+18. Historical authority lookup considers only transition-produced receipts
+    after complete replay. Zero, duplicate, malformed, or substituted evidence
+    fails closed, and a historical receipt never becomes current authority.
 
 ## Allowed Dependencies
 
@@ -145,14 +166,20 @@ snapshot, and independently protected checkpoint must advance atomically; the
 adapter reconstructs the checkpoint through the public validated constructor
 and may not derive it from the untrusted history being verified.
 
+Version 1.2 adds the explicit `ProcessHandoff` command/transition and historical
+authority lookup required by SPEC-011 restart recovery. Its retained fence is
+safe only because authenticated exact process-death evidence and the unchanged
+daemon identity exclude a concurrent predecessor; otherwise callers must use
+the existing revoke/new-acquire path with a new fence.
+
 ## Acceptance Gates
 
 | Gate | Evidence | Owner | Required for merge |
 |---|---|---|---|
-| State and command matrix | acquire/heartbeat/suspect/release/revoke/reacquire tests | Engineering | yes |
+| State and command matrix | acquire/heartbeat/suspect/process-handoff/release/revoke/reacquire tests | Engineering | yes |
 | Fence safety | zero/max/overflow/rollback/non-reuse matrix with zero partial mutation | Security review | yes |
 | Exact retry | applied/denied retry and changed-content reuse tests | Engineering | yes |
-| Recovery | expiry, PID/start identity, holder death, replaced epoch tests | Security review | yes |
+| Recovery | expiry, PID/start identity and reuse, holder death, active/suspect handoff, replaced epoch tests | Security review | yes |
 | Replay | raw corruption/substitution, denied-tail truncation, receipt-chain, and trusted-checkpoint rollback matrix | Engineering | yes |
 | Snapshot bytes | canonical golden bytes plus malformed/version/bound/truncation/reorder/trailing-data matrices | Engineering | yes |
 | Repository contract | fake/conformance implementation proves exact execute/current-authority/assert-current, planner parity, retry, and component-free failures | Architecture review | yes |
@@ -174,3 +201,4 @@ architecture review, and responsible-user authorization.
 |---|---|---|---|---|
 | 1.0 | 2026-07-29 | SPEC-002 v10, ADR-012, TASK-014 | Pure Writer Lease owner, planner/verifier, fake, receipts, fencing, and recovery | User MVP-3 execution directive |
 | 1.1 | 2026-08-09 | SPEC-003 v3, ADR-023, TASK-038 | Canonical complete snapshot/checkpoint bytes and the sole abstract repository contract used by PostgreSQL persistence | User TASK-038-first direction |
+| 1.2 | 2026-08-27 | SPEC-011 v1.2, ADR-012 Phase 4 amendment, ADR-028 | Add exact process-death-bound same-attempt handoff with unchanged fence and owner-verified historical authority lookup | User Phase 4 delegation |

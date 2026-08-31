@@ -1,10 +1,10 @@
 ---
 module_id: foreman-state
 name: Foreman State
-version: 1.4
+version: 1.6
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-25
+last_reviewed: 2026-08-28
 ---
 
 ## Mission
@@ -12,12 +12,19 @@ last_reviewed: 2026-08-25
 Define the small, versioned, secret-free foreman snapshot and pure watchdog
 classification used to reconstruct active engineering work after a fresh
 process. It gives Task Ledger one typed semantic payload; it never becomes a
-second durable control-plane truth.
+second durable control-plane truth. It also defines the pure managed-worker
+attempt packet, exact lifecycle child state, bounded budget, and closed
+stall/retry/restart decisions consumed by the Task-Ledger-owned foreman loop.
+Version 1.6 additionally validates the one repair-successor lineage whose
+pre-start predecessor has no provider terminal but is durably closed by an
+owner-bound exact no-provider-effect proof.
 
 ## Non-Goals
 
 - Persist rows, choose a database, acquire a Writer Lease, control workers, or
   archive a Codex task.
+- Own Task Domain state, schedule or start a worker, select an available
+  provider model, execute recovery, or verify task completion.
 - Store a chat transcript, prompt, command line, environment, credential,
   secret, raw stderr, or arbitrary path.
 - Treat `status.json`, a dashboard, a process list, or a heartbeat as authority.
@@ -32,6 +39,10 @@ second durable control-plane truth.
   time, and a closed refresh trigger. These are never snapshot state.
 - Pure reconstruction and watchdog classifications over already loaded typed
   snapshots plus independently supplied live Git/worktree observations.
+- Versioned managed-worker model/routing, budget, attempt-packet identity,
+  exact-start phase, meaningful-progress, terminal, stall, retry, and restart
+  decision semantics. Resolved paths, commands, prompts, and provider output
+  are not owned data.
 
 Task Ledger owns append order, hash-chain replay, idempotency, and authoritative
 current projection. Postgres Store owns physical rows and transactions. The
@@ -54,6 +65,30 @@ dashboard remains an untrusted read-only projection.
   without performing Git or filesystem I/O. Promote the scalar only when its
   domain-separated evidence commitment matches, so canonical-looking legacy
   strings remain opaque blockers.
+- Construct only allowlisted Luna/Terra/Sol model selections with a closed
+  routing reason and `low|medium|high|xhigh|max|ultra` reasoning effort; Terra
+  remains the routine-engineering default and a Terra-insufficient Sol route
+  requires retained evidence.
+- Construct one immutable, digest-bound worker budget and attempt packet with
+  task/project/spec/approval/profile/worktree lineage, deadline, Writer fence,
+  prior terminal evidence, and a bounded secret-safe continuation summary.
+  For the sole pre-start no-effect closure exception, the existing prior-
+  evidence field carries the distinct closure-proof digest and is accepted
+  only through the dedicated closed-prestart successor validator; it never
+  constructs a `WorkerTerminal`.
+- Keep RPC acceptance in `ACCEPTED|STARTING`; derive `EXECUTING` only from the
+  exact retained thread/turn `turn/started` observation with `inProgress`.
+  Persist a dispatch intent before the RPC; a restart with that intent but no
+  exact returned ID blocks as uncertain and never opens a second thread.
+- Classify only closed meaningful-progress kinds and the four SPEC-011 stall
+  reasons. Raw stall signals return reconcile-first; only exhausted
+  reconciliation becomes a terminal stall classification.
+- Derive fresh-process exact-ID reconciliation and repair decisions without
+  I/O. Repair normally requires an exact terminal. The sole alternative is an
+  exact, separately persisted no-provider-effect closure proof for a pre-start
+  predecessor; it is terminal-equivalent only for successor lineage and may
+  not be represented as a provider terminal. Either route may create at most
+  two retries.
 
 ## Invariants
 
@@ -70,6 +105,17 @@ dashboard remains an untrusted read-only projection.
 6. Epistemic references are opaque, bounded, separately typed inputs; no
    hypothesis, confidence, or expired record can serialize as authoritative
    lifecycle state or change it without a later Ledger-authorized decision.
+7. Worker models are exactly `gpt-5.6-luna`, `gpt-5.6-terra`, and
+   `gpt-5.6-sol`; an unavailable or unknown model is never substituted here.
+8. RPC acceptance, elapsed time alone, a worker final message, exit zero, or a
+   commit never proves `EXECUTING` or task completion.
+9. One attempt packet is immutable and domain-separated; retry retains the
+   same task/spec/approval/budget/profile/worktree lineage, increments attempt
+   and Writer fence, and preserves prior evidence. A closed-prestart retry
+   binds the separate no-effect proof, never the immutable blocker alone, and
+   cannot itself authorize capacity mutation or Writer release.
+10. Full prompts, commands, environments, secrets, raw output, arbitrary
+    paths, and credential-bearing URLs cannot enter managed-worker records.
 
 ## Allowed Dependencies
 
@@ -88,7 +134,13 @@ dashboard remains an untrusted read-only projection.
 Unknown schema versions and malformed/oversize/secret-bearing records reject
 without producing an active or archive-ready projection. A later schema requires
 a new versioned payload plus Task Ledger/Postgres compatibility evidence; old
-snapshots remain replayable and are never silently rewritten.
+snapshots remain replayable and are never silently rewritten. Managed-worker
+packet/state/progress digests are new versioned child semantics; they do not
+rewrite `lattice.foreman-snapshot/1.0` or authorize persistence by themselves.
+Version 1.6 adds no new `WorkerTerminal` and does not change attempt-packet
+digest encoding. It narrows the existing prior-evidence slot: the closure-proof
+alternative is valid only through its separate validator and PostgreSQL owner
+evidence; older exact-terminal successors remain unchanged.
 
 ## Acceptance Gates
 
@@ -97,6 +149,7 @@ snapshots remain replayable and are never silently rewritten.
 | Pure schema/replay | focused snapshot and fresh-reader tests | Engineering | yes |
 | Privacy rejection | transcript/secret/path rejection matrix | Security review | yes |
 | Watchdog drift | stale HEAD, all-missed-heartbeat, duplicate identity, blocked archive tests | Engineering | yes |
+| Managed worker domain | model/budget/packet, exact-start, heartbeat/stall, exact-terminal retry, closed-prestart proof retry, and restart focused tests | Engineering | yes |
 | Ledger/Postgres binding | append/replay and injectable repository conformance | Architecture review | yes |
 
 ## Change Policy
@@ -109,8 +162,10 @@ and responsible-user authorization.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 1.6 | 2026-08-28 | SPEC-011 v1.4, ADR-028 amendment | Accept one owner-bound exact no-effect proof as terminal-equivalent repair lineage without creating a provider terminal or persistence authority | Delegated product owner |
 | 1.1 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Add separately typed, expiring epistemic references without lifecycle authority | Foreman-delegated user authority |
 | 1.2 | 2026-08-21 | ADR-024, SPEC-006 v3, TASK-079 | Export fixed-scalar snapshot reconstruction values for the Ledger-owned typed persistence boundary; no I/O or authority added | Fixed-foreman delegation |
 | 1.3 | 2026-08-25 | ADR-027, SPEC-009, TASK-105 | Add closed checkpoint intent/status projection and require exact-next generation; server observation and I/O remain outside | Sole-foreman delegation |
 | 1.4 | 2026-08-25 | SPEC-010, TASK-106 | Add one closed dependency blocker and pure blocked/resumed replay projection; Git ownership and integration proof remain server-owned I/O | Explicit user delegation |
+| 1.5 | 2026-08-26 | SPEC-011, Phase 4 delegated implementation | Add pure managed-worker model/budget/packet, exact-start, meaningful-progress, stall, retry, and restart semantics without persistence, scheduling, or Task Domain ownership | Delegated product owner |
 | 1.0 | 2026-08-21 | ADR-024, SPEC-006, TASK-079 | Initial secret-free snapshot and read-only watchdog boundary | Foreman-delegated user authority |

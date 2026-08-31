@@ -6,11 +6,11 @@ use lattice_contracts::{
 use lattice_writer_lease::test_support::{acquire_command, digest, observation};
 use lattice_writer_lease::{
     CommandOutcome, FakeWriterLease, HeartbeatCommand, LeaseDenial, MarkSuspectCommand,
-    RecoveryEvidence, ReleaseCommand, RevokeCommand, WriterLeaseAcquireRequest, WriterLeaseCommand,
-    WriterLeaseCurrentAuthority, WriterLeaseError, WriterLeaseProjectEvidence,
-    WriterLeaseRepository, WriterLeaseRepositoryCommand, WriterLeaseRepositoryError,
-    WriterLeaseRepositoryErrorKind, apply_plan, plan_command, verify_snapshot,
-    verify_snapshot_against_checkpoint,
+    ProcessHandoffCommand, RecoveryEvidence, ReleaseCommand, RevokeCommand,
+    WriterLeaseAcquireRequest, WriterLeaseCommand, WriterLeaseCurrentAuthority, WriterLeaseError,
+    WriterLeaseProjectEvidence, WriterLeaseRepository, WriterLeaseRepositoryCommand,
+    WriterLeaseRepositoryError, WriterLeaseRepositoryErrorKind, apply_plan, plan_command,
+    verify_snapshot, verify_snapshot_against_checkpoint,
 };
 
 fn project(name: &str) -> ProjectId {
@@ -137,6 +137,29 @@ fn process_death(start_digest: ContentDigest) -> RecoveryEvidence {
     }
 }
 
+fn process_handoff(
+    fake: &FakeWriterLease,
+    project: &ProjectId,
+    command_id: &str,
+    successor_process_id: u64,
+    successor_process_start_identity: ContentDigest,
+    observed_at: &str,
+    expires_at: &str,
+) -> WriterLeaseCommand {
+    WriterLeaseCommand::ProcessHandoff(ProcessHandoffCommand {
+        command_id: command_id.to_owned(),
+        project_id: project.clone(),
+        expected_head: fake.current_head(project).expect("current head"),
+        successor_holder_process_id: HolderProcessId::new(successor_process_id).expect("pid"),
+        successor_holder_process_start_identity: successor_process_start_identity,
+        successor_daemon_instance_id: "daemon-1".to_owned(),
+        successor_daemon_epoch: DaemonEpoch::new(7).expect("epoch"),
+        observation: observation(RuntimeAdmissionMode::Active, observed_at),
+        expires_at: expires_at.to_owned(),
+        evidence: process_death(digest('2')),
+    })
+}
+
 fn assert_process_death_daemon_binding(
     fake: &FakeWriterLease,
     project: &ProjectId,
@@ -197,6 +220,363 @@ fn empty_fake_starts_without_writer_authority() {
     let fake = FakeWriterLease::new();
     assert_eq!(fake.project_count(), 0);
     assert!(fake.current_head(&project("project-a")).is_none());
+}
+
+#[test]
+fn process_handoff_preserves_logical_attempt_and_fence_while_replacing_process() {
+    let project = project("project-process-handoff");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+    let before = fake.current_receipt(&project).expect("before receipt");
+
+    let receipt = fake
+        .execute(process_handoff(
+            &fake,
+            &project,
+            "handoff",
+            84,
+            digest('5'),
+            "2026-07-29T00:05:00Z",
+            "2026-07-29T00:15:00Z",
+        ))
+        .expect("handoff");
+
+    assert_eq!(receipt.outcome, CommandOutcome::Applied);
+    let after = fake.current_receipt(&project).expect("after receipt");
+    assert_eq!(
+        after.identity().project_id(),
+        before.identity().project_id()
+    );
+    assert_eq!(after.identity().task_id(), before.identity().task_id());
+    assert_eq!(
+        after.identity().attempt_id(),
+        before.identity().attempt_id()
+    );
+    assert_eq!(after.identity().lease_id(), before.identity().lease_id());
+    assert_eq!(
+        after.identity().worktree_id(),
+        before.identity().worktree_id()
+    );
+    assert_eq!(
+        after.identity().fencing_token(),
+        before.identity().fencing_token()
+    );
+    assert_eq!(after.identity().holder_process_id().get(), 84);
+    assert_eq!(
+        after.identity().holder_process_start_identity(),
+        &digest('5')
+    );
+    assert_eq!(after.status(), WriterLeaseStatus::Active);
+    assert_ne!(after.head(), before.head());
+}
+
+#[test]
+fn process_handoff_supports_pid_reuse_and_exact_retry_but_rejects_substitution() {
+    let project = project("project-process-handoff-retry");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+    let handoff = process_handoff(
+        &fake,
+        &project,
+        "handoff",
+        42,
+        digest('5'),
+        "2026-07-29T00:05:00Z",
+        "2026-07-29T00:15:00Z",
+    );
+
+    let first = fake.execute(handoff.clone()).expect("pid-reuse handoff");
+    let retry = fake.execute(handoff.clone()).expect("exact retry");
+    assert_eq!(retry, first);
+    assert_eq!(
+        fake.current_receipt(&project)
+            .expect("authority")
+            .identity()
+            .holder_process_id()
+            .get(),
+        42
+    );
+
+    let mut substituted = handoff;
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut substituted else {
+        unreachable!()
+    };
+    command.successor_holder_process_start_identity = digest('6');
+    assert_eq!(
+        fake.execute(substituted),
+        Err(WriterLeaseError::CommandIdReuse)
+    );
+}
+
+#[test]
+fn process_handoff_requires_live_active_time_or_an_exact_suspect_recovery() {
+    let project = project("project-process-handoff-state");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+
+    let expired = fake
+        .execute(process_handoff(
+            &fake,
+            &project,
+            "expired-handoff",
+            84,
+            digest('5'),
+            "2026-07-29T00:10:00Z",
+            "2026-07-29T00:20:00Z",
+        ))
+        .expect("terminal expired denial");
+    assert_eq!(
+        expired.outcome,
+        CommandOutcome::Denied(LeaseDenial::InvalidState)
+    );
+
+    fake.execute(suspect(
+        &fake,
+        &project,
+        "suspect",
+        "2026-07-29T00:10:00Z",
+        RuntimeAdmissionMode::Draining,
+    ))
+    .expect("mark suspect");
+    let recovered = fake
+        .execute(process_handoff(
+            &fake,
+            &project,
+            "suspect-handoff",
+            84,
+            digest('5'),
+            "2026-07-29T00:11:00Z",
+            "2026-07-29T00:21:00Z",
+        ))
+        .expect("suspect handoff");
+    assert_eq!(recovered.outcome, CommandOutcome::Applied);
+    assert_eq!(
+        fake.current_receipt(&project).expect("active").status(),
+        WriterLeaseStatus::Active
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn process_handoff_rejects_wrong_evidence_leadership_and_admission() {
+    let project = project("project-process-handoff-evidence");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+
+    let base = process_handoff(
+        &fake,
+        &project,
+        "handoff",
+        84,
+        digest('5'),
+        "2026-07-29T00:05:00Z",
+        "2026-07-29T00:15:00Z",
+    );
+    let mut wrong_start = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut wrong_start else {
+        unreachable!()
+    };
+    command.command_id = "wrong-start".to_owned();
+    command.evidence = process_death(digest('9'));
+    assert_eq!(
+        fake.execute(wrong_start)
+            .expect("terminal evidence denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut changed_daemon = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut changed_daemon else {
+        unreachable!()
+    };
+    command.command_id = "changed-daemon".to_owned();
+    command.successor_daemon_instance_id = "daemon-2".to_owned();
+    assert_eq!(
+        fake.execute(changed_daemon)
+            .expect("terminal daemon denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut changed_epoch = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut changed_epoch else {
+        unreachable!()
+    };
+    command.command_id = "changed-epoch".to_owned();
+    command.successor_daemon_epoch = DaemonEpoch::new(8).expect("epoch");
+    assert_eq!(
+        fake.execute(changed_epoch)
+            .expect("terminal epoch denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut wrong_pid = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut wrong_pid else {
+        unreachable!()
+    };
+    command.command_id = "wrong-old-pid".to_owned();
+    let RecoveryEvidence::ProcessDeath {
+        holder_process_id, ..
+    } = &mut command.evidence
+    else {
+        unreachable!()
+    };
+    *holder_process_id = HolderProcessId::new(41).expect("pid");
+    assert_eq!(
+        fake.execute(wrong_pid)
+            .expect("terminal old-pid denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut wrong_evidence_daemon = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut wrong_evidence_daemon else {
+        unreachable!()
+    };
+    command.command_id = "wrong-evidence-daemon".to_owned();
+    let RecoveryEvidence::ProcessDeath {
+        holder_daemon_instance_id,
+        ..
+    } = &mut command.evidence
+    else {
+        unreachable!()
+    };
+    *holder_daemon_instance_id = "daemon-2".to_owned();
+    assert_eq!(
+        fake.execute(wrong_evidence_daemon)
+            .expect("terminal evidence-daemon denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut same_process = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut same_process else {
+        unreachable!()
+    };
+    command.command_id = "same-process".to_owned();
+    command.successor_holder_process_id = HolderProcessId::new(42).expect("pid");
+    command.successor_holder_process_start_identity = digest('2');
+    assert_eq!(
+        fake.execute(same_process)
+            .expect("terminal same-process denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::RecoveryEvidenceMismatch)
+    );
+
+    let mut leadership = base.clone();
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut leadership else {
+        unreachable!()
+    };
+    command.command_id = "leadership".to_owned();
+    command.evidence = RecoveryEvidence::LeadershipReplaced {
+        replaced_daemon_instance_id: "daemon-1".to_owned(),
+        replaced_epoch: DaemonEpoch::new(7).expect("epoch"),
+        replacement_daemon_instance_id: "daemon-2".to_owned(),
+        replacement_epoch: DaemonEpoch::new(8).expect("epoch"),
+        evidence_digest: digest('8'),
+    };
+    assert_eq!(
+        fake.execute(leadership),
+        Err(WriterLeaseError::InvalidRecoveryEvidence)
+    );
+
+    let mut draining = base;
+    let WriterLeaseCommand::ProcessHandoff(command) = &mut draining else {
+        unreachable!()
+    };
+    command.command_id = "draining".to_owned();
+    command.observation.admission = RuntimeAdmissionMode::Draining;
+    assert_eq!(
+        fake.execute(draining)
+            .expect("terminal admission denial")
+            .outcome,
+        CommandOutcome::Denied(LeaseDenial::AdmissionDenied)
+    );
+}
+
+#[test]
+fn process_handoff_snapshot_replays_and_detects_process_substitution() {
+    let project = project("project-process-handoff-snapshot");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+    fake.execute(process_handoff(
+        &fake,
+        &project,
+        "handoff",
+        84,
+        digest('5'),
+        "2026-07-29T00:05:00Z",
+        "2026-07-29T00:15:00Z",
+    ))
+    .expect("handoff");
+    let snapshot = fake.export_snapshot(&project).expect("snapshot");
+    let checkpoint = fake
+        .current_checkpoint(&project)
+        .expect("checkpoint")
+        .expect("project checkpoint");
+    let bytes = snapshot.canonical_bytes().expect("bytes");
+    let decoded = lattice_writer_lease::UntrustedWriterLeaseSnapshot::from_canonical_bytes(&bytes)
+        .expect("decode");
+    assert_eq!(
+        verify_snapshot_against_checkpoint(&decoded, &checkpoint)
+            .expect("replay")
+            .current_head(),
+        fake.current_head(&project)
+    );
+
+    let mut tampered = snapshot;
+    let handoff_receipt = &mut array_field_mut(&mut tampered.payload, "commands")[1];
+    let request = object_field_mut(handoff_receipt, "request");
+    set_string_field(
+        request,
+        "successor_holder_process_start_identity",
+        digest('6').as_str(),
+    );
+    assert_corrupt(&tampered);
+}
+
+#[test]
+fn historical_authority_lookup_survives_release_and_unknown_digest_is_absent() {
+    let project = project("project-historical-authority");
+    let mut fake = FakeWriterLease::new();
+    fake.execute(acquire(&project, "acquire")).expect("acquire");
+    let historical = fake.current_receipt(&project).expect("historical receipt");
+    fake.execute(release(
+        &fake,
+        &project,
+        "release",
+        RuntimeAdmissionMode::Draining,
+    ))
+    .expect("release");
+    let verified = verify_snapshot(&fake.export_snapshot(&project).expect("snapshot"))
+        .expect("verified released aggregate");
+
+    assert_eq!(
+        verified
+            .historical_authority_receipt(historical.receipt_digest())
+            .expect("historical lookup"),
+        Some(historical)
+    );
+    assert_eq!(
+        verified
+            .historical_authority_receipt(&digest('9'))
+            .expect("unknown lookup"),
+        None
+    );
+    assert_eq!(
+        verified.historical_authority_receipt(&digest('0')),
+        Err(WriterLeaseError::ZeroEvidenceDigest)
+    );
+
+    let mut duplicated = fake.export_snapshot(&project).expect("released snapshot");
+    let duplicate = array_field_mut(&mut duplicated.payload, "transitions")[0].clone();
+    array_field_mut(&mut duplicated.payload, "transitions").push(duplicate);
+    assert_eq!(
+        verify_snapshot(&duplicated),
+        Err(WriterLeaseError::CorruptSnapshot),
+        "duplicate historical authority evidence must fail before lookup"
+    );
 }
 
 #[test]

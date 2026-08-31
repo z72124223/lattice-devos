@@ -22,6 +22,12 @@ struct PendingTurnItems {
     total_bytes: usize,
 }
 
+#[derive(Debug)]
+struct PendingTurnStarted {
+    thread_id: String,
+    turn_id: String,
+}
+
 /// Server identity returned by the required `initialize` response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InitializeEvidence {
@@ -37,6 +43,7 @@ pub enum SessionPhase {
     Initialize,
     ThreadStart,
     TurnStart,
+    TurnStarted,
     Terminal,
     Complete,
 }
@@ -69,6 +76,8 @@ pub enum SessionError {
     DuplicateResponseId(i64),
     ResponseBeforeRequest(i64),
     DuplicateRequest(SessionRequest),
+    TurnStartedBeforeTurnStart,
+    DuplicateTurnStarted,
     Rpc {
         request_id: i64,
         code: i64,
@@ -95,6 +104,8 @@ pub struct AppServerSession {
     initialize: Option<InitializeEvidence>,
     thread_id: Option<String>,
     turn_id: Option<String>,
+    pending_turn_started: Option<PendingTurnStarted>,
+    turn_started: bool,
     pending_items: Option<PendingTurnItems>,
     pending_terminal: Option<Value>,
     validated_terminal: Option<TurnOutcome>,
@@ -144,6 +155,7 @@ impl AppServerSession {
 
         let result = self.ingest_inner(message);
         if let Err(error) = &result {
+            self.pending_turn_started = None;
             self.pending_items = None;
             self.pending_terminal = None;
             self.failure = Some(error.clone());
@@ -203,10 +215,21 @@ impl AppServerSession {
         self.turn_id.as_deref()
     }
 
+    /// Returns true only after the exact retained thread and turn emitted a
+    /// `turn/started` notification whose status was `inProgress`.
+    #[must_use]
+    pub const fn turn_started(&self) -> bool {
+        self.turn_started
+    }
+
     /// Returns the terminal only when the complete session is unambiguous.
     #[must_use]
     pub fn outcome(&self) -> Option<&TurnOutcome> {
-        if self.initialize.is_some() && self.thread_id.is_some() && self.turn_id.is_some() {
+        if self.initialize.is_some()
+            && self.thread_id.is_some()
+            && self.turn_id.is_some()
+            && self.turn_started
+        {
             self.validated_terminal.as_ref()
         } else {
             None
@@ -222,6 +245,8 @@ impl AppServerSession {
             SessionPhase::ThreadStart
         } else if self.turn_id.is_none() {
             SessionPhase::TurnStart
+        } else if !self.turn_started {
+            SessionPhase::TurnStarted
         } else if self.validated_terminal.is_none() {
             SessionPhase::Terminal
         } else {
@@ -324,6 +349,7 @@ impl AppServerSession {
                 ))?;
 
         match method {
+            "turn/started" => self.ingest_turn_started(&message)?,
             "item/completed" => self.ingest_completed_item(&message)?,
             "turn/completed" => {
                 if !self.sent_requests[SessionRequest::TurnStart.index()] {
@@ -332,11 +358,84 @@ impl AppServerSession {
                 if self.pending_terminal.is_some() || self.validated_terminal.is_some() {
                     return Err(SessionError::DuplicateTerminal);
                 }
+                self.validate_terminal_identity(&message)?;
                 self.pending_terminal = Some(message);
             }
             _ => {}
         }
 
+        Ok(())
+    }
+
+    fn validate_terminal_identity(&self, message: &Value) -> Result<(), SessionError> {
+        let params = message.get("params").and_then(Value::as_object).ok_or(
+            SessionError::MalformedMessage("turn/completed params must be an object"),
+        )?;
+        let thread_id = notification_id(params.get("threadId"), "turn/completed threadId")?;
+        let turn_id = params
+            .get("turn")
+            .and_then(Value::as_object)
+            .and_then(|turn| turn.get("id"));
+        let turn_id = notification_id(turn_id, "turn/completed turn.id")?;
+        if self
+            .thread_id
+            .as_deref()
+            .is_some_and(|expected| expected != thread_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if self
+            .turn_id
+            .as_deref()
+            .is_some_and(|expected| expected != turn_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+        Ok(())
+    }
+
+    fn ingest_turn_started(&mut self, message: &Value) -> Result<(), SessionError> {
+        if !self.sent_requests[SessionRequest::TurnStart.index()] {
+            return Err(SessionError::TurnStartedBeforeTurnStart);
+        }
+        if self.pending_turn_started.is_some() || self.turn_started {
+            return Err(SessionError::DuplicateTurnStarted);
+        }
+        let params = message.get("params").and_then(Value::as_object).ok_or(
+            SessionError::MalformedMessage("turn/started params must be an object"),
+        )?;
+        let thread_id = notification_id(params.get("threadId"), "turn/started threadId")?;
+        let turn =
+            params
+                .get("turn")
+                .and_then(Value::as_object)
+                .ok_or(SessionError::MalformedMessage(
+                    "turn/started turn must be an object",
+                ))?;
+        let turn_id = notification_id(turn.get("id"), "turn/started turn.id")?;
+        if turn.get("status").and_then(Value::as_str) != Some("inProgress") {
+            return Err(SessionError::MalformedMessage(
+                "turn/started turn.status must be inProgress",
+            ));
+        }
+        if self
+            .thread_id
+            .as_deref()
+            .is_some_and(|expected| expected != thread_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if self
+            .turn_id
+            .as_deref()
+            .is_some_and(|expected| expected != turn_id)
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+        self.pending_turn_started = Some(PendingTurnStarted {
+            thread_id: thread_id.to_owned(),
+            turn_id: turn_id.to_owned(),
+        });
         Ok(())
     }
 
@@ -419,6 +518,27 @@ impl AppServerSession {
     }
 
     fn reconcile(&mut self) -> Result<Option<TurnOutcome>, SessionError> {
+        if let (Some(expected_thread_id), Some(started)) = (
+            self.thread_id.as_deref(),
+            self.pending_turn_started.as_ref(),
+        ) && started.thread_id != expected_thread_id
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedThread));
+        }
+        if let (Some(expected_turn_id), Some(started)) =
+            (self.turn_id.as_deref(), self.pending_turn_started.as_ref())
+            && started.turn_id != expected_turn_id
+        {
+            return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
+        }
+        if !self.turn_started
+            && self.thread_id.is_some()
+            && self.turn_id.is_some()
+            && self.pending_turn_started.is_some()
+        {
+            self.turn_started = true;
+            self.pending_turn_started = None;
+        }
         if let (Some(expected_thread_id), Some(pending)) =
             (self.thread_id.as_deref(), self.pending_items.as_ref())
             && pending.thread_id != expected_thread_id
@@ -432,7 +552,8 @@ impl AppServerSession {
             return Err(SessionError::Terminal(ProtocolError::UnexpectedTurn));
         }
 
-        if self.validated_terminal.is_none()
+        if self.turn_started
+            && self.validated_terminal.is_none()
             && let (Some(thread_id), Some(turn_id), Some(message)) = (
                 self.thread_id.as_deref(),
                 self.turn_id.as_deref(),
@@ -469,6 +590,7 @@ impl AppServerSession {
     }
 
     fn fail<T>(&mut self, error: SessionError) -> Result<T, SessionError> {
+        self.pending_turn_started = None;
         self.pending_items = None;
         self.pending_terminal = None;
         self.failure = Some(error.clone());
@@ -628,6 +750,16 @@ mod tests {
         json!({"id": 2, "result": {"turn": {"id": "turn_456"}}})
     }
 
+    fn turn_started() -> Value {
+        json!({
+            "method": "turn/started",
+            "params": {
+                "threadId": "thr_123",
+                "turn": {"id": "turn_456", "status": "inProgress"}
+            }
+        })
+    }
+
     fn terminal(status: &str) -> Value {
         let items = if status == "completed" {
             json!([{
@@ -715,11 +847,63 @@ mod tests {
     }
 
     #[test]
+    fn exact_turn_started_is_required_before_terminal_completion() {
+        let mut session = sent_session();
+        session
+            .ingest(initialize_response())
+            .expect("initialize response is valid");
+        session
+            .ingest(thread_response())
+            .expect("thread response is valid");
+        session
+            .ingest(turn_response())
+            .expect("turn response is valid");
+        ingest_completed_delivery_items(&mut session);
+
+        assert_eq!(session.ingest(terminal("completed")), Ok(None));
+        assert_eq!(session.phase(), SessionPhase::TurnStarted);
+        assert!(!session.turn_started());
+
+        let outcome = session
+            .ingest(turn_started())
+            .expect("exact started evidence is valid")
+            .expect("terminal can reconcile only after exact start");
+        assert_eq!(outcome.status, TurnStatus::Completed);
+        assert!(session.turn_started());
+    }
+
+    #[test]
+    fn foreign_or_non_running_turn_started_fails_closed() {
+        for (field, value) in [
+            ("threadId", "foreign-thread"),
+            ("turn.id", "foreign-turn"),
+            ("turn.status", "completed"),
+        ] {
+            let mut session = sent_session();
+            session
+                .ingest(thread_response())
+                .expect("thread response is valid");
+            session
+                .ingest(turn_response())
+                .expect("turn response is valid");
+            let mut started = turn_started();
+            match field {
+                "threadId" => started["params"]["threadId"] = json!(value),
+                "turn.id" => started["params"]["turn"]["id"] = json!(value),
+                "turn.status" => started["params"]["turn"]["status"] = json!(value),
+                _ => unreachable!(),
+            }
+            assert!(session.ingest(started).is_err(), "{field} must be exact");
+        }
+    }
+
+    #[test]
     fn demultiplexes_responses_and_notifications_in_any_order() {
         let mut session = sent_session();
 
         ingest_completed_delivery_items(&mut session);
         assert_eq!(session.ingest(terminal("completed")), Ok(None));
+        assert_eq!(session.ingest(turn_started()), Ok(None));
         assert_eq!(session.ingest(turn_response()), Ok(None));
         assert_eq!(session.ingest(initialize_response()), Ok(None));
         let outcome = session
@@ -762,6 +946,9 @@ mod tests {
         session
             .ingest(turn_response())
             .expect("turn response is valid");
+        session
+            .ingest(turn_started())
+            .expect("exact turn start is valid");
         ingest_completed_delivery_items(&mut session);
         let mut terminal = terminal("completed");
         terminal["params"]["turn"]["items"] = json!([]);
@@ -816,6 +1003,8 @@ mod tests {
             .expect("thread response is valid");
         late.ingest(turn_response())
             .expect("turn response is valid");
+        late.ingest(turn_started())
+            .expect("exact turn start is valid");
         ingest_completed_delivery_items(&mut late);
         late.ingest(terminal("completed"))
             .expect("terminal is valid")
@@ -936,6 +1125,9 @@ mod tests {
             session
                 .ingest(turn_response())
                 .expect("turn response is valid");
+            session
+                .ingest(turn_started())
+                .expect("exact turn start is valid");
             let outcome = session
                 .ingest(terminal(status))
                 .expect("terminal notification is valid")
@@ -984,6 +1176,9 @@ mod tests {
         incomplete
             .ingest(turn_response())
             .expect("turn response is valid");
+        incomplete
+            .ingest(turn_started())
+            .expect("exact turn start is valid");
         assert_eq!(
             incomplete.finish_eof(),
             Err(SessionError::UnexpectedEof(SessionPhase::Terminal))
@@ -999,6 +1194,9 @@ mod tests {
         complete
             .ingest(turn_response())
             .expect("turn response is valid");
+        complete
+            .ingest(turn_started())
+            .expect("exact turn start is valid");
         ingest_completed_delivery_items(&mut complete);
         complete
             .ingest(terminal("completed"))

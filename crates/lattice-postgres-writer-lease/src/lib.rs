@@ -12,9 +12,9 @@ mod setup;
 pub use adapter::PostgresWriterLease;
 pub use setup::{
     ExtensionApplyOutcome, ExtensionSetupError, ExtensionSetupErrorKind, ExtensionTarget,
-    V3BootstrapProfile, V3ExtensionTarget, V4ExtensionTarget, apply_extension, apply_v3_extension,
-    apply_v4_extension, inspect_v3_bootstrap_profile, rebind_existing_v3_extension,
-    rebind_v3_extension, verify_extension,
+    V3BootstrapProfile, V3ExtensionTarget, V4ExtensionTarget, V5ExtensionTarget, apply_extension,
+    apply_v3_extension, apply_v4_extension, apply_v5_extension, inspect_v3_bootstrap_profile,
+    rebind_existing_v3_extension, rebind_v3_extension, verify_extension,
 };
 
 /// Fixed extension identity.
@@ -33,18 +33,23 @@ pub const WRITER_LEASE_V3_REBIND_PATH: &str = "db/extensions/writer-lease/v3-reb
 pub const WRITER_LEASE_V4_EXTENSION_PATH: &str = "db/extensions/writer-lease/v4.sql";
 /// Repository-relative location of the fixed Writer-owned v4 rebind boundary.
 pub const WRITER_LEASE_V4_REBIND_PATH: &str = "db/extensions/writer-lease/v4-rebind.sql";
+/// Repository-relative location of the append-only Writer v5 process-handoff profile.
+pub const WRITER_LEASE_V5_EXTENSION_PATH: &str = "db/extensions/writer-lease/v5.sql";
 /// Physical extension schema version.
 pub const WRITER_LEASE_EXTENSION_SCHEMA_VERSION: u16 = 2;
 /// Physical v3 bridge schema version.
 pub const WRITER_LEASE_V3_EXTENSION_SCHEMA_VERSION: u16 = 3;
 /// Physical v4 bridge schema version.
 pub const WRITER_LEASE_V4_EXTENSION_SCHEMA_VERSION: u16 = 4;
+/// Physical Writer v5 process-handoff schema version.
+pub const WRITER_LEASE_V5_EXTENSION_SCHEMA_VERSION: u16 = 5;
 const V1_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v1.sql");
 const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v2.sql");
 const V3_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v3.sql");
 const V3_REBIND_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v3-rebind.sql");
 const V4_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v4.sql");
 const V4_REBIND_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v4-rebind.sql");
+const V5_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v5.sql");
 const EXPECTED_V1_EXTENSION_SQL_BYTES: usize = 44_366;
 const EXPECTED_V1_EXTENSION_SQL_SHA256: &str =
     "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
@@ -75,6 +80,11 @@ const EXPECTED_V4_REBIND_SQL_SHA256: &str =
     "67e5f8830877f85ebc5e12a478ea5e5e807496c568da8332d76b6de9e05752b6";
 const EXPECTED_V4_REBIND_MANIFEST_SHA256: &str =
     "21568a392427659285e8077609cf6685fd0b24a4662ea299d9465310905bd547";
+const EXPECTED_V5_EXTENSION_SQL_BYTES: usize = 20_740;
+const EXPECTED_V5_EXTENSION_SQL_SHA256: &str =
+    "c8193b47ef764d54a445a3f481331f642d0ce67b3a148c7c00fb3ca26d7ad12a";
+const EXPECTED_V5_EXTENSION_MANIFEST_SHA256: &str =
+    "354aa40bc2ed30b7500cffea3a9227d94b766d150798824e39225cf664cca5ad";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-writer-lease.extension-manifest.v1";
 
 /// Exact embedded-extension identity failure.
@@ -236,6 +246,23 @@ pub fn verify_embedded_v4_rebind_manifest()
         EXPECTED_V4_REBIND_SQL_BYTES,
         EXPECTED_V4_REBIND_SQL_SHA256,
         EXPECTED_V4_REBIND_MANIFEST_SHA256,
+    )
+}
+
+/// Verifies the append-only Writer v5 process-handoff bytes and identity.
+///
+/// # Errors
+///
+/// Returns a typed failure for any byte, hash, path, or identity drift.
+pub fn verify_embedded_v5_extension_manifest()
+-> Result<ExtensionManifestEvidence, ExtensionManifestError> {
+    verify_manifest(
+        WRITER_LEASE_V5_EXTENSION_PATH,
+        WRITER_LEASE_V5_EXTENSION_SCHEMA_VERSION,
+        V5_EXTENSION_SQL,
+        EXPECTED_V5_EXTENSION_SQL_BYTES,
+        EXPECTED_V5_EXTENSION_SQL_SHA256,
+        EXPECTED_V5_EXTENSION_MANIFEST_SHA256,
     )
 }
 
@@ -414,6 +441,54 @@ pub fn verify_writer_lease_v4_transition(
             Ok(WriterLeaseV4BridgeState::Current)
         }
         (_, 6..=7) => Err(WriterLeaseV3BridgeError::HistoryMismatch),
+        _ => Err(WriterLeaseV3BridgeError::UnsupportedGeneration),
+    }
+}
+
+/// Closed offline state for the immutable Writer-v4/Store-v7 predecessor and
+/// the append-only Writer-v5 process-handoff successor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterLeaseV5State {
+    V4Current,
+    Current,
+}
+
+impl WriterLeaseV5State {
+    #[must_use]
+    pub const fn runtime_function_count(self) -> u8 {
+        7
+    }
+}
+
+/// Verifies one exact same-generation Writer-v4 to Writer-v5 transition or
+/// exact v5 retry.
+///
+/// # Errors
+///
+/// Rejects future generations, reordered history, and skipped v4 lineage.
+pub fn verify_writer_lease_v5_transition(
+    state: WriterLeaseV5State,
+    global_schema_version: u16,
+    ledger_shape: &str,
+) -> Result<WriterLeaseV5State, WriterLeaseV3BridgeError> {
+    const V4_CURRENT: [&str; 3] = [
+        "1:INSTALLED,2:UPGRADED,3:REBOUND",
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND",
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND,6:UPGRADED,7:REBOUND",
+    ];
+    const V5_CURRENT: [&str; 3] = [
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED",
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND,6:UPGRADED",
+        "1:INSTALLED,2:UPGRADED,3:REBOUND,4:UPGRADED,5:REBOUND,6:UPGRADED,7:REBOUND,8:UPGRADED",
+    ];
+    match (state, global_schema_version) {
+        (WriterLeaseV5State::V4Current, 7) if V4_CURRENT.contains(&ledger_shape) => {
+            Ok(WriterLeaseV5State::Current)
+        }
+        (WriterLeaseV5State::Current, 7) if V5_CURRENT.contains(&ledger_shape) => {
+            Ok(WriterLeaseV5State::Current)
+        }
+        (_, 7) => Err(WriterLeaseV3BridgeError::HistoryMismatch),
         _ => Err(WriterLeaseV3BridgeError::UnsupportedGeneration),
     }
 }

@@ -15,11 +15,11 @@ use crate::matrix::{
 };
 use crate::{
     AgentActionGate, AgentRole, ApprovalKind, ApprovalSubject, Boundary, DecisionKind,
-    DecisionStage, DecisionSubject, DeploymentIntent, ExecutionGate, GuardianSagaOutcome,
-    MemoryKind, MemoryPromotionGate, MergeGate, MergeTarget, NetworkIntent,
-    NormalRecoveryResolution, PolicyDecision, PolicyInputFailure, PolicyReason, ProjectClass,
-    ProtectedChangeClass, ProtectedChangeGate, ProtectedReleaseSubject, RecoveryGate,
-    RecoveryOwner, RecoverySubject, RuntimeAdmission, UpgradeGate, UpgradeStage,
+    DecisionStage, DecisionSubject, DeploymentIntent, ExecutionGate, ExecutionGateDecisionEvidence,
+    GuardianSagaOutcome, ManagedExecutionBindingFact, MemoryKind, MemoryPromotionGate, MergeGate,
+    MergeTarget, NetworkIntent, NormalRecoveryResolution, PolicyDecision, PolicyInputFailure,
+    PolicyReason, ProjectClass, ProtectedChangeClass, ProtectedChangeGate, ProtectedReleaseSubject,
+    RecoveryGate, RecoveryOwner, RecoverySubject, RuntimeAdmission, UpgradeGate, UpgradeStage,
     WorkerAdmissionGate,
 };
 
@@ -37,6 +37,101 @@ pub fn evaluate(subject: DecisionSubject<'_>) -> PolicyDecision {
         DecisionSubject::Recovery(gate) => evaluate_recovery(&gate),
         DecisionSubject::ProtectedChange(gate) => evaluate_protected_change(&gate),
     }
+}
+
+/// Evaluates the existing execution subject and captures the exact owned input
+/// facts in one opaque result. Downstream approval code can inspect this
+/// evidence but cannot construct or substitute it.
+#[must_use]
+pub fn evaluate_execution_gate_with_evidence(
+    gate: ExecutionGate<'_>,
+) -> ExecutionGateDecisionEvidence {
+    let task_spec_digest = gate
+        .context
+        .task_spec
+        .and_then(|task_spec| ContentDigest::from_sha256(task_spec.spec_hash().to_hex()).ok());
+    let (project_binding, project_receipt, current_project_head) = gate
+        .context
+        .project
+        .as_ref()
+        .map_or((None, None, None), |project| {
+            (
+                Some(project.binding.clone()),
+                Some(project.receipt.clone()),
+                Some(project.current_head.clone()),
+            )
+        });
+    let state = gate.context.state;
+    let runtime_admission = gate.context.runtime_admission;
+    let decision = evaluate(DecisionSubject::ExecutionGate(gate));
+    ExecutionGateDecisionEvidence::new(
+        decision,
+        task_spec_digest,
+        project_binding,
+        project_receipt,
+        current_project_head,
+        None,
+        state,
+        runtime_admission,
+    )
+}
+
+/// Evaluates a managed execution gate and seals the exact immutable
+/// Task-Ledger execution binding into the returned opaque evidence.
+///
+/// A binding whose Task Spec does not equal the actual gate subject (or which
+/// contains a zero digest) is denied before the ordinary execution decision.
+#[must_use]
+pub fn evaluate_managed_execution_gate_with_evidence(
+    gate: ExecutionGate<'_>,
+    binding: ManagedExecutionBindingFact,
+) -> ExecutionGateDecisionEvidence {
+    let task_spec_digest = gate
+        .context
+        .task_spec
+        .and_then(|task_spec| ContentDigest::from_sha256(task_spec.spec_hash().to_hex()).ok());
+    let (project_binding, project_receipt, current_project_head) = gate
+        .context
+        .project
+        .as_ref()
+        .map_or((None, None, None), |project| {
+            (
+                Some(project.binding.clone()),
+                Some(project.receipt.clone()),
+                Some(project.current_head.clone()),
+            )
+        });
+    let state = gate.context.state;
+    let runtime_admission = gate.context.runtime_admission;
+    let binding_is_exact = task_spec_digest.as_ref() == Some(&binding.task_spec_digest)
+        && [
+            &binding.task_ref,
+            &binding.successor_stream_id,
+            &binding.task_spec_digest,
+            &binding.approval_subject_digest,
+            &binding.budget_digest,
+        ]
+        .into_iter()
+        .all(|digest| !digest.as_str().bytes().all(|byte| byte == b'0'));
+    let decision = if binding_is_exact {
+        evaluate(DecisionSubject::ExecutionGate(gate))
+    } else {
+        PolicyDecision::deny(
+            DecisionKind::ExecutionGate,
+            PolicyReason::InvalidDecisionSubject,
+            DecisionStage::Input,
+        )
+    };
+    ExecutionGateDecisionEvidence::new(
+        decision,
+        task_spec_digest,
+        project_binding,
+        project_receipt,
+        current_project_head,
+        Some(binding),
+        state,
+        runtime_admission,
+    )
 }
 
 fn evaluate_invalid(failure: PolicyInputFailure) -> PolicyDecision {

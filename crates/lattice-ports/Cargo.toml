@@ -6,9 +6,11 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lattice-artifact-store = { path = "../lattice-artifact-store" }
 lattice-contracts = { path = "../lattice-contracts" }
 lattice-foreman-state = { path = "../lattice-foreman-state" }
 lattice-task-domain = { path = "../lattice-task-domain" }
+lattice-task-ledger = { path = "../lattice-task-ledger" }
 
 [lints]
 workspace = true

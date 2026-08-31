@@ -349,6 +349,7 @@ fn map_process_error(error: AppServerRunError) -> DeliveryPortError {
         | AppServerRunErrorKind::CodexHomeOwnershipMissing
         | AppServerRunErrorKind::CodexHomeOverlap
         | AppServerRunErrorKind::AmbientCodexHomeDenied
+        | AppServerRunErrorKind::PlaintextCodexAuthDenied
         | AppServerRunErrorKind::InvalidWorkingDirectory
         | AppServerRunErrorKind::InvalidPrompt
         | AppServerRunErrorKind::InvalidTimeout
@@ -410,7 +411,8 @@ const fn process_error_kind(kind: AppServerRunErrorKind) -> PortErrorKind {
         | AppServerRunErrorKind::PinnedResourcesDigestMismatch => PortErrorKind::CapabilityMismatch,
         AppServerRunErrorKind::CodexHomeOwnershipMissing
         | AppServerRunErrorKind::CodexHomeOverlap
-        | AppServerRunErrorKind::AmbientCodexHomeDenied => PortErrorKind::Denied,
+        | AppServerRunErrorKind::AmbientCodexHomeDenied
+        | AppServerRunErrorKind::PlaintextCodexAuthDenied => PortErrorKind::Denied,
         AppServerRunErrorKind::FsSandboxHelperTimeout | AppServerRunErrorKind::Timeout => {
             PortErrorKind::Timeout
         }
@@ -440,6 +442,9 @@ const fn process_error_code(kind: AppServerRunErrorKind) -> &'static str {
         AppServerRunErrorKind::CodexHomeOverlap => "CODEX_APP_SERVER_CODEX_HOME_OVERLAP",
         AppServerRunErrorKind::AmbientCodexHomeDenied => {
             "CODEX_APP_SERVER_AMBIENT_CODEX_HOME_DENIED"
+        }
+        AppServerRunErrorKind::PlaintextCodexAuthDenied => {
+            "CODEX_APP_SERVER_PLAINTEXT_CODEX_AUTH_DENIED"
         }
         AppServerRunErrorKind::InvalidWorkingDirectory => {
             "CODEX_APP_SERVER_INVALID_WORKING_DIRECTORY"

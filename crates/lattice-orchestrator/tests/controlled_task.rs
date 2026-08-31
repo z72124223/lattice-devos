@@ -281,6 +281,7 @@ impl WriterLeaseRepository for FakeLeaseRepository {
             }
             WriterLeaseRepositoryCommand::Heartbeat(_)
             | WriterLeaseRepositoryCommand::MarkSuspect(_)
+            | WriterLeaseRepositoryCommand::ProcessHandoff(_)
             | WriterLeaseRepositoryCommand::Revoke(_) => Err(WriterLeaseRepositoryError::new(
                 WriterLeaseRepositoryErrorKind::Unavailable,
             )),

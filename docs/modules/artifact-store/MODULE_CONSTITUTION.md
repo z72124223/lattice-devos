@@ -1,10 +1,10 @@
 ---
 module_id: artifact-store
 name: Artifact Store
-version: 1.0
+version: 1.1
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-01
+last_reviewed: 2026-08-26
 ---
 
 ## Mission
@@ -15,6 +15,8 @@ current-head, retention, durable-delete-claim, unknown-outcome reconciliation,
 and safe-sweep semantics; issue fixed-owner receipts through a deterministic
 non-durable fake; and define the one semantic core later reused by PostgreSQL
 metadata and an owned-root filesystem blob adapter.
+Version 1.1 additionally owns the small immutable, bounded managed-foreman
+evidence object used by the PostgreSQL foreman extension.
 
 ## Non-Goals
 
@@ -42,6 +44,14 @@ metadata and an owned-root filesystem blob adapter.
 - Fixed `lattice-artifact-store` receipt issuance and independent available
   current-head projection.
 - Typed reference-owner retain/release authority binding.
+- Exact managed-foreman evidence bytes, closed evidence kind, sanitized
+  producer metadata, direct content digest, and separate canonical descriptor
+  digest. This object grants no truth, approval, task-state, or completion
+  authority.
+- A managed-worktree pre-dispatch baseline reuses `GIT_SNAPSHOT` with the
+  closed `lattice.managed-worktree-baseline/1.0` payload schema. Its content
+  digest is the immutable attempt `worktree_ref`; attempt-specific descriptor
+  metadata cannot redefine that baseline.
 - Pure exact sweep planning, delete-claim/token, known-failure,
   unknown-outcome/reconciliation, and fake lifecycle application.
 
@@ -77,6 +87,8 @@ adapter owns byte staging/read/unlink mechanics only.
 - Export and verify a strict untrusted raw aggregate snapshot.
 - Export and compare a validated trusted checkpoint for rollback-sensitive
   restore.
+- Construct and strictly replay-verify a maximum-1-MiB managed-foreman evidence
+  object while keeping raw bytes out of `Debug` and descriptor bytes.
 
 ## Invariants
 
@@ -162,6 +174,13 @@ adapter owns byte staging/read/unlink mechanics only.
 23. Raw artifact bytes never enter command receipts, metadata snapshots,
     errors, or `Debug`; the fake byte backend is separate from replay metadata.
 24. The pure owner performs no I/O and exposes no real deletion operation.
+25. Managed-foreman evidence uses a closed kind, exact task/project/attempt
+    binding, separate byte and descriptor hash domains, and rejects common
+    credential-bearing content. PostgreSQL may retain its verified bytes and
+    descriptor only; an unverified row cannot become task evidence.
+26. The pre-dispatch baseline is recorded after atomic attempt claim and before
+    the first provider thread RPC. Retry may create a new attempt descriptor,
+    but its baseline bytes/content digest must equal the first durable value.
 
 ## Allowed Dependencies
 
@@ -224,6 +243,8 @@ are documented gates now; TASK-016 does not claim them machine-enforced.
 | Replay/rollback | raw corruption, denied-tail chain, and trusted-checkpoint matrix | Engineering | yes |
 | Dependency/no-I/O/secrets | Cargo tree plus forbidden source and raw-byte leak scans | Architecture review | yes |
 | Full verification | workspace format, lint, Rust and preserved Node tests | Engineering | yes |
+| Managed foreman evidence | byte/descriptor separation, size boundary, secret-shaped rejection, tamper replay, and `Debug` redaction | Security review | yes |
+| Managed worktree baseline | predispatch ordering, content-bound `worktree_ref`, exact retry, and control/index drift tests | Security review | yes |
 
 ## Change Policy
 
@@ -238,3 +259,4 @@ review, and responsible-user authorization.
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
 | 1.0 | 2026-07-30 | SPEC-002 v12, ADR-014, TASK-016 | Pure project-scoped artifact owner, deterministic fake, provenance/reference receipt/head, replay, and sweep plan split | User MVP-3 execution directive |
+| 1.1 | 2026-08-26 | SPEC-011, ADR-028 | Add bounded immutable managed-foreman evidence and strict rehydration without granting workflow authority | Delegated product owner |

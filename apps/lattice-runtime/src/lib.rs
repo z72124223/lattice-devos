@@ -4,6 +4,16 @@ pub mod composition;
 pub mod coordination;
 pub mod delivery_ledger;
 pub mod git_delivery;
+mod managed_execution_environment;
+mod managed_file_identity;
+mod managed_foreman_service;
+mod managed_process_observer;
+pub mod managed_repository;
+pub mod managed_semantic_reviewer;
+pub mod managed_task_spec;
+pub mod managed_verifier;
+mod managed_worker_adapter;
+mod managed_worktree_adapter;
 pub mod mcp;
 pub mod mcp_budget;
 pub(crate) mod project_bridge;
@@ -550,6 +560,8 @@ mod tests {
     #[test]
     fn scripted_fixture_tracks_prompt_and_completed_tool_evidence() {
         let fixture = include_str!("fixtures/task032-scripted-codex.ps1");
+        assert!(fixture.contains("$threads = [object[]]@()"));
+        assert!(!fixture.contains("$threads = if ($null -eq $state)"));
         let prompt_sha256 = sha256_hex(DELIVERY_PROMPT.as_bytes());
         assert!(
             fixture.contains(&format!("$expectedPromptSha256 = '{prompt_sha256}'")),
@@ -633,7 +645,7 @@ mod tests {
                 notification
                     .get("method")
                     .and_then(serde_json::Value::as_str),
-                Some("item/completed" | "turn/completed")
+                Some("turn/started" | "item/completed" | "turn/completed")
             )
         }) {
             if let Some(completed) = session

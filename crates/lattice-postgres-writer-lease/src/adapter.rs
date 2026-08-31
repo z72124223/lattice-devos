@@ -1,12 +1,13 @@
 use lattice_contracts::{
     ContentDigest, DaemonEpoch, ProjectId, RuntimeAdmissionMode, RuntimeKind, StoreAuthorityHead,
-    WriterLeaseAuthorityHead,
+    WriterLeaseAuthorityHead, WriterLeaseAuthorityReceipt,
 };
 use lattice_writer_lease::{
     AcquireClaim, AcquireCommand, CommandOutcome, HeartbeatCommand, LeaseObservation,
-    MarkSuspectCommand, ReleaseCommand, RevokeCommand, UntrustedWriterLeaseSnapshot,
-    VerifiedWriterLeaseAggregate, WriterLeaseCheckpoint, WriterLeaseCommand,
-    WriterLeaseCommandReceipt, WriterLeaseCurrentAuthority, WriterLeaseProjectEvidence,
+    MarkSuspectCommand, ProcessHandoffCommand, ReleaseCommand, RevokeCommand,
+    UntrustedWriterLeaseSnapshot, VerifiedWriterLeaseAggregate, WriterLeaseAcquireRequest,
+    WriterLeaseCheckpoint, WriterLeaseCommand, WriterLeaseCommandReceipt,
+    WriterLeaseCurrentAuthority, WriterLeaseProjectEvidence, WriterLeaseReleaseRequest,
     WriterLeaseRepository, WriterLeaseRepositoryCommand, WriterLeaseRepositoryError,
     WriterLeaseRepositoryErrorKind, apply_plan, plan_command, verify_snapshot_against_checkpoint,
 };
@@ -15,10 +16,10 @@ use postgres::{Client, IsolationLevel, Row, Transaction};
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 
-use crate::setup::{ExtensionTarget, V3ExtensionTarget, V4ExtensionTarget};
+use crate::setup::{ExtensionTarget, V3ExtensionTarget, V4ExtensionTarget, V5ExtensionTarget};
 use crate::{
     sha256_bytes, verify_embedded_extension_manifest, verify_embedded_v3_extension_manifest,
-    verify_embedded_v4_extension_manifest,
+    verify_embedded_v4_extension_manifest, verify_embedded_v5_extension_manifest,
 };
 
 const MAX_SERIALIZATION_RETRIES: usize = 3;
@@ -34,6 +35,10 @@ const BIND_RUNTIME_V4_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_bind_runtime_v4($1,$2,$3,$4,$5,$6,$7,$8)";
 const LOAD_FOR_UPDATE_V4_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_for_update_v4($1,$2,$3,$4,$5)";
+const BIND_RUNTIME_V5_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_bind_runtime_v5($1,$2,$3,$4,$5,$6,$7,$8)";
+const LOAD_FOR_UPDATE_V5_SQL: &str =
+    "SELECT * FROM writer_lease.writer_lease_load_for_update_v5($1,$2,$3,$4,$5)";
 const LOAD_COMMANDS_SQL: &str = "SELECT * FROM writer_lease.writer_lease_load_commands_v1($1)";
 const LOAD_TRANSITIONS_SQL: &str =
     "SELECT * FROM writer_lease.writer_lease_load_transitions_v1($1)";
@@ -60,6 +65,7 @@ enum RuntimeProcedureProfile {
     V2,
     V3,
     V4,
+    V5,
 }
 
 impl RuntimeProcedureProfile {
@@ -68,6 +74,7 @@ impl RuntimeProcedureProfile {
             Self::V2 => BIND_RUNTIME_SQL,
             Self::V3 => BIND_RUNTIME_V3_SQL,
             Self::V4 => BIND_RUNTIME_V4_SQL,
+            Self::V5 => BIND_RUNTIME_V5_SQL,
         }
     }
 
@@ -76,6 +83,7 @@ impl RuntimeProcedureProfile {
             Self::V2 => LOAD_FOR_UPDATE_SQL,
             Self::V3 => LOAD_FOR_UPDATE_V3_SQL,
             Self::V4 => LOAD_FOR_UPDATE_V4_SQL,
+            Self::V5 => LOAD_FOR_UPDATE_V5_SQL,
         }
     }
 }
@@ -162,6 +170,34 @@ impl PostgresWriterLease {
             store_authority,
             lease_ttl_seconds,
             RuntimeProcedureProfile::V4,
+            manifest.sql_sha256(),
+            manifest.manifest_sha256(),
+        )
+    }
+
+    /// Constructs the exact schema-v7 adapter through the append-only Writer
+    /// v5 process-handoff procedure surface.
+    ///
+    /// # Errors
+    ///
+    /// Rejects any target, authority, manifest, or database profile mismatch.
+    pub fn new_v5_v7(
+        client: Client,
+        target: &V5ExtensionTarget,
+        store_authority: &StoreAuthorityHead,
+        lease_ttl_seconds: u32,
+    ) -> Result<Self, WriterLeaseRepositoryError> {
+        let runtime_target = target
+            .successor()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        let manifest = verify_embedded_v5_extension_manifest()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Corrupt))?;
+        Self::new_with_profile(
+            client,
+            runtime_target,
+            store_authority,
+            lease_ttl_seconds,
+            RuntimeProcedureProfile::V5,
             manifest.sql_sha256(),
             manifest.manifest_sha256(),
         )
@@ -294,21 +330,243 @@ impl PostgresWriterLease {
         Ok(evidence)
     }
 
-    fn execute_once(
+    /// Replays the complete owner history and returns one exact historical
+    /// authority receipt by digest, even when the aggregate is now released.
+    ///
+    /// # Errors
+    ///
+    /// Physical/snapshot tamper, duplicate authority evidence, a zero digest,
+    /// or unavailable owner storage fails closed.
+    pub fn inspect_historical_authority(
         &mut self,
-        repository_command: &WriterLeaseRepositoryCommand,
-    ) -> Result<WriterLeaseCommandReceipt, AdapterFailure> {
-        let project_id = repository_command.project_id();
-        let repository_request_bytes = repository_command
-            .canonical_bytes()
-            .map_err(domain_failure)?;
-        let repository_request_sha256 = sha256_bytes(&repository_request_bytes);
-        let vacant = VerifiedWriterLeaseAggregate::vacant(project_id.clone());
-        let vacant_bytes = vacant.export_canonical_bytes().map_err(domain_failure)?;
-        let vacant_checkpoint = vacant.checkpoint().map_err(domain_failure)?;
-        let vacant_snapshot_digest = digest_bytes(vacant_checkpoint.snapshot_digest())?;
-        let vacant_bytes_sha256 = sha256_bytes(&vacant_bytes);
+        project_id: &ProjectId,
+        receipt_digest: &ContentDigest,
+    ) -> Result<Option<WriterLeaseAuthorityReceipt>, WriterLeaseRepositoryError> {
+        validate_historical_receipt_digest(receipt_digest)?;
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        enter_runtime_reader(&mut transaction).map_err(|failure| failure.error)?;
+        let receipt = match Self::load_current_in(&mut transaction, project_id)
+            .map_err(|failure| failure.error)?
+        {
+            None => None,
+            Some(loaded) => loaded
+                .aggregate
+                .historical_authority_receipt(receipt_digest)
+                .map_err(|error| domain_failure(error).error)?,
+        };
+        transaction
+            .commit()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        Ok(receipt)
+    }
 
+    /// Reconstructs one exact applied release intent from replay-verified
+    /// Writer history. This is used only to finish a predecessor release that
+    /// committed before a process crash; absence is distinct from corruption.
+    ///
+    /// # Errors
+    ///
+    /// Duplicate, denied, non-release, malformed, or physically inconsistent
+    /// history fails closed.
+    pub fn replay_applied_release_request(
+        &mut self,
+        project_id: &ProjectId,
+        command_id: &str,
+    ) -> Result<Option<WriterLeaseReleaseRequest>, WriterLeaseRepositoryError> {
+        if command_id.is_empty() || command_id.len() > 128 {
+            return Err(repository_error(
+                WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+            ));
+        }
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        enter_runtime_reader(&mut transaction).map_err(|failure| failure.error)?;
+        let loaded =
+            Self::load_current_in(&mut transaction, project_id).map_err(|failure| failure.error)?;
+        let request = match loaded {
+            None => None,
+            Some(loaded) => {
+                let matches = loaded
+                    .aggregate
+                    .command_receipts()
+                    .iter()
+                    .filter(|receipt| receipt.request.command_id() == command_id)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [] => None,
+                    [receipt] => {
+                        let lattice_writer_lease::WriterLeaseCommand::Release(release) =
+                            &receipt.request
+                        else {
+                            return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                        };
+                        if receipt.outcome != CommandOutcome::Applied
+                            || receipt.before.as_ref() != Some(&release.expected_head)
+                            || receipt.after.is_some()
+                            || &release.project_id != project_id
+                        {
+                            return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                        }
+                        Some(WriterLeaseReleaseRequest {
+                            command_id: command_id.to_owned(),
+                            project_id: project_id.clone(),
+                            expected_head: release.expected_head.clone(),
+                        })
+                    }
+                    _ => {
+                        return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                    }
+                }
+            }
+        };
+        transaction
+            .commit()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        Ok(request)
+    }
+
+    /// Reconstructs one exact applied acquire intent from replay-verified
+    /// Writer history so a fresh process can retry the original holder
+    /// identity instead of substituting its new PID/start observation.
+    ///
+    /// # Errors
+    ///
+    /// Duplicate, denied, non-acquire, malformed, or physically inconsistent
+    /// history fails closed.
+    pub fn replay_applied_acquire_request(
+        &mut self,
+        project_id: &ProjectId,
+        command_id: &str,
+    ) -> Result<Option<WriterLeaseAcquireRequest>, WriterLeaseRepositoryError> {
+        if command_id.is_empty() || command_id.len() > 128 {
+            return Err(repository_error(
+                WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+            ));
+        }
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        enter_runtime_reader(&mut transaction).map_err(|failure| failure.error)?;
+        let loaded =
+            Self::load_current_in(&mut transaction, project_id).map_err(|failure| failure.error)?;
+        let request = match loaded {
+            None => None,
+            Some(loaded) => {
+                let matches = loaded
+                    .aggregate
+                    .command_receipts()
+                    .iter()
+                    .filter(|receipt| receipt.request.command_id() == command_id)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [] => None,
+                    [receipt] => {
+                        let lattice_writer_lease::WriterLeaseCommand::Acquire(acquire) =
+                            &receipt.request
+                        else {
+                            return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                        };
+                        if receipt.outcome != CommandOutcome::Applied
+                            || receipt.before != acquire.expected_head
+                            || receipt.after.is_none()
+                            || &acquire.claim.project_id != project_id
+                        {
+                            return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                        }
+                        Some(WriterLeaseAcquireRequest {
+                            command_id: command_id.to_owned(),
+                            expected_head: acquire.expected_head.clone(),
+                            project_id: acquire.claim.project_id.clone(),
+                            project_snapshot_id: acquire.claim.project_snapshot_id.clone(),
+                            task_id: acquire.claim.task_id.clone(),
+                            task_revision: acquire.claim.task_revision.clone(),
+                            task_spec_digest: acquire.claim.task_spec_digest.clone(),
+                            attempt_id: acquire.claim.attempt_id.clone(),
+                            lease_id: acquire.claim.lease_id.clone(),
+                            lease_holder_id: acquire.claim.lease_holder_id.clone(),
+                            worktree_id: acquire.claim.worktree_id.clone(),
+                            holder_process_id: acquire.claim.holder_process_id,
+                            holder_process_start_identity: acquire
+                                .claim
+                                .holder_process_start_identity
+                                .clone(),
+                        })
+                    }
+                    _ => {
+                        return Err(repository_error(WriterLeaseRepositoryErrorKind::Corrupt));
+                    }
+                }
+            }
+        };
+        transaction
+            .commit()
+            .map_err(|_| repository_error(WriterLeaseRepositoryErrorKind::Unavailable))?;
+        Ok(request)
+    }
+
+    /// Atomically releases one exact retained Writer head and acquires its exact
+    /// successor. Both existing domain commands are planned and persisted in a
+    /// single serializable transaction, so no competing acquire can consume the
+    /// successor fence between the two operations. Exact retries reconcile both
+    /// command receipts before returning the retained successor head.
+    ///
+    /// # Errors
+    ///
+    /// Cross-project requests, a denied/substituted command, serialization
+    /// exhaustion, corrupt history, or an unknown commit outcome fail closed.
+    pub fn rotate_exact(
+        &mut self,
+        release: WriterLeaseReleaseRequest,
+        acquire: WriterLeaseAcquireRequest,
+    ) -> Result<WriterLeaseAuthorityHead, WriterLeaseRepositoryError> {
+        let release_command = WriterLeaseRepositoryCommand::Release(release);
+        let acquire_command = WriterLeaseRepositoryCommand::Acquire(acquire);
+        if release_command.project_id() != acquire_command.project_id() {
+            return Err(repository_error(
+                WriterLeaseRepositoryErrorKind::AuthorityMismatch,
+            ));
+        }
+        for attempt in 0..=MAX_SERIALIZATION_RETRIES {
+            match self.rotate_once(&release_command, &acquire_command) {
+                Ok(head) => return Ok(head),
+                Err(error) if error.retryable && attempt < MAX_SERIALIZATION_RETRIES => {}
+                Err(error) if error.retryable => {
+                    return Err(repository_error(
+                        WriterLeaseRepositoryErrorKind::SerializationExhausted,
+                    ));
+                }
+                Err(error) => return Err(error.error),
+            }
+        }
+        Err(repository_error(
+            WriterLeaseRepositoryErrorKind::SerializationExhausted,
+        ))
+    }
+
+    fn rotate_once(
+        &mut self,
+        release: &WriterLeaseRepositoryCommand,
+        acquire: &WriterLeaseRepositoryCommand,
+    ) -> Result<WriterLeaseAuthorityHead, AdapterFailure> {
+        let procedure_profile = self.procedure_profile;
+        let lease_ttl_seconds = self.lease_ttl_seconds;
+        let bound_daemon_instance_id = self.bound_daemon_instance_id.clone();
+        let bound_daemon_epoch = self.bound_daemon_epoch;
         let mut transaction = self
             .client
             .build_transaction()
@@ -316,47 +574,55 @@ impl PostgresWriterLease {
             .start()
             .map_err(database_failure)?;
         enter_runtime_writer(&mut transaction)?;
-        let row = transaction
-            .query_one(
-                self.procedure_profile.load_for_update_sql(),
-                &[
-                    &project_id.as_str(),
-                    &vacant_bytes,
-                    &vacant_bytes_sha256,
-                    &vacant_snapshot_digest,
-                    &repository_command.command_id(),
-                ],
-            )
-            .map_err(database_failure)?;
-        let loaded = LoadedAggregate::from_locked_row(&row, project_id)?;
-        verify_physical_history(&mut transaction, project_id, &loaded.aggregate)?;
-        if let Some(receipt) = exact_repository_retry(
-            repository_command,
-            &repository_request_bytes,
-            &repository_request_sha256,
-            &loaded,
-        )? {
-            transaction.commit().map_err(commit_failure)?;
-            return Ok(receipt);
-        }
-        loaded.assert_bound_daemon(&self.bound_daemon_instance_id, self.bound_daemon_epoch)?;
-        let command =
-            bind_live_command(repository_command.clone(), &loaded, self.lease_ttl_seconds)?;
-        let plan = plan_command(&loaded.aggregate, &command).map_err(domain_failure)?;
-        let receipt = plan.receipt().clone();
-        if plan.is_exact_retry() {
-            transaction.commit().map_err(commit_failure)?;
-            return Ok(receipt);
-        }
-
-        let next = apply_plan(&loaded.aggregate, plan).map_err(domain_failure)?;
-        persist_plan(
+        let released = execute_in_transaction(
             &mut transaction,
-            &loaded,
-            &next,
-            &receipt,
-            &repository_request_bytes,
-            &repository_request_sha256,
+            procedure_profile,
+            lease_ttl_seconds,
+            &bound_daemon_instance_id,
+            bound_daemon_epoch,
+            release,
+        )?;
+        if released.outcome != CommandOutcome::Applied || released.after.is_some() {
+            return Err(authority_failure());
+        }
+        let acquired = execute_in_transaction(
+            &mut transaction,
+            procedure_profile,
+            lease_ttl_seconds,
+            &bound_daemon_instance_id,
+            bound_daemon_epoch,
+            acquire,
+        )?;
+        let head = acquired
+            .after
+            .filter(|_| acquired.outcome == CommandOutcome::Applied)
+            .ok_or_else(authority_failure)?;
+        transaction.commit().map_err(commit_failure)?;
+        Ok(head)
+    }
+
+    fn execute_once(
+        &mut self,
+        repository_command: &WriterLeaseRepositoryCommand,
+    ) -> Result<WriterLeaseCommandReceipt, AdapterFailure> {
+        let procedure_profile = self.procedure_profile;
+        let lease_ttl_seconds = self.lease_ttl_seconds;
+        let bound_daemon_instance_id = self.bound_daemon_instance_id.clone();
+        let bound_daemon_epoch = self.bound_daemon_epoch;
+        let mut transaction = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .map_err(database_failure)?;
+        enter_runtime_writer(&mut transaction)?;
+        let receipt = execute_in_transaction(
+            &mut transaction,
+            procedure_profile,
+            lease_ttl_seconds,
+            &bound_daemon_instance_id,
+            bound_daemon_epoch,
+            repository_command,
         )?;
         transaction.commit().map_err(commit_failure)?;
         Ok(receipt)
@@ -379,6 +645,65 @@ impl PostgresWriterLease {
             _ => Err(corrupt_failure()),
         }
     }
+}
+
+fn execute_in_transaction(
+    transaction: &mut Transaction<'_>,
+    procedure_profile: RuntimeProcedureProfile,
+    lease_ttl_seconds: u32,
+    bound_daemon_instance_id: &str,
+    bound_daemon_epoch: DaemonEpoch,
+    repository_command: &WriterLeaseRepositoryCommand,
+) -> Result<WriterLeaseCommandReceipt, AdapterFailure> {
+    let project_id = repository_command.project_id();
+    let repository_request_bytes = repository_command
+        .canonical_bytes()
+        .map_err(domain_failure)?;
+    let repository_request_sha256 = sha256_bytes(&repository_request_bytes);
+    let vacant = VerifiedWriterLeaseAggregate::vacant(project_id.clone());
+    let vacant_bytes = vacant.export_canonical_bytes().map_err(domain_failure)?;
+    let vacant_checkpoint = vacant.checkpoint().map_err(domain_failure)?;
+    let vacant_snapshot_digest = digest_bytes(vacant_checkpoint.snapshot_digest())?;
+    let vacant_bytes_sha256 = sha256_bytes(&vacant_bytes);
+    let row = transaction
+        .query_one(
+            procedure_profile.load_for_update_sql(),
+            &[
+                &project_id.as_str(),
+                &vacant_bytes,
+                &vacant_bytes_sha256,
+                &vacant_snapshot_digest,
+                &repository_command.command_id(),
+            ],
+        )
+        .map_err(database_failure)?;
+    let loaded = LoadedAggregate::from_locked_row(&row, project_id)?;
+    verify_physical_history(transaction, project_id, &loaded.aggregate)?;
+    if let Some(receipt) = exact_repository_retry(
+        repository_command,
+        &repository_request_bytes,
+        &repository_request_sha256,
+        &loaded,
+    )? {
+        return Ok(receipt);
+    }
+    loaded.assert_bound_daemon(bound_daemon_instance_id, bound_daemon_epoch)?;
+    let command = bind_live_command(repository_command.clone(), &loaded, lease_ttl_seconds)?;
+    let plan = plan_command(&loaded.aggregate, &command).map_err(domain_failure)?;
+    let receipt = plan.receipt().clone();
+    if plan.is_exact_retry() {
+        return Ok(receipt);
+    }
+    let next = apply_plan(&loaded.aggregate, plan).map_err(domain_failure)?;
+    persist_plan(
+        transaction,
+        &loaded,
+        &next,
+        &receipt,
+        &repository_request_bytes,
+        &repository_request_sha256,
+    )?;
+    Ok(receipt)
 }
 
 impl WriterLeaseRepository for PostgresWriterLease {
@@ -701,6 +1026,21 @@ fn bind_live_command(
                 project_id: request.project_id,
                 expected_head: request.expected_head,
                 observation,
+            })
+        }
+        WriterLeaseRepositoryCommand::ProcessHandoff(request) => {
+            WriterLeaseCommand::ProcessHandoff(ProcessHandoffCommand {
+                command_id: request.command_id,
+                project_id: request.project_id,
+                expected_head: request.expected_head,
+                successor_holder_process_id: request.successor_holder_process_id,
+                successor_holder_process_start_identity: request
+                    .successor_holder_process_start_identity,
+                successor_daemon_instance_id: daemon_instance_id,
+                successor_daemon_epoch: daemon_epoch,
+                observation,
+                expires_at: expiry,
+                evidence: request.evidence,
             })
         }
         WriterLeaseRepositoryCommand::Release(request) => {
@@ -1134,9 +1474,21 @@ fn enter_runtime_writer(transaction: &mut Transaction<'_>) -> Result<(), Adapter
              SET LOCAL search_path = pg_catalog; \
              SET LOCAL row_security = on; \
              SET LOCAL synchronous_commit = on; \
-             SET LOCAL lock_timeout = '5s'; \
-             SET LOCAL statement_timeout = '30s'; \
-             SET LOCAL idle_in_transaction_session_timeout = '30s';",
+             SELECT pg_catalog.set_config('lock_timeout', \
+                 CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          5000::bigint)::text END, true); \
+             SELECT pg_catalog.set_config('statement_timeout', \
+                 CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          30000::bigint)::text END, true); \
+             SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', \
+                 CASE WHEN pg_catalog.current_setting('idle_in_transaction_session_timeout') = '0' THEN '30000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('idle_in_transaction_session_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          30000::bigint)::text END, true);",
         )
         .map_err(database_failure)
 }
@@ -1147,9 +1499,21 @@ fn enter_runtime_reader(transaction: &mut Transaction<'_>) -> Result<(), Adapter
             "SET LOCAL ROLE lattice_runtime; \
              SET LOCAL search_path = pg_catalog; \
              SET LOCAL row_security = on; \
-             SET LOCAL lock_timeout = '5s'; \
-             SET LOCAL statement_timeout = '30s'; \
-             SET LOCAL idle_in_transaction_session_timeout = '30s';",
+             SELECT pg_catalog.set_config('lock_timeout', \
+                 CASE WHEN pg_catalog.current_setting('lock_timeout') = '0' THEN '5000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('lock_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          5000::bigint)::text END, true); \
+             SELECT pg_catalog.set_config('statement_timeout', \
+                 CASE WHEN pg_catalog.current_setting('statement_timeout') = '0' THEN '30000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('statement_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          30000::bigint)::text END, true); \
+             SELECT pg_catalog.set_config('idle_in_transaction_session_timeout', \
+                 CASE WHEN pg_catalog.current_setting('idle_in_transaction_session_timeout') = '0' THEN '30000' \
+                      ELSE LEAST(pg_catalog.floor(EXTRACT(EPOCH FROM \
+                          pg_catalog.current_setting('idle_in_transaction_session_timeout')::pg_catalog.interval) * 1000)::bigint, \
+                          30000::bigint)::text END, true);",
         )
         .map_err(database_failure)
 }
@@ -1193,6 +1557,17 @@ fn domain_failure(error: lattice_writer_lease::WriterLeaseError) -> AdapterFailu
     }
 }
 
+fn validate_historical_receipt_digest(
+    receipt_digest: &ContentDigest,
+) -> Result<(), WriterLeaseRepositoryError> {
+    if receipt_digest.as_str().bytes().all(|byte| byte == b'0') {
+        return Err(WriterLeaseRepositoryError::from_domain(
+            lattice_writer_lease::WriterLeaseError::ZeroEvidenceDigest,
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn database_failure(error: postgres::Error) -> AdapterFailure {
     let retryable = error.code() == Some(&SqlState::T_R_SERIALIZATION_FAILURE);
@@ -1230,5 +1605,42 @@ fn map_assert_error(error: &postgres::Error) -> WriterLeaseRepositoryError {
         authority_repository_error()
     } else {
         repository_error(WriterLeaseRepositoryErrorKind::Unavailable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn writer_transactions_never_extend_a_shorter_session_deadline() {
+        let source = include_str!("adapter.rs");
+        for function in ["enter_runtime_writer", "enter_runtime_reader"] {
+            let settings = source
+                .split(&format!("fn {function}("))
+                .nth(1)
+                .expect("runtime transaction entry")
+                .split(".map_err(database_failure)")
+                .next()
+                .expect("transaction settings boundary");
+            assert!(settings.contains("pg_catalog.set_config('lock_timeout'"));
+            assert!(settings.contains("pg_catalog.set_config('statement_timeout'"));
+            assert!(settings.contains("LEAST("));
+            assert!(!settings.contains("SET LOCAL lock_timeout = '5s'"));
+            assert!(!settings.contains("SET LOCAL statement_timeout = '30s'"));
+        }
+    }
+
+    #[test]
+    fn historical_authority_rejects_zero_digest_before_storage_lookup() {
+        let zero = ContentDigest::from_sha256("0".repeat(64)).expect("shape-valid zero digest");
+        let error = validate_historical_receipt_digest(&zero)
+            .expect_err("zero historical receipt digest must fail before any database access");
+
+        assert_eq!(error.kind(), WriterLeaseRepositoryErrorKind::Domain);
+        assert_eq!(
+            error.domain(),
+            Some(lattice_writer_lease::WriterLeaseError::ZeroEvidenceDigest)
+        );
     }
 }

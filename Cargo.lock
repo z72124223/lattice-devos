@@ -226,6 +226,9 @@ version = "0.1.0"
 dependencies = [
  "lattice-cjson",
  "lattice-contracts",
+ "lattice-policy",
+ "lattice-task-domain",
+ "serde_json",
  "time",
 ]
 
@@ -348,7 +351,9 @@ dependencies = [
  "lattice-foreman-state",
  "lattice-ports",
  "lattice-task-domain",
+ "lattice-task-ledger",
  "lattice-writer-lease",
+ "serde_json",
 ]
 
 [[package]]
@@ -366,9 +371,11 @@ dependencies = [
 name = "lattice-ports"
 version = "0.1.0"
 dependencies = [
+ "lattice-artifact-store",
  "lattice-contracts",
  "lattice-foreman-state",
  "lattice-task-domain",
+ "lattice-task-ledger",
 ]
 
 [[package]]
@@ -381,6 +388,24 @@ dependencies = [
  "lattice-gateway-ipc",
  "lattice-ports",
  "postgres",
+ "sha2",
+]
+
+[[package]]
+name = "lattice-postgres-foreman"
+version = "0.1.0"
+dependencies = [
+ "lattice-approval-verifier",
+ "lattice-artifact-store",
+ "lattice-contracts",
+ "lattice-foreman-state",
+ "lattice-postgres-store",
+ "lattice-postgres-writer-lease",
+ "lattice-project-registry",
+ "lattice-task-ledger",
+ "lattice-writer-lease",
+ "postgres",
+ "serde_json",
  "sha2",
 ]
 
@@ -423,6 +448,8 @@ name = "lattice-runtime"
 version = "0.1.0"
 dependencies = [
  "getrandom",
+ "lattice-approval-verifier",
+ "lattice-artifact-store",
  "lattice-cjson",
  "lattice-codebase-memory",
  "lattice-codex-adapter",
@@ -433,8 +460,10 @@ dependencies = [
  "lattice-hermes-adapter",
  "lattice-openclaw-adapter",
  "lattice-orchestrator",
+ "lattice-policy",
  "lattice-ports",
  "lattice-postgres-codebase-memory",
+ "lattice-postgres-foreman",
  "lattice-postgres-store",
  "lattice-postgres-writer-lease",
  "lattice-project-registry",
@@ -621,8 +650,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "postgres"
 version = "0.19.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "33ad20e0aa0b24f5a394eab4f78c781d248982b22b25cecc7e3aa46a681605bd"
 dependencies = [
  "bytes",
  "fallible-iterator",
