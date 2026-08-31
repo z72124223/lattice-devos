@@ -20,19 +20,20 @@ use lattice_foreman_state::{
     Confidence, EpistemicReferences, ForemanSnapshot, ForemanState, RefreshTrigger,
 };
 use lattice_task_ledger::{
-    AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, Diagnostic,
-    FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan, LEDGER_CHECKPOINT_SCHEMA_VERSION,
-    LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint, LedgerError, LedgerEventKind,
-    OutboxAdmission, TaskCreatedProfile, TaskIngressClaim, TaskIngressRequestKind,
-    TaskSubmissionEnvelope, UntrustedAppendRequest, UntrustedAutonomyReceiptRow,
-    UntrustedCommandReceipt, UntrustedCommandRecord, UntrustedForemanSnapshotRow,
-    UntrustedLedgerEvent, UntrustedLedgerSnapshot, UntrustedOutboxAdmission,
-    UntrustedTaskIngressClaim, UntrustedTaskSubmissionEnvelope, VerifiedAutonomyReceipt,
-    VerifiedAutonomyReceiptState, VerifiedForemanSnapshotRecord, VerifiedStream, apply_append_plan,
-    classify_task_created_profile, foreman_coordination_identity, plan_append,
-    verify_untrusted_autonomy_receipt_rows, verify_untrusted_foreman_snapshot_rows,
-    verify_untrusted_snapshot_against_checkpoint, verify_untrusted_task_ingress_claim,
-    verify_untrusted_task_ingress_claim_structure, verify_untrusted_task_submission,
+    ActorId, AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, CorrelationId,
+    Diagnostic, ExternalVerifiedResultAdoption, FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan,
+    LEDGER_CHECKPOINT_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint,
+    LedgerError, LedgerEventKind, OutboxAdmission, TaskCreatedProfile, TaskIngressClaim,
+    TaskIngressRequestKind, TaskSubmissionEnvelope, UntrustedAppendRequest,
+    UntrustedAutonomyReceiptRow, UntrustedCommandReceipt, UntrustedCommandRecord,
+    UntrustedForemanSnapshotRow, UntrustedLedgerEvent, UntrustedLedgerSnapshot,
+    UntrustedOutboxAdmission, UntrustedTaskIngressClaim, UntrustedTaskSubmissionEnvelope,
+    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedForemanSnapshotRecord,
+    VerifiedStream, apply_append_plan, classify_task_created_profile,
+    foreman_coordination_identity, plan_append, verify_untrusted_autonomy_receipt_rows,
+    verify_untrusted_foreman_snapshot_rows, verify_untrusted_snapshot_against_checkpoint,
+    verify_untrusted_task_ingress_claim, verify_untrusted_task_ingress_claim_structure,
+    verify_untrusted_task_submission,
 };
 use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
@@ -823,6 +824,7 @@ impl PostgresTaskLedger {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -848,6 +850,7 @@ impl PostgresTaskLedger {
             None,
             None,
             Some(&ingress_claim),
+            None,
         )
     }
 
@@ -876,6 +879,7 @@ impl PostgresTaskLedger {
             None,
             Some(&submission),
             Some(&ingress_claim),
+            None,
         )?;
         Ok(PostgresTaskSubmissionExecution {
             ledger_execution,
@@ -978,6 +982,7 @@ impl PostgresTaskLedger {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1006,6 +1011,7 @@ impl PostgresTaskLedger {
             &expected_authority,
             autonomy_plan.writer_authority(),
             Some(&autonomy_plan),
+            None,
             None,
             None,
             None,
@@ -1140,6 +1146,59 @@ impl PostgresTaskLedger {
         }))
     }
 
+    /// Appends the one verified external-result terminal only after the
+    /// transaction-owned resolver has rechecked its evidence and concurrency
+    /// preconditions. The caller supplies no execution or Writer authority.
+    pub fn execute_external_verified_result_adoption(
+        &mut self,
+        adoption: ExternalVerifiedResultAdoption,
+        expected_authority: StoreAuthorityHead,
+        occurred_at: &str,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        if self.sql_profile != TaskLedgerSqlProfile::V8 {
+            return Err(error(
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+            ));
+        }
+        let retained = self
+            .load_submission_by_task_ref(adoption.task_ref())?
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        if retained.submission.task_ref() != adoption.task_ref()
+            || retained.ledger.stream().head().head_digest()
+                != adoption.expected_ledger_head_digest()
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+        }
+        let actor = retained
+            .ledger
+            .stream()
+            .events()
+            .first()
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?
+            .actor_id()
+            .as_str();
+        let command = AppendCommand::new_external_verified_result_adopted(
+            retained.ledger.stream().head().clone(),
+            CommandId::new(adoption.command_id()).map_err(|ledger| map_ledger_error(&ledger))?,
+            CorrelationId::new("general-task-intake")
+                .map_err(|ledger| map_ledger_error(&ledger))?,
+            occurred_at,
+            ActorId::new(actor).map_err(|ledger| map_ledger_error(&ledger))?,
+            &adoption,
+        )
+        .map_err(|ledger| map_ledger_error(&ledger))?;
+        self.execute_with_writer_authority(
+            &command,
+            &expected_authority,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&adoption),
+        )
+    }
+
     /// Loads the fixed foreman stream and verifies every child row against the
     /// authoritative Ledger replay in one repeatable-read transaction.
     ///
@@ -1242,6 +1301,7 @@ impl PostgresTaskLedger {
             Some(foreman_plan),
             None,
             None,
+            None,
         )
     }
 
@@ -1255,6 +1315,7 @@ impl PostgresTaskLedger {
         foreman_plan: Option<&ForemanSnapshotAppendPlan>,
         submission: Option<&TaskSubmissionEnvelope>,
         ingress_claim: Option<&TaskIngressClaim>,
+        external_adoption: Option<&ExternalVerifiedResultAdoption>,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
         if command.expected_head().runtime() != RuntimeKind::Live
@@ -1279,6 +1340,12 @@ impl PostgresTaskLedger {
                 claim.request_kind() == TaskIngressRequestKind::GeneralTask && submission.is_none()
             })
             || ingress_claim.is_some() && (autonomy_plan.is_some() || foreman_plan.is_some())
+            || external_adoption.is_some()
+                && (writer_authority.is_some()
+                    || autonomy_plan.is_some()
+                    || foreman_plan.is_some()
+                    || submission.is_some()
+                    || ingress_claim.is_some())
         {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
         }
@@ -1313,6 +1380,7 @@ impl PostgresTaskLedger {
                 foreman_plan,
                 submission,
                 ingress_claim,
+                external_adoption,
             ) {
                 Ok(execution) => return Ok(execution),
                 Err(AttemptFailure::Retryable) if retry_count < MAX_LIVE_SERIALIZATION_RETRIES => {}
@@ -1496,6 +1564,13 @@ struct LedgerPrepareRow {
     retained_store_transaction_id: Option<String>,
     terminal_found: bool,
     physical_state_digest: Option<ContentDigest>,
+}
+
+/// Transaction-local evidence identity returned only by the security-definer
+/// resolver. Runtime never writes or reconstitutes this catalog row.
+struct ResolvedExternalVerifiedResultAdoption {
+    adoption_digest: Vec<u8>,
+    evidence_descriptor_digest: Vec<u8>,
 }
 
 enum AttemptFailure {
@@ -3094,6 +3169,7 @@ fn run_execute_attempt(
     foreman_plan: Option<&ForemanSnapshotAppendPlan>,
     submission: Option<&TaskSubmissionEnvelope>,
     ingress_claim: Option<&TaskIngressClaim>,
+    external_adoption: Option<&ExternalVerifiedResultAdoption>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let Ok(global_schema_version) = i16::try_from(global_persistence.schema_version()) else {
         return Err(AttemptFailure::Terminal(error(
@@ -3109,6 +3185,93 @@ fn run_execute_attempt(
     if let Err(database) = transaction.batch_execute(WRITE_TRANSACTION_SETTINGS) {
         return rollback_attempt(transaction, classify_query_error(&database));
     }
+    let external_adoption_resolution = if let Some(adoption) = external_adoption {
+        if !sql_profile.supports_submission() {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(
+                    PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+                )),
+            );
+        }
+        let preflight = transaction.query_one(
+            "SELECT control.external_verified_result_adoption_preflight_v1($1::text,$2::text,$3::text)",
+            &[
+                &identity.project_id().as_str(),
+                &identity.project_snapshot_id().as_str(),
+                &adoption.task_ref().as_str(),
+            ],
+        );
+        match preflight {
+            Ok(row) if row_value::<bool>(&row, 0).unwrap_or(false) => {}
+            Ok(_) => {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
+                );
+            }
+            Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
+        }
+        let adoption_digest = match digest_bytes(adoption.result_digest()) {
+            Ok(value) => value,
+            Err(error) => return rollback_attempt(transaction, AttemptFailure::Terminal(error)),
+        };
+        let evidence = match transaction.query_opt(
+            "SELECT * FROM control.external_verified_result_evidence_read_v1($1::bytea)",
+            &[&adoption_digest],
+        ) {
+            Ok(Some(row)) => row,
+            Ok(None) => {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
+                );
+            }
+            Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
+        };
+        let matches = row_value::<String>(&evidence, 0)
+            .is_ok_and(|value| value == identity.project_id().as_str())
+            && row_value::<String>(&evidence, 1)
+                .is_ok_and(|value| value == identity.project_snapshot_id().as_str())
+            && row_value::<String>(&evidence, 2)
+                .is_ok_and(|value| value == adoption.task_ref().as_str())
+            && row_value::<String>(&evidence, 3).is_ok_and(|value| value == adoption.source_sha())
+            && row_value::<String>(&evidence, 4).is_ok_and(|value| value == adoption.target_sha())
+            && row_value::<String>(&evidence, 5).is_ok_and(|value| value == adoption.target_sha())
+            && row_value::<String>(&evidence, 6)
+                .is_ok_and(|value| value == adoption.push_merge_receipt_ref())
+            && row_value::<String>(&evidence, 7)
+                .is_ok_and(|value| value == adoption.deployment_receipt_ref())
+            && row_value::<String>(&evidence, 8)
+                .is_ok_and(|value| value == adoption.deployment_artifact_ref())
+            && row_value::<String>(&evidence, 9)
+                .is_ok_and(|value| value == adoption.independent_acceptance_ref())
+            && row_value::<Vec<String>>(&evidence, 10)
+                .is_ok_and(|value| value == adoption.protected_action_approval_refs());
+        let evidence_descriptor_digest = match row_value::<Vec<u8>>(&evidence, 15) {
+            Ok(value) if value.len() == 32 => value,
+            _ => {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(
+                        PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
+                    )),
+                );
+            }
+        };
+        if !matches {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
+            );
+        }
+        Some(ResolvedExternalVerifiedResultAdoption {
+            adoption_digest,
+            evidence_descriptor_digest,
+        })
+    } else {
+        None
+    };
     let retained_ingress_claim = if let Some(claim) = ingress_claim {
         if !sql_profile.supports_submission() {
             return rollback_attempt(
@@ -3371,6 +3534,33 @@ fn run_execute_attempt(
             .iter()
             .find(|outbox| outbox.command_id().as_str() == command_id)
             .cloned();
+        if let Some(resolved) = external_adoption_resolution.as_ref() {
+            let event = match loaded.stream.events().iter().find(|event| {
+                event.command_id().as_str() == command_id
+                    && event.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
+            }) {
+                Some(event) => event,
+                None => {
+                    return rollback_attempt(
+                        transaction,
+                        AttemptFailure::Terminal(error(
+                            PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
+                        )),
+                    );
+                }
+            };
+            if let Err(bind_error) = bind_external_verified_result_adoption(
+                &mut transaction,
+                loaded.stream.head().stream_id(),
+                event.sequence(),
+                event.event_digest(),
+                command_id,
+                plan.receipt().request_digest(),
+                resolved,
+            ) {
+                return rollback_attempt(transaction, bind_error);
+            }
+        }
         let execution = PostgresTaskLedgerExecution {
             receipt: plan.receipt().clone(),
             result_checkpoint: plan.command_record().result_checkpoint().clone(),
@@ -3552,6 +3742,28 @@ fn run_execute_attempt(
             transaction,
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
         );
+    }
+    if let Some(resolved) = external_adoption_resolution.as_ref() {
+        let event = match plan.new_event() {
+            Some(event) if event.kind() == LedgerEventKind::ExternalVerifiedResultAdopted => event,
+            _ => {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::Malformed)),
+                );
+            }
+        };
+        if let Err(bind_error) = bind_external_verified_result_adoption(
+            &mut transaction,
+            event.stream_id(),
+            event.sequence(),
+            event.event_digest(),
+            command_id,
+            plan.receipt().request_digest(),
+            resolved,
+        ) {
+            return rollback_attempt(transaction, bind_error);
+        }
     }
     if let Some(receipt) = autonomy_receipt {
         let event = match plan.new_event() {
@@ -3959,6 +4171,45 @@ fn commit_failure_class(code: Option<&str>, constraint: Option<&str>) -> CommitF
         Some(code) if retryable_sqlstate(code, constraint) => CommitFailureClass::Retryable,
         Some(_) => CommitFailureClass::Terminal,
         None => CommitFailureClass::OutcomeUnknown,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn bind_external_verified_result_adoption(
+    transaction: &mut Transaction<'_>,
+    stream_id: &ContentDigest,
+    event_sequence: u64,
+    event_digest: &ContentDigest,
+    command_id: &str,
+    request_digest: &ContentDigest,
+    resolved: &ResolvedExternalVerifiedResultAdoption,
+) -> Result<(), AttemptFailure> {
+    let stream_id = digest_bytes(stream_id).map_err(AttemptFailure::Terminal)?;
+    let event_digest = digest_bytes(event_digest).map_err(AttemptFailure::Terminal)?;
+    let request_digest = digest_bytes(request_digest).map_err(AttemptFailure::Terminal)?;
+    let event_sequence = event_sequence.to_string();
+    let status = transaction.query_one(
+        "SELECT control.external_verified_result_adoption_bind_v1(\
+             $1::bytea,$2::text,$3::bytea,$4::text,$5::bytea,$6::bytea,$7::bytea)",
+        &[
+            &stream_id,
+            &event_sequence,
+            &event_digest,
+            &command_id,
+            &request_digest,
+            &resolved.adoption_digest,
+            &resolved.evidence_descriptor_digest,
+        ],
+    );
+    match status {
+        Ok(row) => match row_value::<String>(&row, 0) {
+            Ok(status) if matches!(status.as_str(), "RECORDED" | "REPLAYED") => Ok(()),
+            Ok(_) => Err(AttemptFailure::Terminal(error(
+                PostgresTaskLedgerErrorKind::AuthorityMismatch,
+            ))),
+            Err(row_error) => Err(AttemptFailure::Terminal(row_error)),
+        },
+        Err(database) => Err(classify_query_error(&database)),
     }
 }
 

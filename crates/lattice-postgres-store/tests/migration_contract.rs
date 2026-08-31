@@ -687,7 +687,10 @@ fn schema_v8_appends_digest_bound_external_adoption_without_rewriting_v7() {
         "GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_preflight_v1",
         "GRANT EXECUTE ON FUNCTION control.external_verified_result_adoption_bind_v1",
     ] {
-        assert!(sql.contains(required), "missing schema-v8 adoption boundary: {required}");
+        assert!(
+            sql.contains(required),
+            "missing schema-v8 adoption boundary: {required}"
+        );
     }
     assert!(
         !sql.contains("GRANT SELECT ON TABLE control.external_verified_result_evidence"),
@@ -1827,6 +1830,49 @@ fn foreman_adapter_uses_the_ledger_transaction_and_verified_fresh_replay() {
     assert!(adapter.contains("IsolationLevel::RepeatableRead"));
     assert!(adapter.contains("IsolationLevel::Serializable"));
     assert!(adapter.contains("if plan.is_exact_retry()"));
+}
+
+#[test]
+fn external_verified_result_adoption_resolves_and_binds_in_the_serializable_ledger_transaction() {
+    let adapter = include_str!("../src/task_ledger.rs");
+    let attempt_start = adapter
+        .find("fn run_execute_attempt(")
+        .expect("Task Ledger transaction");
+    let attempt = &adapter[attempt_start..];
+    let resolver = attempt
+        .find("external_verified_result_adoption_preflight_v1")
+        .expect("server-side adoption preflight");
+    let plan = attempt
+        .find("let plan = match plan_append")
+        .expect("Ledger plan");
+    let finalize = attempt
+        .find("if ledger_status != \"FINALIZED\"")
+        .expect("Ledger finalized guard");
+    let binding = finalize
+        + attempt[finalize..]
+            .find("bind_external_verified_result_adoption(")
+            .expect("immutable adoption binding after finalization");
+    let commit = binding
+        + attempt[binding..]
+            .find("transaction\n        .commit()")
+            .expect("transaction commit after binding");
+    assert!(resolver < plan && plan < finalize && finalize < binding && binding < commit);
+    let exact_start = attempt
+        .find("if plan.is_exact_retry()")
+        .expect("exact retry");
+    let exact_end = exact_start
+        + attempt[exact_start..]
+            .find("if retained_submission.is_some()")
+            .expect("new-command boundary");
+    let exact = &attempt[exact_start..exact_end];
+    assert!(
+        exact.contains("bind_external_verified_result_adoption("),
+        "exact replay must verify the existing immutable adoption binding"
+    );
+    assert!(
+        adapter.contains("control.external_verified_result_adoption_bind_v1"),
+        "the binding helper must call the fixed security-definer primitive"
+    );
 }
 
 #[test]
