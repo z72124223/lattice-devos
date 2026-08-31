@@ -12,14 +12,14 @@ fn embedded_v1_identity_is_exact_and_bound_to_store_v7() {
     assert_eq!(evidence.schema_version(), FOREMAN_EXTENSION_SCHEMA_VERSION);
     assert_eq!(evidence.path(), FOREMAN_EXTENSION_PATH);
     assert_eq!(evidence.byte_length(), evidence.bytes().len());
-    assert_eq!(evidence.byte_length(), 349_470);
+    assert_eq!(evidence.byte_length(), 349_546);
     assert_eq!(
         evidence.sql_sha256().as_str(),
-        "32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13"
+        "46e186d54b65fbd55f7d5f48c693707287e0d723bd10c3077412d484c19ead6e"
     );
     assert_eq!(
         evidence.manifest_sha256().as_str(),
-        "0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63"
+        "2a487f0f32c45542d0ee02a37881f55466ca892f530967d95f661a27594279dd"
     );
     assert_eq!(REQUIRED_GLOBAL_SCHEMA_VERSION, 7);
     assert_eq!(
@@ -34,8 +34,9 @@ fn catalog_profile_pins_are_closed_and_live_measurement_is_coordinator_owned() {
     assert!(setup.contains("const EXPECTED_TABLE_COUNT: i64 = 17;"));
     assert!(setup.contains("const EXPECTED_FUNCTION_COUNT: i64 = 43;"));
     assert!(setup.contains("const EXPECTED_RUNTIME_FUNCTION_COUNT: i64 = 39;"));
-    assert!(setup.contains("7b249bf8416f734a34b6e1b9e7b407d17b00771139ac71a12294a3b0543e6120"));
-    assert!(setup.contains("e772c3041a4c30908c555c5b96f6705f48011634e47db8f562410371705ce807"));
+    assert!(setup.contains("8d8dd263498cab48b1164bf456f5d3b314d575ee9a186460715beea02bc8bfec"));
+    assert!(setup.contains("42f151dd9f52ba1e82a2aac392234f2b285c18e9bd71a00372f7c7b4a1237eb5"));
+    assert!(setup.contains("dcd206da5753e55a4499717a896fd1373165430edd6eadeaf6c1284c23fbde17"));
     assert!(setup.contains("function_digest != EXPECTED_FUNCTION_CATALOG_SHA256"));
     assert!(setup.contains("table_digest != EXPECTED_TABLE_CATALOG_SHA256"));
     assert!(!setup.contains("LATTICE_FOREMAN_CATALOG_DEBUG"));
@@ -60,10 +61,60 @@ fn catalog_profile_pins_complete_schema_table_and_function_acl_rows() {
     assert!(setup.contains("COALESCE(p.proacl,pg_catalog.acldefault('f',p.proowner))"));
     assert!(setup.contains("grantor.rolname"));
     assert!(setup.contains("grantee.rolname"));
+    for required in [
+        "verify_closed_catalog_shape(client)?;",
+        "const EXPECTED_INTERNAL_TRIGGER_COUNT: i64 = 92;",
+        "const EXPECTED_CONTROL_INTERNAL_TRIGGER_COUNT: i64 = 12;",
+        "const EXPECTED_TYPE_COUNT: i64 = 34;",
+        "AND t.tgenabled='O' AND t.tgconstraint<>0",
+        "cn.nspname='foreman_execution' AND t.tgisinternal",
+        "COALESCE(t.typacl,pg_catalog.acldefault('T',t.typowner))",
+        "SELECT pg_catalog.count(*) FROM pg_catalog.pg_cast c",
+        "n.nspname='foreman_execution' AND c.relkind NOT IN ('r','i')",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact closed Foreman catalog guard: {required}"
+        );
+    }
 }
 
 #[test]
-fn exact_extension_replay_verifies_the_catalog_and_never_silently_repairs() {
+fn identity_reader_is_the_only_foreman_capability_shared_with_store_audit_roles() {
+    let sql = std::str::from_utf8(verify_embedded_extension().expect("extension").bytes())
+        .expect("UTF-8 extension SQL");
+    assert!(sql.contains(
+        "GRANT EXECUTE ON FUNCTION foreman_execution.read_extension_identity_v1()\n    TO lattice_runtime, lattice_guardian, lattice_readonly;"
+    ));
+    assert!(sql.contains(
+        "GRANT USAGE ON SCHEMA foreman_execution\n    TO lattice_runtime, lattice_guardian, lattice_readonly;"
+    ));
+    for role in ["lattice_guardian", "lattice_readonly"] {
+        assert_eq!(
+            sql.matches(&format!("TO {role};")).count(),
+            0,
+            "Store audit role must not receive any additional Foreman capability"
+        );
+    }
+    let setup = include_str!("../src/setup.rs");
+    let catalog = setup
+        .split_once("fn verify_catalog(")
+        .expect("catalog verifier")
+        .1
+        .split_once("fn verify_exact_catalog_digests(")
+        .expect("catalog verifier boundary")
+        .0;
+    let digest_pin = catalog
+        .find("verify_exact_catalog_digests(client)?;")
+        .expect("catalog digest pin");
+    let identity_read = catalog
+        .find("FROM foreman_execution.read_extension_identity_v1()")
+        .expect("identity reader invocation");
+    assert!(digest_pin < identity_read);
+}
+
+#[test]
+fn exact_extension_replay_only_replaces_the_pinned_empty_predecessor() {
     let setup = include_str!("../src/setup.rs");
     let exact_start = setup
         .find("if state == ExtensionPreState::Exact {")
@@ -77,11 +128,156 @@ fn exact_extension_replay_verifies_the_catalog_and_never_silently_repairs() {
 
     assert!(exact.contains("verify_catalog("));
     assert!(exact.contains("ExtensionApplyOutcome::AlreadyCurrent(evidence)"));
+    assert!(exact.contains("verify_exact_empty_predecessor(&mut transaction, target)?;"));
+    assert!(exact.contains("DROP SCHEMA foreman_execution CASCADE"));
+    assert!(exact.contains("ExtensionApplyOutcome::Upgraded(evidence)"));
+    assert!(exact.contains("PREDECESSOR_FUNCTION_CATALOG_SHA256"));
+    assert!(exact.contains("PREDECESSOR_TABLE_CATALOG_SHA256"));
     assert!(exact.contains(".commit()"));
-    assert!(!exact.contains("batch_execute(sql)"));
+    let predecessor_check = exact
+        .find("verify_exact_empty_predecessor(&mut transaction, target)?;")
+        .expect("predecessor verification");
+    let predecessor_drop = exact
+        .find("DROP SCHEMA foreman_execution CASCADE")
+        .expect("predecessor replacement");
+    let replacement_verify = exact[predecessor_drop..]
+        .find("verify_catalog(")
+        .map(|offset| predecessor_drop + offset)
+        .expect("replacement verification");
+    let replacement_commit = exact[replacement_verify..]
+        .find(".commit()")
+        .map(|offset| replacement_verify + offset)
+        .expect("replacement commit");
+    assert!(predecessor_check < predecessor_drop);
+    assert!(predecessor_drop < replacement_verify);
+    assert!(replacement_verify < replacement_commit);
     assert!(fresh.contains("ExtensionPreState::Fresh => {}"));
     assert!(fresh.contains("batch_execute(sql)"));
     assert!(fresh.contains("ExtensionApplyOutcome::Installed(evidence)"));
+}
+
+#[test]
+fn catalog_shape_verifiers_retain_types_with_empty_acl_arrays() {
+    let setup = include_str!("../src/setup.rs");
+    assert!(
+        setup
+            .matches("LEFT JOIN LATERAL pg_catalog.aclexplode(")
+            .count()
+            >= 1
+    );
+    assert!(
+        setup
+            .matches("pg_catalog.count(acl.privilege_type)<>2")
+            .count()
+            >= 1
+    );
+    let store = include_str!("../../lattice-postgres-store/src/postgres_setup.rs");
+    assert!(
+        store
+            .matches("LEFT JOIN LATERAL pg_catalog.aclexplode(")
+            .count()
+            >= 2
+    );
+    assert!(store.matches("count(acl.privilege_type)<>2").count() >= 2);
+}
+
+#[test]
+fn predecessor_replacement_closes_automatic_external_dependencies() {
+    let setup = include_str!("../src/setup.rs");
+    let predecessor = setup
+        .split_once("fn verify_exact_empty_predecessor(")
+        .expect("predecessor verifier")
+        .1
+        .split_once("fn insert_identity(")
+        .expect("predecessor verifier boundary")
+        .0;
+    assert!(predecessor.contains("foreman_toast_relations"));
+    assert!(predecessor.contains("'pg_attrdef'::pg_catalog.regclass::oid"));
+    assert!(predecessor.contains("'pg_trigger'::pg_catalog.regclass::oid"));
+    assert!(!predecessor.contains("d.deptype NOT IN ('i','a')"));
+
+    let live = include_str!("postgres_live.rs");
+    assert!(live.contains("CREATE PUBLICATION foreman_predecessor_dependency"));
+    assert!(live.contains("FOREMAN_EXTENSION_PREDECESSOR_NOT_EMPTY"));
+    assert!(live.contains("read retained publication membership"));
+}
+
+#[test]
+fn managed_profiles_reject_postgres_extension_lifecycle_dependencies() {
+    let foreman = include_str!("../src/setup.rs");
+    let store = include_str!("../../lattice-postgres-store/src/postgres_setup.rs");
+    for source in [foreman, store] {
+        assert!(source.contains("verify_managed_extension_dependency_closure"));
+        assert!(source.contains("d.deptype IN ('e','x')"));
+        assert!(source.contains("'pg_proc'::"));
+        assert!(source.contains("'pg_class'::"));
+        assert!(source.contains("'pg_cast'::"));
+        assert!(source.contains("managed_casts"));
+        assert!(source.contains("'pg_transform'::"));
+        assert!(source.contains("managed_transforms"));
+        assert!(source.contains("regclass::oid"));
+    }
+
+    let live = include_str!("postgres_live.rs");
+    for signature in [
+        "foreman_execution.read_task_replay_v1(bytea)",
+        "writer_lease.writer_lease_load_commands_v1(text)",
+        "control.task_ingress_historical_closure_v1()",
+    ] {
+        assert!(live.contains(signature));
+    }
+    assert_eq!(live.matches("DEPENDS ON EXTENSION plpgsql").count(), 6);
+    assert!(live.contains("Foreman extension lifecycle dependency must fail extension closed"));
+    assert!(live.contains("Foreman extension lifecycle dependency must fail Store closed"));
+    assert!(live.contains("Writer extension lifecycle dependency must fail Store closed"));
+    assert!(live.contains("Store extension lifecycle dependency must fail Store closed"));
+    assert!(live.contains("control.task_ledger_streams AS text"));
+    assert!(live.contains("managed_cast_dependencies"));
+    assert!(live.contains("unmodeled Store cast must fail Store closed"));
+    assert!(live.contains("Store cast lifecycle dependency must fail Store closed"));
+    assert!(live.contains("unmodeled Foreman transform must fail extension closed"));
+    assert!(live.contains("unmodeled Foreman transform must fail Store closed"));
+    assert!(live.contains("unmodeled Writer transform must fail Store closed"));
+    assert!(live.contains("unmodeled Store transform must fail Store closed"));
+    assert!(live.contains("managed_transform_dependencies"));
+    assert!(live.contains("Store transform lifecycle dependency must fail Store closed"));
+    assert!(live.contains("store_profile_safe_empty_acl"));
+    assert!(live.contains("safe external empty-ACL function remains Store current"));
+}
+
+#[test]
+fn table_catalog_pins_relation_and_column_storage_metadata() {
+    let setup = include_str!("../src/setup.rs");
+    let store = include_str!("../../lattice-postgres-store/src/postgres_setup.rs");
+    for source in [setup, store] {
+        for pin in [
+            "LATTICE_POSTGRES_FOREMAN_TABLE_CATALOG_V2\\0",
+            "obj_description(n.oid,'pg_namespace')",
+            "array_to_string(c.reloptions,','),'<NULL>'",
+            "array_to_string(toast.reloptions,','),'<NULL>'",
+            "obj_description(c.oid,'pg_class')",
+            "coll_ns.nspname,coll.collname",
+            "a.attisdropped",
+            "a.attidentity",
+            "a.attgenerated",
+            "a.attstorage",
+            "a.attcompression",
+            "a.attstattarget",
+            "array_to_string(a.attoptions,','),'<NULL>'",
+            "col_description(c.oid,a.attnum)",
+            "obj_description(k.oid,'pg_constraint')",
+        ] {
+            assert!(source.contains(pin), "missing table catalog pin: {pin}");
+        }
+    }
+    let live = include_str!("postgres_live.rs");
+    assert!(live.contains("SET (autovacuum_enabled=false)"));
+    assert!(live.contains("Foreman table reloptions drift must fail extension closed"));
+    assert!(live.contains("Foreman table reloptions drift must fail Store closed"));
+    assert!(live.contains("dropped Foreman column tombstone must fail extension closed"));
+    assert!(live.contains("dropped Foreman column tombstone must fail Store closed"));
+    assert!(live.contains("external Foreman inheritance edge must fail extension closed"));
+    assert!(live.contains("external Foreman inheritance edge must fail Store closed"));
 }
 
 #[test]

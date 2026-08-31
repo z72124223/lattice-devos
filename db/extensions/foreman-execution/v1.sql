@@ -6580,7 +6580,8 @@ REVOKE ALL ON ALL SEQUENCES IN SCHEMA foreman_execution FROM PUBLIC;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA foreman_execution FROM lattice_runtime;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA foreman_execution FROM PUBLIC;
 REVOKE ALL ON ALL FUNCTIONS IN SCHEMA foreman_execution FROM lattice_runtime;
-GRANT USAGE ON SCHEMA foreman_execution TO lattice_runtime;
+GRANT USAGE ON SCHEMA foreman_execution
+    TO lattice_runtime, lattice_guardian, lattice_readonly;
 GRANT EXECUTE ON FUNCTION foreman_execution.record_preparation_observation_v1(
     bytea,text,text,bytea,text,bytea,text,bytea
 ) TO lattice_runtime;
@@ -6647,7 +6648,7 @@ GRANT EXECUTE ON FUNCTION foreman_execution.record_approval_evidence_v1(
     bytea,numeric,bytea,text,bytea,bytea
 ) TO lattice_runtime;
 GRANT EXECUTE ON FUNCTION foreman_execution.read_extension_identity_v1()
-    TO lattice_runtime;
+    TO lattice_runtime, lattice_guardian, lattice_readonly;
 GRANT EXECUTE ON FUNCTION foreman_execution.read_preparation_observation_v1(bytea)
     TO lattice_runtime;
 GRANT EXECUTE ON FUNCTION foreman_execution.read_promotion_intent_v1(bytea)

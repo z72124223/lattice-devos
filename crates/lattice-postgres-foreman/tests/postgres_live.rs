@@ -31,7 +31,8 @@ use lattice_postgres_foreman::{
     apply_extension, verify_extension,
 };
 use lattice_postgres_store::{
-    MigrationTarget, PostgresProjectRegistry, PostgresTaskLedger, PostgresTaskLedgerErrorKind,
+    DatabaseRole, MigrationTarget, PostgresProjectRegistry, PostgresTaskLedger,
+    PostgresTaskLedgerErrorKind, verify_postgres_schema,
 };
 use lattice_postgres_writer_lease::{PostgresWriterLease, V5ExtensionTarget};
 use lattice_project_registry::{
@@ -71,12 +72,15 @@ fn disposable_store_v7_fresh_extension_apply_and_reconnect() {
     let installed = apply_extension(&mut migrator, &target).expect("install extension");
     let installed_evidence = match installed {
         ExtensionApplyOutcome::Installed(evidence) => evidence,
+        ExtensionApplyOutcome::Upgraded(_) => panic!("fresh fixture was a predecessor"),
         ExtensionApplyOutcome::AlreadyCurrent(_) => panic!("live fixture was not fresh"),
     };
     let replay = apply_extension(&mut migrator, &target).expect("exact setup replay");
     let replay_evidence = match replay {
         ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) => panic!("extension installed twice"),
+        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
+            panic!("extension installed twice")
+        }
     };
     assert_eq!(installed_evidence, replay_evidence);
     drop(migrator);
@@ -101,18 +105,69 @@ fn disposable_store_v7_bootstrap_owned_extension_apply_acl_and_reconnect() {
         .expect("product bootstrap must have installed an exact extension")
     {
         ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) => {
+        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
             panic!("product bootstrap omitted the required Foreman extension")
         }
     };
-    let replay_evidence = match apply_extension(&mut migrator, &target)
-        .expect("exact product-bootstrap extension replay")
+
+    migrator
+        .batch_execute(
+            "REVOKE USAGE ON SCHEMA foreman_execution \
+                 FROM lattice_guardian, lattice_readonly; \
+             REVOKE EXECUTE ON FUNCTION foreman_execution.read_extension_identity_v1() \
+                 FROM lattice_guardian, lattice_readonly; \
+             UPDATE ONLY foreman_execution.extension_identity \
+                SET extension_sql_bytes=349470, \
+                    extension_sql_sha256='32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13', \
+                    extension_manifest_sha256='0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63'; \
+             UPDATE ONLY foreman_execution.extension_ledger \
+                SET extension_sql_sha256='32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13', \
+                    extension_manifest_sha256='0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63'",
+        )
+        .expect("restage the exact empty deployed predecessor");
+
+    let mut superuser = connect_superuser_from_url(&migrator_url);
+    superuser
+        .batch_execute(
+            "CREATE PUBLICATION foreman_predecessor_dependency \
+             FOR TABLE foreman_execution.worker_attempts",
+        )
+        .expect("create external automatic predecessor dependency");
+    let dependency = apply_extension(&mut migrator, &target)
+        .expect_err("external automatic dependency must block predecessor replacement");
+    assert_eq!(dependency.code(), "FOREMAN_EXTENSION_PREDECESSOR_NOT_EMPTY");
+    let retained_membership: i64 = superuser
+        .query_one(
+            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_publication_rel pr \
+              JOIN pg_catalog.pg_publication p ON p.oid=pr.prpubid \
+             WHERE p.pubname='foreman_predecessor_dependency' \
+               AND pr.prrelid='foreman_execution.worker_attempts'::pg_catalog.regclass",
+            &[],
+        )
+        .expect("read retained publication membership")
+        .get(0);
+    assert_eq!(retained_membership, 1);
+    superuser
+        .batch_execute("DROP PUBLICATION foreman_predecessor_dependency")
+        .expect("remove external automatic predecessor dependency");
+    drop(superuser);
+
+    let upgraded_evidence = match apply_extension(&mut migrator, &target)
+        .expect("atomically upgrade the exact empty deployed predecessor")
     {
-        ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) => {
-            panic!("bootstrap extension was unexpectedly reinstalled")
+        ExtensionApplyOutcome::Upgraded(evidence) => evidence,
+        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::AlreadyCurrent(_) => {
+            panic!("exact predecessor was not upgraded")
         }
     };
+    assert_eq!(bootstrap_evidence, upgraded_evidence);
+    let replay_evidence =
+        match apply_extension(&mut migrator, &target).expect("exact upgraded extension replay") {
+            ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
+            ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
+                panic!("upgraded extension was unexpectedly reinstalled")
+            }
+        };
     assert_eq!(bootstrap_evidence, replay_evidence);
     drop(migrator);
 
@@ -617,9 +672,13 @@ fn disposable_store_v7_catalog_tamper_fails_closed() {
         return;
     }
     let migrator_url = required("LATTICE_FOREMAN_MIGRATOR_URL");
+    let runtime_url = required("LATTICE_FOREMAN_RUNTIME_URL");
     let database_name = required("LATTICE_FOREMAN_DATABASE_NAME");
     let run_id = required("LATTICE_FOREMAN_RUN_ID");
-    let target = ExtensionTarget::new(database_name, run_id).expect("bounded tamper target");
+    let target =
+        ExtensionTarget::new(database_name.clone(), run_id.clone()).expect("bounded tamper target");
+    let store_target =
+        MigrationTarget::new(database_name, run_id).expect("bounded Store tamper target");
     let mut migrator = connect_as(&migrator_url, "lattice_migrator");
     let assert_rejected = |client: &mut Client, reason: &str| {
         let failure =
@@ -630,8 +689,415 @@ fn disposable_store_v7_catalog_tamper_fails_closed() {
     let assert_current = |client: &mut Client, reason: &str| {
         verify_extension(client, &target, ExtensionDatabaseRole::Migrator).expect(reason);
     };
+    let assert_store_rejected = |reason: &str| {
+        let failure =
+            match PostgresTaskLedger::new(connect_store_runtime(&runtime_url), &store_target) {
+                Ok(_) => panic!("{reason}"),
+                Err(failure) => failure,
+            };
+        assert_eq!(
+            failure.kind(),
+            PostgresTaskLedgerErrorKind::RetainedRowCorrupt
+        );
+    };
+    let assert_store_current = |reason: &str| {
+        if let Err(failure) =
+            PostgresTaskLedger::new(connect_store_runtime(&runtime_url), &store_target)
+        {
+            let mut diagnostic = connect_store_runtime(&runtime_url);
+            let setup_kind =
+                verify_postgres_schema(&mut diagnostic, &store_target, DatabaseRole::Runtime)
+                    .err()
+                    .map(|error| error.kind());
+            panic!(
+                "{reason}: task_ledger_kind={:?}; setup_kind={setup_kind:?}",
+                failure.kind()
+            );
+        }
+    };
 
     assert_current(&mut migrator, "baseline exact ACL profile");
+    assert_store_current("baseline exact Store plus Writer-v5 plus Foreman profile");
+
+    migrator
+        .batch_execute("CREATE TYPE writer_lease.store_profile_extra_type AS ENUM ('DRIFT')")
+        .expect("create disposable unmodeled Writer type");
+    assert_store_rejected("unmodeled Writer-v5 type must fail closed");
+    migrator
+        .batch_execute("DROP TYPE writer_lease.store_profile_extra_type")
+        .expect("restore exact Writer type profile");
+    assert_store_current("unmodeled Writer-v5 type restore");
+
+    migrator
+        .batch_execute(
+            "CREATE CAST (writer_lease.writer_lease_heads AS text) \
+             WITH INOUT AS IMPLICIT",
+        )
+        .expect("create disposable unmodeled Writer cast");
+    assert_store_rejected("unmodeled Writer-v5 cast must fail closed");
+    migrator
+        .batch_execute("DROP CAST (writer_lease.writer_lease_heads AS text)")
+        .expect("restore exact Writer cast profile");
+    assert_store_current("unmodeled Writer-v5 cast restore");
+
+    migrator
+        .batch_execute(
+            "CREATE INDEX store_profile_extra_index \
+             ON writer_lease.writer_lease_heads (project_id)",
+        )
+        .expect("create disposable unmodeled Writer index");
+    assert_store_rejected("unmodeled Writer-v5 index must fail closed");
+    migrator
+        .batch_execute("DROP INDEX writer_lease.store_profile_extra_index")
+        .expect("restore exact Writer index profile");
+    assert_store_current("unmodeled Writer-v5 index restore");
+
+    migrator
+        .batch_execute(
+            "GRANT SELECT (project_id) ON writer_lease.writer_lease_heads \
+             TO lattice_readonly",
+        )
+        .expect("grant disposable Writer column capability drift");
+    assert_store_rejected("Writer-v5 column ACL drift must fail closed");
+    migrator
+        .batch_execute(
+            "REVOKE SELECT (project_id) ON writer_lease.writer_lease_heads \
+             FROM lattice_readonly",
+        )
+        .expect("restore exact Writer column ACL profile");
+    assert_store_current("Writer-v5 column ACL restore");
+
+    migrator
+        .batch_execute("GRANT USAGE ON TYPE writer_lease.writer_lease_heads TO lattice_readonly")
+        .expect("grant disposable Writer type capability drift");
+    assert_store_rejected("Writer-v5 type ACL drift must fail closed");
+    migrator
+        .batch_execute("REVOKE USAGE ON TYPE writer_lease.writer_lease_heads FROM lattice_readonly")
+        .expect("restore exact Writer type ACL profile");
+    assert_store_current("Writer-v5 type ACL restore");
+
+    migrator
+        .batch_execute(
+            "REVOKE USAGE ON TYPE writer_lease.writer_lease_heads \
+             FROM PUBLIC, lattice_migrator",
+        )
+        .expect("remove the complete Writer type ACL");
+    assert_store_rejected("empty Writer-v5 type ACL must fail closed");
+    migrator
+        .batch_execute(
+            "GRANT USAGE ON TYPE writer_lease.writer_lease_heads \
+             TO PUBLIC, lattice_migrator",
+        )
+        .expect("restore the complete Writer type ACL");
+    assert_store_current("empty Writer-v5 type ACL restore");
+
+    // This numeric-only CHECK round-trips byte-for-byte through
+    // pg_get_constraintdef; the current-state CHECK's IN expression does not.
+    let writer_constraint_definition: String = migrator
+        .query_one(
+            "SELECT pg_catalog.pg_get_constraintdef(con.oid, false) \
+              FROM pg_catalog.pg_constraint con \
+               JOIN pg_catalog.pg_class c ON c.oid=con.conrelid \
+               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+              WHERE n.nspname='writer_lease' AND c.relname='writer_lease_heads' \
+                AND con.conname='writer_lease_heads_versions'",
+            &[],
+        )
+        .expect("read exact Writer constraint definition")
+        .get(0);
+    migrator
+        .batch_execute(
+            "ALTER TABLE writer_lease.writer_lease_heads \
+             DROP CONSTRAINT writer_lease_heads_versions",
+        )
+        .expect("drop disposable Writer constraint");
+    assert_store_rejected("missing Writer-v5 constraint must fail closed");
+    migrator
+        .batch_execute(&format!(
+            "ALTER TABLE writer_lease.writer_lease_heads \
+             ADD CONSTRAINT writer_lease_heads_versions {writer_constraint_definition}"
+        ))
+        .expect("restore exact Writer constraint");
+    assert_store_current("Writer-v5 constraint restore");
+
+    migrator
+        .batch_execute(
+            "CREATE COLLATION foreman_execution.store_profile_extra \
+             FROM pg_catalog.\"C\"",
+        )
+        .expect("create disposable unmodeled Foreman collation");
+    assert_rejected(
+        &mut migrator,
+        "unmodeled Foreman catalog object must fail extension closed",
+    );
+    assert_store_rejected("unmodeled Foreman catalog object must fail closed");
+    migrator
+        .batch_execute("DROP COLLATION foreman_execution.store_profile_extra")
+        .expect("restore exact Foreman object profile");
+    assert_current(&mut migrator, "unmodeled Foreman catalog object restore");
+    assert_store_current("unmodeled Foreman catalog object restore");
+
+    migrator
+        .batch_execute("CREATE SEQUENCE foreman_execution.store_profile_extra_sequence")
+        .expect("create disposable unmodeled Foreman relation");
+    assert_rejected(
+        &mut migrator,
+        "unmodeled Foreman relation must fail extension closed",
+    );
+    assert_store_rejected("unmodeled Foreman relation must fail closed");
+    migrator
+        .batch_execute("DROP SEQUENCE foreman_execution.store_profile_extra_sequence")
+        .expect("restore exact Foreman relation profile");
+    assert_current(&mut migrator, "unmodeled Foreman relation restore");
+    assert_store_current("unmodeled Foreman relation restore");
+
+    migrator
+        .batch_execute(
+            "ALTER TABLE foreman_execution.worker_attempts \
+             SET (autovacuum_enabled=false)",
+        )
+        .expect("alter disposable Foreman table reloptions");
+    assert_rejected(
+        &mut migrator,
+        "Foreman table reloptions drift must fail extension closed",
+    );
+    assert_store_rejected("Foreman table reloptions drift must fail Store closed");
+    migrator
+        .batch_execute(
+            "ALTER TABLE foreman_execution.worker_attempts \
+             RESET (autovacuum_enabled)",
+        )
+        .expect("restore exact Foreman table reloptions");
+    assert_current(&mut migrator, "Foreman table reloptions restore");
+    assert_store_current("Foreman table reloptions Store restore");
+
+    let mut boundary_superuser = connect_superuser_from_url(&migrator_url);
+    boundary_superuser
+        .batch_execute(
+            "CREATE TABLE public.foreman_profile_external_child () \
+             INHERITS (foreman_execution.worker_attempts)",
+        )
+        .expect("create disposable external Foreman inheritance edge");
+    assert_rejected(
+        &mut migrator,
+        "external Foreman inheritance edge must fail extension closed",
+    );
+    assert_store_rejected("external Foreman inheritance edge must fail Store closed");
+    boundary_superuser
+        .batch_execute("DROP TABLE public.foreman_profile_external_child")
+        .expect("restore exact Foreman inheritance closure");
+    assert_current(&mut migrator, "external Foreman inheritance restore");
+    assert_store_current("external Foreman inheritance Store restore");
+
+    boundary_superuser
+        .batch_execute(
+            "CREATE FUNCTION public.store_profile_external_owner() RETURNS integer \
+             LANGUAGE sql IMMUTABLE SECURITY DEFINER SET search_path=pg_catalog AS 'SELECT 1'; \
+             ALTER FUNCTION public.store_profile_external_owner() OWNER TO lattice_migrator; \
+             REVOKE ALL ON FUNCTION public.store_profile_external_owner() \
+             FROM PUBLIC, lattice_migrator",
+        )
+        .expect("create disposable fixed-owner external function with empty ACL");
+    assert_current(
+        &mut migrator,
+        "external fixed-owner function stays outside Foreman extension scope",
+    );
+    assert_store_rejected("external fixed-owner function with empty ACL must fail Store closed");
+    boundary_superuser
+        .batch_execute("DROP FUNCTION public.store_profile_external_owner()")
+        .expect("restore exact external function owner closure");
+    boundary_superuser
+        .batch_execute(
+            "CREATE FUNCTION public.store_profile_safe_empty_acl() RETURNS integer \
+             LANGUAGE sql IMMUTABLE AS 'SELECT 2'; \
+             REVOKE ALL ON FUNCTION public.store_profile_safe_empty_acl() \
+             FROM PUBLIC, CURRENT_USER",
+        )
+        .expect("create disposable safe external function with empty ACL");
+    assert_current(
+        &mut migrator,
+        "safe external empty-ACL function stays outside Foreman extension scope",
+    );
+    assert_store_current("safe external empty-ACL function remains Store current");
+    boundary_superuser
+        .batch_execute("DROP FUNCTION public.store_profile_safe_empty_acl()")
+        .expect("remove disposable safe external empty-ACL function");
+    drop(boundary_superuser);
+    assert_current(&mut migrator, "external fixed-owner function restore");
+    assert_store_current("external fixed-owner function Store restore");
+
+    migrator
+        .batch_execute(
+            "CREATE CAST (foreman_execution.worker_attempts AS text) \
+             WITH INOUT AS IMPLICIT",
+        )
+        .expect("create disposable unmodeled Foreman cast");
+    assert_rejected(
+        &mut migrator,
+        "unmodeled Foreman cast must fail extension closed",
+    );
+    assert_store_rejected("unmodeled Foreman cast must fail Store closed");
+    migrator
+        .batch_execute("DROP CAST (foreman_execution.worker_attempts AS text)")
+        .expect("restore exact Foreman cast profile");
+    assert_current(&mut migrator, "unmodeled Foreman cast restore");
+    assert_store_current("unmodeled Foreman cast Store restore");
+
+    migrator
+        .batch_execute("GRANT USAGE ON TYPE foreman_execution.worker_attempts TO lattice_readonly")
+        .expect("grant disposable Foreman type capability drift");
+    assert_rejected(
+        &mut migrator,
+        "Foreman type ACL drift must fail extension closed",
+    );
+    assert_store_rejected("Foreman type ACL drift must fail Store closed");
+    migrator
+        .batch_execute(
+            "REVOKE USAGE ON TYPE foreman_execution.worker_attempts FROM lattice_readonly",
+        )
+        .expect("restore exact Foreman type ACL profile");
+    assert_current(&mut migrator, "Foreman type ACL restore");
+    assert_store_current("Foreman type ACL Store restore");
+
+    migrator
+        .batch_execute(
+            "REVOKE USAGE ON TYPE foreman_execution.worker_attempts \
+             FROM PUBLIC, lattice_migrator",
+        )
+        .expect("remove the complete Foreman type ACL");
+    assert_rejected(
+        &mut migrator,
+        "empty Foreman type ACL must fail extension closed",
+    );
+    assert_store_rejected("empty Foreman type ACL must fail Store closed");
+    migrator
+        .batch_execute(
+            "GRANT USAGE ON TYPE foreman_execution.worker_attempts \
+             TO PUBLIC, lattice_migrator",
+        )
+        .expect("restore the complete Foreman type ACL");
+    assert_current(&mut migrator, "empty Foreman type ACL restore");
+    assert_store_current("empty Foreman type ACL Store restore");
+
+    migrator
+        .batch_execute(
+            "GRANT USAGE ON SCHEMA writer_lease TO lattice_readonly; \
+             GRANT SELECT ON writer_lease.writer_lease_heads TO lattice_readonly",
+        )
+        .expect("grant disposable Writer capability drift");
+    assert_store_rejected("Writer-v5 capability ACL drift must fail closed");
+    migrator
+        .batch_execute(
+            "REVOKE SELECT ON writer_lease.writer_lease_heads FROM lattice_readonly; \
+             REVOKE USAGE ON SCHEMA writer_lease FROM lattice_readonly",
+        )
+        .expect("restore exact Writer capability profile");
+    assert_store_current("Writer-v5 capability ACL restore");
+
+    for (login, role) in [
+        ("lattice_guardian_login", "lattice_guardian"),
+        ("lattice_readonly_login", "lattice_readonly"),
+    ] {
+        let mut verifier = connect_capability_from_url(&migrator_url, login, role);
+        let identity_count: i64 = verifier
+            .query_one(
+                "SELECT count(*) FROM foreman_execution.read_extension_identity_v1()",
+                &[],
+            )
+            .expect("closed Store role reads only the Foreman identity capability")
+            .get(0);
+        assert_eq!(identity_count, 1);
+        let direct = verifier.query(
+            "SELECT singleton FROM ONLY foreman_execution.extension_identity",
+            &[],
+        );
+        let error = direct.expect_err("closed Store role must not read Foreman tables directly");
+        assert_eq!(
+            error.as_db_error().map(postgres::error::DbError::code),
+            Some(&SqlState::INSUFFICIENT_PRIVILEGE)
+        );
+    }
+
+    let original_identity_manifest: String = migrator
+        .query_one(
+            "SELECT extension_manifest_sha256::text \
+               FROM ONLY foreman_execution.extension_identity WHERE singleton",
+            &[],
+        )
+        .expect("read exact Foreman identity manifest")
+        .get(0);
+    let original_ledger_manifest: String = migrator
+        .query_one(
+            "SELECT extension_manifest_sha256::text \
+               FROM ONLY foreman_execution.extension_ledger WHERE ledger_ordinal=1",
+            &[],
+        )
+        .expect("read exact Foreman ledger manifest")
+        .get(0);
+    assert_eq!(original_identity_manifest, original_ledger_manifest);
+    let substituted_manifest = "a".repeat(64);
+    migrator
+        .execute(
+            "UPDATE ONLY foreman_execution.extension_identity \
+                SET extension_manifest_sha256=$1 WHERE singleton",
+            &[&substituted_manifest],
+        )
+        .expect("substitute Foreman identity manifest");
+    migrator
+        .execute(
+            "UPDATE ONLY foreman_execution.extension_ledger \
+                SET extension_manifest_sha256=$1 WHERE ledger_ordinal=1",
+            &[&substituted_manifest],
+        )
+        .expect("substitute Foreman ledger manifest");
+    let identity_failure =
+        verify_extension(&mut migrator, &target, ExtensionDatabaseRole::Migrator)
+            .expect_err("coherent Foreman identity substitution must fail closed");
+    assert_eq!(
+        identity_failure.kind(),
+        ExtensionSetupErrorKind::CatalogMismatch
+    );
+    assert_eq!(
+        identity_failure.code(),
+        "FOREMAN_EXTENSION_IDENTITY_MISMATCH"
+    );
+    assert_store_rejected("coherent Foreman identity substitution must fail Store closed");
+    migrator
+        .execute(
+            "UPDATE ONLY foreman_execution.extension_identity \
+                SET extension_manifest_sha256=$1 WHERE singleton",
+            &[&original_identity_manifest],
+        )
+        .expect("restore Foreman identity manifest");
+    migrator
+        .execute(
+            "UPDATE ONLY foreman_execution.extension_ledger \
+                SET extension_manifest_sha256=$1 WHERE ledger_ordinal=1",
+            &[&original_ledger_manifest],
+        )
+        .expect("restore Foreman ledger manifest");
+    assert_current(&mut migrator, "Foreman identity manifest restore");
+    assert_store_current("Foreman identity manifest Store restore");
+
+    let mut superuser = connect_superuser_from_url(&migrator_url);
+    superuser
+        .batch_execute("ALTER TABLE foreman_execution.worker_attempts DISABLE TRIGGER ALL")
+        .expect("disable disposable Foreman constraint triggers");
+    assert_rejected(
+        &mut migrator,
+        "disabled Foreman constraint trigger must fail extension closed",
+    );
+    assert_store_rejected("disabled Foreman constraint trigger must fail closed");
+    superuser
+        .batch_execute("ALTER TABLE foreman_execution.worker_attempts ENABLE TRIGGER ALL")
+        .expect("restore Foreman constraint triggers");
+    drop(superuser);
+    assert_current(
+        &mut migrator,
+        "Foreman constraint trigger extension restore",
+    );
+    assert_store_current("Foreman constraint trigger restore");
+
     migrator
         .batch_execute("GRANT SELECT ON foreman_execution.staged_artifact_references TO PUBLIC")
         .expect("grant disposable PUBLIC staged-table read");
@@ -708,6 +1174,191 @@ fn disposable_store_v7_catalog_tamper_fails_closed() {
         .expect("restore extra-role schema ACL");
     assert_current(&mut migrator, "extra-role schema ACL restore");
 
+    let mut dependency_superuser = connect_superuser_from_url(&migrator_url);
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION foreman_execution.read_task_replay_v1(bytea) \
+             DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("add disposable Foreman extension lifecycle dependency");
+    assert_rejected(
+        &mut migrator,
+        "Foreman extension lifecycle dependency must fail extension closed",
+    );
+    assert_store_rejected("Foreman extension lifecycle dependency must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION foreman_execution.read_task_replay_v1(bytea) \
+             NO DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("restore Foreman extension lifecycle dependency closure");
+    assert_current(
+        &mut migrator,
+        "Foreman extension lifecycle dependency restore",
+    );
+    assert_store_current("Foreman extension lifecycle dependency Store restore");
+
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION writer_lease.writer_lease_load_commands_v1(text) \
+             DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("add disposable Writer extension lifecycle dependency");
+    assert_current(
+        &mut migrator,
+        "Writer extension lifecycle dependency stays outside Foreman scope",
+    );
+    assert_store_rejected("Writer extension lifecycle dependency must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION writer_lease.writer_lease_load_commands_v1(text) \
+             NO DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("restore Writer extension lifecycle dependency closure");
+    assert_store_current("Writer extension lifecycle dependency Store restore");
+
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION control.task_ingress_historical_closure_v1() \
+             DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("add disposable Store extension lifecycle dependency");
+    assert_current(
+        &mut migrator,
+        "Store extension lifecycle dependency stays outside Foreman scope",
+    );
+    assert_store_rejected("Store extension lifecycle dependency must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER FUNCTION control.task_ingress_historical_closure_v1() \
+             NO DEPENDS ON EXTENSION plpgsql",
+        )
+        .expect("restore Store extension lifecycle dependency closure");
+
+    dependency_superuser
+        .batch_execute(
+            "CREATE TRANSFORM FOR foreman_execution.worker_attempts LANGUAGE SQL ( \
+               FROM SQL WITH FUNCTION pg_catalog.prsd_lextype(internal) \
+             )",
+        )
+        .expect("create disposable unmodeled Foreman transform");
+    assert_rejected(
+        &mut migrator,
+        "unmodeled Foreman transform must fail extension closed",
+    );
+    assert_store_rejected("unmodeled Foreman transform must fail Store closed");
+    dependency_superuser
+        .batch_execute("DROP TRANSFORM FOR foreman_execution.worker_attempts LANGUAGE SQL")
+        .expect("restore exact Foreman transform closure");
+    assert_current(&mut migrator, "unmodeled Foreman transform restore");
+    assert_store_current("unmodeled Foreman transform Store restore");
+
+    dependency_superuser
+        .batch_execute(
+            "CREATE TRANSFORM FOR writer_lease.writer_lease_heads LANGUAGE SQL ( \
+               FROM SQL WITH FUNCTION pg_catalog.prsd_lextype(internal) \
+             )",
+        )
+        .expect("create disposable unmodeled Writer transform");
+    assert_current(
+        &mut migrator,
+        "Writer transform remains outside the Foreman catalog scope",
+    );
+    assert_store_rejected("unmodeled Writer transform must fail Store closed");
+    dependency_superuser
+        .batch_execute("DROP TRANSFORM FOR writer_lease.writer_lease_heads LANGUAGE SQL")
+        .expect("restore exact Writer transform closure");
+    assert_store_current("unmodeled Writer transform Store restore");
+
+    dependency_superuser
+        .batch_execute(
+            "CREATE TRANSFORM FOR control.task_ledger_streams LANGUAGE SQL ( \
+               FROM SQL WITH FUNCTION pg_catalog.prsd_lextype(internal) \
+             )",
+        )
+        .expect("create disposable unmodeled Store transform");
+    assert_current(
+        &mut migrator,
+        "Store transform remains outside the Foreman catalog scope",
+    );
+    assert_store_rejected("unmodeled Store transform must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER EXTENSION plpgsql \
+             ADD TRANSFORM FOR control.task_ledger_streams LANGUAGE SQL",
+        )
+        .expect("attach disposable Store transform lifecycle dependency");
+    let managed_transform_dependencies: i64 = dependency_superuser
+        .query_one(
+            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d \
+              JOIN pg_catalog.pg_transform tr ON tr.oid=d.objid \
+             WHERE d.classid='pg_transform'::pg_catalog.regclass \
+               AND d.deptype IN ('e','x') \
+               AND tr.trftype='control.task_ledger_streams'::pg_catalog.regtype",
+            &[],
+        )
+        .expect("read disposable Store transform lifecycle dependency")
+        .get(0);
+    assert_eq!(managed_transform_dependencies, 1);
+    assert_current(
+        &mut migrator,
+        "Store transform lifecycle dependency stays outside Foreman scope",
+    );
+    assert_store_rejected("Store transform lifecycle dependency must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER EXTENSION plpgsql \
+             DROP TRANSFORM FOR control.task_ledger_streams LANGUAGE SQL",
+        )
+        .expect("detach disposable Store transform lifecycle dependency");
+    dependency_superuser
+        .batch_execute("DROP TRANSFORM FOR control.task_ledger_streams LANGUAGE SQL")
+        .expect("restore exact Store transform closure");
+    assert_store_current("unmodeled Store transform restore");
+
+    migrator
+        .batch_execute(
+            "CREATE CAST (control.task_ledger_streams AS text) \
+             WITH INOUT AS IMPLICIT",
+        )
+        .expect("create disposable unmodeled Store cast");
+    assert_current(
+        &mut migrator,
+        "Store cast remains outside the Foreman catalog scope",
+    );
+    assert_store_rejected("unmodeled Store cast must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER EXTENSION plpgsql \
+             ADD CAST (control.task_ledger_streams AS text)",
+        )
+        .expect("attach disposable Store cast lifecycle dependency");
+    let managed_cast_dependencies: i64 = dependency_superuser
+        .query_one(
+            "SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d \
+              JOIN pg_catalog.pg_cast c ON c.oid=d.objid \
+             WHERE d.classid='pg_cast'::pg_catalog.regclass \
+               AND d.deptype IN ('e','x') \
+               AND c.castsource='control.task_ledger_streams'::pg_catalog.regtype \
+               AND c.casttarget='text'::pg_catalog.regtype",
+            &[],
+        )
+        .expect("read disposable Store cast lifecycle dependency")
+        .get(0);
+    assert_eq!(managed_cast_dependencies, 1);
+    assert_store_rejected("Store cast lifecycle dependency must fail Store closed");
+    dependency_superuser
+        .batch_execute(
+            "ALTER EXTENSION plpgsql \
+             DROP CAST (control.task_ledger_streams AS text)",
+        )
+        .expect("detach disposable Store cast lifecycle dependency");
+    migrator
+        .batch_execute("DROP CAST (control.task_ledger_streams AS text)")
+        .expect("restore exact Store cast closure");
+    drop(dependency_superuser);
+    assert_store_current("Store extension and cast lifecycle dependency restore");
+
     migrator
         .batch_execute(
             "ALTER FUNCTION foreman_execution.read_task_replay_v1(bytea) \
@@ -715,6 +1366,39 @@ fn disposable_store_v7_catalog_tamper_fails_closed() {
         )
         .expect("apply disposable function tamper");
     assert_rejected(&mut migrator, "tampered catalog must fail closed");
+    assert_store_rejected("tampered function catalog must fail Store closed");
+    migrator
+        .batch_execute(
+            "ALTER FUNCTION foreman_execution.read_task_replay_tampered_v1(bytea) \
+             RENAME TO read_task_replay_v1",
+        )
+        .expect("restore exact function catalog");
+    assert_current(&mut migrator, "tampered function catalog restore");
+    assert_store_current("tampered function catalog Store restore");
+
+    migrator
+        .batch_execute(
+            "ALTER TABLE foreman_execution.worker_attempts \
+             ADD COLUMN catalog_generated_probe text \
+             GENERATED ALWAYS AS ('drift'::text) STORED",
+        )
+        .expect("add disposable generated catalog column");
+    assert_rejected(
+        &mut migrator,
+        "generated Foreman column must fail extension closed",
+    );
+    assert_store_rejected("generated Foreman column must fail Store closed");
+    migrator
+        .batch_execute(
+            "ALTER TABLE foreman_execution.worker_attempts \
+             DROP COLUMN catalog_generated_probe",
+        )
+        .expect("leave a terminal dropped-column tombstone");
+    assert_rejected(
+        &mut migrator,
+        "dropped Foreman column tombstone must fail extension closed",
+    );
+    assert_store_rejected("dropped Foreman column tombstone must fail Store closed");
 }
 
 #[test]
@@ -6043,6 +6727,26 @@ fn connect_as(url: &str, role: &str) -> Client {
         })
         .expect("set closed role");
     client
+}
+
+fn connect_capability_from_url(url: &str, login: &str, role: &str) -> Client {
+    let mut config: Config = url.parse().expect("parse disposable PostgreSQL URL");
+    config.user(login);
+    let mut client = config
+        .connect(NoTls)
+        .expect("connect closed disposable PostgreSQL role");
+    client
+        .batch_execute(&format!("SET ROLE {role}"))
+        .expect("set closed disposable role");
+    client
+}
+
+fn connect_superuser_from_url(url: &str) -> Client {
+    let mut config: Config = url.parse().expect("parse disposable PostgreSQL URL");
+    config.user(&required("LATTICE_TASK_SUBMISSION_SUPERUSER"));
+    config
+        .connect(NoTls)
+        .expect("connect coordinator-owned disposable PostgreSQL superuser")
 }
 
 fn required(name: &str) -> String {

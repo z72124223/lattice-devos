@@ -16,12 +16,24 @@ const EXTENSION_ADVISORY_LOCK: i64 = 7_212_400_260_826;
 const EXPECTED_TABLE_COUNT: i64 = 17;
 const EXPECTED_FUNCTION_COUNT: i64 = 43;
 const EXPECTED_RUNTIME_FUNCTION_COUNT: i64 = 39;
+const EXPECTED_INTERNAL_TRIGGER_COUNT: i64 = 92;
+const EXPECTED_CONTROL_INTERNAL_TRIGGER_COUNT: i64 = 12;
+const EXPECTED_TYPE_COUNT: i64 = 34;
 const FUNCTION_CATALOG_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_FUNCTION_CATALOG_V1\0";
-const TABLE_CATALOG_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_TABLE_CATALOG_V1\0";
+const TABLE_CATALOG_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_TABLE_CATALOG_V2\0";
 const EXPECTED_FUNCTION_CATALOG_SHA256: &str =
-    "7b249bf8416f734a34b6e1b9e7b407d17b00771139ac71a12294a3b0543e6120";
+    "8d8dd263498cab48b1164bf456f5d3b314d575ee9a186460715beea02bc8bfec";
 const EXPECTED_TABLE_CATALOG_SHA256: &str =
-    "e772c3041a4c30908c555c5b96f6705f48011634e47db8f562410371705ce807";
+    "42f151dd9f52ba1e82a2aac392234f2b285c18e9bd71a00372f7c7b4a1237eb5";
+const PREDECESSOR_EXTENSION_SQL_BYTES: i64 = 349_470;
+const PREDECESSOR_EXTENSION_SQL_SHA256: &str =
+    "32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13";
+const PREDECESSOR_EXTENSION_MANIFEST_SHA256: &str =
+    "0b1855611b37da4ed8b17be3d85e6410598fb13a255ce307d0907e702afeea63";
+const PREDECESSOR_FUNCTION_CATALOG_SHA256: &str =
+    "7b249bf8416f734a34b6e1b9e7b407d17b00771139ac71a12294a3b0543e6120";
+const PREDECESSOR_TABLE_CATALOG_SHA256: &str =
+    "dcd206da5753e55a4499717a896fd1373165430edd6eadeaf6c1284c23fbde17";
 
 /// Closed administrative/runtime database roles for the extension.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,15 +190,18 @@ impl ExtensionCatalogEvidence {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExtensionApplyOutcome {
     Installed(ExtensionCatalogEvidence),
+    Upgraded(ExtensionCatalogEvidence),
     AlreadyCurrent(ExtensionCatalogEvidence),
 }
 
-/// Installs fresh v1 or verifies an exact existing profile.
+/// Installs fresh v1, atomically replaces the exact empty predecessor, or
+/// verifies an exact existing profile.
 ///
 /// # Errors
 ///
-/// Any wrong role, Store identity, schema collision, partial state, SQL failure,
-/// catalog drift, or ACL drift rolls back and fails closed.
+/// Any wrong role, Store identity, schema collision, partial state, predecessor
+/// data/dependency, SQL failure, catalog drift, or ACL drift rolls back and
+/// fails closed. No ordinary Runtime path calls this administrative operation.
 pub fn apply_extension(
     client: &mut Client,
     target: &ExtensionTarget,
@@ -219,6 +234,36 @@ pub fn apply_extension(
         restage_transaction_failure(failure, "FOREMAN_EXTENSION_CLASSIFY_FAILED")
     })?;
     if state == ExtensionPreState::Exact {
+        let function_digest = measure_function_catalog_digest(&mut transaction)?;
+        let table_digest = measure_table_catalog_digest(&mut transaction)?;
+        if function_digest == EXPECTED_FUNCTION_CATALOG_SHA256
+            && table_digest == EXPECTED_TABLE_CATALOG_SHA256
+        {
+            let evidence = verify_catalog(
+                &mut transaction,
+                target,
+                ExtensionDatabaseRole::Migrator,
+                &manifest,
+            )?;
+            transaction
+                .commit()
+                .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
+            return Ok(ExtensionApplyOutcome::AlreadyCurrent(evidence));
+        }
+        if function_digest != PREDECESSOR_FUNCTION_CATALOG_SHA256
+            || table_digest != PREDECESSOR_TABLE_CATALOG_SHA256
+        {
+            return Err(catalog_profile_mismatch());
+        }
+        verify_exact_empty_predecessor(&mut transaction, target)?;
+        transaction
+            .batch_execute("DROP SCHEMA foreman_execution CASCADE")
+            .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_PREDECESSOR_DROP_FAILED"))?;
+        let sql = std::str::from_utf8(manifest.bytes()).map_err(|_| transaction_error())?;
+        transaction
+            .batch_execute(sql)
+            .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_SQL_FAILED"))?;
+        insert_identity(&mut transaction, target, &manifest)?;
         let evidence = verify_catalog(
             &mut transaction,
             target,
@@ -228,7 +273,7 @@ pub fn apply_extension(
         transaction
             .commit()
             .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
-        return Ok(ExtensionApplyOutcome::AlreadyCurrent(evidence));
+        return Ok(ExtensionApplyOutcome::Upgraded(evidence));
     }
     match state {
         ExtensionPreState::Fresh => {}
@@ -423,6 +468,152 @@ fn classify_extension(
     })
 }
 
+#[allow(clippy::too_many_lines)]
+fn verify_exact_empty_predecessor(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+) -> Result<(), ExtensionSetupError> {
+    verify_closed_catalog_shape(client)?;
+    let identity = client
+        .query_one(
+            "SELECT extension_id, extension_schema_version, extension_path, \
+                    extension_sql_bytes, extension_sql_sha256, \
+                    extension_manifest_sha256, database_name, database_uuid, \
+                    database_identity_sha256, global_schema_version, \
+                    global_manifest_sha256 \
+               FROM foreman_execution.read_extension_identity_v1()",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    if identity.get::<_, String>(0) != FOREMAN_EXTENSION_ID
+        || identity.get::<_, i16>(1)
+            != i16::try_from(FOREMAN_EXTENSION_SCHEMA_VERSION).expect("fixed")
+        || identity.get::<_, String>(2) != FOREMAN_EXTENSION_PATH
+        || identity.get::<_, i64>(3) != PREDECESSOR_EXTENSION_SQL_BYTES
+        || identity.get::<_, String>(4) != PREDECESSOR_EXTENSION_SQL_SHA256
+        || identity.get::<_, String>(5) != PREDECESSOR_EXTENSION_MANIFEST_SHA256
+        || identity.get::<_, String>(6) != target.database_name()
+        || identity.get::<_, String>(7) != target.expected_database_uuid()
+        || identity.get::<_, String>(8) != target.expected_database_identity_digest().as_str()
+        || identity.get::<_, i16>(9)
+            != i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed")
+        || identity.get::<_, String>(10) != REQUIRED_GLOBAL_MANIFEST_SHA256
+    {
+        return Err(catalog_profile_mismatch());
+    }
+
+    let boundary = client
+        .query_one(
+            "WITH foreman_relations(objid) AS ( \
+                SELECT c.oid FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' \
+            ), foreman_constraints(objid) AS ( \
+                SELECT c.oid FROM pg_catalog.pg_constraint c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.connamespace \
+                 WHERE n.nspname='foreman_execution' \
+            ), foreman_toast_relations(objid) AS ( \
+                SELECT c.reltoastrelid FROM pg_catalog.pg_class c \
+                 WHERE c.oid IN (SELECT objid FROM foreman_relations) \
+                   AND c.reltoastrelid<>0 \
+                UNION \
+                SELECT i.indexrelid FROM pg_catalog.pg_index i \
+                 WHERE i.indrelid IN ( \
+                    SELECT c.reltoastrelid FROM pg_catalog.pg_class c \
+                     WHERE c.oid IN (SELECT objid FROM foreman_relations) \
+                       AND c.reltoastrelid<>0) \
+            ), managed(classid,objid) AS ( \
+                SELECT 'pg_namespace'::pg_catalog.regclass::oid,n.oid \
+                  FROM pg_catalog.pg_namespace n \
+                 WHERE n.nspname='foreman_execution' \
+                UNION \
+                SELECT 'pg_class'::pg_catalog.regclass::oid,objid \
+                  FROM foreman_relations \
+                UNION \
+                SELECT 'pg_class'::pg_catalog.regclass::oid,objid \
+                  FROM foreman_toast_relations \
+                UNION \
+                SELECT 'pg_proc'::pg_catalog.regclass::oid,p.oid \
+                  FROM pg_catalog.pg_proc p \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                 WHERE n.nspname='foreman_execution' \
+                UNION \
+                SELECT 'pg_type'::pg_catalog.regclass::oid,t.oid \
+                  FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                 WHERE n.nspname='foreman_execution' \
+                UNION \
+                SELECT 'pg_constraint'::pg_catalog.regclass::oid,objid \
+                  FROM foreman_constraints \
+                UNION \
+                SELECT 'pg_attrdef'::pg_catalog.regclass::oid,a.oid \
+                  FROM pg_catalog.pg_attrdef a \
+                 WHERE a.adrelid IN (SELECT objid FROM foreman_relations) \
+                UNION \
+                SELECT 'pg_trigger'::pg_catalog.regclass::oid,t.oid \
+                  FROM pg_catalog.pg_trigger t \
+                 WHERE t.tgrelid IN (SELECT objid FROM foreman_relations) \
+                    OR t.tgconstraint IN (SELECT objid FROM foreman_constraints) \
+                UNION \
+                SELECT 'pg_rewrite'::pg_catalog.regclass::oid,r.oid \
+                  FROM pg_catalog.pg_rewrite r \
+                 WHERE r.ev_class IN (SELECT objid FROM foreman_relations) \
+                UNION \
+                SELECT 'pg_policy'::pg_catalog.regclass::oid,p.oid \
+                  FROM pg_catalog.pg_policy p \
+                 WHERE p.polrelid IN (SELECT objid FROM foreman_relations) \
+                UNION \
+                SELECT 'pg_statistic_ext'::pg_catalog.regclass::oid,s.oid \
+                  FROM pg_catalog.pg_statistic_ext s \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=s.stxnamespace \
+                 WHERE n.nspname='foreman_execution' \
+                UNION \
+                SELECT 'pg_type'::pg_catalog.regclass::oid,t.oid \
+                  FROM pg_catalog.pg_type t \
+                 WHERE t.typrelid IN (SELECT objid FROM foreman_toast_relations) \
+            ) \
+            SELECT \
+                (SELECT pg_catalog.count(*) \
+                   FROM ONLY foreman_execution.extension_identity), \
+                (SELECT pg_catalog.count(*) \
+                   FROM ONLY foreman_execution.extension_ledger), \
+                ((SELECT pg_catalog.count(*) FROM ONLY foreman_execution.child_events) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.preparation_observations) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.promotion_intents) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.task_promotions) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.worker_attempts) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.pending_worker_claims) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.execution_environments) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.worker_observations) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.verification_records) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.artifact_references) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.staged_artifact_references) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.provider_dispatch_claims) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.attempt_closures) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.approval_owner_snapshots) + \
+                 (SELECT pg_catalog.count(*) FROM ONLY foreman_execution.approval_evidence)), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d \
+                  JOIN managed referenced \
+                    ON referenced.classid=d.refclassid AND referenced.objid=d.refobjid \
+                  LEFT JOIN managed dependent \
+                    ON dependent.classid=d.classid AND dependent.objid=d.objid \
+                 WHERE dependent.objid IS NULL)",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    if boundary.get::<_, i64>(0) != 1
+        || boundary.get::<_, i64>(1) != 1
+        || boundary.get::<_, i64>(2) != 0
+        || boundary.get::<_, i64>(3) != 0
+    {
+        return Err(error(
+            ExtensionSetupErrorKind::PartialProfile,
+            "FOREMAN_EXTENSION_PREDECESSOR_NOT_EMPTY",
+        ));
+    }
+    Ok(())
+}
+
 fn insert_identity(
     client: &mut impl GenericClient,
     target: &ExtensionTarget,
@@ -481,6 +672,10 @@ fn verify_catalog(
     role: ExtensionDatabaseRole,
     manifest: &ExtensionManifestEvidence,
 ) -> Result<ExtensionCatalogEvidence, ExtensionSetupError> {
+    // Pin the SECURITY DEFINER implementation and its complete ACL before
+    // invoking the extension-owned identity reader.
+    verify_exact_catalog_digests(client)?;
+    verify_closed_catalog_shape(client)?;
     let identity = client
         .query_one(
             "SELECT extension_id, extension_schema_version, extension_path, \
@@ -580,7 +775,6 @@ fn verify_catalog(
     let public_usage: bool = shape.get(6);
     let runtime_usage: bool = shape.get(7);
     let runtime_create: bool = shape.get(8);
-    verify_exact_catalog_digests(client)?;
     if tables != EXPECTED_TABLE_COUNT
         || functions != EXPECTED_FUNCTION_COUNT
         || owned_tables != EXPECTED_TABLE_COUNT
@@ -612,6 +806,250 @@ fn verify_exact_catalog_digests(
     if function_digest != EXPECTED_FUNCTION_CATALOG_SHA256
         || table_digest != EXPECTED_TABLE_CATALOG_SHA256
     {
+        return Err(catalog_profile_mismatch());
+    }
+    Ok(())
+}
+
+fn verify_closed_catalog_shape(client: &mut impl GenericClient) -> Result<(), ExtensionSetupError> {
+    let shape = client
+        .query_one(
+            "SELECT \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND c.relkind NOT IN ('r','i')), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND NOT t.tgisinternal), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND t.tgisinternal), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                 WHERE n.nspname='foreman_execution' AND t.tgisinternal \
+                   AND t.tgenabled='O' AND t.tgconstraint<>0), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t \
+                  JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  JOIN pg_catalog.pg_constraint con ON con.oid=t.tgconstraint \
+                  JOIN pg_catalog.pg_namespace cn ON cn.oid=con.connamespace \
+                 WHERE n.nspname IN ('control','memory','readmodel') \
+                   AND cn.nspname='foreman_execution' AND t.tgisinternal \
+                   AND t.tgenabled='O' AND t.tgconstraint<>0), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                 WHERE n.nspname='foreman_execution' \
+                   AND (NOT t.typisdefined OR t.typtype IN ('d','e','p','r','m'))), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_type t \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                 WHERE n.nspname='foreman_execution'), \
+                (SELECT pg_catalog.count(*) FROM ( \
+                   SELECT t.oid \
+                     FROM pg_catalog.pg_type t \
+                     JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     LEFT JOIN LATERAL pg_catalog.aclexplode( \
+                       COALESCE(t.typacl,pg_catalog.acldefault('T',t.typowner))) acl ON TRUE \
+                    WHERE n.nspname='foreman_execution' \
+                    GROUP BY t.oid,t.typowner \
+                   HAVING pg_catalog.count(acl.privilege_type)<>2 \
+                       OR pg_catalog.count(*) FILTER (WHERE acl.grantee=0 \
+                           AND acl.grantor=t.typowner \
+                           AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+                       OR pg_catalog.count(*) FILTER (WHERE acl.grantee=t.typowner \
+                           AND acl.grantor=t.typowner \
+                           AND acl.privilege_type='USAGE' AND NOT acl.is_grantable)<>1 \
+                ) type_acl_drift), \
+                ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_conversion x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.connamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_operator x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.oprnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opclass x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.opcnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_opfamily x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.opfnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_statistic_ext x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.stxnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_config x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.cfgnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_dict x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.dictnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace \
+                  WHERE n.nspname='foreman_execution')), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_default_acl d \
+                  JOIN pg_catalog.pg_namespace n ON n.oid=d.defaclnamespace \
+                 WHERE n.nspname='foreman_execution'), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_cast c \
+                 WHERE c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                      WHERE n.nspname='foreman_execution') \
+                    OR c.casttarget IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                      WHERE n.nspname='foreman_execution') \
+                    OR c.castfunc IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                      WHERE n.nspname='foreman_execution')), \
+                (SELECT pg_catalog.count(*) FROM pg_catalog.pg_transform tr \
+                 WHERE tr.trftype IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                      WHERE n.nspname='foreman_execution') \
+                    OR tr.trffromsql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                      WHERE n.nspname='foreman_execution') \
+                    OR tr.trftosql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                       JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                      WHERE n.nspname='foreman_execution')), \
+                ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite w \
+                   JOIN pg_catalog.pg_class c ON c.oid=w.ev_class \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='foreman_execution' AND w.rulename<>'_RETURN') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_policy p \
+                   JOIN pg_catalog.pg_class c ON c.oid=p.polrelid \
+                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
+                  WHERE n.nspname='foreman_execution') + \
+                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i \
+                   JOIN pg_catalog.pg_class child ON child.oid=i.inhrelid \
+                   JOIN pg_catalog.pg_namespace child_ns ON child_ns.oid=child.relnamespace \
+                   JOIN pg_catalog.pg_class parent ON parent.oid=i.inhparent \
+                   JOIN pg_catalog.pg_namespace parent_ns ON parent_ns.oid=parent.relnamespace \
+                  WHERE child_ns.nspname='foreman_execution' \
+                     OR parent_ns.nspname='foreman_execution'))",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    let expected = [
+        0_i64,
+        0,
+        EXPECTED_INTERNAL_TRIGGER_COUNT,
+        EXPECTED_INTERNAL_TRIGGER_COUNT,
+        EXPECTED_CONTROL_INTERNAL_TRIGGER_COUNT,
+        0,
+        EXPECTED_TYPE_COUNT,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ];
+    if expected
+        .into_iter()
+        .enumerate()
+        .any(|(index, expected)| shape.get::<_, i64>(index) != expected)
+    {
+        return Err(catalog_profile_mismatch());
+    }
+    verify_managed_extension_dependency_closure(client)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_managed_extension_dependency_closure(
+    client: &mut impl GenericClient,
+) -> Result<(), ExtensionSetupError> {
+    let forbidden = client
+        .query_one(
+            "WITH managed_namespaces(objid) AS ( \
+                SELECT n.oid FROM pg_catalog.pg_namespace n \
+                 WHERE n.nspname='foreman_execution' \
+            ), managed_relations(objid) AS ( \
+                SELECT c.oid FROM pg_catalog.pg_class c \
+                 WHERE c.relnamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_constraints(objid) AS ( \
+                SELECT c.oid FROM pg_catalog.pg_constraint c \
+                 WHERE c.connamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_toast_relations(objid) AS ( \
+                SELECT c.reltoastrelid FROM pg_catalog.pg_class c \
+                 WHERE c.oid IN (SELECT objid FROM managed_relations) \
+                   AND c.reltoastrelid<>0 \
+                UNION \
+                SELECT i.indexrelid FROM pg_catalog.pg_index i \
+                 WHERE i.indrelid IN ( \
+                    SELECT c.reltoastrelid FROM pg_catalog.pg_class c \
+                     WHERE c.oid IN (SELECT objid FROM managed_relations) \
+                       AND c.reltoastrelid<>0) \
+            ), managed_functions(objid) AS ( \
+                SELECT p.oid FROM pg_catalog.pg_proc p \
+                 WHERE p.pronamespace IN (SELECT objid FROM managed_namespaces) \
+            ), managed_types(objid) AS ( \
+                SELECT t.oid FROM pg_catalog.pg_type t \
+                 WHERE t.typnamespace IN (SELECT objid FROM managed_namespaces) \
+                    OR t.typrelid IN (SELECT objid FROM managed_toast_relations) \
+            ), managed_casts(objid) AS ( \
+                SELECT c.oid FROM pg_catalog.pg_cast c \
+                 WHERE c.castsource IN (SELECT objid FROM managed_types) \
+                    OR c.casttarget IN (SELECT objid FROM managed_types) \
+                    OR c.castfunc IN (SELECT objid FROM managed_functions) \
+            ), managed_transforms(objid) AS ( \
+                SELECT tr.oid FROM pg_catalog.pg_transform tr \
+                 WHERE tr.trftype IN (SELECT objid FROM managed_types) \
+                    OR tr.trffromsql IN (SELECT objid FROM managed_functions) \
+                    OR tr.trftosql IN (SELECT objid FROM managed_functions) \
+            ), managed(classid,objid) AS ( \
+                SELECT 'pg_namespace'::pg_catalog.regclass::oid,objid \
+                  FROM managed_namespaces \
+                UNION \
+                SELECT 'pg_class'::pg_catalog.regclass::oid,objid FROM managed_relations \
+                UNION \
+                SELECT 'pg_class'::pg_catalog.regclass::oid,objid FROM managed_toast_relations \
+                UNION \
+                SELECT 'pg_proc'::pg_catalog.regclass::oid,objid FROM managed_functions \
+                UNION \
+                SELECT 'pg_type'::pg_catalog.regclass::oid,objid FROM managed_types \
+                UNION \
+                SELECT 'pg_cast'::pg_catalog.regclass::oid,objid FROM managed_casts \
+                UNION \
+                SELECT 'pg_transform'::pg_catalog.regclass::oid,objid \
+                  FROM managed_transforms \
+                UNION \
+                SELECT 'pg_constraint'::pg_catalog.regclass::oid,objid \
+                  FROM managed_constraints \
+                UNION \
+                SELECT 'pg_attrdef'::pg_catalog.regclass::oid,a.oid \
+                  FROM pg_catalog.pg_attrdef a \
+                 WHERE a.adrelid IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_trigger'::pg_catalog.regclass::oid,t.oid \
+                  FROM pg_catalog.pg_trigger t \
+                 WHERE t.tgrelid IN (SELECT objid FROM managed_relations) \
+                    OR t.tgconstraint IN (SELECT objid FROM managed_constraints) \
+                UNION \
+                SELECT 'pg_rewrite'::pg_catalog.regclass::oid,r.oid \
+                  FROM pg_catalog.pg_rewrite r \
+                 WHERE r.ev_class IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_policy'::pg_catalog.regclass::oid,p.oid \
+                  FROM pg_catalog.pg_policy p \
+                 WHERE p.polrelid IN (SELECT objid FROM managed_relations) \
+                UNION \
+                SELECT 'pg_statistic_ext'::pg_catalog.regclass::oid,s.oid \
+                  FROM pg_catalog.pg_statistic_ext s \
+                 WHERE s.stxnamespace IN (SELECT objid FROM managed_namespaces) \
+            ) \
+            SELECT pg_catalog.count(*) FROM pg_catalog.pg_depend d \
+              JOIN managed dependent \
+                ON dependent.classid=d.classid AND dependent.objid=d.objid \
+             WHERE d.deptype IN ('e','x')",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    if forbidden.get::<_, i64>(0) != 0 {
         return Err(catalog_profile_mismatch());
     }
     Ok(())
@@ -679,7 +1117,8 @@ fn measure_table_catalog_digest(
             "WITH profile AS ( \
                 SELECT 0 AS kind,n.nspname::text AS relation_name,''::text AS item_key, \
                        pg_catalog.json_build_array( \
-                           'SCHEMA_PROFILE',n.nspname,schema_owner.rolname)::text AS value \
+                           'SCHEMA_PROFILE',n.nspname,schema_owner.rolname, \
+                           pg_catalog.obj_description(n.oid,'pg_namespace'))::text AS value \
                   FROM pg_catalog.pg_namespace AS n \
                   JOIN pg_catalog.pg_roles AS schema_owner ON schema_owner.oid = n.nspowner \
                  WHERE n.nspname='foreman_execution' \
@@ -702,31 +1141,42 @@ fn measure_table_catalog_digest(
                  WHERE n.nspname='foreman_execution' \
                 UNION ALL \
                 SELECT 2,c.relname::text,''::text, \
-                       pg_catalog.json_build_array( \
-                           'TABLE',c.relname,owner.rolname,c.relrowsecurity, \
-                           c.relforcerowsecurity,c.relreplident,c.relpersistence)::text \
+                        pg_catalog.json_build_array( \
+                            'TABLE',c.relname,owner.rolname,c.relrowsecurity, \
+                            c.relforcerowsecurity,c.relreplident,c.relpersistence, \
+                            COALESCE(pg_catalog.array_to_string(c.reloptions,','),'<NULL>'), \
+                            COALESCE(pg_catalog.array_to_string(toast.reloptions,','),'<NULL>'), \
+                            pg_catalog.obj_description(c.oid,'pg_class'))::text \
                   FROM pg_catalog.pg_class AS c \
                   JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
                   JOIN pg_catalog.pg_roles AS owner ON owner.oid=c.relowner \
+                  LEFT JOIN pg_catalog.pg_class AS toast ON toast.oid=c.reltoastrelid \
                  WHERE n.nspname='foreman_execution' AND c.relkind='r' \
                 UNION ALL \
                 SELECT 3,c.relname::text,pg_catalog.lpad(a.attnum::text,5,'0'), \
                        pg_catalog.json_build_array( \
-                           'COLUMN',c.relname,a.attnum,a.attname, \
-                           pg_catalog.format_type(a.atttypid,a.atttypmod), \
-                           a.attnotnull,pg_catalog.pg_get_expr(d.adbin,d.adrelid))::text \
+                            'COLUMN',c.relname,a.attnum,a.attname, \
+                            pg_catalog.format_type(a.atttypid,a.atttypmod), \
+                            coll_ns.nspname,coll.collname,a.attnotnull,a.attisdropped,a.attidentity, \
+                            a.attgenerated,a.attstorage,a.attcompression,a.attstattarget, \
+                            COALESCE(pg_catalog.array_to_string(a.attoptions,','),'<NULL>'), \
+                            pg_catalog.pg_get_expr(d.adbin,d.adrelid), \
+                            pg_catalog.col_description(c.oid,a.attnum))::text \
                   FROM pg_catalog.pg_class AS c \
                   JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
                   JOIN pg_catalog.pg_attribute AS a \
-                    ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped \
-                 LEFT JOIN pg_catalog.pg_attrdef AS d \
-                    ON d.adrelid=c.oid AND d.adnum=a.attnum \
+                    ON a.attrelid=c.oid AND a.attnum>0 \
+                  LEFT JOIN pg_catalog.pg_attrdef AS d \
+                     ON d.adrelid=c.oid AND d.adnum=a.attnum \
+                  LEFT JOIN pg_catalog.pg_collation AS coll ON coll.oid=a.attcollation \
+                  LEFT JOIN pg_catalog.pg_namespace AS coll_ns ON coll_ns.oid=coll.collnamespace \
                  WHERE n.nspname='foreman_execution' AND c.relkind='r' \
                 UNION ALL \
                 SELECT 4,c.relname::text,k.conname::text, \
-                       pg_catalog.json_build_array( \
-                           'CONSTRAINT',c.relname,k.conname,k.contype, \
-                           pg_catalog.pg_get_constraintdef(k.oid,false))::text \
+                        pg_catalog.json_build_array( \
+                            'CONSTRAINT',c.relname,k.conname,k.contype, \
+                            pg_catalog.pg_get_constraintdef(k.oid,false), \
+                            pg_catalog.obj_description(k.oid,'pg_constraint'))::text \
                   FROM pg_catalog.pg_constraint AS k \
                   JOIN pg_catalog.pg_class AS c ON c.oid=k.conrelid \
                   JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace \
@@ -734,8 +1184,10 @@ fn measure_table_catalog_digest(
                 UNION ALL \
                 SELECT 5,t.relname::text,i.relname::text, \
                        pg_catalog.json_build_array( \
-                           'INDEX',t.relname,i.relname, \
-                           pg_catalog.pg_get_indexdef(i.oid))::text \
+                            'INDEX',t.relname,i.relname, \
+                            pg_catalog.pg_get_indexdef(i.oid), \
+                            COALESCE(pg_catalog.array_to_string(i.reloptions,','),'<NULL>'), \
+                            pg_catalog.obj_description(i.oid,'pg_class'))::text \
                   FROM pg_catalog.pg_index AS x \
                   JOIN pg_catalog.pg_class AS i ON i.oid=x.indexrelid \
                   JOIN pg_catalog.pg_class AS t ON t.oid=x.indrelid \
@@ -932,7 +1384,21 @@ mod tests {
         let function_digest =
             measure_function_catalog_digest(&mut client).expect("function catalog digest");
         let table_digest = measure_table_catalog_digest(&mut client).expect("table catalog digest");
+        client
+            .batch_execute(
+                "SET ROLE lattice_migrator; \
+                 BEGIN; \
+                 REVOKE USAGE ON SCHEMA foreman_execution \
+                    FROM lattice_guardian, lattice_readonly",
+            )
+            .expect("stage predecessor schema ACL");
+        let predecessor_table_digest =
+            measure_table_catalog_digest(&mut client).expect("predecessor table catalog digest");
+        client
+            .batch_execute("ROLLBACK; RESET ROLE")
+            .expect("restore current catalog");
         println!("FOREMAN_FUNCTION_CATALOG_SHA256={function_digest}");
         println!("FOREMAN_TABLE_CATALOG_SHA256={table_digest}");
+        println!("FOREMAN_PREDECESSOR_TABLE_CATALOG_SHA256={predecessor_table_digest}");
     }
 }

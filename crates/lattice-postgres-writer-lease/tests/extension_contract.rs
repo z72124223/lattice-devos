@@ -71,6 +71,23 @@ fn v5_process_handoff_profile_is_append_only_and_explicit() {
 }
 
 #[test]
+fn managed_writer_profile_rejects_unmodeled_casts_and_transforms() {
+    let setup = include_str!("../src/setup.rs");
+    for required in [
+        "pg_catalog.pg_cast",
+        "pg_catalog.pg_transform",
+        "tr.trftype",
+        "tr.trffromsql",
+        "tr.trftosql",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing Writer catalog closure: {required}"
+        );
+    }
+}
+
+#[test]
 fn task105_bootstrap_profile_is_read_only_closed_and_fully_verified() {
     let _: fn(
         &mut postgres::Client,

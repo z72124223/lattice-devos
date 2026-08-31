@@ -1805,7 +1805,7 @@ fn schema_v6_runtime_admission_requires_writer_v3_current_and_closed_acl() {
         "verify_forbidden_namespace_objects(client)",
         "verify_effective_default_privileges(client)",
         "verify_runtime_admission_present(client)",
-        "verify_exact_principal_database_boundary(client, expected_dangerous_functions, true)",
+        "verify_exact_principal_database_boundary(client, expected_dangerous_functions, true, None)",
     ] {
         assert!(
             verifier.contains(required),
@@ -1835,13 +1835,17 @@ fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_clos
         "verify_writer_lease_v4_functions(client, true)",
         "17 =>",
         "verify_writer_lease_v5_functions(client)",
+        "&WRITER_LEASE_V5_CURRENT_CATALOG_SIGNATURES",
+        "verify_writer_lease_acl_closure(client, 10, true)",
         "writer_tables != 5",
         "writer_runtime_functions != 7",
         "&WRITER_LEASE_V4_CURRENT_CATALOG_SIGNATURES",
         "verify_writer_lease_acl_closure(client, 8, true)",
         "SCHEMA_V7_WRITER_V4_DANGEROUS_FUNCTION_COUNT",
         "verify_owned_catalog_signature_profile(client, &SCHEMA_V7_OWNED_CATALOG_SIGNATURES)",
-        "&SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS",
+        "SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS",
+        "expected_forbidden_objects[7] += MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT",
+        "verify_optional_managed_foreman_extension(client, target, manifest)",
         "verify_exact_default_acl_signature(client)",
         "verify_autonomy_receipt_profile(client)",
         "verify_forbidden_namespace_objects(client)",
@@ -1875,6 +1879,25 @@ fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_clos
         !verifier.contains("writer_lease.writer_lease_extension_identity"),
         "runtime admission must not bypass the Writer function boundary to read denied tables"
     );
+    for required in [
+        "COALESCE(t.typacl,pg_catalog.acldefault('T',t.typowner))",
+        "count(*) FILTER (WHERE acl.grantee=t.typowner",
+        "SELECT count(*) FROM pg_catalog.pg_cast c",
+        "c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t",
+        "n.nspname='foreman_execution' AND t.tgisinternal \\",
+        "AND t.tgenabled='O' AND t.tgconstraint<>0",
+        "cn.nspname='foreman_execution' AND t.tgisinternal",
+        "MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT",
+        "FROM foreman_execution.read_extension_identity_v1()",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing exact Writer/Foreman closed-profile guard: {required}"
+        );
+    }
+    assert!(!setup.contains(
+        "if matches!(\n        current_role.as_str(),\n        \"lattice_migrator\" | \"lattice_runtime\""
+    ));
 }
 
 #[test]
@@ -2626,8 +2649,8 @@ fn review_regression_verifier_uses_one_exact_catalog_snapshot_and_fixed_tables()
     assert!(source.contains("c.relispartition"));
     assert_eq!(
         source.matches("AND NOT a.attisdropped").count(),
-        1,
-        "only the schema-v7 subject-column closure may filter dropped columns"
+        2,
+        "only schema-v7 subject and managed-Foreman column-ACL profiles filter dropped columns"
     );
     assert!(source.contains("COALESCE(array_to_string(p.proconfig, ','), '<NULL>')"));
     assert!(
@@ -2743,7 +2766,7 @@ fn review_regression_requires_real_login_to_capability_role_mapping() {
         "role_settings != 0",
         "database_privileges != [false, false, false, true, true, true]",
         "verify_login_principal_closure(client)",
-        "verify_cluster_wide_acl_closure_for_writer_lease",
+        "verify_cluster_wide_acl_closure_for_owned_extensions",
     ] {
         assert!(
             exact_core.contains(required),
@@ -2786,6 +2809,9 @@ fn review_regression_requires_real_login_to_capability_role_mapping() {
     assert!(live.contains("prove_external_public_acl_drift"));
     assert!(live.contains("prove_external_function_acl_drift"));
     assert!(live.contains("prove_external_function_fixed_acl_drift"));
+    assert!(live.contains("prove_external_function_empty_acl_owner_drift"));
+    assert!(source.contains("LEFT JOIN LATERAL aclexplode("));
+    assert!(source.contains("p.proowner IN (SELECT oid FROM fixed_principals)"));
     assert!(live.contains("prove_non_migrator_default_acl_drift"));
     assert!(live.contains("prove_large_object_acl_drift"));
     assert!(live.contains("prove_login_owner_dependency_drift"));
@@ -2803,6 +2829,65 @@ fn review_regression_requires_real_login_to_capability_role_mapping() {
     assert!(live.contains("pg_logical_emit_message"));
     assert!(live.contains("pg_try_advisory_lock"));
     assert!(!source.contains("pg_catalog.pg_notify(text,text)"));
+}
+
+#[test]
+fn owned_extension_closure_rejects_lifecycle_dependencies_and_handles_empty_function_acls() {
+    let source = include_str!("../src/postgres_setup.rs");
+    let writer_v3_bridge = source
+        .split_once("fn verify_writer_lease_v3_bridge_catalog")
+        .expect("Writer-v3 bridge verifier")
+        .1
+        .split_once("fn verify_v1_store_empty")
+        .expect("Writer-v3 bridge verifier boundary")
+        .0;
+    assert!(writer_v3_bridge.contains("verify_writer_lease_acl_closure(client, 12, false)"));
+    let writer_v1 = source
+        .split_once("fn verify_writer_lease_v1_profile")
+        .expect("Writer-v1 verifier")
+        .1
+        .split_once("fn verify_writer_lease_v2_catalog")
+        .expect("Writer-v1 verifier boundary")
+        .0;
+    assert!(writer_v1.contains("pg_catalog.pg_cast"));
+    assert!(writer_v1.contains("pg_catalog.pg_transform"));
+    assert!(writer_v1.contains("tr.trftype"));
+    assert!(writer_v1.contains("tr.trffromsql"));
+    assert!(writer_v1.contains("tr.trftosql"));
+    assert!(source.contains("verify_managed_extension_dependency_closure("));
+    assert!(source.contains("d.deptype IN ('e','x')"));
+    assert!(source.contains("managed_casts(objid)"));
+    assert!(source.contains("'pg_cast'::regclass::oid,objid FROM managed_casts"));
+    assert!(source.contains("managed_transforms(objid)"));
+    assert!(source.contains("'pg_transform'::regclass::oid,objid FROM managed_transforms"));
+    assert!(source.contains("writer_lease_is_owned"));
+    assert!(source.contains("foreman_is_owned"));
+    assert!(source.contains("cardinality(COALESCE(p.proacl, acldefault('f', p.proowner)))=0"));
+
+    let phase4_live = include_str!("../../lattice-postgres-foreman/tests/postgres_live.rs");
+    assert!(phase4_live.contains("ALTER FUNCTION foreman_execution.read_task_replay_v1(bytea)"));
+    assert!(
+        phase4_live.contains("ALTER FUNCTION writer_lease.writer_lease_load_commands_v1(text)")
+    );
+    assert!(phase4_live.contains("ALTER FUNCTION control.task_ingress_historical_closure_v1()"));
+    assert!(phase4_live.contains("control.task_ledger_streams AS text"));
+    assert!(phase4_live.contains("managed_cast_dependencies"));
+    assert!(phase4_live.contains("unmodeled Foreman transform must fail Store closed"));
+    assert!(phase4_live.contains("unmodeled Writer transform must fail Store closed"));
+    assert!(phase4_live.contains("unmodeled Store transform must fail Store closed"));
+    assert!(phase4_live.contains("managed_transform_dependencies"));
+    assert!(phase4_live.contains("Store transform lifecycle dependency must fail Store closed"));
+    assert!(phase4_live.contains("store_profile_safe_empty_acl"));
+    assert!(phase4_live.contains("safe external empty-ACL function remains Store current"));
+    assert_eq!(
+        phase4_live.matches("DEPENDS ON EXTENSION plpgsql").count(),
+        6
+    );
+
+    let store_live = include_str!("postgres_live.rs");
+    assert!(store_live.contains("prove_external_function_empty_acl_safe"));
+    assert!(store_live.contains("task019_external_safe_empty_function"));
+    assert!(store_live.contains("TASK019_EXTERNAL_SAFE_EMPTY_FUNCTION_FIXTURE_FAILED"));
 }
 
 #[test]

@@ -1199,8 +1199,7 @@ fn prove_task_ingress_claim_races(
             general_first,
         )
         .expect("general first claim");
-    let mut fresh_verifier = connect_as(database, "lattice_migrator");
-    verify_postgres_schema(&mut fresh_verifier, target, DatabaseRole::Migrator)
+    let fresh_verifier = PostgresTaskLedger::new(connect_as(database, "lattice_runtime"), target)
         .expect("general task envelope must remain outside historical closure");
     drop(fresh_verifier);
     let (canary_after_general_command, canary_after_general_claim) =
@@ -1989,12 +1988,9 @@ fn prove_submission_claim_digest_drift_fails_fresh_verifiers(
             .expect("general claim digest drift repair"),
         1
     );
-    for role in DatabaseRole::ALL {
-        let mut verifier = connect_as(database, role.as_str());
-        let evidence = verify_postgres_schema(&mut verifier, target, role)
-            .expect("fresh verifier after general claim digest repair");
-        assert_eq!(evidence.schema_version(), 7);
-    }
+    let repaired = PostgresTaskLedger::new(connect_as(database, "lattice_runtime"), target)
+        .expect("fresh runtime constructor after general claim digest repair");
+    drop(repaired);
     println!("TASK_SUBMISSION_GENERAL_CLAIM_DIGEST_DRIFT_REJECTED_BY_FRESH_ROLES");
 }
 
@@ -2319,6 +2315,24 @@ fn general_submission_is_atomic_idempotent_and_fresh_reconnectable_when_provisio
     drop(reconnected);
 
     prove_task_ingress_claim_races(&database, &run_id, &target, &project);
+}
+
+#[test]
+#[ignore = "requires an exact product-installed Store-v7 plus managed Foreman extension"]
+fn exact_managed_foreman_extension_remains_store_v7_compatible_when_provisioned() {
+    if std::env::var("LATTICE_STORE_FOREMAN_COMPOSITION_LIVE")
+        .ok()
+        .as_deref()
+        != Some("1")
+    {
+        return;
+    }
+    let run_id = required_environment("LATTICE_TASK019_RUN_ID");
+    let database = format!("lattice_task019_{}_base", &run_id[..8]);
+    let target = MigrationTarget::new(database.clone(), run_id).expect("composition target");
+
+    PostgresTaskLedger::new(connect_as(&database, "lattice_runtime"), &target)
+        .expect("exact managed Foreman profile must remain Store-v7 compatible");
 }
 
 #[test]

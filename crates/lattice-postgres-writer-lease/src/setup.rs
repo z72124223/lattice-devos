@@ -5947,7 +5947,27 @@ fn verify_namespace_and_effective_acl_closure<C: GenericClient>(
               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_parser x \
                 JOIN pg_catalog.pg_namespace n ON n.oid=x.prsnamespace WHERE n.nspname='writer_lease') + \
               (SELECT pg_catalog.count(*) FROM pg_catalog.pg_ts_template x \
-                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease')), \
+                JOIN pg_catalog.pg_namespace n ON n.oid=x.tmplnamespace WHERE n.nspname='writer_lease') + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_cast c \
+                WHERE c.castsource IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR c.casttarget IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR c.castfunc IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease')) + \
+              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_transform tr \
+                WHERE tr.trftype IN (SELECT t.oid FROM pg_catalog.pg_type t \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=t.typnamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trffromsql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease') \
+                   OR tr.trftosql IN (SELECT p.oid FROM pg_catalog.pg_proc p \
+                      JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
+                     WHERE n.nspname='writer_lease'))), \
              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
                JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
                CROSS JOIN pg_catalog.pg_roles roles \

@@ -19673,7 +19673,9 @@ mod tests {
         let mut migrator = connect_live_migrator(config);
         assert!(matches!(
             apply_extension(&mut migrator, &target).expect("apply foreman extension"),
-            ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::AlreadyCurrent(_)
+            ExtensionApplyOutcome::Installed(_)
+                | ExtensionApplyOutcome::Upgraded(_)
+                | ExtensionApplyOutcome::AlreadyCurrent(_)
         ));
     }
 
