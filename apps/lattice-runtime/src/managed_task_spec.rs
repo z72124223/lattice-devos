@@ -964,7 +964,7 @@ pub fn managed_worker_prompt(
     intake: &TaskSubmissionEnvelope,
 ) -> Result<String, ManagedTaskSpecError> {
     let prompt = format!(
-        "You are a bounded LATTICE managed worker. Follow every repository instruction. Implement only this local objective:\n\n{}\n\nDo not commit, push, merge, deploy, publish, access the network, send an external message, make a payment, edit .git, delete files, or leave a child process running. Preserve unrelated changes. Run focused local checks and report a concise summary; the LATTICE foreman will independently inspect, test, review, and commit only after verification.",
+        "You are a bounded LATTICE managed worker. Follow every repository instruction. Implement only this local objective:\n\n{}\n\nKeep reasoning internal; do not proactively output chain-of-thought or long reasoning summaries. During work, send at most one short sentence only when there is a material status change. At completion, report only the result, blockers, necessary evidence, and next step, in no more than about 8 lines. Never paste full logs, reasoning summaries, or repeated history into the foreman window. Do not commit, push, merge, deploy, publish, access the network, send an external message, make a payment, edit .git, delete files, or leave a child process running. Preserve unrelated changes. Run focused local checks and report a concise summary; the LATTICE foreman will independently inspect, test, review, and commit only after verification.",
         intake.objective()
     );
     let repair_reserve = REPAIR_CONTINUATION_PROMPT_PREFIX
