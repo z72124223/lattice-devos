@@ -96,8 +96,15 @@ $script:InitDb = Join-Path $script:PostgresBin 'initdb.exe'
 $script:PgCtl = Join-Path $script:PostgresBin 'pg_ctl.exe'
 $script:Postgres = Join-Path $script:PostgresBin 'postgres.exe'
 $script:Psql = Join-Path $script:PostgresBin 'psql.exe'
-$script:Netstat = Join-Path `
-    ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'netstat.exe'
+$script:Netstat = if (
+    [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+) {
+    Join-Path `
+        ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'netstat.exe'
+}
+else {
+    Join-Path $script:PostgresBin 'netstat.exe'
+}
 $script:ControlServer = Join-Path $script:RepositoryRoot 'apps\lattice-control\src\server.mjs'
 $script:ManagedBridge = Join-Path `
     $script:RepositoryRoot 'apps\lattice-control\src\managed-codex-worker-bridge.mjs'
@@ -109,8 +116,15 @@ $script:Wsl2PreflightBridge = Join-Path `
     $script:RepositoryRoot 'apps\lattice-control\src\wsl2-execution-preflight-bridge.mjs'
 $script:Wsl2ProviderSubtreeReconciler = Join-Path `
     $script:RepositoryRoot 'apps\lattice-control\src\wsl2-provider-subtree-reconcile.mjs'
-$script:Wsl = Join-Path `
-    ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'wsl.exe'
+$script:Wsl = if (
+    [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+) {
+    Join-Path `
+        ([Environment]::GetFolderPath([Environment+SpecialFolder]::System)) 'wsl.exe'
+}
+else {
+    Join-Path $script:PostgresBin 'wsl.exe'
+}
 $script:Wsl2Distribution = 'Ubuntu'
 $script:Wsl2LinuxLiveEnabled = [bool]$Wsl2LinuxLive
 $script:ExpectedCodexSha256 = 'bc343ba420dc2e2e9f59e6fc5e5bf0aae1cd8c771fc319665241fc9c0271fddb'
