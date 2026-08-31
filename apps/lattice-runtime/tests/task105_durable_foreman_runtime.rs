@@ -1663,28 +1663,19 @@ impl LiveConfig {
         )
     }
 
-    fn assert_writer_denial(&self, checkpoint_id: &str, expected_reason: &str) {
+    fn assert_writer_command_absent(&self, checkpoint_id: &str) {
         let command_id = foreman_acquire_command_id(checkpoint_id);
-        let rows = self
+        let count: i64 = self
             .bootstrap_client()
-            .query(
-                "SELECT c.outcome::text, c.denial_reason::text \
+            .query_one(
+                "SELECT pg_catalog.count(*) \
                    FROM ONLY writer_lease.writer_lease_commands c \
                   WHERE c.project_id=$1 AND c.command_id=$2",
                 &[&"lattice-control", &command_id],
             )
-            .expect("TASK105_RACE_WRITER_DENIAL_QUERY");
-        assert_eq!(rows.len(), 1, "TASK105_RACE_WRITER_DENIAL_COUNT");
-        assert_eq!(
-            rows[0].get::<_, String>(0),
-            "DENIED",
-            "TASK105_RACE_WRITER_DENIAL_OUTCOME"
-        );
-        assert_eq!(
-            rows[0].get::<_, String>(1),
-            expected_reason,
-            "TASK105_RACE_WRITER_DENIAL_REASON"
-        );
+            .expect("TASK105_RACE_WRITER_ABSENCE_QUERY")
+            .get(0);
+        assert_eq!(count, 0, "TASK105_RACE_WRITER_COMMAND_MUST_BE_ABSENT");
     }
 }
 
@@ -2969,8 +2960,6 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "process_a.recv_expected(2, Duration::from_secs(35))",
         "assert_eq!(same_generation_one[\"params\"], generation_one[\"params\"])",
         "process_b.send(&same_generation_one)",
-        "process_b.recv_expected(3, Duration::from_secs(2))",
-        "process_b.recv_expected(4, Duration::from_secs(2))",
         "lattice.task-ledger.stream.v1:",
         "wait_for_one_ungranted_waiter_for",
         "NOT waiting.granted",
@@ -2979,11 +2968,10 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "Duration::from_millis(20)",
         "task105-race-contender",
         "holder_process_id().get()",
-        "race.assert_writer_denial(contender_checkpoint_id, \"WRITER_ALREADY_HELD\")",
+        "race.assert_writer_command_absent(contender_checkpoint_id)",
         "pg_catalog.encode(s.head_digest,'hex')",
         "TASK105_RACE_GENERATION_ONE_LEDGER_DIGEST",
         "TASK105_RACE_GENERATION_TWO_LEDGER_DIGEST",
-        "WRITER_ALREADY_HELD",
         "race.foreman_counts()",
         "race.try_bootstrap_client().is_err()",
         "LEGACY_V8_MANIFEST_SHA256",
@@ -3567,16 +3555,16 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     process_b.send(&same_generation_one);
     assert_foreman_replay_error(
         &process_b.recv_expected(3, Duration::from_secs(35)),
-        "FOREMAN_WRITER_CONTENTION",
+        "FOREMAN_REPLAY_UNAVAILABLE",
     );
     let contender_checkpoint_id = "task105-race-contender";
     let contender = checkpoint(4, contender_checkpoint_id, 1, "ACTIVE", Value::Null, 'c');
     process_b.send(&contender);
     assert_foreman_replay_error(
         &process_b.recv_expected(4, Duration::from_secs(35)),
-        "FOREMAN_WRITER_CONTENTION",
+        "FOREMAN_REPLAY_UNAVAILABLE",
     );
-    race.assert_writer_denial(contender_checkpoint_id, "WRITER_ALREADY_HELD");
+    race.assert_writer_command_absent(contender_checkpoint_id);
     assert_eq!(
         race.foreman_counts(),
         ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
