@@ -8665,6 +8665,15 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskSubmit,
         )?;
+        if arguments.verified_result_adoption().is_some() {
+            // The mutation path is deliberately unavailable until the
+            // Postgres receipt verifier can re-check the immutable evidence
+            // bundle in the same serializable transaction.  Never reinterpret
+            // this closed input as ordinary general intake or schedule work.
+            return Err(ToolExecutionError::new(
+                "LATTICE_EXTERNAL_RESULT_EVIDENCE_UNAVAILABLE",
+            ));
+        }
         let existing_general =
             load_general_submission_by_request(&core, arguments.client_request_id())?;
         if arguments.is_controlled_canary() && existing_general.is_some() {
@@ -14283,6 +14292,26 @@ mod tests {
         assert_eq!(error.code(), MANAGED_STATUS_TIMEOUT);
         assert!(started.elapsed() >= Duration::from_millis(40));
         assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn external_verified_adoption_never_enters_general_submission_or_scheduler_paths() {
+        let source = include_str!("composition.rs");
+        let task_submit = source
+            .split("    fn task_submit(")
+            .nth(1)
+            .expect("Task Submit composition")
+            .split("    fn task_status(")
+            .next()
+            .expect("Task Submit body");
+        let adoption_gate = task_submit
+            .find("verified_result_adoption()")
+            .expect("adoption gate");
+        let general_lookup = task_submit
+            .find("load_general_submission_by_request")
+            .expect("general intake path");
+        assert!(adoption_gate < general_lookup);
+        assert!(!task_submit[..adoption_gate].contains("schedule_managed_general_task"));
     }
 
     #[test]
