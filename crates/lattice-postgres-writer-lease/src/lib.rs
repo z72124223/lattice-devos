@@ -14,7 +14,7 @@ pub use setup::{
     ExtensionApplyOutcome, ExtensionSetupError, ExtensionSetupErrorKind, ExtensionTarget,
     V3BootstrapProfile, V3ExtensionTarget, V4ExtensionTarget, V5ExtensionTarget, apply_extension,
     apply_v3_extension, apply_v4_extension, apply_v5_extension, inspect_v3_bootstrap_profile,
-    rebind_existing_v3_extension, rebind_v3_extension, verify_extension,
+    rebind_existing_v3_extension, rebind_v3_extension, rebind_v5_for_store_v8, verify_extension,
 };
 
 /// Fixed extension identity.
@@ -35,6 +35,9 @@ pub const WRITER_LEASE_V4_EXTENSION_PATH: &str = "db/extensions/writer-lease/v4.
 pub const WRITER_LEASE_V4_REBIND_PATH: &str = "db/extensions/writer-lease/v4-rebind.sql";
 /// Repository-relative location of the append-only Writer v5 process-handoff profile.
 pub const WRITER_LEASE_V5_EXTENSION_PATH: &str = "db/extensions/writer-lease/v5.sql";
+/// Fixed Writer-owned runtime successor for exact Store V7/V8 profiles.
+pub const WRITER_LEASE_V5_STORE_V8_REBIND_PATH: &str =
+    "db/extensions/writer-lease/v5-store-v8-rebind.sql";
 /// Physical extension schema version.
 pub const WRITER_LEASE_EXTENSION_SCHEMA_VERSION: u16 = 2;
 /// Physical v3 bridge schema version.
@@ -50,6 +53,8 @@ const V3_REBIND_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease
 const V4_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v4.sql");
 const V4_REBIND_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v4-rebind.sql");
 const V5_EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/writer-lease/v5.sql");
+const V5_STORE_V8_REBIND_SQL: &[u8] =
+    include_bytes!("../../../db/extensions/writer-lease/v5-store-v8-rebind.sql");
 const EXPECTED_V1_EXTENSION_SQL_BYTES: usize = 44_366;
 const EXPECTED_V1_EXTENSION_SQL_SHA256: &str =
     "63ffbf8f8b6c22bf35c3d393bd84e9462ca37e4ace94ceaedd6c27b729daa562";
@@ -85,6 +90,11 @@ const EXPECTED_V5_EXTENSION_SQL_SHA256: &str =
     "c8193b47ef764d54a445a3f481331f642d0ce67b3a148c7c00fb3ca26d7ad12a";
 const EXPECTED_V5_EXTENSION_MANIFEST_SHA256: &str =
     "354aa40bc2ed30b7500cffea3a9227d94b766d150798824e39225cf664cca5ad";
+const EXPECTED_V5_STORE_V8_REBIND_SQL_BYTES: usize = 14_932;
+const EXPECTED_V5_STORE_V8_REBIND_SQL_SHA256: &str =
+    "8916e5851d4def21808b4e7c78ba77d7a30a09f188222c604f64ad6d1463e7a4";
+const EXPECTED_V5_STORE_V8_REBIND_MANIFEST_SHA256: &str =
+    "278a2a0e6922f1c256297326e38290ef8fa7a01b1386ef99d770497056eeb0e7";
 const EXTENSION_MANIFEST_DOMAIN: &str = "lattice.postgres-writer-lease.extension-manifest.v1";
 
 /// Exact embedded-extension identity failure.
@@ -263,6 +273,23 @@ pub fn verify_embedded_v5_extension_manifest()
         EXPECTED_V5_EXTENSION_SQL_BYTES,
         EXPECTED_V5_EXTENSION_SQL_SHA256,
         EXPECTED_V5_EXTENSION_MANIFEST_SHA256,
+    )
+}
+
+/// Verifies the fixed Writer-owned Store V8 runtime successor bytes.
+///
+/// # Errors
+///
+/// Returns a typed failure for any byte, hash, path, or identity drift.
+pub fn verify_embedded_v5_store_v8_rebind_manifest()
+-> Result<ExtensionManifestEvidence, ExtensionManifestError> {
+    verify_manifest(
+        WRITER_LEASE_V5_STORE_V8_REBIND_PATH,
+        WRITER_LEASE_V5_EXTENSION_SCHEMA_VERSION,
+        V5_STORE_V8_REBIND_SQL,
+        EXPECTED_V5_STORE_V8_REBIND_SQL_BYTES,
+        EXPECTED_V5_STORE_V8_REBIND_SQL_SHA256,
+        EXPECTED_V5_STORE_V8_REBIND_MANIFEST_SHA256,
     )
 }
 

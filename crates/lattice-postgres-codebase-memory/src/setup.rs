@@ -22,6 +22,11 @@ const BOOTSTRAP_V6_GLOBAL_MANIFEST_SHA256: &str =
 const BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION: u16 = 7;
 const BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
+const BOOTSTRAP_V8_GLOBAL_SCHEMA_VERSION: u16 = 8;
+const BOOTSTRAP_V8_LEGACY_GLOBAL_MANIFEST_SHA256: &str =
+    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
+const BOOTSTRAP_V8_GLOBAL_MANIFEST_SHA256: &str =
+    "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60";
 const HISTORICAL_V2_GLOBAL_SCHEMA_VERSION: u16 = 3;
 const HISTORICAL_V2_GLOBAL_MANIFEST_SHA256: &str =
     "09c431df18ad71a4f44239a5d2ddf6b1774b8ffec06c7f9223f0e41757f3d407";
@@ -576,6 +581,8 @@ pub enum ExtensionBootstrapGlobalProfile {
     V5,
     V6,
     V7,
+    V8LegacyPrefix,
+    V8,
 }
 
 /// Closed Memory-owned state returned to the product bootstrap coordinator.
@@ -871,7 +878,9 @@ pub fn inspect_bootstrap_profile(
     let schema_comment = match global {
         ExtensionBootstrapGlobalProfile::V5 => "LATTICE_DEVOS_MEMORY_SCHEMA_V5",
         ExtensionBootstrapGlobalProfile::V6 => "LATTICE_DEVOS_MEMORY_SCHEMA_V6",
-        ExtensionBootstrapGlobalProfile::V7 => "LATTICE_DEVOS_MEMORY_SCHEMA_V7",
+        ExtensionBootstrapGlobalProfile::V7
+        | ExtensionBootstrapGlobalProfile::V8LegacyPrefix
+        | ExtensionBootstrapGlobalProfile::V8 => "LATTICE_DEVOS_MEMORY_SCHEMA_V7",
     };
     verify_global_default_acl_closure(&mut transaction)?;
     let profile = match classify_pre_state(&mut transaction)? {
@@ -1033,6 +1042,14 @@ fn preflight_bootstrap(
         ExtensionBootstrapGlobalProfile::V7 => (
             BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION,
             BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256,
+        ),
+        ExtensionBootstrapGlobalProfile::V8LegacyPrefix => (
+            BOOTSTRAP_V8_GLOBAL_SCHEMA_VERSION,
+            BOOTSTRAP_V8_LEGACY_GLOBAL_MANIFEST_SHA256,
+        ),
+        ExtensionBootstrapGlobalProfile::V8 => (
+            BOOTSTRAP_V8_GLOBAL_SCHEMA_VERSION,
+            BOOTSTRAP_V8_GLOBAL_MANIFEST_SHA256,
         ),
     };
     preflight_for_global(

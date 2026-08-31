@@ -492,9 +492,9 @@ try {
         'postgresql://lattice_runtime_login:{0}@127.0.0.1:{1}/{2}?sslmode=disable' -f
         $password, $port, $databaseName
     )
-    Invoke-CargoStage 'FOREMAN_APPLY_ACL_RECONNECT' @(
+    Invoke-CargoStage 'FOREMAN_V8_ACL_RECONNECT' @(
         'test', '-p', 'lattice-postgres-foreman', '--test', 'postgres_live',
-        '--locked', '--offline', 'disposable_store_v7_bootstrap_owned_extension_apply_acl_and_reconnect',
+        '--locked', '--offline', 'disposable_store_v8_bootstrap_owned_extension_acl_and_reconnect',
         '--', '--ignored', '--exact', '--nocapture'
     )
     Invoke-CargoStage 'FOREMAN_ARTIFACT_INGRESS_GUARDS' @(

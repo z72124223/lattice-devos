@@ -47,6 +47,8 @@ pub const FOREMAN_EXTENSION_ID: &str = "lattice-postgres-foreman";
 pub const FOREMAN_EXTENSION_SCHEMA_VERSION: u16 = 1;
 /// Repository-relative embedded profile path.
 pub const FOREMAN_EXTENSION_PATH: &str = "db/extensions/foreman-execution/v1.sql";
+/// Repository-relative fixed Store-v8 rebind asset.
+pub const STORE_V8_REBIND_PATH: &str = "db/extensions/foreman-execution/v1-store-v8-rebind.sql";
 /// Exact compatible global Store schema.
 pub const REQUIRED_GLOBAL_SCHEMA_VERSION: u16 = 7;
 /// Exact compatible global Store-v7 manifest.
@@ -70,11 +72,16 @@ pub const MAX_ARTIFACT_BYTES_PER_TASK: u64 = 25_165_824;
 pub const MAX_ACTIVE_TASK_REPLAY_ROWS: u16 = 256;
 
 const EXTENSION_SQL: &[u8] = include_bytes!("../../../db/extensions/foreman-execution/v1.sql");
+const STORE_V8_REBIND_SQL: &[u8] =
+    include_bytes!("../../../db/extensions/foreman-execution/v1-store-v8-rebind.sql");
 const EXPECTED_EXTENSION_SQL_BYTES: usize = 349_546;
 const EXPECTED_EXTENSION_SQL_SHA256: &str =
     "46e186d54b65fbd55f7d5f48c693707287e0d723bd10c3077412d484c19ead6e";
 const EXPECTED_EXTENSION_MANIFEST_SHA256: &str =
     "2a487f0f32c45542d0ee02a37881f55466ca892f530967d95f661a27594279dd";
+const STORE_V8_REBIND_SQL_BYTES: usize = 6_427;
+const STORE_V8_REBIND_SHA256: &str =
+    "b0052a71b0358cacae6941941ea64727c4f6fcb37a589f2b6330fb46cca25902";
 const EXTENSION_MANIFEST_DOMAIN: &[u8] = b"LATTICE_POSTGRES_FOREMAN_EXTENSION_MANIFEST_V1\0";
 
 /// Frozen embedded-profile verification failure.
@@ -102,6 +109,34 @@ impl Error for ExtensionManifestError {}
 pub struct ExtensionManifestEvidence {
     sql_sha256: ContentDigest,
     manifest_sha256: ContentDigest,
+}
+
+/// Verified exact bytes of the owner-controlled Store-v8 rebind.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StoreV8RebindEvidence {
+    sql_sha256: ContentDigest,
+}
+
+impl StoreV8RebindEvidence {
+    #[must_use]
+    pub const fn path(&self) -> &'static str {
+        STORE_V8_REBIND_PATH
+    }
+
+    #[must_use]
+    pub const fn bytes(&self) -> &'static [u8] {
+        STORE_V8_REBIND_SQL
+    }
+
+    #[must_use]
+    pub const fn byte_length(&self) -> usize {
+        STORE_V8_REBIND_SQL.len()
+    }
+
+    #[must_use]
+    pub const fn sql_sha256(&self) -> &ContentDigest {
+        &self.sql_sha256
+    }
 }
 
 impl ExtensionManifestEvidence {
@@ -161,6 +196,25 @@ pub fn verify_embedded_extension() -> Result<ExtensionManifestEvidence, Extensio
         sql_sha256: ContentDigest::from_sha256(sql_sha256)
             .map_err(|_| ExtensionManifestError::Contract)?,
         manifest_sha256: ContentDigest::from_sha256(manifest_sha256)
+            .map_err(|_| ExtensionManifestError::Contract)?,
+    })
+}
+
+/// Verifies the immutable Foreman-owned Store-v8 rebind bytes.
+///
+/// # Errors
+///
+/// Fails closed on any path, byte-length, digest, or shared-contract drift.
+pub fn verify_embedded_store_v8_rebind() -> Result<StoreV8RebindEvidence, ExtensionManifestError> {
+    let sql_sha256 = sha256_hex(STORE_V8_REBIND_SQL);
+    if STORE_V8_REBIND_PATH != "db/extensions/foreman-execution/v1-store-v8-rebind.sql"
+        || STORE_V8_REBIND_SQL.len() != STORE_V8_REBIND_SQL_BYTES
+        || sql_sha256 != STORE_V8_REBIND_SHA256
+    {
+        return Err(ExtensionManifestError::SqlMismatch);
+    }
+    Ok(StoreV8RebindEvidence {
+        sql_sha256: ContentDigest::from_sha256(sql_sha256)
             .map_err(|_| ExtensionManifestError::Contract)?,
     })
 }

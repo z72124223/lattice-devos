@@ -4,9 +4,9 @@ use lattice_contracts::{
     StoreAuthorityRevision, StoreDaemonInstanceId, TaskId, TaskLedgerStreamIdentity,
 };
 use lattice_postgres_store::{
-    DatabaseRole, MigrationApplyOutcome, MigrationStatus, MigrationTarget, PostgresProjectRegistry,
-    PostgresTaskLedger, PostgresTaskLedgerError, PostgresTaskLedgerErrorKind, apply_migrations,
-    migration_manifest, verify_postgres_schema,
+    DatabaseRole, MigrationApplyOutcome, MigrationStatus, MigrationTarget, POSTGRES_SCHEMA_VERSION,
+    PostgresProjectRegistry, PostgresTaskLedger, PostgresTaskLedgerError,
+    PostgresTaskLedgerErrorKind, apply_migrations, migration_manifest, verify_postgres_schema,
 };
 use lattice_project_registry::{
     CommandId as RegistryCommandId, RegistryCommand as ProjectRegistryCommand,
@@ -500,7 +500,7 @@ fn prove_live_upgrade(run_id: &str, suffix: &str, prefix_len: usize, manifest_sh
     assert_eq!(
         apply_migrations(&mut migrator, &target).expect("prefix upgrade"),
         MigrationApplyOutcome::Applied {
-            executable_count: 9 - prefix_len
+            executable_count: 6 - prefix_len
         }
     );
     verify_postgres_schema(&mut migrator, &target, DatabaseRole::Migrator)
@@ -583,9 +583,12 @@ fn provision_general_project(database: &str, target: &MigrationTarget) -> Genera
     let observation = general_project_observation();
     let mut registry =
         PostgresProjectRegistry::new(connect_as(database, "lattice_runtime"), target)
-            .expect("schema-v7 Project Registry adapter");
-    let vacant = registry.load().expect("vacant schema-v7 Project Registry");
-    assert_eq!(vacant.persistence().schema_version(), 7);
+            .expect("current Project Registry adapter");
+    let vacant = registry.load().expect("vacant current Project Registry");
+    assert_eq!(
+        vacant.persistence().schema_version(),
+        POSTGRES_SCHEMA_VERSION
+    );
     assert!(vacant.state().is_vacant());
 
     let registered = registry
@@ -599,7 +602,7 @@ fn provision_general_project(database: &str, target: &MigrationTarget) -> Genera
             ),
             store_authority(),
         )
-        .expect("register general submission project through exact v7 adapter");
+        .expect("register general submission project through exact current adapter");
     assert!(matches!(
         registered.semantic_receipt().outcome(),
         RegistryCommandOutcome::Applied
@@ -621,7 +624,7 @@ fn provision_general_project(database: &str, target: &MigrationTarget) -> Genera
             ),
             store_authority(),
         )
-        .expect("observe exact general submission project through v7 adapter");
+        .expect("observe exact general submission project through current adapter");
     assert!(matches!(
         observed.semantic_receipt().outcome(),
         RegistryCommandOutcome::Applied
@@ -630,9 +633,12 @@ fn provision_general_project(database: &str, target: &MigrationTarget) -> Genera
 
     let mut reloaded =
         PostgresProjectRegistry::new(connect_as(database, "lattice_runtime"), target)
-            .expect("fresh schema-v7 Project Registry adapter");
-    let loaded = reloaded.load().expect("reload schema-v7 Project Registry");
-    assert_eq!(loaded.persistence().schema_version(), 7);
+            .expect("fresh current Project Registry adapter");
+    let loaded = reloaded.load().expect("reload current Project Registry");
+    assert_eq!(
+        loaded.persistence().schema_version(),
+        POSTGRES_SCHEMA_VERSION
+    );
     let projection = loaded
         .state()
         .project(&project_id)
@@ -2063,29 +2069,34 @@ fn prove_project_registry_snapshot_width_boundary(
         assert_eq!(widths.get::<_, i64>(index), 159);
     }
 
-    let global_manifest = admin
+    let compatibility = admin
         .query_one(
-            "SELECT manifest_sha256::text FROM ONLY control.schema_compatibility \
-             WHERE singleton=true AND current_schema_version=7",
+            "SELECT current_schema_version,manifest_sha256::text \
+               FROM ONLY control.schema_compatibility WHERE singleton=true",
             &[],
         )
-        .expect("current schema-v7 manifest")
-        .get::<_, String>(0);
+        .expect("current schema compatibility");
+    let current_schema_version = compatibility.get::<_, i16>(0);
+    assert_eq!(
+        u16::try_from(current_schema_version).expect("positive current schema version"),
+        POSTGRES_SCHEMA_VERSION
+    );
+    let global_manifest = compatibility.get::<_, String>(1);
     let mut runtime = connect_as(database, "lattice_runtime");
     let error = runtime
         .query(
             "SELECT * FROM control.task_ledger_read_head_v4(\
                 $1::smallint,$2::text,$3::bytea,$4::text,$5::text)",
             &[
-                &7_i16,
+                &current_schema_version,
                 &global_manifest,
                 &stream_id,
                 &project.project_id.as_str(),
                 &snapshot_160,
             ],
         )
-        .expect_err("current-v7 read function must reject a 160-byte snapshot");
-    assert_sqlstate(&error, "LST01", "current-v7 snapshot width guard");
+        .expect_err("current read function must reject a 160-byte snapshot");
+    assert_sqlstate(&error, "LST01", "current snapshot width guard");
     drop(runtime);
 
     let error = admin

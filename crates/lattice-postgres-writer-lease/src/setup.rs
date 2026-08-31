@@ -17,6 +17,7 @@ use crate::{
     verify_embedded_v1_extension_manifest, verify_embedded_v3_extension_manifest,
     verify_embedded_v3_rebind_manifest, verify_embedded_v4_extension_manifest,
     verify_embedded_v4_rebind_manifest, verify_embedded_v5_extension_manifest,
+    verify_embedded_v5_store_v8_rebind_manifest,
 };
 
 const GLOBAL_MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
@@ -33,8 +34,10 @@ const V6_GLOBAL_MANIFEST_SHA256: &str =
     "75189dea7cd2cb95b694bade467c2b5c40373436fb1b3d48e9017b50a9d206ae";
 const V7_GLOBAL_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
-const V8_GLOBAL_MANIFEST_SHA256: &str =
+const V8_LEGACY_GLOBAL_MANIFEST_SHA256: &str =
     "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
+const V8_GLOBAL_MANIFEST_SHA256: &str =
+    "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60";
 const LEGACY_F252_WRITER_LEASE_V4_REBIND_BODY_SHA256: &str =
     "4834f71b90744dddbf828baa5b1e0c5b3e3efbc64bb1d186b8c48bce8c88da52";
 const LEGACY_F252_WRITER_LEASE_V4_REBIND_OBJECT_SIGNATURE: &str =
@@ -791,6 +794,24 @@ impl V5ExtensionTarget {
             fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
         )
     }
+
+    fn v8_legacy_successor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
+        ExtensionTarget::new(
+            self.database_name.clone(),
+            self.database_identity_digest.clone(),
+            fixed_digest(V8_LEGACY_GLOBAL_MANIFEST_SHA256)?,
+            fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+        )
+    }
+
+    fn v8_successor(&self) -> Result<ExtensionTarget, ExtensionSetupError> {
+        ExtensionTarget::new(
+            self.database_name.clone(),
+            self.database_identity_digest.clone(),
+            fixed_digest(V8_GLOBAL_MANIFEST_SHA256)?,
+            fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
+        )
+    }
 }
 
 fn fixed_digest(value: &str) -> Result<ContentDigest, ExtensionSetupError> {
@@ -830,10 +851,21 @@ pub enum V3BootstrapProfile {
     /// Schema v7 has the exact current Writer-v4 successor profile.
     V7V4Current,
     /// Schema v7 has the exact current Writer-v5 process-handoff profile.
+    V7V5RebindPending,
+    /// Schema v7 has the dual Store-v7/v8 Writer runtime successor installed.
     V7V5Current,
-    /// Schema v8 retains the exact immutable Writer-v5 process-handoff
-    /// identity while the Store adds external-verification evidence.
+    /// Schema v8 retains the immutable Writer-v5 identity but still has the
+    /// Store-v7-only runtime surface.
+    V8V5RebindPending,
+    /// Schema v8 retains the immutable Writer-v5 identity and has the fixed
+    /// dual Store-v7/v8 runtime successor installed.
     V8V5Current,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum V5RuntimeFunctionProfile {
+    StoreV7Base,
+    StoreV8Successor,
 }
 
 /// Closed extension setup/verifier failure classes.
@@ -1347,6 +1379,172 @@ pub fn apply_v5_extension(
     result
 }
 
+/// Rebinds the immutable Writer-v5 runtime surface to the exact dual Store-v7/v8
+/// successor while preserving Writer identity, ledger provenance, and business
+/// state. The rebind is valid on the exact Store-v7 predecessor, the published
+/// legacy Store-v8 prefix, or the complete Store-v8 successor.
+///
+/// Runtime admission must remain stopped for the complete rebind/migration
+/// sequence. Replaying the operation against the exact successor is a verified
+/// no-op.
+///
+/// # Errors
+///
+/// Rejects non-stopped admission, a non-v5 Writer profile, changed immutable
+/// assets, a substituted Store manifest, catalog/function/ACL drift, or an
+/// ambiguous database state.
+pub fn rebind_v5_for_store_v8(
+    client: &mut Client,
+    target: &V5ExtensionTarget,
+) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
+    let v1 = verify_embedded_v1_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v2 = verify_embedded_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v3 = verify_embedded_v3_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v4 = verify_embedded_v4_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let v5 = verify_embedded_v5_extension_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let rebind = verify_embedded_v5_store_v8_rebind_manifest()
+        .map_err(|_| ExtensionSetupError::new(ExtensionSetupErrorKind::ManifestMismatch))?;
+    let writer_target = target.successor()?;
+    let store_v7_target = target.successor()?;
+    let store_v8_legacy_target = target.v8_legacy_successor()?;
+    let store_v8_target = target.v8_successor()?;
+    let mut gate = GlobalApplyGate::acquire(client)?;
+    let mut result = Err(ExtensionSetupError::new(ExtensionSetupErrorKind::Database));
+    for attempt in 1..=MAX_SERIALIZATION_ATTEMPTS {
+        result = match rebind_v5_for_store_v8_attempt(
+            gate.client(),
+            &writer_target,
+            &store_v7_target,
+            &store_v8_legacy_target,
+            &store_v8_target,
+            &v1,
+            &v2,
+            &v3,
+            &v4,
+            &v5,
+            &rebind,
+        ) {
+            Err(SetupAttemptError::SerializationFailure)
+                if attempt < MAX_SERIALIZATION_ATTEMPTS =>
+            {
+                continue;
+            }
+            Err(error) => Err(error.into_public()),
+            Ok(outcome) => Ok(outcome),
+        };
+        break;
+    }
+    gate.release()?;
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rebind_v5_for_store_v8_attempt(
+    client: &mut Client,
+    writer_target: &ExtensionTarget,
+    store_v7_target: &ExtensionTarget,
+    store_v8_legacy_target: &ExtensionTarget,
+    store_v8_target: &ExtensionTarget,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    v5: &ExtensionManifestEvidence,
+    rebind: &ExtensionManifestEvidence,
+) -> Result<ExtensionApplyOutcome, SetupAttemptError> {
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .map_err(map_database)?;
+    enter_migrator(&mut transaction)?;
+    acquire_common_locks(&mut transaction)?;
+    let foundation = match verify_v7_foundation(&mut transaction, store_v7_target) {
+        Ok(foundation) => foundation,
+        Err(SetupAttemptError::Setup(error))
+            if error.kind() == ExtensionSetupErrorKind::UnsupportedFoundation =>
+        {
+            match verify_v8_foundation(&mut transaction, store_v8_legacy_target) {
+                Ok(foundation) => foundation,
+                Err(SetupAttemptError::Setup(error))
+                    if error.kind() == ExtensionSetupErrorKind::UnsupportedFoundation =>
+                {
+                    verify_v8_foundation(&mut transaction, store_v8_target)?
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if !matches!(
+        foundation.profile,
+        FoundationProfile::G7MemoryV3 | FoundationProfile::G8MemoryV3
+    ) || classify_v3_state(&mut transaction)? != V3InstalledState::G7MemoryV3WriterV5Current
+    {
+        return Err(setup_attempt_error(
+            ExtensionSetupErrorKind::UnsupportedFoundation,
+        ));
+    }
+    verify_v5_upgrade_admission(&mut transaction)?;
+    let outcome = match classify_v5_runtime_profile(
+        &mut transaction,
+        writer_target,
+        &foundation.database_uuid,
+        v1,
+        v2,
+        v3,
+        v4,
+        v5,
+    )? {
+        V5RuntimeFunctionProfile::StoreV7Base => {
+            verify_v5_store_v8_rebind_source(
+                &mut transaction,
+                writer_target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+            )?;
+            let sql = std::str::from_utf8(rebind.bytes()).map_err(|_| profile_collision())?;
+            transaction.batch_execute(sql).map_err(map_database)?;
+            verify_v5_v8_current_profile(
+                &mut transaction,
+                writer_target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+            )?;
+            ExtensionApplyOutcome::Rebound
+        }
+        V5RuntimeFunctionProfile::StoreV8Successor => {
+            verify_v5_v8_current_profile(
+                &mut transaction,
+                writer_target,
+                &foundation.database_uuid,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+            )?;
+            ExtensionApplyOutcome::AlreadyCurrent
+        }
+    };
+    verify_replay_safe_history(&mut transaction)?;
+    transaction.commit().map_err(map_database)?;
+    Ok(outcome)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn apply_v5_extension_attempt(
     client: &mut Client,
@@ -1466,12 +1664,8 @@ pub fn inspect_v3_bootstrap_profile(
         target.database_identity_digest().clone(),
     )?;
     let v5_successor = v5_target.successor()?;
-    let v8_successor = ExtensionTarget::new(
-        target.database_name().to_owned(),
-        target.database_identity_digest().clone(),
-        fixed_digest(V8_GLOBAL_MANIFEST_SHA256)?,
-        fixed_digest(CURRENT_MEMORY_MANIFEST_SHA256)?,
-    )?;
+    let v8_legacy_successor = v5_target.v8_legacy_successor()?;
+    let v8_successor = v5_target.v8_successor()?;
     let mut gate = GlobalApplyGate::acquire(client)?;
     let mut transaction = gate
         .client()
@@ -1621,7 +1815,7 @@ pub fn inspect_v3_bootstrap_profile(
         V3InstalledState::G7MemoryV3WriterV5Current => {
             match verify_v7_foundation(&mut transaction, &v5_successor) {
                 Ok(foundation) => {
-                    verify_v5_v7_current_profile(
+                    let runtime_profile = classify_v5_runtime_profile(
                         &mut transaction,
                         &v5_successor,
                         &foundation.database_uuid,
@@ -1634,14 +1828,31 @@ pub fn inspect_v3_bootstrap_profile(
                     .map_err(SetupAttemptError::into_public)?;
                     verify_replay_safe_history(&mut transaction)
                         .map_err(SetupAttemptError::into_public)?;
-                    V3BootstrapProfile::V7V5Current
+                    match runtime_profile {
+                        V5RuntimeFunctionProfile::StoreV7Base => {
+                            V3BootstrapProfile::V7V5RebindPending
+                        }
+                        V5RuntimeFunctionProfile::StoreV8Successor => {
+                            V3BootstrapProfile::V7V5Current
+                        }
+                    }
                 }
                 Err(SetupAttemptError::Setup(error))
                     if error.kind() == ExtensionSetupErrorKind::UnsupportedFoundation =>
                 {
-                    let foundation = verify_v8_foundation(&mut transaction, &v8_successor)
-                        .map_err(SetupAttemptError::into_public)?;
-                    verify_v5_v7_current_profile(
+                    let foundation =
+                        match verify_v8_foundation(&mut transaction, &v8_legacy_successor) {
+                            Ok(foundation) => foundation,
+                            Err(SetupAttemptError::Setup(error))
+                                if error.kind()
+                                    == ExtensionSetupErrorKind::UnsupportedFoundation =>
+                            {
+                                verify_v8_foundation(&mut transaction, &v8_successor)
+                                    .map_err(SetupAttemptError::into_public)?
+                            }
+                            Err(error) => return Err(error.into_public()),
+                        };
+                    let runtime_profile = classify_v5_runtime_profile(
                         &mut transaction,
                         &v5_successor,
                         &foundation.database_uuid,
@@ -1654,7 +1865,14 @@ pub fn inspect_v3_bootstrap_profile(
                     .map_err(SetupAttemptError::into_public)?;
                     verify_replay_safe_history(&mut transaction)
                         .map_err(SetupAttemptError::into_public)?;
-                    V3BootstrapProfile::V8V5Current
+                    match runtime_profile {
+                        V5RuntimeFunctionProfile::StoreV7Base => {
+                            V3BootstrapProfile::V8V5RebindPending
+                        }
+                        V5RuntimeFunctionProfile::StoreV8Successor => {
+                            V3BootstrapProfile::V8V5Current
+                        }
+                    }
                 }
                 Err(error) => return Err(error.into_public()),
             }
@@ -2171,7 +2389,10 @@ fn verify_v8_foundation<C: GenericClient>(
     if database_name != target.database_name()
         || database_identity != target.database_identity_digest().as_str()
         || global_version != 8
-        || global_manifest != V8_GLOBAL_MANIFEST_SHA256
+        || !matches!(
+            global_manifest.as_str(),
+            V8_LEGACY_GLOBAL_MANIFEST_SHA256 | V8_GLOBAL_MANIFEST_SHA256
+        )
         || global_manifest != target.global_manifest_digest().as_str()
         || memory_version != 3
         || memory_manifest != CURRENT_MEMORY_MANIFEST_SHA256
@@ -4171,7 +4392,85 @@ fn verify_v5_v7_current_profile<C: GenericClient>(
     v4: &ExtensionManifestEvidence,
     v5: &ExtensionManifestEvidence,
 ) -> Result<(), SetupAttemptError> {
-    verify_v5_catalog(client)?;
+    verify_v5_catalog(client, V5RuntimeFunctionProfile::StoreV7Base)?;
+    let identity = load_identity_shape(client)?;
+    let expected_identity = identity_shape(
+        database_uuid,
+        target.database_identity_digest().as_str(),
+        V7_GLOBAL_MANIFEST_SHA256,
+        CURRENT_MEMORY_MANIFEST_SHA256,
+        v5,
+        7,
+        3,
+    );
+    let ledger = load_ledger_shape(client)?;
+    let mut histories = v4_expected_histories(database_uuid, target, v1, v2, v3, v4, true);
+    for (history, ordinal) in histories.iter_mut().zip([4_i16, 6_i16, 8_i16]) {
+        history.push(ledger_shape(
+            ordinal,
+            database_uuid,
+            target.database_identity_digest().as_str(),
+            V7_GLOBAL_MANIFEST_SHA256,
+            CURRENT_MEMORY_MANIFEST_SHA256,
+            v5,
+            7,
+            3,
+            "UPGRADED",
+        ));
+    }
+    if identity != expected_identity || !histories.contains(&ledger) {
+        return Err(profile_collision());
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_v5_runtime_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    v5: &ExtensionManifestEvidence,
+) -> Result<V5RuntimeFunctionProfile, SetupAttemptError> {
+    match verify_v5_v7_current_profile(client, target, database_uuid, v1, v2, v3, v4, v5) {
+        Ok(()) => return Ok(V5RuntimeFunctionProfile::StoreV7Base),
+        Err(SetupAttemptError::Setup(error))
+            if error.kind() == ExtensionSetupErrorKind::PartialOrCollidingProfile => {}
+        Err(error) => return Err(error),
+    }
+    verify_v5_v8_current_profile(client, target, database_uuid, v1, v2, v3, v4, v5)?;
+    Ok(V5RuntimeFunctionProfile::StoreV8Successor)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_v5_store_v8_rebind_source<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    v5: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v5_v7_current_profile(client, target, database_uuid, v1, v2, v3, v4, v5)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_v5_v8_current_profile<C: GenericClient>(
+    client: &mut C,
+    target: &ExtensionTarget,
+    database_uuid: &str,
+    v1: &ExtensionManifestEvidence,
+    v2: &ExtensionManifestEvidence,
+    v3: &ExtensionManifestEvidence,
+    v4: &ExtensionManifestEvidence,
+    v5: &ExtensionManifestEvidence,
+) -> Result<(), SetupAttemptError> {
+    verify_v5_catalog(client, V5RuntimeFunctionProfile::StoreV8Successor)?;
     let identity = load_identity_shape(client)?;
     let expected_identity = identity_shape(
         database_uuid,
@@ -5005,7 +5304,10 @@ fn verify_v4_catalog_with_rebind<C: GenericClient>(
 }
 
 #[allow(clippy::too_many_lines)]
-fn verify_v5_catalog<C: GenericClient>(client: &mut C) -> Result<(), SetupAttemptError> {
+fn verify_v5_catalog<C: GenericClient>(
+    client: &mut C,
+    runtime_profile: V5RuntimeFunctionProfile,
+) -> Result<(), SetupAttemptError> {
     let rebind = verify_embedded_v4_rebind_manifest().map_err(|_| profile_collision())?;
     verify_v4_rebind_boundary(client, &rebind)?;
     for (query, rows, signature) in [
@@ -5204,7 +5506,7 @@ fn verify_v5_catalog<C: GenericClient>(client: &mut C) -> Result<(), SetupAttemp
     {
         return Err(profile_collision());
     }
-    verify_v5_function_sources(client)?;
+    verify_v5_function_sources(client, runtime_profile)?;
     verify_namespace_and_effective_acl_closure(client, 10, true)
 }
 
@@ -5393,17 +5695,27 @@ fn verify_v4_function_sources<C: GenericClient>(client: &mut C) -> Result<(), Se
 }
 
 #[allow(clippy::too_many_lines)]
-fn verify_v5_function_sources<C: GenericClient>(client: &mut C) -> Result<(), SetupAttemptError> {
+fn verify_v5_function_sources<C: GenericClient>(
+    client: &mut C,
+    runtime_profile: V5RuntimeFunctionProfile,
+) -> Result<(), SetupAttemptError> {
     let v1 = verify_embedded_v1_extension_manifest().map_err(|_| profile_collision())?;
     let v2 = verify_embedded_extension_manifest().map_err(|_| profile_collision())?;
     let v3 = verify_embedded_v3_extension_manifest().map_err(|_| profile_collision())?;
     let v4 = verify_embedded_v4_extension_manifest().map_err(|_| profile_collision())?;
     let v5 = verify_embedded_v5_extension_manifest().map_err(|_| profile_collision())?;
+    let v8_rebind =
+        verify_embedded_v5_store_v8_rebind_manifest().map_err(|_| profile_collision())?;
     let v1_sql = std::str::from_utf8(v1.bytes()).map_err(|_| profile_collision())?;
     let v2_sql = std::str::from_utf8(v2.bytes()).map_err(|_| profile_collision())?;
     let v3_sql = std::str::from_utf8(v3.bytes()).map_err(|_| profile_collision())?;
     let v4_sql = std::str::from_utf8(v4.bytes()).map_err(|_| profile_collision())?;
     let v5_sql = std::str::from_utf8(v5.bytes()).map_err(|_| profile_collision())?;
+    let v8_rebind_sql = std::str::from_utf8(v8_rebind.bytes()).map_err(|_| profile_collision())?;
+    let v5_runtime_sql = match runtime_profile {
+        V5RuntimeFunctionProfile::StoreV7Base => v5_sql,
+        V5RuntimeFunctionProfile::StoreV8Successor => v8_rebind_sql,
+    };
     let descriptors = [
         (
             "writer_lease_assert_current_v1",
@@ -5433,7 +5745,7 @@ fn verify_v5_function_sources<C: GenericClient>(client: &mut C) -> Result<(), Se
         (
             "writer_lease_bind_runtime_v5",
             "lattice_writer_lease_bind_runtime_v5",
-            v5_sql,
+            v5_runtime_sql,
         ),
         (
             "writer_lease_commit_plan_v1",
@@ -5473,7 +5785,7 @@ fn verify_v5_function_sources<C: GenericClient>(client: &mut C) -> Result<(), Se
         (
             "writer_lease_load_for_update_v5",
             "lattice_writer_lease_load_for_update_v5",
-            v5_sql,
+            v5_runtime_sql,
         ),
         (
             "writer_lease_load_transitions_v1",

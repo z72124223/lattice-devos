@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use lattice_contracts::ContentDigest;
 use postgres::{Client, GenericClient, IsolationLevel};
@@ -8,14 +9,18 @@ use sha2::{Digest, Sha256};
 use crate::{
     ExtensionManifestEvidence, FOREMAN_EXTENSION_ID, FOREMAN_EXTENSION_PATH,
     FOREMAN_EXTENSION_SCHEMA_VERSION, REQUIRED_GLOBAL_MANIFEST_SHA256,
-    REQUIRED_GLOBAL_SCHEMA_VERSION, verify_embedded_extension,
+    REQUIRED_GLOBAL_SCHEMA_VERSION, StoreV8RebindEvidence, verify_embedded_extension,
+    verify_embedded_store_v8_rebind,
 };
 
 const DATABASE_IDENTITY_DOMAIN: &[u8] = b"LATTICE_POSTGRES_DATABASE_IDENTITY_V1\0";
-const EXTERNAL_ADOPTION_GLOBAL_SCHEMA_VERSION: i32 = 8;
-const EXTERNAL_ADOPTION_GLOBAL_MANIFEST_SHA256: &str =
-    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
+const STORE_V8_GLOBAL_SCHEMA_VERSION: i32 = 8;
+const STORE_V8_GLOBAL_MANIFEST_SHA256: &str =
+    "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60";
+const GLOBAL_MIGRATION_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
 const EXTENSION_ADVISORY_LOCK: i64 = 7_212_400_260_826;
+const GLOBAL_APPLY_GATE_TIMEOUT: Duration = Duration::from_secs(30);
+const GLOBAL_APPLY_GATE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const EXPECTED_TABLE_COUNT: i64 = 17;
 const EXPECTED_FUNCTION_COUNT: i64 = 43;
 const EXPECTED_RUNTIME_FUNCTION_COUNT: i64 = 39;
@@ -28,6 +33,10 @@ const EXPECTED_FUNCTION_CATALOG_SHA256: &str =
     "8d8dd263498cab48b1164bf456f5d3b314d575ee9a186460715beea02bc8bfec";
 const EXPECTED_TABLE_CATALOG_SHA256: &str =
     "42f151dd9f52ba1e82a2aac392234f2b285c18e9bd71a00372f7c7b4a1237eb5";
+const EXPECTED_STORE_V8_REBOUND_FUNCTION_CATALOG_SHA256: &str =
+    "3874875a39369bd3e3e9238afbe5abd2cfc2cd4f29447d6013bcf59ffbb61bb0";
+const EXPECTED_STORE_V8_REBOUND_TABLE_CATALOG_SHA256: &str =
+    "28606d1ae0b3dce3f7f47f93dfde651fbe44c28d237ce9558bbbf6cad728078d";
 const PREDECESSOR_EXTENSION_SQL_BYTES: i64 = 349_470;
 const PREDECESSOR_EXTENSION_SQL_SHA256: &str =
     "32dd034191b9d87c8792f78c26b5d84533a95405ff4d1cc5be00da54a08d4b13";
@@ -194,7 +203,81 @@ impl ExtensionCatalogEvidence {
 pub enum ExtensionApplyOutcome {
     Installed(ExtensionCatalogEvidence),
     Upgraded(ExtensionCatalogEvidence),
+    Rebound(ExtensionCatalogEvidence),
     AlreadyCurrent(ExtensionCatalogEvidence),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoreProfile {
+    V7,
+    V8,
+}
+
+struct GlobalApplyGate<'client> {
+    client: &'client mut Client,
+    held: bool,
+}
+
+impl<'client> GlobalApplyGate<'client> {
+    fn acquire(client: &'client mut Client) -> Result<Self, ExtensionSetupError> {
+        let started_at = Instant::now();
+        loop {
+            let acquired: bool = client
+                .query_one(
+                    "SELECT pg_catalog.pg_try_advisory_lock($1::bigint)",
+                    &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
+                )
+                .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_GLOBAL_GATE_QUERY_FAILED"))?
+                .get(0);
+            if acquired {
+                return Ok(Self { client, held: true });
+            }
+            let elapsed = started_at.elapsed();
+            if elapsed >= GLOBAL_APPLY_GATE_TIMEOUT {
+                return Err(transaction_stage_error(
+                    "FOREMAN_EXTENSION_GLOBAL_GATE_TIMEOUT",
+                ));
+            }
+            std::thread::sleep(std::cmp::min(
+                GLOBAL_APPLY_GATE_POLL_INTERVAL,
+                GLOBAL_APPLY_GATE_TIMEOUT.saturating_sub(elapsed),
+            ));
+        }
+    }
+
+    fn client(&mut self) -> &mut Client {
+        self.client
+    }
+
+    fn release(mut self) -> Result<(), ExtensionSetupError> {
+        let released: bool = self
+            .client
+            .query_one(
+                "SELECT pg_catalog.pg_advisory_unlock($1::bigint)",
+                &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
+            )
+            .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_GLOBAL_GATE_RELEASE_FAILED"))?
+            .get(0);
+        self.held = false;
+        if !released {
+            return Err(transaction_stage_error(
+                "FOREMAN_EXTENSION_GLOBAL_GATE_RELEASE_FAILED",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for GlobalApplyGate<'_> {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = self.client.query_one(
+                "SELECT pg_catalog.pg_advisory_unlock($1::bigint)",
+                &[&GLOBAL_MIGRATION_ADVISORY_LOCK],
+            );
+            self.held = false;
+        }
+    }
 }
 
 /// Installs fresh v1, atomically replaces the exact empty predecessor, or
@@ -209,10 +292,26 @@ pub fn apply_extension(
     client: &mut Client,
     target: &ExtensionTarget,
 ) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
+    let mut gate = GlobalApplyGate::acquire(client)?;
+    let result = apply_extension_under_gate(gate.client(), target);
+    gate.release()?;
+    result
+}
+
+fn apply_extension_under_gate(
+    client: &mut Client,
+    target: &ExtensionTarget,
+) -> Result<ExtensionApplyOutcome, ExtensionSetupError> {
     let manifest = verify_embedded_extension().map_err(|_| {
         error(
             ExtensionSetupErrorKind::ManifestInvalid,
             "FOREMAN_EXTENSION_MANIFEST_INVALID",
+        )
+    })?;
+    let store_v8_rebind = verify_embedded_store_v8_rebind().map_err(|_| {
+        error(
+            ExtensionSetupErrorKind::ManifestInvalid,
+            "FOREMAN_EXTENSION_STORE_V8_REBIND_INVALID",
         )
     })?;
     let mut transaction = client
@@ -228,11 +327,14 @@ pub fn apply_extension(
             &[&EXTENSION_ADVISORY_LOCK],
         )
         .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_LOCK_FAILED"))?;
-    verify_global_preflight(&mut transaction, target, ExtensionDatabaseRole::Migrator).map_err(
-        |failure| {
-            restage_transaction_failure(failure, "FOREMAN_EXTENSION_GLOBAL_PREFLIGHT_QUERY_FAILED")
-        },
-    )?;
+    let store_profile =
+        verify_global_preflight(&mut transaction, target, ExtensionDatabaseRole::Migrator)
+            .map_err(|failure| {
+                restage_transaction_failure(
+                    failure,
+                    "FOREMAN_EXTENSION_GLOBAL_PREFLIGHT_QUERY_FAILED",
+                )
+            })?;
     let state = classify_extension(&mut transaction).map_err(|failure| {
         restage_transaction_failure(failure, "FOREMAN_EXTENSION_CLASSIFY_FAILED")
     })?;
@@ -241,17 +343,52 @@ pub fn apply_extension(
         let table_digest = measure_table_catalog_digest(&mut transaction)?;
         if function_digest == EXPECTED_FUNCTION_CATALOG_SHA256
             && table_digest == EXPECTED_TABLE_CATALOG_SHA256
+            && store_profile == StoreProfile::V7
         {
             let evidence = verify_catalog(
                 &mut transaction,
                 target,
                 ExtensionDatabaseRole::Migrator,
                 &manifest,
+                StoreProfile::V7,
             )?;
             transaction
                 .commit()
                 .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
             return Ok(ExtensionApplyOutcome::AlreadyCurrent(evidence));
+        }
+        if function_digest == EXPECTED_STORE_V8_REBOUND_FUNCTION_CATALOG_SHA256
+            && table_digest == EXPECTED_STORE_V8_REBOUND_TABLE_CATALOG_SHA256
+            && store_profile == StoreProfile::V8
+        {
+            let evidence = verify_catalog(
+                &mut transaction,
+                target,
+                ExtensionDatabaseRole::Migrator,
+                &manifest,
+                StoreProfile::V8,
+            )?;
+            transaction
+                .commit()
+                .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
+            return Ok(ExtensionApplyOutcome::AlreadyCurrent(evidence));
+        }
+        if function_digest == EXPECTED_FUNCTION_CATALOG_SHA256
+            && table_digest == EXPECTED_TABLE_CATALOG_SHA256
+            && store_profile == StoreProfile::V8
+        {
+            verify_store_v8_rebind_source(&mut transaction, target, &manifest)?;
+            apply_store_v8_rebind(&mut transaction, &store_v8_rebind)?;
+            let evidence = verify_store_v8_rebound_catalog(
+                &mut transaction,
+                target,
+                &manifest,
+                ExtensionDatabaseRole::Migrator,
+            )?;
+            transaction
+                .commit()
+                .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
+            return Ok(ExtensionApplyOutcome::Rebound(evidence));
         }
         if function_digest != PREDECESSOR_FUNCTION_CATALOG_SHA256
             || table_digest != PREDECESSOR_TABLE_CATALOG_SHA256
@@ -259,6 +396,7 @@ pub fn apply_extension(
             return Err(catalog_profile_mismatch());
         }
         verify_exact_empty_predecessor(&mut transaction, target)?;
+        verify_stopped_admission(&mut transaction)?;
         transaction
             .batch_execute("DROP SCHEMA foreman_execution CASCADE")
             .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_PREDECESSOR_DROP_FAILED"))?;
@@ -267,12 +405,25 @@ pub fn apply_extension(
             .batch_execute(sql)
             .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_SQL_FAILED"))?;
         insert_identity(&mut transaction, target, &manifest)?;
-        let evidence = verify_catalog(
-            &mut transaction,
-            target,
-            ExtensionDatabaseRole::Migrator,
-            &manifest,
-        )?;
+        let evidence = if store_profile == StoreProfile::V8 {
+            verify_store_v8_rebind_source(&mut transaction, target, &manifest)?;
+            apply_store_v8_rebind(&mut transaction, &store_v8_rebind)?;
+            verify_store_v8_rebound_catalog(
+                &mut transaction,
+                target,
+                &manifest,
+                ExtensionDatabaseRole::Migrator,
+            )?
+        } else {
+            verify_catalog(
+                &mut transaction,
+                target,
+                ExtensionDatabaseRole::Migrator,
+                &manifest,
+                StoreProfile::V7,
+            )?
+        };
+        verify_stopped_admission(&mut transaction)?;
         transaction
             .commit()
             .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
@@ -294,17 +445,31 @@ pub fn apply_extension(
         }
         ExtensionPreState::Exact => unreachable!("handled above"),
     }
+    verify_stopped_admission(&mut transaction)?;
     let sql = std::str::from_utf8(manifest.bytes()).map_err(|_| transaction_error())?;
     transaction
         .batch_execute(sql)
         .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_SQL_FAILED"))?;
     insert_identity(&mut transaction, target, &manifest)?;
-    let evidence = verify_catalog(
-        &mut transaction,
-        target,
-        ExtensionDatabaseRole::Migrator,
-        &manifest,
-    )?;
+    let evidence = if store_profile == StoreProfile::V8 {
+        verify_store_v8_rebind_source(&mut transaction, target, &manifest)?;
+        apply_store_v8_rebind(&mut transaction, &store_v8_rebind)?;
+        verify_store_v8_rebound_catalog(
+            &mut transaction,
+            target,
+            &manifest,
+            ExtensionDatabaseRole::Migrator,
+        )?
+    } else {
+        verify_catalog(
+            &mut transaction,
+            target,
+            ExtensionDatabaseRole::Migrator,
+            &manifest,
+            StoreProfile::V7,
+        )?
+    };
+    verify_stopped_admission(&mut transaction)?;
     transaction
         .commit()
         .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_COMMIT_FAILED"))?;
@@ -334,8 +499,8 @@ pub fn verify_extension(
         .start()
         .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_VERIFY_START_FAILED"))?;
     harden(&mut transaction)?;
-    verify_session(&mut transaction, target, role)?;
-    let evidence = verify_catalog(&mut transaction, target, role, &manifest)?;
+    let store_profile = verify_global_preflight(&mut transaction, target, role)?;
+    let evidence = verify_catalog(&mut transaction, target, role, &manifest, store_profile)?;
     transaction.commit().map_err(|_| transaction_error())?;
     Ok(evidence)
 }
@@ -363,7 +528,7 @@ fn verify_global_preflight(
     client: &mut impl GenericClient,
     target: &ExtensionTarget,
     role: ExtensionDatabaseRole,
-) -> Result<(), ExtensionSetupError> {
+) -> Result<StoreProfile, ExtensionSetupError> {
     verify_session(client, target, role).map_err(|failure| {
         restage_transaction_failure(failure, "FOREMAN_EXTENSION_SESSION_QUERY_FAILED")
     })?;
@@ -380,22 +545,28 @@ fn verify_global_preflight(
     let database_uuid: String = row.get(0);
     let schema_version: i32 = row.get(1);
     let manifest_sha256: String = row.get(2);
-    if database_uuid != target.expected_database_uuid()
-        || !supported_store_profile(schema_version, &manifest_sha256)
-    {
+    let profile = classify_store_profile(schema_version, &manifest_sha256);
+    if database_uuid != target.expected_database_uuid() || profile.is_none() {
         return Err(global_error());
     }
-    Ok(())
+    profile.ok_or_else(global_error)
 }
 
-/// Foreman v1 remains immutably identified with its V7 Store predecessor.
-/// Store V8 only adds external-adoption evidence and leaves Foreman authority
-/// unchanged, so the setup boundary admits that exact successor pair too.
+fn classify_store_profile(schema_version: i32, manifest_sha256: &str) -> Option<StoreProfile> {
+    match (schema_version, manifest_sha256) {
+        (version, REQUIRED_GLOBAL_MANIFEST_SHA256)
+            if version == i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION) =>
+        {
+            Some(StoreProfile::V7)
+        }
+        (STORE_V8_GLOBAL_SCHEMA_VERSION, STORE_V8_GLOBAL_MANIFEST_SHA256) => Some(StoreProfile::V8),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
 fn supported_store_profile(schema_version: i32, manifest_sha256: &str) -> bool {
-    (schema_version == i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION)
-        && manifest_sha256 == REQUIRED_GLOBAL_MANIFEST_SHA256)
-        || (schema_version == EXTERNAL_ADOPTION_GLOBAL_SCHEMA_VERSION
-            && manifest_sha256 == EXTERNAL_ADOPTION_GLOBAL_MANIFEST_SHA256)
+    classify_store_profile(schema_version, manifest_sha256).is_some()
 }
 
 fn verify_session(
@@ -677,19 +848,191 @@ fn insert_identity(
     Ok(())
 }
 
+fn verify_stopped_admission(client: &mut impl GenericClient) -> Result<(), ExtensionSetupError> {
+    client
+        .batch_execute("LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE")
+        .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_RUNTIME_ADMISSION_LOCK_FAILED"))?;
+    let rows = client
+        .query(
+            "SELECT admission_mode::text, daemon_instance_id::text, daemon_epoch, \
+                    authority_revision, observation_digest, authority_head_digest \
+               FROM ONLY control.runtime_admission \
+              WHERE singleton = true",
+            &[],
+        )
+        .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_RUNTIME_ADMISSION_QUERY_FAILED"))?;
+    if rows.len() != 1 {
+        return Err(runtime_admission_error());
+    }
+    let row = &rows[0];
+    let mode: String = row.try_get(0).map_err(|_| runtime_admission_error())?;
+    let daemon_instance: Option<String> = row.try_get(1).map_err(|_| runtime_admission_error())?;
+    let daemon_epoch: Option<i64> = row.try_get(2).map_err(|_| runtime_admission_error())?;
+    let authority_revision: i64 = row.try_get(3).map_err(|_| runtime_admission_error())?;
+    let observation_digest: Option<Vec<u8>> =
+        row.try_get(4).map_err(|_| runtime_admission_error())?;
+    let authority_head_digest: Option<Vec<u8>> =
+        row.try_get(5).map_err(|_| runtime_admission_error())?;
+    if mode != "STOPPED"
+        || daemon_instance.is_some()
+        || daemon_epoch.is_some()
+        || authority_revision != 0
+        || observation_digest.is_some()
+        || authority_head_digest.is_some()
+    {
+        return Err(runtime_admission_error());
+    }
+    Ok(())
+}
+
+fn verify_exact_identity_and_history(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &ExtensionManifestEvidence,
+    store_profile: StoreProfile,
+) -> Result<(), ExtensionSetupError> {
+    let identities = client
+        .query(
+            "SELECT extension_id, extension_schema_version, extension_path, \
+                    extension_sql_bytes, extension_sql_sha256, \
+                    extension_manifest_sha256, database_name, database_uuid::text, \
+                    database_identity_sha256, global_schema_version, \
+                    global_manifest_sha256 \
+               FROM ONLY foreman_execution.extension_identity \
+              WHERE singleton",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    if identities.len() != 1 {
+        return Err(catalog_profile_mismatch());
+    }
+    let identity = &identities[0];
+    let (global_version, global_manifest) = match store_profile {
+        StoreProfile::V7 => (
+            i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+            REQUIRED_GLOBAL_MANIFEST_SHA256,
+        ),
+        StoreProfile::V8 => (
+            i16::try_from(STORE_V8_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+            STORE_V8_GLOBAL_MANIFEST_SHA256,
+        ),
+    };
+    if identity.get::<_, String>(0) != FOREMAN_EXTENSION_ID
+        || identity.get::<_, i16>(1)
+            != i16::try_from(FOREMAN_EXTENSION_SCHEMA_VERSION).expect("fixed")
+        || identity.get::<_, String>(2) != FOREMAN_EXTENSION_PATH
+        || identity.get::<_, i64>(3) != i64::try_from(manifest.byte_length()).expect("bounded SQL")
+        || identity.get::<_, String>(4) != manifest.sql_sha256().as_str()
+        || identity.get::<_, String>(5) != manifest.manifest_sha256().as_str()
+        || identity.get::<_, String>(6) != target.database_name()
+        || identity.get::<_, String>(7) != target.expected_database_uuid()
+        || identity.get::<_, String>(8) != target.expected_database_identity_digest().as_str()
+        || identity.get::<_, i16>(9) != global_version
+        || identity.get::<_, String>(10) != global_manifest
+    {
+        return Err(catalog_profile_mismatch());
+    }
+
+    let ledger = client
+        .query(
+            "SELECT ledger_ordinal, extension_id, extension_schema_version, \
+                    extension_sql_sha256, extension_manifest_sha256, database_uuid::text, \
+                    database_identity_sha256, global_schema_version, \
+                    global_manifest_sha256, event_kind \
+               FROM ONLY foreman_execution.extension_ledger \
+              ORDER BY ledger_ordinal",
+            &[],
+        )
+        .map_err(|_| catalog_profile_mismatch())?;
+    let expected_rows = match store_profile {
+        StoreProfile::V7 => 1,
+        StoreProfile::V8 => 2,
+    };
+    if ledger.len() != expected_rows {
+        return Err(catalog_profile_mismatch());
+    }
+    for (index, row) in ledger.iter().enumerate() {
+        let (expected_ordinal, expected_global_version, expected_global_manifest, expected_event) =
+            if index == 0 {
+                (
+                    1_i16,
+                    i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+                    REQUIRED_GLOBAL_MANIFEST_SHA256,
+                    "INSTALLED",
+                )
+            } else {
+                (
+                    2_i16,
+                    i16::try_from(STORE_V8_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+                    STORE_V8_GLOBAL_MANIFEST_SHA256,
+                    "REBOUND",
+                )
+            };
+        if row.get::<_, i16>(0) != expected_ordinal
+            || row.get::<_, String>(1) != FOREMAN_EXTENSION_ID
+            || row.get::<_, i16>(2)
+                != i16::try_from(FOREMAN_EXTENSION_SCHEMA_VERSION).expect("fixed")
+            || row.get::<_, String>(3) != manifest.sql_sha256().as_str()
+            || row.get::<_, String>(4) != manifest.manifest_sha256().as_str()
+            || row.get::<_, String>(5) != target.expected_database_uuid()
+            || row.get::<_, String>(6) != target.expected_database_identity_digest().as_str()
+            || row.get::<_, i16>(7) != expected_global_version
+            || row.get::<_, String>(8) != expected_global_manifest
+            || row.get::<_, String>(9) != expected_event
+        {
+            return Err(catalog_profile_mismatch());
+        }
+    }
+    Ok(())
+}
+
+fn verify_store_v8_rebind_source(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &ExtensionManifestEvidence,
+) -> Result<(), ExtensionSetupError> {
+    verify_stopped_admission(client)?;
+    verify_exact_catalog_digests(client, StoreProfile::V7)?;
+    verify_closed_catalog_shape(client)?;
+    verify_exact_identity_and_history(client, target, manifest, StoreProfile::V7)
+}
+
+fn apply_store_v8_rebind(
+    client: &mut impl GenericClient,
+    rebind: &StoreV8RebindEvidence,
+) -> Result<(), ExtensionSetupError> {
+    let sql = std::str::from_utf8(rebind.bytes())
+        .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_STORE_V8_REBIND_UTF8_INVALID"))?;
+    client
+        .batch_execute(sql)
+        .map_err(|_| transaction_stage_error("FOREMAN_EXTENSION_STORE_V8_REBIND_SQL_FAILED"))
+}
+
+fn verify_store_v8_rebound_catalog(
+    client: &mut impl GenericClient,
+    target: &ExtensionTarget,
+    manifest: &ExtensionManifestEvidence,
+    role: ExtensionDatabaseRole,
+) -> Result<ExtensionCatalogEvidence, ExtensionSetupError> {
+    verify_stopped_admission(client)?;
+    verify_exact_identity_and_history(client, target, manifest, StoreProfile::V8)?;
+    verify_catalog(client, target, role, manifest, StoreProfile::V8)
+}
+
 #[allow(clippy::too_many_lines)]
 fn verify_catalog(
     client: &mut impl GenericClient,
     target: &ExtensionTarget,
     role: ExtensionDatabaseRole,
     manifest: &ExtensionManifestEvidence,
+    store_profile: StoreProfile,
 ) -> Result<ExtensionCatalogEvidence, ExtensionSetupError> {
     // Pin the SECURITY DEFINER implementation and its complete ACL before
     // invoking the extension-owned identity reader.
-    verify_exact_catalog_digests(client)?;
+    verify_exact_catalog_digests(client, store_profile)?;
     verify_closed_catalog_shape(client)?;
     let identity = client
-        .query_one(
+        .query_opt(
             "SELECT extension_id, extension_schema_version, extension_path, \
                     extension_sql_bytes, extension_sql_sha256, \
                     extension_manifest_sha256, database_name, database_uuid, \
@@ -703,6 +1046,12 @@ fn verify_catalog(
                 ExtensionSetupErrorKind::CatalogMismatch,
                 "FOREMAN_EXTENSION_IDENTITY_QUERY_FAILED",
             )
+        })?
+        .ok_or_else(|| {
+            error(
+                ExtensionSetupErrorKind::CatalogMismatch,
+                "FOREMAN_EXTENSION_IDENTITY_MISMATCH",
+            )
         })?;
     let extension_id: String = identity.get(0);
     let extension_version: i16 = identity.get(1);
@@ -715,6 +1064,16 @@ fn verify_catalog(
     let database_identity: String = identity.get(8);
     let global_version: i16 = identity.get(9);
     let global_manifest: String = identity.get(10);
+    let (expected_global_version, expected_global_manifest) = match store_profile {
+        StoreProfile::V7 => (
+            i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+            REQUIRED_GLOBAL_MANIFEST_SHA256,
+        ),
+        StoreProfile::V8 => (
+            i16::try_from(STORE_V8_GLOBAL_SCHEMA_VERSION).expect("fixed"),
+            STORE_V8_GLOBAL_MANIFEST_SHA256,
+        ),
+    };
     if extension_id != FOREMAN_EXTENSION_ID
         || extension_version != i16::try_from(FOREMAN_EXTENSION_SCHEMA_VERSION).expect("fixed")
         || extension_path != FOREMAN_EXTENSION_PATH
@@ -724,8 +1083,8 @@ fn verify_catalog(
         || database_name != target.database_name()
         || database_uuid != target.expected_database_uuid()
         || database_identity != target.expected_database_identity_digest().as_str()
-        || global_version != i16::try_from(REQUIRED_GLOBAL_SCHEMA_VERSION).expect("fixed")
-        || global_manifest != REQUIRED_GLOBAL_MANIFEST_SHA256
+        || global_version != expected_global_version
+        || global_manifest != expected_global_manifest
     {
         return Err(error(
             ExtensionSetupErrorKind::CatalogMismatch,
@@ -812,12 +1171,21 @@ fn verify_catalog(
 
 fn verify_exact_catalog_digests(
     client: &mut impl GenericClient,
+    store_profile: StoreProfile,
 ) -> Result<(), ExtensionSetupError> {
     let function_digest = measure_function_catalog_digest(client)?;
     let table_digest = measure_table_catalog_digest(client)?;
-    if function_digest != EXPECTED_FUNCTION_CATALOG_SHA256
-        || table_digest != EXPECTED_TABLE_CATALOG_SHA256
-    {
+    let (expected_function_digest, expected_table_digest) = match store_profile {
+        StoreProfile::V7 => (
+            EXPECTED_FUNCTION_CATALOG_SHA256,
+            EXPECTED_TABLE_CATALOG_SHA256,
+        ),
+        StoreProfile::V8 => (
+            EXPECTED_STORE_V8_REBOUND_FUNCTION_CATALOG_SHA256,
+            EXPECTED_STORE_V8_REBOUND_TABLE_CATALOG_SHA256,
+        ),
+    };
+    if function_digest != expected_function_digest || table_digest != expected_table_digest {
         return Err(catalog_profile_mismatch());
     }
     Ok(())
@@ -1378,6 +1746,13 @@ const fn global_error() -> ExtensionSetupError {
     )
 }
 
+const fn runtime_admission_error() -> ExtensionSetupError {
+    error(
+        ExtensionSetupErrorKind::GlobalIdentityMismatch,
+        "FOREMAN_EXTENSION_RUNTIME_ADMISSION_NOT_STOPPED",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1388,16 +1763,14 @@ mod tests {
             i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION),
             REQUIRED_GLOBAL_MANIFEST_SHA256
         ));
-        assert!(supported_store_profile(
-            8,
-            "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
-        ));
-        assert!(!supported_store_profile(
-            8,
-            REQUIRED_GLOBAL_MANIFEST_SHA256
-        ));
+        assert!(supported_store_profile(8, STORE_V8_GLOBAL_MANIFEST_SHA256));
+        assert!(!supported_store_profile(8, REQUIRED_GLOBAL_MANIFEST_SHA256));
         assert!(!supported_store_profile(
             i32::from(REQUIRED_GLOBAL_SCHEMA_VERSION),
+            STORE_V8_GLOBAL_MANIFEST_SHA256
+        ));
+        assert!(!supported_store_profile(
+            8,
             "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
         ));
     }
@@ -1412,6 +1785,32 @@ mod tests {
         client
             .batch_execute("SET search_path = pg_catalog")
             .expect("harden measurement search path");
+
+        if std::env::var("LATTICE_FOREMAN_MEASURE_STORE_V8_REBOUND").as_deref() == Ok("1") {
+            client
+                .batch_execute("SET ROLE lattice_migrator; BEGIN; SET LOCAL search_path=pg_catalog")
+                .expect("start rebound measurement transaction");
+            for sql in [
+                include_str!("../../../db/extensions/writer-lease/v5-store-v8-rebind.sql"),
+                include_str!("../../../db/migrations/0009_external_verified_result_adoption.sql"),
+                include_str!("../../../db/migrations/0010_store_v8_runtime_successor.sql"),
+                include_str!("../../../db/extensions/foreman-execution/v1-store-v8-rebind.sql"),
+            ] {
+                client
+                    .batch_execute(sql)
+                    .expect("apply rebound measurement asset");
+            }
+            let function_digest =
+                measure_function_catalog_digest(&mut client).expect("rebound function digest");
+            let table_digest =
+                measure_table_catalog_digest(&mut client).expect("rebound table digest");
+            client
+                .batch_execute("ROLLBACK; RESET ROLE")
+                .expect("rollback rebound measurement transaction");
+            println!("FOREMAN_STORE_V8_REBOUND_FUNCTION_CATALOG_SHA256={function_digest}");
+            println!("FOREMAN_STORE_V8_REBOUND_TABLE_CATALOG_SHA256={table_digest}");
+            return;
+        }
 
         let function_digest =
             measure_function_catalog_digest(&mut client).expect("function catalog digest");

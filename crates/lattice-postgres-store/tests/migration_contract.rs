@@ -6,6 +6,80 @@ use lattice_postgres_store::{
 };
 
 #[test]
+fn post_commit_migrator_verifier_accepts_exact_v7_transition_profile() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("pub fn verify_postgres_schema(")
+        .expect("migrator verifier entrypoint")
+        .1
+        .split_once("pub(crate) fn verify_runtime_store_schema(")
+        .expect("migrator verifier boundary")
+        .0;
+    let v7 = verifier
+        .split_once("else if schema_version == 7 {")
+        .expect("exact Store-v7 post-commit verifier")
+        .1
+        .split_once("} else if schema_version == 6 {")
+        .expect("Store-v7 verifier boundary")
+        .0;
+    for required in [
+        "verify_v7_manifest_prefix()?",
+        "verify_runtime_submission_schema_v7(",
+        "&manifest, false",
+        "bootstrap_admission: BootstrapAdmission::StoppedNoLeader",
+    ] {
+        assert!(
+            v7.contains(required),
+            "exact Store-v7 post-commit verification missing {required}"
+        );
+    }
+}
+
+#[test]
+fn store_v8_successor_widens_registry_persistence_profile() {
+    let sql = include_str!("../../../db/migrations/0010_store_v8_runtime_successor.sql");
+    let drop_constraint = sql
+        .find("DROP CONSTRAINT project_registry_commands_persistence_profile")
+        .expect("Store-v8 drops the retained Store-v7 registry receipt constraint");
+    let add_constraint = sql
+        .find("ADD CONSTRAINT project_registry_commands_persistence_profile CHECK")
+        .expect("Store-v8 restores the registry receipt constraint");
+    let v8_bound = sql
+        .find("persistence_schema_version BETWEEN 4 AND 8")
+        .expect("Store-v8 admits exact schema-8 registry persistence receipts");
+    let first_runtime_function = sql
+        .find("CREATE OR REPLACE FUNCTION control.store_prepare_v5")
+        .expect("Store-v8 runtime successor function");
+    assert!(drop_constraint < add_constraint && add_constraint < v8_bound);
+    assert!(
+        v8_bound < first_runtime_function,
+        "the constraint transition must precede runtime function replacement"
+    );
+}
+
+#[test]
+fn store_v8_verifier_retains_v7_ingress_integrity_before_admission() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("fn verify_runtime_external_adoption_schema_v8")
+        .expect("Store-v8 verifier")
+        .1
+        .split_once("fn verify_store_v8_runtime_successor_functions")
+        .expect("Store-v8 verifier boundary")
+        .0;
+    let ingress = verifier
+        .find("verify_v7_ingress_ambiguity_profile(client)?")
+        .expect("Store-v8 retains exact task-ingress closure verification");
+    let admission = verifier
+        .find("if runtime_active {")
+        .expect("Store-v8 admission verification");
+    assert!(
+        ingress < admission,
+        "retained ingress drift must be classified before admission state"
+    );
+}
+
+#[test]
 fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
     let setup = include_str!("../src/postgres_setup.rs");
     let fresh = setup
@@ -32,7 +106,7 @@ fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
         "apply_entries_until(&mut transaction, 6, 7)",
         "advance_compatibility_from_v5",
         "CALL writer_lease.writer_lease_rebind_v3()",
-        "apply_missing_entries(&mut transaction, 7)",
+        "apply_entries_until(&mut transaction, 7, 8)",
         "advance_compatibility_from_v6",
         "CALL writer_lease.writer_lease_rebind_v4()",
     ] {
@@ -199,7 +273,7 @@ fn task094_store_boundary_keeps_writer_semantics_and_live_composition_outside_st
     );
     let v6_order = [
         "verify_runtime_foreman_schema_v6",
-        "apply_missing_entries(&mut transaction, 7)",
+        "apply_entries_until(&mut transaction, 7, 8)",
         "advance_compatibility_from_v6",
         "CALL writer_lease.writer_lease_rebind_v4()",
         "verify_runtime_submission_schema_v7",
@@ -531,13 +605,13 @@ fn task076_store_live_phases_are_closed_and_emit_fixed_pass_tokens() {
 fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
     let manifest = migration_manifest();
     assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
-    assert_eq!(manifest.len(), 9);
+    assert_eq!(manifest.len(), 10);
     assert_eq!(
         verify_embedded_manifest()
             .expect("exact schema-v8 manifest")
             .manifest_sha256()
             .as_str(),
-        "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82"
+        "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60"
     );
 
     let registry = &manifest[4];
@@ -575,7 +649,7 @@ fn schema_v6_manifest_preserves_registry_and_autonomy_before_foreman() {
 fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
     let manifest = migration_manifest();
     assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
-    assert_eq!(manifest.len(), 9);
+    assert_eq!(manifest.len(), 10);
     let intake = &manifest[7];
     assert_eq!(intake.ordinal(), 8);
     assert_eq!(intake.id(), "0008_task_submission_envelope");
@@ -660,7 +734,7 @@ fn schema_v7_appends_authoritative_task_submission_locator_after_frozen_v6() {
 fn schema_v8_appends_digest_bound_external_adoption_without_rewriting_v7() {
     let manifest = migration_manifest();
     assert_eq!(POSTGRES_SCHEMA_VERSION, 8);
-    assert_eq!(manifest.len(), 9);
+    assert_eq!(manifest.len(), 10);
     let adoption = &manifest[8];
     assert_eq!(adoption.ordinal(), 9);
     assert_eq!(adoption.id(), "0009_external_verified_result_adoption");
@@ -1576,7 +1650,7 @@ fn schema_v5_catalog_measurement_has_closed_forbidden_object_diagnostics() {
 #[allow(clippy::too_many_lines)]
 fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     let manifest = migration_manifest();
-    assert_eq!(manifest.len(), 9);
+    assert_eq!(manifest.len(), 10);
 
     let draft = &manifest[0];
     assert_eq!(draft.ordinal(), 1);
@@ -1727,18 +1801,34 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
     assert_eq!(adoption.reader_compatibility(), 8..=8);
     assert_eq!(adoption.writer_compatibility(), 8..=8);
 
-    assert_eq!(evidence.entry_count(), 9);
-    assert_eq!(evidence.executable_count(), 8);
+    let successor = &manifest[9];
+    assert_eq!(successor.ordinal(), 10);
+    assert_eq!(successor.id(), "0010_store_v8_runtime_successor");
+    assert_eq!(
+        successor.path(),
+        "db/migrations/0010_store_v8_runtime_successor.sql"
+    );
+    assert_eq!(successor.byte_length(), 195_721);
+    assert_eq!(
+        successor.sha256(),
+        "0cc671a575879eaf28cbb4af31e449290b40a13ee87bd5ec037c5d340238153b"
+    );
+    assert_eq!(successor.schema_version(), 8);
+    assert_eq!(successor.reader_compatibility(), 8..=8);
+    assert_eq!(successor.writer_compatibility(), 8..=8);
+
+    assert_eq!(evidence.entry_count(), 10);
+    assert_eq!(evidence.executable_count(), 9);
     assert_eq!(evidence.schema_version(), POSTGRES_SCHEMA_VERSION);
     assert_eq!(evidence.manifest_sha256().as_str().len(), 64);
 
     let task_ledger = include_str!("postgres_task_ledger.rs");
     assert_eq!(
         task_ledger
-            .matches("executable_count: 9 - prefix_len")
+            .matches("executable_count: 6 - prefix_len")
             .count(),
         1,
-        "only the exact-prefix Ledger fixture may derive its executable count from all nine entries"
+        "the exact-prefix Ledger fixture must stop at the independent Store-v5 foundation"
     );
     assert!(
         task_ledger.contains("executable_count: 5"),
@@ -1940,8 +2030,10 @@ fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_clos
         "15 =>",
         "verify_writer_lease_v4_functions(client, true)",
         "17 =>",
-        "verify_writer_lease_v5_functions(client)",
+        "classify_writer_lease_v5_runtime_profile(client)",
+        "verify_writer_lease_v5_functions(client, runtime_profile)",
         "&WRITER_LEASE_V5_CURRENT_CATALOG_SIGNATURES",
+        "&WRITER_LEASE_V5_STORE_V8_CURRENT_CATALOG_SIGNATURES",
         "verify_writer_lease_acl_closure(client, 10, true)",
         "writer_tables != 5",
         "writer_runtime_functions != 7",
@@ -1951,7 +2043,7 @@ fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_clos
         "verify_owned_catalog_signature_profile(client, &SCHEMA_V7_OWNED_CATALOG_SIGNATURES)",
         "SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS",
         "expected_forbidden_objects[7] += MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT",
-        "verify_optional_managed_foreman_extension(client, target, manifest)",
+        "verify_optional_managed_foreman_extension(client, target)",
         "verify_exact_default_acl_signature(client)",
         "verify_autonomy_receipt_profile(client)",
         "verify_forbidden_namespace_objects(client)",
@@ -2004,6 +2096,63 @@ fn schema_v7_runtime_admission_requires_exact_writer_v4_or_v5_successor_and_clos
     assert!(!setup.contains(
         "if matches!(\n        current_role.as_str(),\n        \"lattice_migrator\" | \"lattice_runtime\""
     ));
+}
+
+#[test]
+fn schema_v8_runtime_admission_requires_exact_foreman_and_principal_closure() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    let verifier = setup
+        .split_once("fn verify_runtime_external_adoption_schema_v8")
+        .expect("schema-v8 runtime verifier")
+        .1
+        .split_once("fn verify_store_v8_runtime_successor_functions")
+        .expect("schema-v8 verifier boundary")
+        .0;
+    for required in [
+        "verify_optional_managed_foreman_extension(client, target)",
+        "verify_schema_v8_forbidden_object_profile(client, managed_foreman.is_some())",
+        "ManagedForemanStoreBinding::StoreV8Rebound",
+        "SCHEMA_V8_WRITER_V5_DANGEROUS_FUNCTION_COUNT",
+        "verify_exact_principal_database_boundary(",
+        "managed_foreman.as_ref()",
+    ] {
+        assert!(
+            verifier.contains(required),
+            "missing schema-v8 principal/companion closure: {required}"
+        );
+    }
+
+    let companion = setup
+        .split_once("fn verify_managed_foreman_identity_and_history")
+        .expect("managed Foreman classifier")
+        .1
+        .split_once("fn verify_runtime_submission_schema_v7")
+        .expect("managed Foreman classifier boundary")
+        .0;
+    for required in [
+        "MANAGED_FOREMAN_STORE_V8_REBOUND_FUNCTION_CATALOG_SHA256",
+        "MANAGED_FOREMAN_STORE_V8_REBOUND_TABLE_CATALOG_SHA256",
+        "FROM ONLY foreman_execution.extension_identity",
+        "FROM ONLY foreman_execution.extension_ledger",
+        "ManagedForemanStoreBinding::StoreV7Base",
+        "ManagedForemanStoreBinding::StoreV8Rebound",
+    ] {
+        assert!(
+            companion.contains(required),
+            "missing exact managed Foreman classifier evidence: {required}"
+        );
+    }
+    for required in [
+        "if current_role == \"lattice_migrator\"",
+        "verify_managed_foreman_identity_and_history(client, target, binding)",
+        "verify_managed_foreman_reader_identity(client, target, binding)",
+        "FROM foreman_execution.read_extension_identity_v1()",
+    ] {
+        assert!(
+            companion.contains(required),
+            "managed Foreman role-aware identity verification is missing: {required}"
+        );
+    }
 }
 
 #[test]
@@ -3122,4 +3271,125 @@ fn memory_v3_identity_rows_are_verified_only_with_migrator_authority() {
         role_verifier
             .contains("verify_codebase_memory_v3_identity(client, target, global_manifest)?;")
     );
+}
+
+#[test]
+fn schema_v8_runtime_successor_is_append_only_and_rebinds_every_retained_repository_surface() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    for required in [
+        "const SCHEMA_V8_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [74, 0, 0, 0, 0, 0, 0, 126, 0, 0];",
+        "verify_schema_header_comments(client, \"V7\")?;",
+        "verify_schema_v8_forbidden_object_profile(client, managed_foreman.is_some())?;",
+        "expected[7] += MANAGED_FOREMAN_CONTROL_INTERNAL_TRIGGER_COUNT",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing Store V8 closed catalog guard: {required}"
+        );
+    }
+    let manifest = migration_manifest();
+    assert_eq!(
+        manifest.len(),
+        10,
+        "Store V8 successor must append ordinal 10"
+    );
+    let successor = &manifest[9];
+    assert_eq!(successor.ordinal(), 10);
+    assert_eq!(successor.id(), "0010_store_v8_runtime_successor");
+    assert_eq!(
+        successor.path(),
+        "db/migrations/0010_store_v8_runtime_successor.sql"
+    );
+    assert_eq!(successor.schema_version(), 8);
+    assert_eq!(successor.reader_compatibility(), 8..=8);
+    assert_eq!(successor.writer_compatibility(), 8..=8);
+
+    let sql = std::str::from_utf8(successor.bytes()).expect("UTF-8 successor SQL");
+    let normalized = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+    for function in [
+        "control.store_prepare_v5",
+        "control.store_finalize_v5",
+        "control.store_current_head_v5",
+        "control.task_ledger_prepare_v3",
+        "control.task_ledger_read_head_v3",
+        "control.task_ledger_read_events_v3",
+        "control.task_ledger_read_commands_v3",
+        "control.task_ledger_finalize_v3",
+        "control.task_ledger_finalize_general_intake_v1",
+        "control.project_registry_prepare_v2",
+        "control.project_registry_read_state_v2",
+        "control.project_registry_read_observations_v2",
+        "control.project_registry_read_projects_v2",
+        "control.project_registry_read_commands_v2",
+        "control.project_registry_read_reservations_v2",
+        "control.project_registry_stage_command_v2",
+        "control.project_registry_stage_project_v2",
+        "control.project_registry_finalize_v2",
+    ] {
+        let marker = format!("CREATE OR REPLACE FUNCTION {function}(");
+        let start = normalized
+            .find(&marker)
+            .unwrap_or_else(|| panic!("missing explicit Store V8 successor for {function}"));
+        let tail = &normalized[start..];
+        let end = tail[marker.len()..]
+            .find("CREATE OR REPLACE FUNCTION control.")
+            .map_or(tail.len(), |offset| marker.len() + offset);
+        let body = &tail[..end];
+        assert!(
+            body.contains("v_manifest_entry_count IS DISTINCT FROM 10")
+                || body.contains("v_manifest_entry_count = 10"),
+            "{function} does not pin the ten-entry manifest"
+        );
+        for stale in [
+            "p_global_schema_version <> 7",
+            "v_global_schema_version IS DISTINCT FROM 7",
+            "v_schema_version IS DISTINCT FROM 7",
+            "v_manifest_entry_count IS DISTINCT FROM 8",
+            "v_manifest_entry_count = 8",
+            "c.current_schema_version = 7",
+            "c.min_reader = 7",
+            "c.max_reader = 7",
+            "c.min_writer = 7",
+            "c.max_writer = 7",
+            "p_persistence_schema_version IS DISTINCT FROM 7",
+            "c.persistence_schema_version = 7",
+        ] {
+            assert!(
+                !body.contains(stale),
+                "{function} retains stale guard: {stale}"
+            );
+        }
+    }
+    assert_eq!(
+        normalized
+            .matches("CREATE OR REPLACE FUNCTION control.")
+            .count(),
+        18,
+        "successor must replace only the exact retained repository surface"
+    );
+    assert!(normalized.contains("v_manifest_entry_count IS DISTINCT FROM 10"));
+    assert!(normalized.contains("c.current_schema_version = 8"));
+    assert!(normalized.contains("c.min_reader = 8 AND c.max_reader = 8"));
+    assert!(normalized.contains("c.min_writer = 8 AND c.max_writer = 8"));
+    assert!(!normalized.contains("pg_get_functiondef"));
+    assert!(!normalized.contains("foreman_execution."));
+}
+
+#[test]
+fn schema_v8_legacy_prefix_is_reconciled_in_one_store_transaction() {
+    let setup = include_str!("../src/postgres_setup.rs");
+    assert!(setup.contains("ExactV8LegacyPrefix"));
+    assert!(setup.contains("verify_v8_legacy_manifest_prefix"));
+    assert!(setup.contains("advance_compatibility_from_v8_legacy"));
+    for required in [
+        "InstalledManifestState::ExactV8LegacyPrefix",
+        "InstalledManifestState::ExactV8Full",
+        "verify_writer_lease_v5_store_v8_successor(&mut transaction)",
+        "apply_missing_entries(&mut transaction, 9)",
+    ] {
+        assert!(
+            setup.contains(required),
+            "missing legacy V8 recovery gate: {required}"
+        );
+    }
 }

@@ -61,18 +61,20 @@ fn bootstrap_inspector_is_read_only_memory_owned_and_writer_agnostic() {
 }
 
 #[test]
-fn bootstrap_inspector_accepts_only_the_three_frozen_store_profiles() {
+fn bootstrap_inspector_accepts_only_the_five_frozen_store_profiles() {
     let source = include_str!("../src/setup.rs");
     let profiles = [
         ExtensionBootstrapGlobalProfile::V5,
         ExtensionBootstrapGlobalProfile::V6,
         ExtensionBootstrapGlobalProfile::V7,
+        ExtensionBootstrapGlobalProfile::V8LegacyPrefix,
+        ExtensionBootstrapGlobalProfile::V8,
     ];
     assert_eq!(format!("{:?}", profiles[2]), "V7");
     for required in [
         "const BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION: u16 = 7",
         "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8",
-        "ExtensionBootstrapGlobalProfile::V7 => \"LATTICE_DEVOS_MEMORY_SCHEMA_V7\"",
+        "LATTICE_DEVOS_MEMORY_SCHEMA_V7",
         "BOOTSTRAP_V7_GLOBAL_SCHEMA_VERSION",
         "BOOTSTRAP_V7_GLOBAL_MANIFEST_SHA256",
     ] {
@@ -345,4 +347,20 @@ fn exact_catalog_signatures_cover_same_count_definition_and_acl_drift() {
         source.matches("verify_exact_catalog_profile(").count() >= 3,
         "v2 source and both v3 apply/read-only paths must verify exact signatures"
     );
+}
+
+#[test]
+fn bootstrap_inspector_distinguishes_both_exact_store_v8_manifests() {
+    let source = include_str!("../src/setup.rs");
+    for required in [
+        "ExtensionBootstrapGlobalProfile::V8LegacyPrefix",
+        "ExtensionBootstrapGlobalProfile::V8",
+        "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82",
+        "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60",
+    ] {
+        assert!(
+            source.contains(required),
+            "missing Memory V8 bootstrap profile: {required}"
+        );
+    }
 }

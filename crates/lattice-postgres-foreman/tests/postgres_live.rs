@@ -72,13 +72,17 @@ fn disposable_store_v7_fresh_extension_apply_and_reconnect() {
     let installed = apply_extension(&mut migrator, &target).expect("install extension");
     let installed_evidence = match installed {
         ExtensionApplyOutcome::Installed(evidence) => evidence,
-        ExtensionApplyOutcome::Upgraded(_) => panic!("fresh fixture was a predecessor"),
+        ExtensionApplyOutcome::Upgraded(_) | ExtensionApplyOutcome::Rebound(_) => {
+            panic!("fresh fixture was not an unbound fresh install")
+        }
         ExtensionApplyOutcome::AlreadyCurrent(_) => panic!("live fixture was not fresh"),
     };
     let replay = apply_extension(&mut migrator, &target).expect("exact setup replay");
     let replay_evidence = match replay {
         ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
+        ExtensionApplyOutcome::Installed(_)
+        | ExtensionApplyOutcome::Upgraded(_)
+        | ExtensionApplyOutcome::Rebound(_) => {
             panic!("extension installed twice")
         }
     };
@@ -105,7 +109,9 @@ fn disposable_store_v7_bootstrap_owned_extension_apply_acl_and_reconnect() {
         .expect("product bootstrap must have installed an exact extension")
     {
         ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
+        ExtensionApplyOutcome::Installed(_)
+        | ExtensionApplyOutcome::Upgraded(_)
+        | ExtensionApplyOutcome::Rebound(_) => {
             panic!("product bootstrap omitted the required Foreman extension")
         }
     };
@@ -156,7 +162,9 @@ fn disposable_store_v7_bootstrap_owned_extension_apply_acl_and_reconnect() {
         .expect("atomically upgrade the exact empty deployed predecessor")
     {
         ExtensionApplyOutcome::Upgraded(evidence) => evidence,
-        ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::AlreadyCurrent(_) => {
+        ExtensionApplyOutcome::Installed(_)
+        | ExtensionApplyOutcome::Rebound(_)
+        | ExtensionApplyOutcome::AlreadyCurrent(_) => {
             panic!("exact predecessor was not upgraded")
         }
     };
@@ -164,10 +172,51 @@ fn disposable_store_v7_bootstrap_owned_extension_apply_acl_and_reconnect() {
     let replay_evidence =
         match apply_extension(&mut migrator, &target).expect("exact upgraded extension replay") {
             ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
-            ExtensionApplyOutcome::Installed(_) | ExtensionApplyOutcome::Upgraded(_) => {
+            ExtensionApplyOutcome::Installed(_)
+            | ExtensionApplyOutcome::Upgraded(_)
+            | ExtensionApplyOutcome::Rebound(_) => {
                 panic!("upgraded extension was unexpectedly reinstalled")
             }
         };
+    assert_eq!(bootstrap_evidence, replay_evidence);
+    drop(migrator);
+
+    assert_runtime_acl_and_reconnect(&runtime_url, &target, &bootstrap_evidence);
+}
+
+#[test]
+#[ignore = "requires the product-bootstrapped disposable PostgreSQL 17 Store-v8 profile"]
+fn disposable_store_v8_bootstrap_owned_extension_acl_and_reconnect() {
+    if env::var("LATTICE_FOREMAN_LIVE").ok().as_deref() != Some("1") {
+        return;
+    }
+    let migrator_url = required("LATTICE_FOREMAN_MIGRATOR_URL");
+    let runtime_url = required("LATTICE_FOREMAN_RUNTIME_URL");
+    let database_name = required("LATTICE_FOREMAN_DATABASE_NAME");
+    let run_id = required("LATTICE_FOREMAN_RUN_ID");
+    let target = ExtensionTarget::new(database_name, run_id).expect("bounded live target");
+
+    let mut migrator = connect_as(&migrator_url, "lattice_migrator");
+    let bootstrap_evidence = match apply_extension(&mut migrator, &target)
+        .expect("product bootstrap must retain the exact Store-v8 Foreman extension")
+    {
+        ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
+        ExtensionApplyOutcome::Installed(_)
+        | ExtensionApplyOutcome::Upgraded(_)
+        | ExtensionApplyOutcome::Rebound(_) => {
+            panic!("Store-v8 product bootstrap was not already exact")
+        }
+    };
+    let replay_evidence = match apply_extension(&mut migrator, &target)
+        .expect("exact Store-v8 Foreman setup replay")
+    {
+        ExtensionApplyOutcome::AlreadyCurrent(evidence) => evidence,
+        ExtensionApplyOutcome::Installed(_)
+        | ExtensionApplyOutcome::Upgraded(_)
+        | ExtensionApplyOutcome::Rebound(_) => {
+            panic!("exact Store-v8 Foreman replay mutated the extension")
+        }
+    };
     assert_eq!(bootstrap_evidence, replay_evidence);
     drop(migrator);
 

@@ -102,7 +102,8 @@ use lattice_postgres_codebase_memory::{
     verify_embedded_extension_manifest, verify_extension as verify_memory_extension,
 };
 use lattice_postgres_foreman::{
-    ExecutionEnvironmentDescriptor, ExtensionDatabaseRole as ForemanExtensionDatabaseRole,
+    ExecutionEnvironmentDescriptor, ExtensionApplyOutcome as ForemanExtensionApplyOutcome,
+    ExtensionDatabaseRole as ForemanExtensionDatabaseRole,
     ExtensionTarget as ForemanExtensionTarget, PostgresForeman, RestartTaskKind,
     apply_extension as apply_postgres_foreman_extension,
     verify_extension as verify_postgres_foreman_extension,
@@ -119,7 +120,7 @@ use lattice_postgres_writer_lease::{
     V3ExtensionTarget, V4ExtensionTarget, V5ExtensionTarget,
     apply_extension as apply_postgres_writer_extension, apply_v3_extension, apply_v4_extension,
     apply_v5_extension, inspect_v3_bootstrap_profile, rebind_existing_v3_extension,
-    verify_extension as verify_writer_extension,
+    rebind_v5_for_store_v8, verify_extension as verify_writer_extension,
 };
 use lattice_task_domain::{
     AcceptanceCriterion, ApprovalRequirement, ApprovalRequirements, Capability, CapabilityRequest,
@@ -169,6 +170,9 @@ use crate::task_control::{
 };
 
 const DEFAULT_TIMEOUT_SECONDS: u64 = 120;
+const POSTGRES_BOOTSTRAP_GLOBAL_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
+const POSTGRES_BOOTSTRAP_GATE_TIMEOUT: Duration = Duration::from_secs(30);
+const POSTGRES_BOOTSTRAP_GATE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_TIMEOUT_SECONDS: u64 = 3_600;
 const FINALIZATION_RESERVE: Duration = Duration::from_secs(30);
 const CONTROLLED_TASK_MAX_RUNTIME: Duration = Duration::from_mins(5);
@@ -2202,6 +2206,7 @@ enum PostgresBootstrapAction {
     V4Apply,
     V7Apply,
     WriterV5Apply,
+    WriterV8Rebind,
     V8Apply,
     V8VerifyOnly,
 }
@@ -2250,7 +2255,27 @@ const fn postgres_bootstrap_action(
         (
             MigrationBootstrapProfile::V7,
             MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V7V5RebindPending,
+        ) => Some(PostgresBootstrapAction::WriterV8Rebind),
+        (
+            MigrationBootstrapProfile::V7,
+            MemoryBootstrapProfile::V3,
             V3BootstrapProfile::V7V5Current,
+        ) => Some(PostgresBootstrapAction::V8Apply),
+        (
+            MigrationBootstrapProfile::V8LegacyPrefix,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V8V5RebindPending,
+        )
+        | (
+            MigrationBootstrapProfile::V8,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V8V5RebindPending,
+        ) => Some(PostgresBootstrapAction::WriterV8Rebind),
+        (
+            MigrationBootstrapProfile::V8LegacyPrefix,
+            MemoryBootstrapProfile::V3,
+            V3BootstrapProfile::V8V5Current,
         ) => Some(PostgresBootstrapAction::V8Apply),
         (
             MigrationBootstrapProfile::V8,
@@ -2261,13 +2286,92 @@ const fn postgres_bootstrap_action(
     }
 }
 
+fn acquire_postgres_bootstrap_gate(client: &mut Client) -> Result<(), LatticedError> {
+    let started_at = Instant::now();
+    loop {
+        let acquired = client
+            .query_one(
+                "SELECT pg_catalog.pg_try_advisory_lock($1::bigint)",
+                &[&POSTGRES_BOOTSTRAP_GLOBAL_ADVISORY_LOCK],
+            )
+            .and_then(|row| row.try_get::<_, bool>(0))
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+        if acquired {
+            return Ok(());
+        }
+        let elapsed = started_at.elapsed();
+        if elapsed >= POSTGRES_BOOTSTRAP_GATE_TIMEOUT {
+            return Err(LatticedError::new(
+                LatticedErrorKind::RuntimePostgresMigration,
+            ));
+        }
+        std::thread::sleep(std::cmp::min(
+            POSTGRES_BOOTSTRAP_GATE_POLL_INTERVAL,
+            POSTGRES_BOOTSTRAP_GATE_TIMEOUT.saturating_sub(elapsed),
+        ));
+    }
+}
+
+fn release_postgres_bootstrap_gate(client: &mut Client) -> Result<(), LatticedError> {
+    let released = client
+        .query_one(
+            "SELECT pg_catalog.pg_advisory_unlock($1::bigint)",
+            &[&POSTGRES_BOOTSTRAP_GLOBAL_ADVISORY_LOCK],
+        )
+        .and_then(|row| row.try_get::<_, bool>(0))
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+    if !released {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresMigration,
+        ));
+    }
+    Ok(())
+}
+
+fn verify_postgres_runtime_gates(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    store_target: &StoreMigrationTarget,
+    authority: &StoreAuthorityHead,
+    foreman_target: &ForemanExtensionTarget,
+) -> Result<(), LatticedError> {
+    let runtime = connect_fixed_runtime_client(
+        database,
+        password,
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    let ledger = PostgresTaskLedger::new(runtime, store_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::ForemanReplayCorrupt))?;
+    let mut coordination = PostgresForemanCoordination::new(ledger, authority.clone());
+    coordination
+        .load_runtime_status()
+        .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
+    let mut foreman_runtime = connect_fixed_runtime_client(
+        database,
+        password,
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
+    verify_postgres_foreman_extension(
+        &mut foreman_runtime,
+        foreman_target,
+        ForemanExtensionDatabaseRole::Runtime,
+    )
+    .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    Ok(())
+}
+
 /// Performs the only product migration path: Store v5 foundation, Memory v3,
 /// Writer v2/v3 bridge, Store v6/rebind, Store-v7 submission profile, then
 /// the exact Store-v8 external-adoption profile and fresh-runtime replay proof.
 ///
 /// The command temporarily closes Runtime admission while it holds the extension
-/// migration locks, then restores the configured Runtime authority. A failed setup
-/// never reports readiness and restores the exact prior admission row.
+/// migration locks, then restores the configured Runtime authority after every
+/// migrator-owned gate passes. Pre-mutation rejection preserves admission;
+/// once mutation closes admission, any later owner failure leaves exact
+/// STOPPED/no-leader for retry. Fresh Runtime-role replay must also pass before
+/// readiness is reported.
 ///
 /// # Errors
 ///
@@ -2280,6 +2384,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let store_target = StoreMigrationTarget::new(database.database_name(), database.run_id())
         .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
     let mut migrator = connect_migrator(&database, &password)?;
+    acquire_postgres_bootstrap_gate(&mut migrator)?;
     let database_identity =
         ContentDigest::from_sha256(store_target.expected_database_identity_sha256().as_str())
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
@@ -2316,9 +2421,9 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let memory_global = match profile {
         MigrationBootstrapProfile::V5 => MemoryBootstrapGlobalProfile::V5,
         MigrationBootstrapProfile::V6 => MemoryBootstrapGlobalProfile::V6,
-        MigrationBootstrapProfile::V7 | MigrationBootstrapProfile::V8 => {
-            MemoryBootstrapGlobalProfile::V7
-        }
+        MigrationBootstrapProfile::V7 => MemoryBootstrapGlobalProfile::V7,
+        MigrationBootstrapProfile::V8LegacyPrefix => MemoryBootstrapGlobalProfile::V8LegacyPrefix,
+        MigrationBootstrapProfile::V8 => MemoryBootstrapGlobalProfile::V8,
         MigrationBootstrapProfile::Fresh | MigrationBootstrapProfile::LegacyPrefix => {
             return Err(LatticedError::new(
                 LatticedErrorKind::RuntimePostgresVerification,
@@ -2336,21 +2441,51 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     let Some(action) = postgres_bootstrap_action(profile, memory_profile, writer_profile) else {
         return Err(LatticedError::new(LatticedErrorKind::WriterLease));
     };
-
-    if action == PostgresBootstrapAction::V8VerifyOnly {
-        let persisted_admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
-        if persisted_admission != configured_admission {
-            return Err(LatticedError::new(
-                LatticedErrorKind::RuntimePostgresVerification,
-            ));
-        }
+    let foreman_target =
+        ForemanExtensionTarget::new(database.database_name(), database.run_id())
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    let terminal_current = if action == PostgresBootstrapAction::V8VerifyOnly {
+        verify_postgres_foreman_extension(
+            &mut migrator,
+            &foreman_target,
+            ForemanExtensionDatabaseRole::Migrator,
+        )
+        .is_ok()
     } else {
-        let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+        false
+    };
+
+    let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+    if admission != configured_admission && !admission.is_stopped_no_leader() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
+    if terminal_current && admission == configured_admission {
+        release_postgres_bootstrap_gate(&mut migrator)?;
+        drop(migrator);
+        return verify_postgres_runtime_gates(
+            &database,
+            &password,
+            &store_target,
+            &authority,
+            &foreman_target,
+        );
+    }
+    if !admission.is_stopped_no_leader() {
         admission.stop(&mut migrator)?;
+    }
+    if !RuntimeAdmissionSnapshot::load(&mut migrator)?.is_stopped_no_leader() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
+
+    if action != PostgresBootstrapAction::V8VerifyOnly {
         let setup = (|| {
             let mut next_action = action;
             let mut next_writer_profile = writer_profile;
-            for _ in 0..5 {
+            for _ in 0..6 {
                 match next_action {
                     PostgresBootstrapAction::V5Apply => {
                         match next_writer_profile {
@@ -2427,7 +2562,9 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             | V3BootstrapProfile::V6V4Bridge
                             | V3BootstrapProfile::V6V4BridgeLegacyF252Rebind
                             | V3BootstrapProfile::V7V4Current
+                            | V3BootstrapProfile::V7V5RebindPending
                             | V3BootstrapProfile::V7V5Current
+                            | V3BootstrapProfile::V8V5RebindPending
                             | V3BootstrapProfile::V8V5Current => {
                                 return Err(LatticedError::new(LatticedErrorKind::WriterLease));
                             }
@@ -2465,6 +2602,15 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                             return Err(LatticedError::new(LatticedErrorKind::WriterLease));
                         }
                     }
+                    PostgresBootstrapAction::WriterV8Rebind => {
+                        match rebind_v5_for_store_v8(&mut migrator, &writer_v5)
+                            .map_err(|_| LatticedError::new(LatticedErrorKind::WriterLease))?
+                        {
+                            WriterExtensionApplyOutcome::Rebound
+                            | WriterExtensionApplyOutcome::AlreadyCurrent => {}
+                            _ => return Err(LatticedError::new(LatticedErrorKind::WriterLease)),
+                        }
+                    }
                     PostgresBootstrapAction::V8Apply => {
                         apply_store_migrations(&mut migrator, &store_target).map_err(|_| {
                             LatticedError::new(LatticedErrorKind::RuntimePostgresExternalAdoption)
@@ -2480,9 +2626,11 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                 let memory_global = match profile {
                     MigrationBootstrapProfile::V5 => MemoryBootstrapGlobalProfile::V5,
                     MigrationBootstrapProfile::V6 => MemoryBootstrapGlobalProfile::V6,
-                    MigrationBootstrapProfile::V7 | MigrationBootstrapProfile::V8 => {
-                        MemoryBootstrapGlobalProfile::V7
+                    MigrationBootstrapProfile::V7 => MemoryBootstrapGlobalProfile::V7,
+                    MigrationBootstrapProfile::V8LegacyPrefix => {
+                        MemoryBootstrapGlobalProfile::V8LegacyPrefix
                     }
+                    MigrationBootstrapProfile::V8 => MemoryBootstrapGlobalProfile::V8,
                     MigrationBootstrapProfile::Fresh | MigrationBootstrapProfile::LegacyPrefix => {
                         return Err(LatticedError::new(
                             LatticedErrorKind::RuntimePostgresVerification,
@@ -2518,12 +2666,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                 LatticedErrorKind::RuntimePostgresVerification,
             ))
         })();
-        match setup {
-            Ok(()) => configured_admission.restore(&mut migrator)?,
-            Err(error) => {
-                admission.restore(&mut migrator)?;
-                return Err(error);
-            }
+        if let Err(error) = setup {
+            return Err(error);
         }
     }
 
@@ -2536,51 +2680,60 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         );
     }
 
-    // The managed foreman is a same-database extension of the already
-    // verified Store-v7 profile. Explicit bootstrap is its only installation
-    // path; ordinary Runtime startup remains verify-only.
-    let foreman_target =
-        ForemanExtensionTarget::new(database.database_name(), database.run_id())
-            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
-    let admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
-    admission.stop(&mut migrator)?;
+    // The managed foreman is a same-database extension of the exact Store-v8
+    // successor. Explicit bootstrap is its only installation/rebind path;
+    // ordinary Runtime startup remains verify-only.
     match apply_postgres_foreman_extension(&mut migrator, &foreman_target) {
-        Ok(_) => configured_admission.restore(&mut migrator)?,
+        Ok(
+            ForemanExtensionApplyOutcome::Installed(_)
+            | ForemanExtensionApplyOutcome::Upgraded(_)
+            | ForemanExtensionApplyOutcome::Rebound(_)
+            | ForemanExtensionApplyOutcome::AlreadyCurrent(_),
+        ) => {}
         Err(_) => {
-            admission.restore(&mut migrator)?;
             return Err(LatticedError::new(
                 LatticedErrorKind::RuntimePostgresForeman,
             ));
         }
     }
-    drop(migrator);
+    let final_store =
+        verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
+    if final_store.schema_version() != 8
+        || !RuntimeAdmissionSnapshot::load(&mut migrator)?.is_stopped_no_leader()
+    {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
 
-    // Migrator credentials are gone before any Runtime-role verification.
-    let runtime = connect_fixed_runtime_client(
+    if !RuntimeAdmissionSnapshot::load(&mut migrator)?.is_stopped_no_leader() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
+    if configured_admission.restore(&mut migrator).is_err() {
+        return Err(LatticedError::new(LatticedErrorKind::LedgerConfiguration));
+    }
+    let observed_admission = RuntimeAdmissionSnapshot::load(&mut migrator)?;
+    if observed_admission != configured_admission {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresVerification,
+        ));
+    }
+    if release_postgres_bootstrap_gate(&mut migrator).is_err() {
+        return Err(LatticedError::new(
+            LatticedErrorKind::RuntimePostgresMigration,
+        ));
+    }
+    drop(migrator);
+    verify_postgres_runtime_gates(
         &database,
         &password,
-        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    let ledger = PostgresTaskLedger::new(runtime, &store_target)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::ForemanReplayCorrupt))?;
-    let mut coordination = PostgresForemanCoordination::new(ledger, authority);
-    coordination
-        .load_runtime_status()
-        .map_err(|error| foreman_replay_latticed(ToolExecutionError::new(error.code())))?;
-    let mut foreman_runtime = connect_fixed_runtime_client(
-        &database,
-        &password,
-        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS))?,
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
-    verify_postgres_foreman_extension(
-        &mut foreman_runtime,
+        &store_target,
+        &authority,
         &foreman_target,
-        ForemanExtensionDatabaseRole::Runtime,
     )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
-    Ok(())
 }
 
 /// Initializes the LATTICE-owned local `PostgreSQL` database before normal Runtime
@@ -2829,25 +2982,18 @@ impl RuntimeAdmissionSnapshot {
     }
 
     fn stop(&self, client: &mut Client) -> Result<(), LatticedError> {
-        client
+        let affected = client
             .execute(
                 "UPDATE ONLY control.runtime_admission SET admission_mode = 'STOPPED', \
                  daemon_instance_id = NULL, daemon_epoch = NULL, authority_revision = 0, \
                  observation_digest = NULL, authority_head_digest = NULL, \
-                 updated_at = pg_catalog.clock_timestamp() WHERE singleton",
-                &[],
-            )
-            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
-        Ok(())
-    }
-
-    fn restore(&self, client: &mut Client) -> Result<(), LatticedError> {
-        client
-            .execute(
-                "UPDATE ONLY control.runtime_admission SET admission_mode = $1, \
-                 daemon_instance_id = $2, daemon_epoch = $3, authority_revision = $4, \
-                 observation_digest = $5, authority_head_digest = $6, \
-                 updated_at = pg_catalog.clock_timestamp() WHERE singleton",
+                 updated_at = pg_catalog.clock_timestamp() \
+                 WHERE singleton AND admission_mode = $1 \
+                   AND daemon_instance_id IS NOT DISTINCT FROM $2 \
+                   AND daemon_epoch IS NOT DISTINCT FROM $3 \
+                   AND authority_revision = $4 \
+                   AND observation_digest IS NOT DISTINCT FROM $5 \
+                   AND authority_head_digest IS NOT DISTINCT FROM $6",
                 &[
                     &self.mode,
                     &self.daemon_instance_id,
@@ -2858,7 +3004,46 @@ impl RuntimeAdmissionSnapshot {
                 ],
             )
             .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        if affected != 1 {
+            return Err(LatticedError::new(LatticedErrorKind::LedgerConfiguration));
+        }
         Ok(())
+    }
+
+    fn restore(&self, client: &mut Client) -> Result<(), LatticedError> {
+        let affected = client
+            .execute(
+                "UPDATE ONLY control.runtime_admission SET admission_mode = $1, \
+                 daemon_instance_id = $2, daemon_epoch = $3, authority_revision = $4, \
+                 observation_digest = $5, authority_head_digest = $6, \
+                 updated_at = pg_catalog.clock_timestamp() \
+                 WHERE singleton AND admission_mode = 'STOPPED' \
+                   AND daemon_instance_id IS NULL AND daemon_epoch IS NULL \
+                   AND authority_revision = 0 AND observation_digest IS NULL \
+                   AND authority_head_digest IS NULL",
+                &[
+                    &self.mode,
+                    &self.daemon_instance_id,
+                    &self.daemon_epoch,
+                    &self.authority_revision,
+                    &self.observation_digest,
+                    &self.authority_head_digest,
+                ],
+            )
+            .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
+        if affected != 1 {
+            return Err(LatticedError::new(LatticedErrorKind::LedgerConfiguration));
+        }
+        Ok(())
+    }
+
+    fn is_stopped_no_leader(&self) -> bool {
+        self.mode == "STOPPED"
+            && self.daemon_instance_id.is_none()
+            && self.daemon_epoch.is_none()
+            && self.authority_revision == 0
+            && self.observation_digest.is_none()
+            && self.authority_head_digest.is_none()
     }
 }
 
@@ -12117,6 +12302,39 @@ mod tests {
     }
 
     #[test]
+    fn postgres_bootstrap_admission_transition_is_exact_cas_and_stopped_recovery_is_closed() {
+        let stopped = RuntimeAdmissionSnapshot {
+            mode: "STOPPED".to_owned(),
+            daemon_instance_id: None,
+            daemon_epoch: None,
+            authority_revision: 0,
+            observation_digest: None,
+            authority_head_digest: None,
+        };
+        assert!(stopped.is_stopped_no_leader());
+        let source = include_str!("composition.rs");
+        let boundary = source
+            .split_once("impl RuntimeAdmissionSnapshot")
+            .expect("admission boundary")
+            .1
+            .split_once("pub fn serve_stdio_from_environment")
+            .expect("admission boundary end")
+            .0;
+        for required in [
+            "daemon_instance_id IS NOT DISTINCT FROM $2",
+            "observation_digest IS NOT DISTINCT FROM $5",
+            "authority_head_digest IS NOT DISTINCT FROM $6",
+            "WHERE singleton AND admission_mode = 'STOPPED'",
+            "if affected != 1",
+        ] {
+            assert!(
+                boundary.contains(required),
+                "missing admission CAS guard: {required}"
+            );
+        }
+    }
+
+    #[test]
     fn foreman_catalog_measurement_is_test_only_marker_owned_and_reuses_foundation() {
         let source = include_str!("composition.rs").replace("\r\n", "\n");
         let production = source
@@ -12934,13 +13152,15 @@ mod tests {
     #[test]
     fn postgres_bootstrap_cross_product_is_closed_before_effects() {
         use MemoryBootstrapProfile::{Empty, V2 as MemoryV2, V3 as MemoryV3};
-        use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6, V7, V8};
+        use MigrationBootstrapProfile::{Fresh, LegacyPrefix, V5, V6, V7, V8, V8LegacyPrefix};
         use PostgresBootstrapAction::{
             V4Apply, V5Apply, V6Rebind, V7Apply, V8Apply, V8VerifyOnly, WriterV5Apply,
+            WriterV8Rebind,
         };
         use V3BootstrapProfile::{
             V5Bridge, V5FallbackRequired, V6BridgePending, V6Current, V6V4Bridge,
-            V6V4BridgeLegacyF252Rebind, V7V4Current, V7V5Current, V8V5Current,
+            V6V4BridgeLegacyF252Rebind, V7V4Current, V7V5Current, V7V5RebindPending, V8V5Current,
+            V8V5RebindPending,
         };
 
         let accepted = [
@@ -12953,10 +13173,17 @@ mod tests {
             ((V6, MemoryV3, V6V4Bridge), V7Apply),
             ((V6, MemoryV3, V6V4BridgeLegacyF252Rebind), V4Apply),
             ((V7, MemoryV3, V7V4Current), WriterV5Apply),
+            ((V7, MemoryV3, V7V5RebindPending), WriterV8Rebind),
             ((V7, MemoryV3, V7V5Current), V8Apply),
+            (
+                (V8LegacyPrefix, MemoryV3, V8V5RebindPending),
+                WriterV8Rebind,
+            ),
+            ((V8LegacyPrefix, MemoryV3, V8V5Current), V8Apply),
+            ((V8, MemoryV3, V8V5RebindPending), WriterV8Rebind),
             ((V8, MemoryV3, V8V5Current), V8VerifyOnly),
         ];
-        for store in [Fresh, LegacyPrefix, V5, V6, V7, V8] {
+        for store in [Fresh, LegacyPrefix, V5, V6, V7, V8LegacyPrefix, V8] {
             for memory in [Empty, MemoryV2, MemoryV3] {
                 for writer in [
                     V5FallbackRequired,
@@ -12966,7 +13193,9 @@ mod tests {
                     V6V4Bridge,
                     V6V4BridgeLegacyF252Rebind,
                     V7V4Current,
+                    V7V5RebindPending,
                     V7V5Current,
+                    V8V5RebindPending,
                     V8V5Current,
                 ] {
                     let expected = accepted.iter().find_map(
@@ -13026,6 +13255,9 @@ mod tests {
         let writer_v5 = bootstrap
             .find("apply_v5_extension")
             .expect("Writer v5 process-handoff bridge");
+        let writer_v8 = bootstrap
+            .find("rebind_v5_for_store_v8")
+            .expect("Writer v5 dual Store-v7/v8 runtime successor");
         let generic_v5_verifier = bootstrap
             .find("verify_store_schema")
             .expect("generic Store v5 fallback verifier");
@@ -13045,7 +13277,12 @@ mod tests {
         assert!(legacy_rejection < writer_absence && writer_absence < first_store);
         assert!(first_store < memory_inspection && memory_inspection < writer_inspection);
         assert!(writer_inspection < writer_v3);
-        assert!(writer_v3 < writer_v4 && writer_v4 < writer_v5 && writer_v5 < final_store);
+        assert!(
+            writer_v3 < writer_v4
+                && writer_v4 < writer_v5
+                && writer_v5 < writer_v8
+                && writer_v8 < final_store
+        );
         assert!(writer_v3 < generic_v5_verifier && generic_v5_verifier < memory_fallback);
         assert!(memory_fallback < writer_v2_fallback);
         assert!(writer_v2_fallback < memory_fallback_verify);
@@ -13056,28 +13293,60 @@ mod tests {
         assert!(bootstrap.contains("V3BootstrapProfile::V6V4Bridge"));
         assert!(bootstrap.contains("V3BootstrapProfile::V6V4BridgeLegacyF252Rebind"));
         assert!(bootstrap.contains("V3BootstrapProfile::V7V4Current"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V7V5RebindPending"));
         assert!(bootstrap.contains("V3BootstrapProfile::V7V5Current"));
+        assert!(bootstrap.contains("V3BootstrapProfile::V8V5RebindPending"));
         assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V7"));
+        assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V8LegacyPrefix"));
+        assert!(bootstrap.contains("MemoryBootstrapGlobalProfile::V8"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V7Apply"));
         assert!(bootstrap.contains("PostgresBootstrapAction::WriterV5Apply"));
+        assert!(bootstrap.contains("PostgresBootstrapAction::WriterV8Rebind"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V8Apply"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V8VerifyOnly"));
         assert!(bootstrap.contains("final_store.schema_version() != 8"));
         assert!(bootstrap.contains("PostgresBootstrapAction::V4Apply"));
-        assert!(bootstrap.contains("for _ in 0..5"));
+        assert!(bootstrap.contains("for _ in 0..6"));
         assert!(bootstrap.contains("!= WriterExtensionApplyOutcome::Bridged"));
-        assert!(bootstrap.contains("persisted_admission != configured_admission"));
+        assert!(bootstrap.contains("admission != configured_admission"));
+        assert!(bootstrap.contains("admission.is_stopped_no_leader()"));
         assert_eq!(bootstrap.matches("apply_v3_extension").count(), 2);
         let admission_stop = bootstrap.find("admission.stop").expect("admission stop");
         assert!(legacy_rejection < admission_stop);
+        let outer_gate = bootstrap
+            .find("acquire_postgres_bootstrap_gate")
+            .expect("whole-bootstrap advisory gate");
+        let initial_inspection = bootstrap
+            .find("inspect_migration_profile")
+            .expect("initial Store inspection");
+        assert!(outer_gate < initial_inspection);
         let v6_rebind = bootstrap
             .find("rebind_existing_v3_extension")
             .expect("Writer-owned strict existing-v3 rebind");
         assert!(admission_stop < v6_rebind);
         assert!(bootstrap.contains("inspect_migration_profile"));
         assert!(bootstrap.contains("drop(migrator);"));
-        assert!(bootstrap.contains("connect_fixed_runtime_client"));
-        assert!(bootstrap.contains("load_runtime_status"));
+        let foreman_apply = bootstrap
+            .find("apply_postgres_foreman_extension")
+            .expect("Foreman V8 install/rebind");
+        let runtime_verify = bootstrap
+            .rfind("verify_postgres_runtime_gates")
+            .expect("fresh Runtime-role replay and Foreman verification");
+        let final_restore = bootstrap
+            .rfind("configured_admission.restore")
+            .expect("single terminal admission restore");
+        let outer_release = bootstrap
+            .rfind("release_postgres_bootstrap_gate")
+            .expect("outer gate release");
+        let migrator_drop = bootstrap
+            .rfind("drop(migrator)")
+            .expect("migrator credential close");
+        assert!(final_store < foreman_apply);
+        assert!(foreman_apply < final_restore);
+        assert!(final_restore < outer_release && outer_release < migrator_drop);
+        assert!(migrator_drop < runtime_verify);
+        assert_eq!(bootstrap.matches("configured_admission.restore").count(), 1);
+        assert_eq!(bootstrap.matches(".restore(&mut migrator)").count(), 1);
         let production = source
             .split("#[cfg(test)]\nmod tests")
             .next()

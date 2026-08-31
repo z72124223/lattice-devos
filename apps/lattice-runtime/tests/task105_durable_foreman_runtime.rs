@@ -20,15 +20,21 @@ use lattice_postgres_codebase_memory::{
     verify_embedded_extension_manifest as verify_memory_manifest,
     verify_embedded_v2_extension_manifest as verify_memory_v2_manifest,
 };
+use lattice_postgres_foreman::{
+    ExtensionApplyOutcome as ForemanExtensionApplyOutcome,
+    ExtensionTarget as ForemanExtensionTarget, apply_extension as apply_foreman_extension,
+};
 use lattice_postgres_store::{
     DatabaseRole, MigrationApplyOutcome, MigrationBootstrapProfile, MigrationTarget,
-    PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations, inspect_migration_profile,
-    migration_manifest, verify_embedded_manifest, verify_postgres_schema,
+    POSTGRES_SCHEMA_VERSION, PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations,
+    inspect_migration_profile, migration_manifest, verify_embedded_manifest,
+    verify_postgres_schema,
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome, ExtensionSetupErrorKind, ExtensionTarget as WriterExtensionTarget,
-    PostgresWriterLease, V3BootstrapProfile, V3ExtensionTarget, V5ExtensionTarget,
-    apply_extension as apply_writer_extension, apply_v3_extension, inspect_v3_bootstrap_profile,
+    PostgresWriterLease, V3BootstrapProfile, V3ExtensionTarget, V4ExtensionTarget,
+    V5ExtensionTarget, apply_extension as apply_writer_extension, apply_v3_extension,
+    apply_v4_extension, apply_v5_extension, inspect_v3_bootstrap_profile,
     verify_embedded_v1_extension_manifest as verify_writer_v1_manifest,
     verify_embedded_v2_extension_manifest as verify_writer_v2_manifest,
     verify_embedded_v3_rebind_manifest,
@@ -54,10 +60,15 @@ const WRITER_V5_MANIFEST_SHA256: &str =
     "354aa40bc2ed30b7500cffea3a9227d94b766d150798824e39225cf664cca5ad";
 const CURRENT_V7_MANIFEST_SHA256: &str =
     "584a446464ab2f7ebd8b85543ba36a6d52b0a708502c39d2653b8814d84313f8";
-const FUTURE_V8_MANIFEST_SHA256: &str =
-    "d6a30fdffd2d12cbb59d4ddd0d0e0b4c6582a03515b7e0707e1a74270e29c0b3";
+const LEGACY_V8_MANIFEST_SHA256: &str =
+    "01373ed5092e90bf6a9e383955cd70d0fd4e0ed821667f1905b69e313005ea82";
+const CURRENT_V8_MANIFEST_SHA256: &str =
+    "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60";
+const FUTURE_V9_MANIFEST_SHA256: &str =
+    "16ce514cd8cbfe48b58e887ed20a2ef1db0752280fb481d5057f33b3615d6b86";
+const POSTGRES_BOOTSTRAP_GLOBAL_ADVISORY_LOCK: i64 = 0x4c41_5454_4943_4501;
 
-fn independent_manifest_sha256(include_future_v8: bool) -> String {
+fn independent_manifest_sha256(include_future_v9: bool) -> String {
     fn field(hasher: &mut Sha256, value: &[u8]) {
         hasher.update(
             u64::try_from(value.len())
@@ -92,16 +103,16 @@ fn independent_manifest_sha256(include_future_v8: bool) -> String {
             field(&mut hasher, &version.to_be_bytes());
         }
     }
-    if include_future_v8 {
-        field(&mut hasher, &9_u16.to_be_bytes());
-        field(&mut hasher, b"0009_unsupported_fixture");
-        field(&mut hasher, b"db/migrations/0009_unsupported_fixture.sql");
+    if include_future_v9 {
+        field(&mut hasher, &11_u16.to_be_bytes());
+        field(&mut hasher, b"0011_unsupported_fixture");
+        field(&mut hasher, b"db/migrations/0011_unsupported_fixture.sql");
         field(&mut hasher, &1_u64.to_be_bytes());
         field(&mut hasher, "d".repeat(64).as_bytes());
         field(&mut hasher, b"EXECUTABLE");
         field(&mut hasher, b"RUNNER_OWNED");
         for _ in 0..5 {
-            field(&mut hasher, &8_u16.to_be_bytes());
+            field(&mut hasher, &9_u16.to_be_bytes());
         }
     }
     let digest = hasher.finalize();
@@ -113,7 +124,7 @@ fn independent_manifest_sha256(include_future_v8: bool) -> String {
     encoded
 }
 
-fn future_v8_manifest_sha256() -> String {
+fn future_v9_manifest_sha256() -> String {
     independent_manifest_sha256(true)
 }
 const FRESH_CATALOG_FINGERPRINT_QUERIES: [&str; 3] = [
@@ -444,7 +455,7 @@ impl LiveConfig {
     fn prepare_legacy_v1_store(&self) {
         let target = self.migration_target();
         let manifest = migration_manifest();
-        assert_eq!(manifest.len(), 7, "TASK105_FIXTURE_MANIFEST_SIZE");
+        assert_eq!(manifest.len(), 10, "TASK105_FIXTURE_MANIFEST_SIZE");
         let foundation = &manifest[1];
         let mut migrator = self.migrator_client();
         migrator
@@ -743,6 +754,210 @@ impl LiveConfig {
         );
     }
 
+    fn prepare_legacy_v8_foreman_base(&self) {
+        let target = self.migration_target();
+        let database_identity =
+            ContentDigest::from_sha256(target.expected_database_identity_sha256().as_str())
+                .expect("TASK105_LEGACY_V8_DATABASE_IDENTITY");
+        let writer_v4 = V4ExtensionTarget::new(self.database_name(), database_identity.clone())
+            .expect("TASK105_LEGACY_V8_WRITER_V4_TARGET");
+        let writer_v5 = V5ExtensionTarget::new(self.database_name(), database_identity)
+            .expect("TASK105_LEGACY_V8_WRITER_V5_TARGET");
+        let foreman = ForemanExtensionTarget::new(self.database_name(), self.run_id.clone())
+            .expect("TASK105_LEGACY_V8_FOREMAN_TARGET");
+        let mut migrator = self.migrator_client();
+        assert_eq!(
+            apply_v4_extension(&mut migrator, &writer_v4).expect("TASK105_LEGACY_V8_WRITER_V4"),
+            ExtensionApplyOutcome::Bridged
+        );
+        assert_eq!(
+            apply_migrations(&mut migrator, &target).expect("TASK105_LEGACY_V8_STORE_V7"),
+            MigrationApplyOutcome::Applied {
+                executable_count: 1
+            }
+        );
+        assert_eq!(
+            apply_v5_extension(&mut migrator, &writer_v5).expect("TASK105_LEGACY_V8_WRITER_V5"),
+            ExtensionApplyOutcome::Activated
+        );
+        assert!(matches!(
+            apply_foreman_extension(&mut migrator, &foreman)
+                .expect("TASK105_LEGACY_V8_FOREMAN_BASE"),
+            ForemanExtensionApplyOutcome::Installed(_)
+        ));
+
+        let entry = &migration_manifest()[8];
+        assert_eq!(entry.ordinal(), 9);
+        assert_eq!(entry.id(), "0009_external_verified_result_adoption");
+        let sql = std::str::from_utf8(entry.bytes()).expect("TASK105_LEGACY_V8_SQL_UTF8");
+        let ordinal = i16::try_from(entry.ordinal()).expect("TASK105_LEGACY_V8_ORDINAL");
+        let byte_length =
+            i64::try_from(entry.byte_length()).expect("TASK105_LEGACY_V8_BYTE_LENGTH");
+        let schema_version =
+            i16::try_from(entry.schema_version()).expect("TASK105_LEGACY_V8_SCHEMA_VERSION");
+        let min_reader = i16::try_from(*entry.reader_compatibility().start())
+            .expect("TASK105_LEGACY_V8_MIN_READER");
+        let max_reader = i16::try_from(*entry.reader_compatibility().end())
+            .expect("TASK105_LEGACY_V8_MAX_READER");
+        let min_writer = i16::try_from(*entry.writer_compatibility().start())
+            .expect("TASK105_LEGACY_V8_MIN_WRITER");
+        let max_writer = i16::try_from(*entry.writer_compatibility().end())
+            .expect("TASK105_LEGACY_V8_MAX_WRITER");
+        let mut transaction = migrator
+            .transaction()
+            .expect("TASK105_LEGACY_V8_TRANSACTION");
+        transaction
+            .batch_execute(sql)
+            .expect("TASK105_LEGACY_V8_APPLY_SQL");
+        assert_eq!(
+            transaction
+                .execute(
+                    "INSERT INTO control.migration_history (\
+                         ordinal,migration_id,migration_path,byte_length,checksum_sha256,\
+                         migration_status,transaction_mode,schema_version,\
+                         min_reader,max_reader,min_writer,max_writer\
+                     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+                    &[
+                        &ordinal,
+                        &entry.id(),
+                        &entry.path(),
+                        &byte_length,
+                        &entry.sha256(),
+                        &entry.status().as_str(),
+                        &entry.transaction_mode().as_str(),
+                        &schema_version,
+                        &min_reader,
+                        &max_reader,
+                        &min_writer,
+                        &max_writer,
+                    ],
+                )
+                .expect("TASK105_LEGACY_V8_HISTORY"),
+            1
+        );
+        assert_eq!(
+            transaction
+                .execute(
+                    "UPDATE ONLY control.schema_compatibility SET \
+                         manifest_sha256=$1,current_schema_version=8,\
+                         min_reader=8,max_reader=8,min_writer=8,max_writer=8,\
+                         updated_at=clock_timestamp() \
+                       WHERE singleton AND manifest_sha256=$2 \
+                         AND current_schema_version=7 \
+                         AND min_reader=7 AND max_reader=7 \
+                         AND min_writer=7 AND max_writer=7",
+                    &[&LEGACY_V8_MANIFEST_SHA256, &CURRENT_V7_MANIFEST_SHA256],
+                )
+                .expect("TASK105_LEGACY_V8_COMPATIBILITY"),
+            1
+        );
+        transaction.commit().expect("TASK105_LEGACY_V8_COMMIT");
+        assert_eq!(
+            inspect_migration_profile(&mut migrator, &target).expect("TASK105_LEGACY_V8_PROFILE"),
+            MigrationBootstrapProfile::V8LegacyPrefix
+        );
+        drop(migrator);
+        self.activate_configured_authority();
+        self.assert_configured_authority_active();
+    }
+
+    fn activate_configured_authority(&self) {
+        let authority = store_authority_from_environment();
+        assert_eq!(
+            self.bootstrap_client()
+                .execute(
+                    "UPDATE ONLY control.runtime_admission SET \
+                         admission_mode='ACTIVE',daemon_instance_id=$1,daemon_epoch=$2,\
+                         authority_revision=$3,observation_digest=decode($4,'hex'),\
+                         authority_head_digest=decode($5,'hex'),updated_at=clock_timestamp() \
+                       WHERE singleton AND admission_mode='STOPPED' \
+                         AND daemon_instance_id IS NULL AND daemon_epoch IS NULL \
+                         AND authority_revision=0 AND observation_digest IS NULL \
+                         AND authority_head_digest IS NULL",
+                    &[
+                        &authority.daemon_instance_id().as_str(),
+                        &i64::try_from(authority.daemon_epoch().get())
+                            .expect("TASK105_CONFIGURED_EPOCH"),
+                        &i64::try_from(authority.revision().get())
+                            .expect("TASK105_CONFIGURED_REVISION"),
+                        &authority.observation_digest().as_str(),
+                        &authority.head_digest().as_str(),
+                    ],
+                )
+                .expect("TASK105_ACTIVATE_CONFIGURED_AUTHORITY"),
+            1
+        );
+    }
+
+    fn assert_configured_authority_active(&self) {
+        let authority = store_authority_from_environment();
+        let row = self
+            .bootstrap_client()
+            .query_one(
+                "SELECT admission_mode::text,daemon_instance_id::text,daemon_epoch,\
+                        authority_revision,pg_catalog.encode(observation_digest,'hex'),\
+                        pg_catalog.encode(authority_head_digest,'hex') \
+                   FROM ONLY control.runtime_admission WHERE singleton",
+                &[],
+            )
+            .expect("TASK105_CONFIGURED_AUTHORITY_QUERY");
+        assert_eq!(row.get::<_, String>(0), "ACTIVE");
+        assert_eq!(
+            row.get::<_, Option<String>>(1).as_deref(),
+            Some(authority.daemon_instance_id().as_str())
+        );
+        assert_eq!(
+            row.get::<_, Option<i64>>(2),
+            Some(i64::try_from(authority.daemon_epoch().get()).expect("TASK105_ACTIVE_EPOCH"))
+        );
+        assert_eq!(
+            row.get::<_, Option<i64>>(3),
+            Some(i64::try_from(authority.revision().get()).expect("TASK105_ACTIVE_REVISION"))
+        );
+        assert_eq!(
+            row.get::<_, Option<String>>(4).as_deref(),
+            Some(authority.observation_digest().as_str())
+        );
+        assert_eq!(
+            row.get::<_, Option<String>>(5).as_deref(),
+            Some(authority.head_digest().as_str())
+        );
+    }
+
+    fn assert_v8_writer_v5_foreman_pending_stopped(&self) {
+        let row = self
+            .bootstrap_client()
+            .query_one(
+                "SELECT \
+                    (SELECT pg_catalog.count(*)=10 FROM ONLY control.migration_history), \
+                    (SELECT current_schema_version=8 AND manifest_sha256=$1 \
+                       FROM ONLY control.schema_compatibility WHERE singleton), \
+                    (SELECT extension_schema_version=5 AND global_schema_version=7 \
+                       AND global_manifest_sha256=$2 \
+                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
+                    (SELECT extension_schema_version=1 AND global_schema_version=7 \
+                       AND global_manifest_sha256=$2 \
+                       FROM ONLY foreman_execution.extension_identity WHERE singleton), \
+                    (SELECT pg_catalog.count(*)=1 \
+                       AND pg_catalog.count(*) FILTER (WHERE ledger_ordinal=1 \
+                         AND global_schema_version=7 AND global_manifest_sha256=$2 \
+                         AND event_kind='INSTALLED')=1 \
+                       FROM ONLY foreman_execution.extension_ledger), \
+                    (SELECT admission_mode='STOPPED' AND daemon_instance_id IS NULL \
+                       AND daemon_epoch IS NULL AND authority_revision=0 \
+                       AND observation_digest IS NULL AND authority_head_digest IS NULL \
+                       FROM ONLY control.runtime_admission WHERE singleton)",
+                &[&CURRENT_V8_MANIFEST_SHA256, &CURRENT_V7_MANIFEST_SHA256],
+            )
+            .expect("TASK105_V8_FOREMAN_PENDING_STOPPED_QUERY");
+        for index in 0..6 {
+            assert!(
+                row.get::<_, bool>(index),
+                "TASK105_V8_FOREMAN_PENDING_STOPPED_{index}"
+            );
+        }
+    }
+
     fn prove_v5_bridge_retry_does_not_repair_rebind_boundary(&self) {
         let target = self.migration_target();
         let database_identity =
@@ -1009,6 +1224,25 @@ impl LiveConfig {
         .collect()
     }
 
+    fn foreman_profile_fingerprint(&self) -> Vec<String> {
+        let mut client = self.bootstrap_client();
+        [
+            "SELECT pg_catalog.md5(pg_catalog.to_jsonb(f)::text) \
+               FROM ONLY foreman_execution.extension_identity f WHERE f.singleton",
+            "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg(\
+                 pg_catalog.to_jsonb(f)::text,E'\\n' ORDER BY f.ledger_ordinal),'')) \
+               FROM ONLY foreman_execution.extension_ledger f",
+        ]
+        .into_iter()
+        .map(|query| {
+            client
+                .query_one(query, &[])
+                .expect("TASK105_FOREMAN_PROFILE_FINGERPRINT_QUERY")
+                .get(0)
+        })
+        .collect()
+    }
+
     fn assert_v5_writer_v3_bridge(&self) {
         let mut client = self.bootstrap_client();
         let row = client
@@ -1055,17 +1289,17 @@ impl LiveConfig {
         }
     }
 
-    fn assert_v7_writer_v5_current(&self) {
+    fn assert_v8_writer_v5_successor(&self) {
         let mut client = self.bootstrap_client();
         let row = client
             .query_one(
                 "SELECT \
-                    (SELECT pg_catalog.count(*) FROM ONLY control.migration_history)=8, \
-                    (SELECT current_schema_version=7 AND manifest_sha256=$1 \
+                    (SELECT pg_catalog.count(*) FROM ONLY control.migration_history)=10, \
+                    (SELECT current_schema_version=8 AND manifest_sha256=$1 \
                       FROM ONLY control.schema_compatibility WHERE singleton), \
                     (SELECT extension_schema_version=5 \
-                      AND extension_manifest_sha256=$2 \
-                      AND global_schema_version=7 AND global_manifest_sha256=$1 \
+                      AND extension_manifest_sha256=$3 \
+                      AND global_schema_version=7 AND global_manifest_sha256=$2 \
                       AND required_memory_schema_version=3 \
                       FROM ONLY writer_lease.writer_lease_extension_identity WHERE singleton), \
                     (SELECT pg_catalog.count(*) IN (4,6,8) \
@@ -1078,12 +1312,26 @@ impl LiveConfig {
                       'EXECUTE'), \
                     NOT pg_catalog.has_function_privilege('lattice_runtime', \
                       'writer_lease.writer_lease_bind_runtime_v4(text,bigint,bytea,text,text,text,text,text)', \
-                      'EXECUTE')",
-                &[&CURRENT_V7_MANIFEST_SHA256, &WRITER_V5_MANIFEST_SHA256],
+                      'EXECUTE'), \
+                    (SELECT global_schema_version=8 AND global_manifest_sha256=$1 \
+                       FROM ONLY foreman_execution.extension_identity WHERE singleton), \
+                    (SELECT pg_catalog.count(*)=2 \
+                       AND pg_catalog.count(*) FILTER (WHERE ledger_ordinal=2 \
+                         AND global_schema_version=8 AND global_manifest_sha256=$1 \
+                         AND event_kind='REBOUND')=1 \
+                       FROM ONLY foreman_execution.extension_ledger)",
+                &[
+                    &CURRENT_V8_MANIFEST_SHA256,
+                    &CURRENT_V7_MANIFEST_SHA256,
+                    &WRITER_V5_MANIFEST_SHA256,
+                ],
             )
-            .expect("TASK105_V7_WRITER_V5_PROFILE");
-        for index in 0..7 {
-            assert!(row.get::<_, bool>(index), "TASK105_V7_WRITER_V5_{index}");
+            .expect("TASK105_V8_WRITER_V5_SUCCESSOR_PROFILE");
+        for index in 0..9 {
+            assert!(
+                row.get::<_, bool>(index),
+                "TASK105_V8_WRITER_V5_SUCCESSOR_{index}"
+            );
         }
     }
 
@@ -1130,18 +1378,18 @@ impl LiveConfig {
             .batch_execute(
                 "INSERT INTO control.migration_history (ordinal,migration_id,migration_path,\
                     byte_length,checksum_sha256,migration_status,transaction_mode,schema_version,\
-                    min_reader,max_reader,min_writer,max_writer) VALUES (9,'0009_unsupported_fixture',\
-                    'db/migrations/0009_unsupported_fixture.sql',1,repeat('d',64),'EXECUTABLE',\
-                    'RUNNER_OWNED',8,8,8,8,8)",
+                    min_reader,max_reader,min_writer,max_writer) VALUES (11,'0011_unsupported_fixture',\
+                    'db/migrations/0011_unsupported_fixture.sql',1,repeat('d',64),'EXECUTABLE',\
+                    'RUNNER_OWNED',9,9,9,9,9)",
             )
             .expect("TASK105_INTRODUCE_UNSUPPORTED_HISTORY");
         if coherent_future_profile {
             transaction
                 .execute(
                     "UPDATE ONLY control.schema_compatibility \
-                     SET manifest_sha256=$1,current_schema_version=8,min_reader=8,max_reader=8,\
-                         min_writer=8,max_writer=8 WHERE singleton=true",
-                    &[&future_v8_manifest_sha256()],
+                     SET manifest_sha256=$1,current_schema_version=9,min_reader=9,max_reader=9,\
+                         min_writer=9,max_writer=9 WHERE singleton=true",
+                    &[&future_v9_manifest_sha256()],
                 )
                 .expect("TASK105_INTRODUCE_FUTURE_COMPATIBILITY");
         }
@@ -1158,7 +1406,7 @@ impl LiveConfig {
         let deleted = transaction
             .execute(
                 "DELETE FROM ONLY control.migration_history \
-                 WHERE ordinal=9 AND migration_id='0009_unsupported_fixture'",
+                 WHERE ordinal=11 AND migration_id='0011_unsupported_fixture'",
                 &[],
             )
             .map_err(|_| "TASK105_REPAIR_UNSUPPORTED_HISTORY")?;
@@ -1168,9 +1416,12 @@ impl LiveConfig {
         let updated = transaction
             .execute(
                 "UPDATE ONLY control.schema_compatibility \
-                 SET manifest_sha256=$1,current_schema_version=7,min_reader=7,max_reader=7,\
-                     min_writer=7,max_writer=7 WHERE singleton=true",
-                &[&current_manifest.manifest_sha256().as_str()],
+                 SET manifest_sha256=$1,current_schema_version=$2,min_reader=$2,max_reader=$2,\
+                     min_writer=$2,max_writer=$2 WHERE singleton=true",
+                &[
+                    &current_manifest.manifest_sha256().as_str(),
+                    &i16::try_from(POSTGRES_SCHEMA_VERSION).expect("fixed current schema version"),
+                ],
             )
             .map_err(|_| "TASK105_REPAIR_CURRENT_COMPATIBILITY")?;
         if updated != 1 {
@@ -1262,15 +1513,15 @@ impl LiveConfig {
             min_writers.len(),
             max_writers.len(),
         ] {
-            assert_eq!(length, 9, "TASK105_FUTURE_ATOMIC_VECTOR_LENGTH");
+            assert_eq!(length, 11, "TASK105_FUTURE_ATOMIC_VECTOR_LENGTH");
         }
         let manifest = row.get::<_, Option<String>>(12);
         let versions = (13..=17)
             .map(|index| row.get::<_, Option<i16>>(index))
             .collect::<Option<Vec<_>>>()
             .expect("TASK105_FUTURE_ATOMIC_COMPATIBILITY");
-        assert_eq!(manifest.as_deref(), Some(FUTURE_V8_MANIFEST_SHA256));
-        assert_eq!(versions, [8; 5]);
+        assert_eq!(manifest.as_deref(), Some(FUTURE_V9_MANIFEST_SHA256));
+        assert_eq!(versions, [9; 5]);
 
         fn field(hasher: &mut Sha256, value: &[u8]) {
             hasher.update(
@@ -1282,7 +1533,7 @@ impl LiveConfig {
         }
         let mut hasher = Sha256::new();
         hasher.update(b"LATTICE_POSTGRES_MIGRATION_MANIFEST_V1\0");
-        for index in 0..9 {
+        for index in 0..11 {
             field(
                 &mut hasher,
                 &u16::try_from(ordinals[index])
@@ -1321,10 +1572,10 @@ impl LiveConfig {
             use std::fmt::Write as _;
             write!(&mut decoded_digest, "{byte:02x}").expect("TASK105_FUTURE_ATOMIC_DIGEST_HEX");
         }
-        assert_eq!(decoded_digest, FUTURE_V8_MANIFEST_SHA256);
+        assert_eq!(decoded_digest, FUTURE_V9_MANIFEST_SHA256);
     }
 
-    fn v7_absent_writer_fingerprint(&self) -> Vec<String> {
+    fn v8_absent_writer_fingerprint(&self) -> Vec<String> {
         let mut client = self.bootstrap_client();
         [
             "SELECT pg_catalog.md5(COALESCE(pg_catalog.string_agg( \
@@ -1355,7 +1606,7 @@ impl LiveConfig {
         .map(|query| {
             client
                 .query_one(query, &[])
-                .expect("TASK105_V7_ABSENT_FINGERPRINT")
+                .expect("TASK105_V8_ABSENT_FINGERPRINT")
                 .get(0)
         })
         .collect()
@@ -1564,8 +1815,31 @@ impl ForemanStreamLock {
         }
     }
 
+    fn acquire_fixed(config: &LiveConfig, key: i64) -> Self {
+        let mut client = config.bootstrap_client();
+        client
+            .query("SELECT pg_catalog.pg_advisory_lock($1)", &[&key])
+            .expect("TASK105_FIXED_ADVISORY_LOCK_ACQUIRE");
+        Self {
+            client,
+            key,
+            held: true,
+        }
+    }
+
     fn wait_for_one_ungranted_waiter(&mut self) -> Result<(), &'static str> {
         let deadline = Instant::now() + Duration::from_secs(3);
+        self.wait_for_one_ungranted_waiter_until(deadline)
+    }
+
+    fn wait_for_one_ungranted_waiter_for(&mut self, timeout: Duration) -> Result<(), &'static str> {
+        self.wait_for_one_ungranted_waiter_until(Instant::now() + timeout)
+    }
+
+    fn wait_for_one_ungranted_waiter_until(
+        &mut self,
+        deadline: Instant,
+    ) -> Result<(), &'static str> {
         loop {
             let waiting: i64 = self
                 .client
@@ -1594,6 +1868,78 @@ impl ForemanStreamLock {
             }
             if Instant::now() >= deadline {
                 return Err("TASK105_FOREMAN_STREAM_WAITER_TIMEOUT");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_bootstrap_session_count(
+        &mut self,
+        config: &LiveConfig,
+        expected: i64,
+        timeout: Duration,
+    ) -> Result<(), &'static str> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let sessions: i64 = self
+                .client
+                .query_one(
+                    "SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity \
+                      WHERE datname=$1 AND usename='lattice_migrator_login' \
+                        AND application_name='lattice-devos-task019' \
+                        AND pid<>pg_catalog.pg_backend_pid()",
+                    &[&config.database_name()],
+                )
+                .map_err(|_| "TASK105_BOOTSTRAP_SESSION_QUERY")?
+                .get(0);
+            if sessions == expected {
+                return Ok(());
+            }
+            if sessions > expected {
+                return Err("TASK105_BOOTSTRAP_SESSION_DUPLICATE");
+            }
+            if Instant::now() >= deadline {
+                return Err("TASK105_BOOTSTRAP_SESSION_TIMEOUT");
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn wait_for_outer_bootstrap_gate_proof(
+        &mut self,
+        config: &LiveConfig,
+        timeout: Duration,
+    ) -> Result<(), &'static str> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let proof = self
+                .client
+                .query_one(
+                    "SELECT \
+                        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_activity \
+                          WHERE datname=$1 AND usename='lattice_migrator_login' \
+                            AND application_name='lattice-devos-task019' \
+                            AND pid<>pg_catalog.pg_backend_pid() \
+                            AND query LIKE '%pg_try_advisory_lock%'), \
+                        (SELECT pg_catalog.count(*) FROM pg_catalog.pg_locks \
+                          WHERE locktype='advisory' AND granted AND objsubid=1 \
+                            AND ((classid::bigint << 32) | objid::bigint)=$2)",
+                    &[
+                        &config.database_name(),
+                        &POSTGRES_BOOTSTRAP_GLOBAL_ADVISORY_LOCK,
+                    ],
+                )
+                .map_err(|_| "TASK105_OUTER_BOOTSTRAP_GATE_QUERY")?;
+            let contenders: i64 = proof.get(0);
+            let holders: i64 = proof.get(1);
+            if contenders == 1 && holders == 1 {
+                return Ok(());
+            }
+            if contenders > 1 || holders > 1 {
+                return Err("TASK105_OUTER_BOOTSTRAP_GATE_DUPLICATE");
+            }
+            if Instant::now() >= deadline {
+                return Err("TASK105_OUTER_BOOTSTRAP_GATE_TIMEOUT");
             }
             thread::sleep(Duration::from_millis(20));
         }
@@ -1999,6 +2345,33 @@ fn run_latticed_admin(config: &LiveConfig, argument: &str, expected_success: boo
         assert!(stderr.len() <= 128);
     }
     stderr
+}
+
+fn run_concurrent_bootstrap_retry(config: &LiveConfig) {
+    let mut foreman_apply_lock = ForemanStreamLock::acquire_fixed(config, 7_212_400_260_826);
+    thread::scope(|scope| {
+        let runner_a = scope.spawn(|| run_latticed_admin(config, "--postgres-bootstrap", true));
+        foreman_apply_lock
+            .wait_for_one_ungranted_waiter_for(Duration::from_secs(35))
+            .expect("TASK105_CONCURRENT_FOREMAN_WAITER");
+        let runner_b = scope.spawn(|| run_latticed_admin(config, "--postgres-bootstrap", true));
+        foreman_apply_lock
+            .wait_for_bootstrap_session_count(config, 2, Duration::from_secs(3))
+            .expect("TASK105_CONCURRENT_BOOTSTRAP_SESSIONS");
+        foreman_apply_lock
+            .wait_for_outer_bootstrap_gate_proof(config, Duration::from_secs(3))
+            .expect("TASK105_CONCURRENT_OUTER_GATE_PROOF");
+        foreman_apply_lock
+            .release()
+            .expect("TASK105_CONCURRENT_FOREMAN_RELEASE");
+        for runner in [runner_a, runner_b] {
+            let stderr = runner.join().expect("TASK105_BOOTSTRAP_RUNNER_JOIN");
+            assert_eq!(
+                stderr.replace("\r\n", "\n"),
+                "LATTICE_POSTGRES_BOOTSTRAP_READY\n"
+            );
+        }
+    });
 }
 
 fn run_latticed(requests: &[Value]) -> Vec<Value> {
@@ -2565,9 +2938,9 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_no_merged_sql_continuation_tokens();
     assert_eq!(
         independent_manifest_sha256(false),
-        CURRENT_V7_MANIFEST_SHA256
+        CURRENT_V8_MANIFEST_SHA256
     );
-    assert_eq!(future_v8_manifest_sha256(), FUTURE_V8_MANIFEST_SHA256);
+    assert_eq!(future_v9_manifest_sha256(), FUTURE_V9_MANIFEST_SHA256);
     let source = include_str!("task105_durable_foreman_runtime.rs");
     let runtime_client = source
         .split_once("fn runtime_client(&self) -> Client")
@@ -2585,6 +2958,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "TASK105_STAGE_FOREMAN_REPLAY_EXTRA_HISTORY_CORRUPT_PASS",
         "TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS",
         "TASK105_STAGE_FOREMAN_DUAL_PROCESS_RACE_PASS",
+        "TASK105_STAGE_LEGACY_V8_FOREMAN_STOPPED_PASS",
+        "TASK105_STAGE_BOOTSTRAP_DUAL_RUNNER_RETRY_PASS",
     ] {
         assert_eq!(
             source.match_indices(marker).count(),
@@ -2616,12 +2991,30 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "WRITER_ALREADY_HELD",
         "race.foreman_counts()",
         "race.try_bootstrap_client().is_err()",
+        "LEGACY_V8_MANIFEST_SHA256",
+        "prepare_legacy_v8_foreman_base",
+        "7_212_400_260_826",
+        "wait_for_outer_bootstrap_gate_proof",
+        "pg_try_advisory_lock",
+        "0x4c41_5454_4943_4501",
+        "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED",
+        "assert_v8_writer_v5_foreman_pending_stopped",
+        "run_concurrent_bootstrap_retry",
+        "wait_for_bootstrap_session_count",
+        "pg_stat_activity",
     ] {
         assert!(
             source.contains(race_contract),
             "TASK105_RACE_CONTRACT_MISSING:{race_contract}"
         );
     }
+    assert_eq!(
+        source
+            .match_indices("wait_for_outer_bootstrap_gate_proof")
+            .count(),
+        4,
+        "TASK105_OUTER_BOOTSTRAP_GATE_PROOF_MISSING"
+    );
     for query in FRESH_CATALOG_FINGERPRINT_QUERIES {
         assert!(query.contains(" JOIN "));
         assert!(query.contains(" WHERE "));
@@ -2648,18 +3041,53 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     config.advance_v5_to_v6();
     config.assert_v6_writer_v3_current();
     let old_v3_v6_current = config.durable_profile_fingerprint();
-    run_latticed_admin(&config, "--postgres-bootstrap", true);
-    config.assert_v7_writer_v5_current();
+    config.prepare_legacy_v8_foreman_base();
+    assert_eq!(
+        config.migration_fingerprint(),
+        (9, 8, LEGACY_V8_MANIFEST_SHA256.to_owned())
+    );
+    let mut foreman_apply_lock = ForemanStreamLock::acquire_fixed(&config, 7_212_400_260_826);
+    let foreman_failure = thread::scope(|scope| {
+        let runner = scope.spawn(|| run_latticed_admin(&config, "--postgres-bootstrap", false));
+        foreman_apply_lock
+            .wait_for_one_ungranted_waiter_for(Duration::from_secs(35))
+            .expect("TASK105_FOREMAN_APPLY_WAITER");
+        config.assert_v8_writer_v5_foreman_pending_stopped();
+        runner.join().expect("TASK105_FOREMAN_FAILURE_JOIN")
+    });
+    assert_eq!(
+        foreman_failure.replace("\r\n", "\n").trim(),
+        "LATTICED_RUNTIME_POSTGRES_FOREMAN_REJECTED"
+    );
+    config.assert_v8_writer_v5_foreman_pending_stopped();
+    foreman_apply_lock
+        .release()
+        .expect("TASK105_FOREMAN_APPLY_LOCK_RELEASE");
+    println!("TASK105_STAGE_LEGACY_V8_FOREMAN_STOPPED_PASS");
+
+    run_concurrent_bootstrap_retry(&config);
+    config.assert_v8_writer_v5_successor();
+    config.assert_configured_authority_active();
     assert_ne!(config.durable_profile_fingerprint(), old_v3_v6_current);
-    println!("TASK105_STAGE_V6_V3_CURRENT_TO_V7_V4_PASS");
+    println!("TASK105_STAGE_BOOTSTRAP_DUAL_RUNNER_RETRY_PASS");
+    println!("TASK105_STAGE_V6_V3_CURRENT_TO_V8_V5_SUCCESSOR_PASS");
 
     let migration_before = config.migration_fingerprint();
-    assert_eq!(migration_before.1, 7);
-    let current = config.durable_profile_fingerprint();
+    assert_eq!(migration_before.1, 8);
+    let current = (
+        config.durable_profile_fingerprint(),
+        config.foreman_profile_fingerprint(),
+    );
     run_latticed_admin(&config, "--postgres-bootstrap", true);
-    assert_eq!(config.durable_profile_fingerprint(), current);
+    assert_eq!(
+        (
+            config.durable_profile_fingerprint(),
+            config.foreman_profile_fingerprint(),
+        ),
+        current
+    );
     assert_eq!(config.migration_fingerprint(), migration_before);
-    println!("TASK105_STAGE_V7_CURRENT_NOOP_PASS");
+    println!("TASK105_STAGE_V8_CURRENT_NOOP_PASS");
 
     config.introduce_partial_writer_acl();
     let partial = config.durable_profile_fingerprint();
@@ -2669,7 +3097,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(config.durable_profile_fingerprint(), partial);
     config.repair_partial_writer_acl();
-    config.assert_v7_writer_v5_current();
+    config.assert_v8_writer_v5_successor();
     println!("TASK105_STAGE_PARTIAL_FAIL_CLOSED_PASS");
 
     config.introduce_corrupt_writer_identity();
@@ -2680,7 +3108,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     );
     assert_eq!(config.durable_profile_fingerprint(), corrupt);
     config.repair_corrupt_writer_identity();
-    config.assert_v7_writer_v5_current();
+    config.assert_v8_writer_v5_successor();
     println!("TASK105_STAGE_CORRUPT_FAIL_CLOSED_PASS");
 
     let mut unsupported_history = UnsupportedHistory::introduce(&config, true);
@@ -2693,7 +3121,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     unsupported_history
         .restore()
         .expect("TASK105_BOOTSTRAP_UNSUPPORTED_RESTORE");
-    config.assert_v7_writer_v5_current();
+    config.assert_v8_writer_v5_successor();
     println!("TASK105_STAGE_UNSUPPORTED_FAIL_CLOSED_PASS");
     println!("TASK105_STAGE_INITIALIZE_PASS");
 
@@ -2898,8 +3326,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     println!("TASK105_STAGE_FOREMAN_REPLAY_UNSUPPORTED_PASS");
 
     config.remove_disposable_writer_profile();
-    let absent_before = config.v7_absent_writer_fingerprint();
-    assert_eq!(config.migration_fingerprint().1, 7);
+    let absent_before = config.v8_absent_writer_fingerprint();
+    assert_eq!(config.migration_fingerprint().1, 8);
     config.assert_writer_namespace_absent();
     assert_eq!(
         run_latticed_admin(&config, "--postgres-bootstrap", false)
@@ -2907,11 +3335,11 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
             .trim(),
         "LATTICE_WRITER_LEASE_REJECTED"
     );
-    assert_eq!(config.v7_absent_writer_fingerprint(), absent_before);
-    println!("TASK105_STAGE_V7_ABSENT_FAIL_CLOSED_PASS");
+    assert_eq!(config.v8_absent_writer_fingerprint(), absent_before);
+    println!("TASK105_STAGE_V8_ABSENT_FAIL_CLOSED_PASS");
 
     let parent_run_id = required("LATTICE_TASK019_RUN_ID");
-    let main_during_children = config.v7_absent_writer_fingerprint();
+    let main_during_children = config.v8_absent_writer_fingerprint();
 
     let fresh_partial = config.child_database(0x4000_0000);
     assert_ne!(fresh_partial.run_id, config.run_id);
@@ -2932,7 +3360,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         fresh_partial_before
     );
     fresh_partial.assert_store_migration_profile(MigrationBootstrapProfile::Fresh);
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_FRESH_PARTIAL_WRITER_FAIL_CLOSED_PASS");
 
     let writer_v2 = config.child_database(0x1000_0000);
@@ -2946,8 +3374,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     writer_v2.prepare_v5_writer_v2_current();
     writer_v2.assert_v5_writer_v2_current();
     run_latticed_admin(&writer_v2, "--postgres-bootstrap", true);
-    writer_v2.assert_v7_writer_v5_current();
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    writer_v2.assert_v8_writer_v5_successor();
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_V5_WRITER_V2_EXECUTABLE_PASS");
 
     let bridge_pending = config.child_database(0x3000_0000);
@@ -2963,8 +3391,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     bridge_pending.prepare_v5_memory_v2_writer_v2_bridge_pending();
     bridge_pending.assert_v5_memory_v2_writer_v2_bridge_pending();
     run_latticed_admin(&bridge_pending, "--postgres-bootstrap", true);
-    bridge_pending.assert_v7_writer_v5_current();
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    bridge_pending.assert_v8_writer_v5_successor();
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_V5_MEMORY_V2_WRITER_PENDING_EXECUTABLE_PASS");
 
     let legacy_v1 = config.child_database(0x5000_0000);
@@ -2984,7 +3412,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "LATTICED_RUNTIME_POSTGRES_VERIFICATION_REJECTED"
     );
     assert_eq!(legacy_v1.legacy_v1_fingerprint(), legacy_before);
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
     println!("TASK105_STAGE_LEGACY_PRODUCT_BOOTSTRAP_REJECTED_PASS");
 
     let writer_absent = config.child_database(0x2000_0000);
@@ -3042,8 +3470,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     println!("TASK105_STAGE_V5_MEMORY_PARTIAL_FAIL_CLOSED_PASS");
 
     run_latticed_admin(&writer_absent, "--postgres-bootstrap", true);
-    writer_absent.assert_v7_writer_v5_current();
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    writer_absent.assert_v8_writer_v5_successor();
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
 
     writer_absent.revoke_login_database_privileges();
     writer_absent.assert_login_capability(false);
@@ -3054,16 +3482,16 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     fresh_partial.assert_login_capability(false);
     legacy_v1.assert_login_capability(false);
     writer_absent.assert_login_capability(false);
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_during_children);
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_during_children);
     assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
     println!("TASK105_STAGE_V5_WRITER_ABSENT_EXECUTABLE_PASS");
 
-    let main_before_race = config.v7_absent_writer_fingerprint();
+    let main_before_race = config.v8_absent_writer_fingerprint();
     let mut race_database = DisposableRaceDatabase::new(&config);
     race_database.initialize();
     let race = race_database.config();
     run_latticed_admin(&race, "--postgres-bootstrap", true);
-    race.assert_v7_writer_v5_current();
+    race.assert_v8_writer_v5_successor();
     let race_migration = race.migration_fingerprint();
     let race_durable = race.durable_profile_fingerprint();
 
@@ -3420,7 +3848,7 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         .expect("TASK105_RACE_DATABASE_CLEANUP");
     assert!(race.try_bootstrap_client().is_err());
     config.assert_login_capability(true);
-    assert_eq!(config.v7_absent_writer_fingerprint(), main_before_race);
+    assert_eq!(config.v8_absent_writer_fingerprint(), main_before_race);
     assert_eq!(required("LATTICE_TASK019_RUN_ID"), parent_run_id);
     println!("TASK105_STAGE_FOREMAN_DUAL_PROCESS_RACE_PASS");
 }

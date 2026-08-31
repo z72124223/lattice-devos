@@ -37,8 +37,8 @@ fn catalog_profile_pins_are_closed_and_live_measurement_is_coordinator_owned() {
     assert!(setup.contains("8d8dd263498cab48b1164bf456f5d3b314d575ee9a186460715beea02bc8bfec"));
     assert!(setup.contains("42f151dd9f52ba1e82a2aac392234f2b285c18e9bd71a00372f7c7b4a1237eb5"));
     assert!(setup.contains("dcd206da5753e55a4499717a896fd1373165430edd6eadeaf6c1284c23fbde17"));
-    assert!(setup.contains("function_digest != EXPECTED_FUNCTION_CATALOG_SHA256"));
-    assert!(setup.contains("table_digest != EXPECTED_TABLE_CATALOG_SHA256"));
+    assert!(setup.contains("function_digest != expected_function_digest"));
+    assert!(setup.contains("table_digest != expected_table_digest"));
     assert!(!setup.contains("LATTICE_FOREMAN_CATALOG_DEBUG"));
     assert!(setup.contains("LATTICE_FOREMAN_CATALOG_SIGNATURE_URL"));
     assert!(setup.contains("FOREMAN_FUNCTION_CATALOG_SHA256={function_digest}"));
@@ -105,7 +105,7 @@ fn identity_reader_is_the_only_foreman_capability_shared_with_store_audit_roles(
         .expect("catalog verifier boundary")
         .0;
     let digest_pin = catalog
-        .find("verify_exact_catalog_digests(client)?;")
+        .find("verify_exact_catalog_digests(client, store_profile)?;")
         .expect("catalog digest pin");
     let identity_read = catalog
         .find("FROM foreman_execution.read_extension_identity_v1()")
@@ -1782,6 +1782,40 @@ fn retry_requires_monotonic_attempt_fence_and_terminal_predecessor() {
     assert!(claim.contains("MESSAGE = 'FOREMAN_RETRY_PREDECESSOR_NOT_TERMINAL'"));
     assert!(claim.contains("MESSAGE = 'FOREMAN_ATTEMPT_SEQUENCE_MISMATCH'"));
     assert!(claim.contains("MESSAGE = 'FOREMAN_RETRY_BUDGET_EXHAUSTED'"));
+}
+
+#[test]
+fn store_v8_successor_rebind_is_foreman_owned_fixed_and_fail_closed() {
+    let setup = include_str!("../src/setup.rs");
+    let library = include_str!("../src/lib.rs");
+    for required in [
+        "StoreProfile::V7",
+        "StoreProfile::V8",
+        "STORE_V8_REBIND_SQL",
+        "STORE_V8_REBIND_SHA256",
+        "ExtensionApplyOutcome::Rebound",
+    ] {
+        assert!(
+            setup.contains(required) || library.contains(required),
+            "missing Foreman Store V8 successor contract: {required}"
+        );
+    }
+    assert!(setup.contains("verify_store_v8_rebind_source"));
+    assert!(setup.contains("verify_store_v8_rebound_catalog"));
+    assert!(setup.contains("LOCK TABLE control.runtime_admission IN ACCESS EXCLUSIVE MODE"));
+    assert!(setup.contains("authority_revision != 0"));
+    assert!(setup.contains("observation_digest.is_some()"));
+    assert!(setup.contains("authority_head_digest.is_some()"));
+    assert!(setup.contains("pg_advisory_xact_lock"));
+    assert!(!setup.contains("ExtensionPreState::StoreV8RebindPending"));
+    let apply = setup
+        .split_once("fn apply_store_v8_rebind")
+        .expect("Foreman V8 rebind apply boundary")
+        .1
+        .split_once("\nfn ")
+        .expect("Foreman V8 rebind apply end")
+        .0;
+    assert!(!apply.contains("pg_get_functiondef"));
 }
 
 fn function_body<'a>(sql: &'a str, name: &str, next_name: &str) -> &'a str {

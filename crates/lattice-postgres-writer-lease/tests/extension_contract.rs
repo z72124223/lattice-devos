@@ -71,6 +71,27 @@ fn v5_process_handoff_profile_is_append_only_and_explicit() {
 }
 
 #[test]
+fn store_v8_runtime_successor_is_writer_owned_fixed_and_replay_safe() {
+    let setup = include_str!("../src/setup.rs");
+    let library = include_str!("../src/lib.rs");
+    for required in [
+        "V8V5RebindPending",
+        "rebind_v5_for_store_v8",
+        "verify_v5_v8_current_profile",
+        "verify_v5_store_v8_rebind_source",
+        "WRITER_LEASE_V5_STORE_V8_REBIND_PATH",
+        "verify_embedded_v5_store_v8_rebind_manifest",
+        "2b1fcbbc81261c28ab06ac3180f75c2ee458e57a4adc7e49bc399209f421de60",
+    ] {
+        assert!(
+            setup.contains(required) || library.contains(required),
+            "missing Writer Store V8 successor contract: {required}"
+        );
+    }
+    assert!(setup.contains("GlobalApplyGate::acquire(client)"));
+}
+
+#[test]
 fn managed_writer_profile_rejects_unmodeled_casts_and_transforms() {
     let setup = include_str!("../src/setup.rs");
     for required in [

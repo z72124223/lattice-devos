@@ -19675,6 +19675,7 @@ mod tests {
             apply_extension(&mut migrator, &target).expect("apply foreman extension"),
             ExtensionApplyOutcome::Installed(_)
                 | ExtensionApplyOutcome::Upgraded(_)
+                | ExtensionApplyOutcome::Rebound(_)
                 | ExtensionApplyOutcome::AlreadyCurrent(_)
         ));
     }
