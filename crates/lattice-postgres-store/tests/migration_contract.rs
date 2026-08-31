@@ -1808,6 +1808,13 @@ fn manifest_is_closed_ordered_and_preserves_the_superseded_bootstrap() {
         successor.path(),
         "db/migrations/0010_store_v8_runtime_successor.sql"
     );
+    let attributes = include_str!("../../../.gitattributes");
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line == "db/migrations/0010_store_v8_runtime_successor.sql binary"),
+        "Store V8 successor migration bytes must bypass Git text normalization"
+    );
     assert_eq!(successor.byte_length(), 195_721);
     assert_eq!(
         successor.sha256(),

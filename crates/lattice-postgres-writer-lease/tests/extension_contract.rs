@@ -4,13 +4,14 @@ use lattice_postgres_writer_lease::{
     WRITER_LEASE_EXTENSION_SCHEMA_VERSION, WRITER_LEASE_V1_EXTENSION_PATH,
     WRITER_LEASE_V2_EXTENSION_PATH, WRITER_LEASE_V3_EXTENSION_PATH, WRITER_LEASE_V3_REBIND_PATH,
     WRITER_LEASE_V4_EXTENSION_PATH, WRITER_LEASE_V4_REBIND_PATH, WRITER_LEASE_V5_EXTENSION_PATH,
-    WriterLeaseV3BridgeState, WriterLeaseV4BridgeState, WriterLeaseV5State, apply_v3_extension,
-    apply_v4_extension, apply_v5_extension, inspect_v3_bootstrap_profile,
-    rebind_existing_v3_extension, rebind_v3_extension, verify_embedded_extension_manifest,
-    verify_embedded_v1_extension_manifest, verify_embedded_v2_extension_manifest,
-    verify_embedded_v3_extension_manifest, verify_embedded_v3_rebind_manifest,
-    verify_embedded_v4_extension_manifest, verify_embedded_v4_rebind_manifest,
-    verify_embedded_v5_extension_manifest, verify_writer_lease_v3_transition,
+    WRITER_LEASE_V5_STORE_V8_REBIND_PATH, WriterLeaseV3BridgeState, WriterLeaseV4BridgeState,
+    WriterLeaseV5State, apply_v3_extension, apply_v4_extension, apply_v5_extension,
+    inspect_v3_bootstrap_profile, rebind_existing_v3_extension, rebind_v3_extension,
+    verify_embedded_extension_manifest, verify_embedded_v1_extension_manifest,
+    verify_embedded_v2_extension_manifest, verify_embedded_v3_extension_manifest,
+    verify_embedded_v3_rebind_manifest, verify_embedded_v4_extension_manifest,
+    verify_embedded_v4_rebind_manifest, verify_embedded_v5_extension_manifest,
+    verify_embedded_v5_store_v8_rebind_manifest, verify_writer_lease_v3_transition,
     verify_writer_lease_v4_transition, verify_writer_lease_v5_transition,
 };
 
@@ -74,6 +75,21 @@ fn v5_process_handoff_profile_is_append_only_and_explicit() {
 fn store_v8_runtime_successor_is_writer_owned_fixed_and_replay_safe() {
     let setup = include_str!("../src/setup.rs");
     let library = include_str!("../src/lib.rs");
+    let attributes = include_str!("../../../.gitattributes");
+    assert!(
+        attributes
+            .lines()
+            .any(|line| line == "db/extensions/writer-lease/v5-store-v8-rebind.sql binary"),
+        "Writer Store V8 successor bytes must bypass Git text normalization"
+    );
+    let rebind = verify_embedded_v5_store_v8_rebind_manifest()
+        .expect("fixed Writer Store V8 successor bytes");
+    assert_eq!(rebind.path(), WRITER_LEASE_V5_STORE_V8_REBIND_PATH);
+    assert_eq!(rebind.byte_length(), 14_932);
+    assert_eq!(
+        rebind.sql_sha256().as_str(),
+        "8916e5851d4def21808b4e7c78ba77d7a30a09f188222c604f64ad6d1463e7a4"
+    );
     for required in [
         "V8V5RebindPending",
         "rebind_v5_for_store_v8",

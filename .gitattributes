@@ -1,3 +1,5 @@
 * text=auto eol=lf
 *.ps1 text eol=crlf
 db/migrations/0006_task_autonomy_receipt.sql binary
+db/extensions/writer-lease/v5-store-v8-rebind.sql binary
+db/migrations/0010_store_v8_runtime_successor.sql binary
