@@ -1,5 +1,6 @@
 import importlib.util
 import msvcrt
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -89,6 +90,33 @@ class SafeMcpUpdateTests(unittest.TestCase):
             run.return_value.stderr = ""
             with self.assertRaises(RuntimeError):
                 MODULE.verify_candidate(candidate)
+
+    def test_active_locks_are_recorded_but_do_not_block_future_process_activation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            codex_home = root / "codex-home"
+            codex_home.mkdir()
+            config = self.write_config(codex_home, r"C:\\old\\latticed.exe")
+            source = root / "source"
+            source.mkdir()
+            candidate = root / "candidate.exe"
+            candidate.write_bytes(b"candidate")
+            receipts = []
+
+            with (
+                patch.dict(os.environ, {"CODEX_HOME": str(codex_home), "LOCALAPPDATA": str(root), "LATTICE_SAFE_UPDATE_SOURCE_ROOT": str(source)}, clear=False),
+                patch.object(MODULE, "active_locks", return_value=["active.lock"]),
+                patch.object(MODULE, "git_head", return_value="a" * 40),
+                patch.object(MODULE, "build_candidate", return_value=candidate) as build,
+                patch.object(MODULE, "verify_candidate") as verify,
+                patch.object(MODULE, "write_receipt", side_effect=lambda _root, status, **fields: receipts.append((status, fields))),
+            ):
+                self.assertEqual(MODULE.main(), 0)
+
+            build.assert_called_once()
+            verify.assert_called_once_with(candidate)
+            self.assertEqual(receipts, [("ACTIVATED", {"revision": "a" * 40, "executable_sha256": MODULE.sha256(candidate), "active_lock_count": 1})])
+            self.assertIn(str(candidate).replace("\\", "\\\\"), config.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

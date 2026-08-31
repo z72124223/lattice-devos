@@ -2,7 +2,8 @@
 """Prepare a verified LATTICE MCP binary without interrupting Codex tasks.
 
 This hook deliberately never terminates a process.  It only changes Codex's
-MCP command for future sessions after no writer-lock file is actively held.
+MCP command for future sessions; active writer locks are recorded as an
+observation because existing processes retain their already-started command.
 """
 
 from __future__ import annotations
@@ -146,16 +147,19 @@ def main() -> int:
     )
     config = codex_home / "config.toml"
     locks = active_locks(codex_home)
-    if locks:
-        write_receipt(lattice_root, "DEFERRED_ACTIVE_CODEX_TASKS", active_lock_count=len(locks))
-        return 0
     original_config = None
     try:
         revision = git_head(source_root)
         executable = build_candidate(source_root, lattice_root / "build-cache", revision)
         verify_candidate(executable)
         original_config = replace_command(config, executable)
-        write_receipt(lattice_root, "ACTIVATED", revision=revision, executable_sha256=sha256(executable))
+        write_receipt(
+            lattice_root,
+            "ACTIVATED",
+            revision=revision,
+            executable_sha256=sha256(executable),
+            active_lock_count=len(locks),
+        )
         return 0
     except Exception as error:  # hook errors must preserve the previous command
         if original_config is not None:
