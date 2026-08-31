@@ -1677,6 +1677,28 @@ impl LiveConfig {
             .get(0);
         assert_eq!(count, 0, "TASK105_RACE_WRITER_COMMAND_MUST_BE_ABSENT");
     }
+
+    fn assert_writer_denial(&self, checkpoint_id: &str, expected_reason: &str) {
+        let command_id = foreman_acquire_command_id(checkpoint_id);
+        let rows = self
+            .bootstrap_client()
+            .query(
+                "SELECT c.outcome::text, c.denial_reason::text \
+                   FROM ONLY writer_lease.writer_lease_commands c \
+                  WHERE c.project_id=$1 AND c.command_id=$2",
+                &[&"lattice-control", &command_id],
+            )
+            .expect("TASK105_RACE_WRITER_DENIAL_QUERY");
+        assert_eq!(rows.len(), 1, "TASK105_RACE_WRITER_DENIAL_COUNT");
+        let outcome: String = rows[0].get(0);
+        let denial_reason: Option<String> = rows[0].get(1);
+        assert_eq!(outcome, "DENIED", "TASK105_RACE_WRITER_DENIAL_OUTCOME");
+        assert_eq!(
+            denial_reason.as_deref(),
+            Some(expected_reason),
+            "TASK105_RACE_WRITER_DENIAL_REASON"
+        );
+    }
 }
 
 fn foreman_stream_hex() -> String {
@@ -2973,11 +2995,21 @@ fn run_focused_dual_process_race(config: &LiveConfig) {
         Value::Null,
         'c',
     ));
-    assert_foreman_replay_error(
-        &process_b.recv_expected(3, Duration::from_secs(35)),
-        "FOREMAN_REPLAY_UNAVAILABLE",
-    );
-    race.assert_writer_command_absent(contender_checkpoint_id);
+    let contender_response = process_b.recv_expected(3, Duration::from_secs(35));
+    let contender_code = contender_response["result"]["structuredContent"]["code"]
+        .as_str()
+        .expect("TASK105_FOCUSED_CONTENDER_CODE");
+    match contender_code {
+        "FOREMAN_REPLAY_UNAVAILABLE" => {
+            assert_foreman_replay_error(&contender_response, "FOREMAN_REPLAY_UNAVAILABLE");
+            race.assert_writer_command_absent(contender_checkpoint_id);
+        }
+        "FOREMAN_WRITER_CONTENTION" => {
+            assert_foreman_replay_error(&contender_response, "FOREMAN_WRITER_CONTENTION");
+            race.assert_writer_denial(contender_checkpoint_id, "WRITER_ALREADY_HELD");
+        }
+        other => panic!("TASK105_FOCUSED_CONTENDER_NOT_FAIL_CLOSED:{other}"),
+    }
     assert_eq!(
         race.foreman_counts(),
         ([0, 0, 0], ["0".into(), "0".into(), "0".into()], None)
