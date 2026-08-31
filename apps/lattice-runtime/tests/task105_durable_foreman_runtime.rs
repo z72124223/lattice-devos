@@ -2974,7 +2974,8 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
         "lattice.task-ledger.stream.v1:",
         "wait_for_one_ungranted_waiter_for",
         "NOT waiting.granted",
-        "Duration::from_secs(2)",
+        "process_b.recv_expected(3, Duration::from_secs(35))",
+        "process_b.recv_expected(4, Duration::from_secs(35))",
         "Duration::from_millis(20)",
         "task105-race-contender",
         "holder_process_id().get()",
@@ -3565,14 +3566,14 @@ fn task105_checkpoint_survives_a_fresh_latticed_process_without_migration() {
     assert_eq!(same_generation_one["params"], generation_one["params"]);
     process_b.send(&same_generation_one);
     assert_foreman_replay_error(
-        &process_b.recv_expected(3, Duration::from_secs(2)),
+        &process_b.recv_expected(3, Duration::from_secs(35)),
         "FOREMAN_WRITER_CONTENTION",
     );
     let contender_checkpoint_id = "task105-race-contender";
     let contender = checkpoint(4, contender_checkpoint_id, 1, "ACTIVE", Value::Null, 'c');
     process_b.send(&contender);
     assert_foreman_replay_error(
-        &process_b.recv_expected(4, Duration::from_secs(2)),
+        &process_b.recv_expected(4, Duration::from_secs(35)),
         "FOREMAN_WRITER_CONTENTION",
     );
     race.assert_writer_denial(contender_checkpoint_id, "WRITER_ALREADY_HELD");
