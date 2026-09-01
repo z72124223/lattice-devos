@@ -128,6 +128,29 @@ export function createLatticeServer({
         sendJson(response, 200, service.state());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/conversation") {
+        sendJson(response, 200, service.primaryConversation());
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/conversation/messages") {
+        const body = await readJson(request);
+        sendJson(response, 200, await service.sendPrimaryConversationMessage({
+          projectId: body.projectId,
+          clientMessageId: body.clientMessageId,
+          text: body.text,
+        }));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/conversation/reconnect") {
+        await readJson(request);
+        sendJson(response, 200, await service.reconnectPrimaryConversation());
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/conversation/interrupt") {
+        await readJson(request);
+        sendJson(response, 200, await service.interruptPrimaryConversation());
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/development-radar") {
         sendJson(response, 200, service.developmentRadar());
         return;

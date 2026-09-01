@@ -38,12 +38,13 @@ const developmentRadarActions = new Set([
   "ADOPT_OSS",
   "FREEZE_LATTICE",
 ]);
-const controlSchemaVersion = 2;
+const controlSchemaVersion = 4;
 const projectCatalogSchemaVersion = "lattice.control.project-catalog.v1";
 const projectCatalogRecordKind = "CONTROL_LOCAL_CATALOG";
 const legacyProjectRecordKind = "LEGACY_CONTROL_PROJECT";
 const observationStatuses = new Set(["complete", "partial", "failed"]);
 const safeRemoteProtocols = new Set(["file:", "git:", "http:", "https:", "ssh:"]);
+const primaryConversationId = "primary";
 
 export class ProjectRegistrationSupersededError extends Error {
   constructor() {
@@ -80,6 +81,104 @@ function boundedText(value, label, maximumLength) {
     throw new TypeError(`${label} is too long or contains unsafe control characters`);
   }
   return text;
+}
+
+function boundedConversationText(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError("conversation message is required");
+  }
+  const text = value.trim();
+  if (
+    Buffer.byteLength(text, "utf8") > 16_384
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)
+  ) {
+    throw new TypeError("conversation message is too long or contains unsafe control characters");
+  }
+  return text;
+}
+
+function boundedConversationReply(value) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError("Codex reply is required");
+  }
+  const text = value.trim();
+  if (
+    Buffer.byteLength(text, "utf8") > 262_144
+    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(text)
+  ) {
+    throw new TypeError("Codex reply is too long or contains unsafe control characters");
+  }
+  return text;
+}
+
+function normalizeClientMessageId(value) {
+  const id = requireText(value, "client message ID");
+  if (id.length > 128 || !/^[A-Za-z0-9._:-]+$/u.test(id)) {
+    throw new TypeError("client message ID must contain 1-128 safe ASCII characters");
+  }
+  return id;
+}
+
+function conversationMessageDigest(text) {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+function normalizeConversationLeaseOwner(value) {
+  const owner = requireText(value, "conversation lease owner");
+  if (owner.length > 128 || !/^[A-Za-z0-9._:-]+$/u.test(owner)) {
+    throw new TypeError("conversation lease owner must contain 1-128 safe ASCII characters");
+  }
+  return owner;
+}
+
+function normalizeConversationLeasePid(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("conversation lease PID must be a positive safe integer");
+  }
+  return value;
+}
+
+function normalizeConversationLeaseTtl(value) {
+  if (!Number.isSafeInteger(value) || value < 3_000 || value > 300_000) {
+    throw new TypeError("conversation lease TTL must be between 3000 and 300000 milliseconds");
+  }
+  return value;
+}
+
+function normalizeConversationLeaseGeneration(value) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError("conversation lease generation must be a positive safe integer");
+  }
+  return value;
+}
+
+function normalizeConversationFence(fence) {
+  if (!fence || typeof fence !== "object") {
+    throw new TypeError("primary conversation mutation requires a writer fence");
+  }
+  return {
+    ownerId: normalizeConversationLeaseOwner(fence.ownerId),
+    generation: normalizeConversationLeaseGeneration(fence.generation),
+  };
+}
+
+function assertPrimaryConversationFence(database, fence, timestamp = now()) {
+  const normalized = normalizeConversationFence(fence);
+  const lease = database.prepare(`
+    SELECT owner_id, generation, lease_expires_at
+    FROM conversation_writer_leases WHERE conversation_id = ?
+  `).get(primaryConversationId);
+  if (
+    lease?.owner_id !== normalized.ownerId
+    || lease?.generation !== normalized.generation
+    || lease.lease_expires_at <= timestamp
+  ) {
+    const error = new Error("LATTICE Control 已失去這條對話的寫入權；本次不會繼續送出");
+    error.code = "CONVERSATION_WRITER_LOST";
+    error.status = 409;
+    throw error;
+  }
+  return lease;
 }
 
 export function normalizeProjectDisplayName(value) {
@@ -381,6 +480,9 @@ const schemaColumns = new Map([
     "failure_summary", "archived_at", "created_at", "updated_at",
   ]],
   ["work_events", ["id", "work_item_id", "kind", "payload_json", "created_at"]],
+  ["conversation_writer_leases", [
+    "conversation_id", "owner_id", "owner_pid", "lease_expires_at", "updated_at", "generation",
+  ]],
   ["installation_receipts", [
     "id", "schema_version", "observation_kind", "authority", "project_id", "component",
     "source_commit_sha", "artifact_path", "artifact_sha256", "receipt_digest", "recorded_at",
@@ -411,6 +513,7 @@ const schemaColumns = new Map([
 const schemaForeignKeys = new Map([
   ["work_items", [["project_id", "projects", "id", "CASCADE"]]],
   ["work_events", [["work_item_id", "work_items", "id", "CASCADE"]]],
+  ["conversation_writer_leases", [["conversation_id", "work_items", "id", "CASCADE"]]],
   ["installation_receipts", [["project_id", "projects", "id", "NO ACTION"]]],
   ["project_registration_details", [["project_id", "projects", "id", "CASCADE"]]],
   ["project_observations", [["project_id", "projects", "id", "CASCADE"]]],
@@ -574,6 +677,16 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
         created_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS conversation_writer_leases (
+        conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
+          CHECK (conversation_id = 'primary'),
+        owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        lease_expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0)
+      );
+
       CREATE TABLE IF NOT EXISTS installation_receipts (
         id TEXT PRIMARY KEY,
         schema_version TEXT NOT NULL
@@ -693,7 +806,7 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
   }
 }
 
-function migrateControlDatabaseV1ToV2(database) {
+function migrateControlDatabaseV1ToV4(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     database.exec(`
@@ -711,7 +824,70 @@ function migrateControlDatabaseV1ToV2(database) {
         decisions_json TEXT NOT NULL CHECK (length(decisions_json) BETWEEN 2 AND 262144),
         updated_at TEXT NOT NULL
       );
-      PRAGMA user_version = 2;
+
+      CREATE TABLE IF NOT EXISTS conversation_writer_leases (
+        conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
+          CHECK (conversation_id = 'primary'),
+        owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        lease_expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0)
+      );
+      PRAGMA user_version = 4;
+    `);
+    validateControlSchemaProfile(database);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV2ToV4(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS conversation_writer_leases (
+        conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
+          CHECK (conversation_id = 'primary'),
+        owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        lease_expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0)
+      );
+      PRAGMA user_version = 4;
+    `);
+    validateControlSchemaProfile(database);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV3ToV4(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.exec(`
+      ALTER TABLE conversation_writer_leases RENAME TO conversation_writer_leases_v3;
+      CREATE TABLE conversation_writer_leases (
+        conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
+          CHECK (conversation_id = 'primary'),
+        owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        lease_expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        generation INTEGER NOT NULL CHECK (generation > 0)
+      );
+      INSERT INTO conversation_writer_leases (
+        conversation_id, owner_id, owner_pid, lease_expires_at, updated_at, generation
+      )
+      SELECT conversation_id, owner_id, owner_pid, lease_expires_at, updated_at, 1
+      FROM conversation_writer_leases_v3;
+      DROP TABLE conversation_writer_leases_v3;
+      PRAGMA user_version = 4;
     `);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
@@ -768,6 +944,30 @@ function decodeItem(row) {
   };
 }
 
+function assertPrimaryConversationIdentity(database, item) {
+  if (!item || item.id !== primaryConversationId) {
+    throw new Error("primary conversation not found");
+  }
+  const created = database.prepare(`
+    SELECT payload_json FROM work_events
+    WHERE work_item_id = ? AND kind = 'created'
+    ORDER BY id ASC LIMIT 1
+  `).get(primaryConversationId);
+  let payload = null;
+  try {
+    payload = created ? JSON.parse(created.payload_json) : null;
+  } catch {
+    // The collision error below is intentionally the only public outcome.
+  }
+  if (payload?.kind !== "primary_conversation") {
+    const error = new Error("reserved primary conversation identity is already in use");
+    error.code = "CONVERSATION_IDENTITY_COLLISION";
+    error.status = 409;
+    throw error;
+  }
+  return item;
+}
+
 function workItemChangeEntries(changes) {
   const entries = Object.entries(changes).filter(([key]) => workItemChangeFields.has(key));
   if (changes.status && !statuses.has(changes.status)) throw new TypeError("invalid status");
@@ -782,13 +982,15 @@ export class LatticeStore {
     const database = new DatabaseSync(databasePath);
     try {
       const version = database.prepare("PRAGMA user_version").get().user_version;
-      if (version !== 0 && version !== 1 && version !== controlSchemaVersion) {
+      if (![0, 1, 2, 3, controlSchemaVersion].includes(version)) {
         throw new Error(
-          `Control database schema ${version} is unsupported; expected 0, 1, or ${controlSchemaVersion}`,
+          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, or ${controlSchemaVersion}`,
         );
       }
       if (version === 0) initializeControlDatabase(database);
-      else if (version === 1) migrateControlDatabaseV1ToV2(database);
+      else if (version === 1) migrateControlDatabaseV1ToV4(database);
+      else if (version === 2) migrateControlDatabaseV2ToV4(database);
+      else if (version === 3) migrateControlDatabaseV3ToV4(database);
       else validateControlSchemaProfile(database);
       database.exec("PRAGMA foreign_keys = ON;");
       if (databasePath !== ":memory:") database.exec("PRAGMA journal_mode = WAL;");
@@ -1492,6 +1694,631 @@ export class LatticeStore {
     };
   }
 
+  acquirePrimaryConversationLease({ ownerId, ownerPid, ttlMs = 15_000 }) {
+    const normalizedOwner = normalizeConversationLeaseOwner(ownerId);
+    const normalizedPid = normalizeConversationLeasePid(ownerPid);
+    const normalizedTtl = normalizeConversationLeaseTtl(ttlMs);
+    const timestamp = now();
+    const expiresAt = new Date(Date.parse(timestamp) + normalizedTtl).toISOString();
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      const current = this.database.prepare(`
+        SELECT * FROM conversation_writer_leases WHERE conversation_id = ?
+      `).get(primaryConversationId);
+      if (
+        current
+        && current.owner_id !== normalizedOwner
+        && current.lease_expires_at > timestamp
+      ) {
+        const error = new Error("另一個 LATTICE Control 正在處理這條對話；本次不會重複送出");
+        error.code = "CONVERSATION_WRITER_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      const generation = current
+        && current.owner_id === normalizedOwner
+        && current.lease_expires_at > timestamp
+        ? current.generation
+        : (current?.generation ?? 0) + 1;
+      this.database.prepare(`
+        INSERT INTO conversation_writer_leases (
+          conversation_id, owner_id, owner_pid, generation, lease_expires_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(conversation_id) DO UPDATE SET
+          owner_id = excluded.owner_id,
+          owner_pid = excluded.owner_pid,
+          generation = excluded.generation,
+          lease_expires_at = excluded.lease_expires_at,
+          updated_at = excluded.updated_at
+      `).run(
+        primaryConversationId,
+        normalizedOwner,
+        normalizedPid,
+        generation,
+        expiresAt,
+        timestamp,
+      );
+      this.database.exec("COMMIT;");
+      return {
+        conversation_id: primaryConversationId,
+        owner_id: normalizedOwner,
+        owner_pid: normalizedPid,
+        generation,
+        lease_expires_at: expiresAt,
+        updated_at: timestamp,
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  renewPrimaryConversationLease({ ownerId, generation, ttlMs = 15_000 }) {
+    const normalizedOwner = normalizeConversationLeaseOwner(ownerId);
+    const normalizedGeneration = normalizeConversationLeaseGeneration(generation);
+    const normalizedTtl = normalizeConversationLeaseTtl(ttlMs);
+    const timestamp = now();
+    const expiresAt = new Date(Date.parse(timestamp) + normalizedTtl).toISOString();
+    const result = this.database.prepare(`
+      UPDATE conversation_writer_leases
+      SET lease_expires_at = ?, updated_at = ?
+      WHERE conversation_id = ? AND owner_id = ? AND generation = ?
+        AND lease_expires_at > ?
+    `).run(
+      expiresAt,
+      timestamp,
+      primaryConversationId,
+      normalizedOwner,
+      normalizedGeneration,
+      timestamp,
+    );
+    if (result.changes !== 1) return null;
+    return {
+      conversation_id: primaryConversationId,
+      owner_id: normalizedOwner,
+      generation: normalizedGeneration,
+      lease_expires_at: expiresAt,
+      updated_at: timestamp,
+    };
+  }
+
+  assertPrimaryConversationLease(fence) {
+    return assertPrimaryConversationFence(this.database, fence);
+  }
+
+  ownsPrimaryConversationLease(ownerId, generation) {
+    const normalizedOwner = normalizeConversationLeaseOwner(ownerId);
+    const normalizedGeneration = normalizeConversationLeaseGeneration(generation);
+    const lease = this.database.prepare(`
+      SELECT owner_id, generation, lease_expires_at
+      FROM conversation_writer_leases WHERE conversation_id = ?
+    `).get(primaryConversationId);
+    return Boolean(
+      lease?.owner_id === normalizedOwner
+      && lease?.generation === normalizedGeneration
+      && lease.lease_expires_at > now()
+    );
+  }
+
+  releasePrimaryConversationLease({ ownerId, generation }) {
+    const normalizedOwner = normalizeConversationLeaseOwner(ownerId);
+    const normalizedGeneration = normalizeConversationLeaseGeneration(generation);
+    const timestamp = now();
+    return this.database.prepare(`
+      UPDATE conversation_writer_leases
+      SET lease_expires_at = '1970-01-01T00:00:00.000Z', updated_at = ?
+      WHERE conversation_id = ? AND owner_id = ? AND generation = ?
+    `).run(
+      timestamp,
+      primaryConversationId,
+      normalizedOwner,
+      normalizedGeneration,
+    ).changes === 1;
+  }
+
+  ensurePrimaryConversation(projectId) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      let item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      if (!item) {
+        const timestamp = now();
+        this.database.prepare(`
+          INSERT INTO work_items (
+            id, project_id, title, objective, priority, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          primaryConversationId,
+          normalizedProjectId,
+          "主對話",
+          "Stable LATTICE Control user conversation binding.",
+          "normal",
+          "draft",
+          timestamp,
+          timestamp,
+        );
+        this.database.prepare(`
+          INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(
+          primaryConversationId,
+          "created",
+          JSON.stringify({ priority: "normal", kind: "primary_conversation" }),
+          timestamp,
+        );
+        item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(primaryConversationId);
+      }
+      assertPrimaryConversationIdentity(this.database, item);
+      this.database.exec("COMMIT;");
+      return decodeItem(item);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  primaryConversationMessage(clientMessageId) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    return this.listEvents(primaryConversationId).find(({ kind, payload }) => (
+      kind === "conversation_message_claimed"
+      && payload.clientMessageId === normalizedId
+    )) ?? null;
+  }
+
+  claimPrimaryConversationMessage({ projectId, clientMessageId, text, fence }) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    const normalizedText = boundedConversationText(text);
+    const promptDigest = conversationMessageDigest(normalizedText);
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      let item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      if (!item) {
+        const timestamp = now();
+        this.database.prepare(`
+          INSERT INTO work_items (
+            id, project_id, title, objective, priority, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          primaryConversationId,
+          normalizedProjectId,
+          "主對話",
+          "Stable LATTICE Control user conversation binding.",
+          "normal",
+          "draft",
+          timestamp,
+          timestamp,
+        );
+        this.database.prepare(`
+          INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(
+          primaryConversationId,
+          "created",
+          JSON.stringify({ priority: "normal", kind: "primary_conversation" }),
+          timestamp,
+        );
+        item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+          .get(primaryConversationId);
+      }
+
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      const claimedMessages = this.database.prepare(`
+        SELECT id, kind, payload_json, created_at
+        FROM work_events
+        WHERE work_item_id = ? AND kind = ?
+        ORDER BY id ASC
+      `).all(primaryConversationId, "conversation_message_claimed")
+        .map((event) => ({
+          id: event.id,
+          kind: event.kind,
+          payload: JSON.parse(event.payload_json),
+          created_at: event.created_at,
+        }));
+      const acceptedMessageIds = new Set(this.database.prepare(`
+        SELECT payload_json FROM work_events
+        WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
+      `).all(primaryConversationId).map(({ payload_json: payloadJson }) => (
+        JSON.parse(payloadJson).clientMessageId
+      )));
+      const existing = claimedMessages
+        .find(({ payload }) => payload.clientMessageId === normalizedId);
+      const unresolvedMessages = claimedMessages.filter(
+        ({ payload }) => !acceptedMessageIds.has(payload.clientMessageId),
+      );
+      if (
+        unresolvedMessages.length > 0
+        && (!existing || unresolvedMessages.some(
+          ({ payload }) => payload.clientMessageId !== normalizedId,
+        ))
+      ) {
+        const error = new Error("an earlier saved conversation message must be reconnected first");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      if (existing) {
+        if (
+          existing.payload.promptDigest !== promptDigest
+          || existing.payload.projectId !== normalizedProjectId
+        ) {
+          throw new TypeError("client message ID was already used for different content");
+        }
+        const accepted = acceptedMessageIds.has(normalizedId);
+        if (!accepted && item.status === "failed") {
+          const timestamp = now();
+          this.database.prepare(`
+            UPDATE work_items
+            SET status = 'starting', progress = ?, failure_summary = NULL, updated_at = ?
+            WHERE id = ? AND status = 'failed'
+          `).run(
+            "正在找回已保存的訊息；不會重複送出",
+            timestamp,
+            primaryConversationId,
+          );
+          item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+            .get(primaryConversationId);
+        }
+        this.database.exec("COMMIT;");
+        return { claimed: false, item: decodeItem(item), event: existing };
+      }
+      if (!["draft", "codex_done", "failed"].includes(item.status)) {
+        const error = new Error("the primary conversation is already handling a message");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+
+      const timestamp = now();
+      const update = this.database.prepare(`
+        UPDATE work_items
+        SET project_id = ?, status = 'starting', progress = ?, approval_json = NULL,
+            failure_summary = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('draft', 'codex_done', 'failed')
+      `).run(
+        normalizedProjectId,
+        "訊息已保存；正在連接 Codex",
+        timestamp,
+        primaryConversationId,
+      );
+      if (update.changes !== 1) {
+        const error = new Error("the primary conversation changed before the message was claimed");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      const inserted = this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+        RETURNING id
+      `).get(
+        primaryConversationId,
+        "conversation_message_claimed",
+        JSON.stringify({
+          clientMessageId: normalizedId,
+          projectId: normalizedProjectId,
+          text: normalizedText,
+          promptDigest,
+        }),
+        timestamp,
+      );
+      item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return {
+        claimed: true,
+        item: decodeItem(item),
+        event: {
+          id: inserted.id,
+          kind: "conversation_message_claimed",
+          payload: {
+            clientMessageId: normalizedId,
+            projectId: normalizedProjectId,
+            text: normalizedText,
+            promptDigest,
+          },
+          created_at: timestamp,
+        },
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  primaryConversationDispatchIntent(clientMessageId) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    return this.listEvents(primaryConversationId).find(({ kind, payload }) => (
+      kind === "conversation_turn_dispatch_intended"
+      && payload.clientMessageId === normalizedId
+    )) ?? null;
+  }
+
+  recordPrimaryConversationDispatchIntent({
+    clientMessageId,
+    threadId,
+    promptDigest,
+    fence,
+  }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
+    const normalizedDigest = normalizeHex(promptDigest, 64, "conversation prompt digest");
+    const normalizedFence = normalizeConversationFence(fence);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, normalizedFence);
+      if (item.codex_thread_id !== normalizedThreadId || item.status !== "starting") {
+        throw new Error("primary conversation changed before turn dispatch intent was saved");
+      }
+      const claimed = this.database.prepare(`
+        SELECT payload_json FROM work_events
+        WHERE work_item_id = ? AND kind = 'conversation_message_claimed'
+        ORDER BY id ASC
+      `).all(primaryConversationId)
+        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson))
+        .find((payload) => payload.clientMessageId === normalizedId);
+      if (!claimed || claimed.promptDigest !== normalizedDigest) {
+        throw new Error("turn dispatch intent has no exact saved message claim");
+      }
+      const intents = this.database.prepare(`
+        SELECT id, payload_json, created_at FROM work_events
+        WHERE work_item_id = ? AND kind = 'conversation_turn_dispatch_intended'
+        ORDER BY id ASC
+      `).all(primaryConversationId);
+      const existing = intents
+        .map((event) => ({ ...event, payload: JSON.parse(event.payload_json) }))
+        .find(({ payload }) => payload.clientMessageId === normalizedId);
+      if (existing) {
+        if (
+          existing.payload.threadId !== normalizedThreadId
+          || existing.payload.promptDigest !== normalizedDigest
+        ) throw new Error("saved turn dispatch intent changed identity");
+        this.database.exec("COMMIT;");
+        return {
+          created: false,
+          event: {
+            id: existing.id,
+            kind: "conversation_turn_dispatch_intended",
+            payload: existing.payload,
+            created_at: existing.created_at,
+          },
+        };
+      }
+      const timestamp = now();
+      const payload = {
+        clientMessageId: normalizedId,
+        threadId: normalizedThreadId,
+        promptDigest: normalizedDigest,
+        leaseGeneration: normalizedFence.generation,
+      };
+      const inserted = this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, 'conversation_turn_dispatch_intended', ?, ?)
+        RETURNING id
+      `).get(primaryConversationId, JSON.stringify(payload), timestamp);
+      this.database.exec("COMMIT;");
+      return {
+        created: true,
+        event: {
+          id: inserted.id,
+          kind: "conversation_turn_dispatch_intended",
+          payload,
+          created_at: timestamp,
+        },
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  bindPrimaryConversationThread({ projectId, threadId, previousThreadId = null, reason, fence }) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
+    const normalizedReason = boundedText(reason, "conversation handoff reason", 128);
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      if ((item.codex_thread_id ?? null) !== (previousThreadId ?? null)) {
+        const error = new Error("primary conversation binding changed before it could be saved");
+        error.code = "CONVERSATION_BINDING_CHANGED";
+        error.status = 409;
+        throw error;
+      }
+      const generation = this.database.prepare(`
+        SELECT COUNT(*) AS count FROM work_events
+        WHERE work_item_id = ? AND kind = ?
+      `).get(primaryConversationId, "conversation_thread_bound").count + 1;
+      const timestamp = now();
+      this.database.prepare(`
+        UPDATE work_items
+        SET project_id = ?, codex_thread_id = ?, codex_turn_id = NULL,
+            progress = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        normalizedProjectId,
+        normalizedThreadId,
+        "Codex 對話已連接；準備送出訊息",
+        timestamp,
+        primaryConversationId,
+      );
+      const binding = {
+        generation,
+        projectId: normalizedProjectId,
+        fromThreadId: previousThreadId,
+        toThreadId: normalizedThreadId,
+        reason: normalizedReason,
+      };
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(
+        primaryConversationId,
+        "conversation_thread_bound",
+        JSON.stringify(binding),
+        timestamp,
+      );
+      if (previousThreadId && previousThreadId !== normalizedThreadId) {
+        this.database.prepare(`
+          INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(
+          primaryConversationId,
+          "conversation_thread_handoff",
+          JSON.stringify(binding),
+          timestamp,
+        );
+      }
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return decodeItem(updated);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  acceptPrimaryConversationTurn({ clientMessageId, threadId, turnId, fence }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
+    const normalizedTurnId = boundedText(turnId, "Codex turn ID", 256);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      if (item.codex_thread_id !== normalizedThreadId || item.status !== "starting") {
+        throw new Error("primary conversation changed before its Codex turn was saved");
+      }
+      const events = this.database.prepare(`
+        SELECT payload_json FROM work_events
+        WHERE work_item_id = ? AND kind = ?
+        ORDER BY id ASC
+      `).all(primaryConversationId, "conversation_message_accepted")
+        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson));
+      const existing = events.find((payload) => payload.clientMessageId === normalizedId);
+      if (existing) {
+        if (existing.threadId !== normalizedThreadId || existing.turnId !== normalizedTurnId) {
+          throw new Error("client message is already bound to a different Codex turn");
+        }
+        this.database.exec("COMMIT;");
+        return decodeItem(item);
+      }
+      const timestamp = now();
+      this.database.prepare(`
+        UPDATE work_items
+        SET codex_turn_id = ?, progress = ?, updated_at = ?
+        WHERE id = ? AND status = 'starting' AND codex_thread_id = ?
+      `).run(
+        normalizedTurnId,
+        "Codex 已接受訊息；等待開始回覆",
+        timestamp,
+        primaryConversationId,
+        normalizedThreadId,
+      );
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(
+        primaryConversationId,
+        "conversation_message_accepted",
+        JSON.stringify({
+          clientMessageId: normalizedId,
+          threadId: normalizedThreadId,
+          turnId: normalizedTurnId,
+        }),
+        timestamp,
+      );
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return decodeItem(updated);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  recordPrimaryConversationReply({ threadId, turnId, messageId, text, fence }) {
+    const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
+    const normalizedTurnId = boundedText(turnId, "Codex turn ID", 256);
+    const normalizedMessageId = boundedText(messageId, "Codex message ID", 256);
+    const normalizedText = boundedConversationReply(text);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      if (
+        item.codex_thread_id !== normalizedThreadId
+        || item.codex_turn_id !== normalizedTurnId
+      ) {
+        this.database.exec("COMMIT;");
+        return false;
+      }
+      const existing = this.database.prepare(`
+        SELECT payload_json FROM work_events
+        WHERE work_item_id = ? AND kind = ?
+        ORDER BY id ASC
+      `).all(primaryConversationId, "conversation_assistant_message")
+        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson))
+        .find((payload) => payload.messageId === normalizedMessageId);
+      if (existing) {
+        if (
+          existing.threadId !== normalizedThreadId
+          || existing.turnId !== normalizedTurnId
+          || existing.text !== normalizedText
+        ) throw new Error("Codex message identity changed during replay");
+        this.database.exec("COMMIT;");
+        return false;
+      }
+      const timestamp = now();
+      this.database.prepare(`
+        UPDATE work_items SET final_response = ?, progress = ?, updated_at = ?
+        WHERE id = ?
+      `).run(normalizedText, "已收到 Codex 回覆", timestamp, primaryConversationId);
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(
+        primaryConversationId,
+        "conversation_assistant_message",
+        JSON.stringify({
+          messageId: normalizedMessageId,
+          threadId: normalizedThreadId,
+          turnId: normalizedTurnId,
+          text: normalizedText,
+        }),
+        timestamp,
+      );
+      this.database.exec("COMMIT;");
+      return true;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
   createWorkItem({ projectId, title, objective, priority = "normal" }) {
     if (!this.getProject(projectId)) throw new Error("project not found");
     if (!priorities.has(priority)) throw new TypeError("invalid priority");
@@ -1539,20 +2366,30 @@ export class LatticeStore {
     `).all().map(decodeItem);
   }
 
-  updateWorkItem(id, changes) {
+  updateWorkItem(id, changes, fence = null) {
     const entries = workItemChangeEntries(changes);
     if (entries.length === 0) return this.getWorkItem(id);
     entries.push(["updated_at", now()]);
-    const result = this.database.prepare(`
-      UPDATE work_items
-      SET ${entries.map(([key]) => `${key} = ?`).join(", ")}
-      WHERE id = ?
-    `).run(...entries.map(([, value]) => value), id);
-    if (result.changes !== 1) throw new Error("work item not found");
-    return this.getWorkItem(id);
+    const primary = id === primaryConversationId;
+    if (primary) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      if (primary) assertPrimaryConversationFence(this.database, fence);
+      const result = this.database.prepare(`
+        UPDATE work_items
+        SET ${entries.map(([key]) => `${key} = ?`).join(", ")}
+        WHERE id = ?
+      `).run(...entries.map(([, value]) => value), id);
+      if (result.changes !== 1) throw new Error("work item not found");
+      const updated = this.getWorkItem(id);
+      if (primary) this.database.exec("COMMIT;");
+      return updated;
+    } catch (error) {
+      if (primary) this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
-  transitionWorkItem(id, fromStatuses, changes) {
+  transitionWorkItem(id, fromStatuses, changes, fence = null) {
     if (!Array.isArray(fromStatuses) || fromStatuses.length === 0) {
       throw new TypeError("at least one source status is required");
     }
@@ -1562,19 +2399,38 @@ export class LatticeStore {
     const entries = workItemChangeEntries(changes);
     if (entries.length === 0) throw new TypeError("at least one work item change is required");
     entries.push(["updated_at", now()]);
-    const result = this.database.prepare(`
-      UPDATE work_items
-      SET ${entries.map(([key]) => `${key} = ?`).join(", ")}
-      WHERE id = ? AND status IN (${fromStatuses.map(() => "?").join(", ")})
-    `).run(...entries.map(([, value]) => value), id, ...fromStatuses);
-    return result.changes === 1 ? this.getWorkItem(id) : null;
+    const primary = id === primaryConversationId;
+    if (primary) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      if (primary) assertPrimaryConversationFence(this.database, fence);
+      const result = this.database.prepare(`
+        UPDATE work_items
+        SET ${entries.map(([key]) => `${key} = ?`).join(", ")}
+        WHERE id = ? AND status IN (${fromStatuses.map(() => "?").join(", ")})
+      `).run(...entries.map(([, value]) => value), id, ...fromStatuses);
+      const updated = result.changes === 1 ? this.getWorkItem(id) : null;
+      if (primary) this.database.exec("COMMIT;");
+      return updated;
+    } catch (error) {
+      if (primary) this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
-  appendEvent(workItemId, kind, payload = {}) {
-    this.database.prepare(`
-      INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
-      VALUES (?, ?, ?, ?)
-    `).run(workItemId, kind, JSON.stringify(payload), now());
+  appendEvent(workItemId, kind, payload = {}, fence = null) {
+    const primary = workItemId === primaryConversationId;
+    if (primary) this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      if (primary) assertPrimaryConversationFence(this.database, fence);
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(workItemId, kind, JSON.stringify(payload), now());
+      if (primary) this.database.exec("COMMIT;");
+    } catch (error) {
+      if (primary) this.database.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   listEvents(workItemId) {

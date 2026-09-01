@@ -2,201 +2,246 @@
 <html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>LATTICE Control</title>
   <style>
-    :root { color-scheme: dark; font-family: Inter, "Noto Sans TC", system-ui, sans-serif; }
-    body { margin: 0; background: #0b1020; color: #e8eefc; }
-    main { width: min(1080px, calc(100% - 32px)); margin: 32px auto; }
-    h1 { margin-bottom: 4px; }
-    .muted { color: #9eabc7; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
-    section, article { background: #131b31; border: 1px solid #263353; border-radius: 14px; padding: 16px; }
-    form { display: grid; gap: 10px; }
-    input, textarea, select, button { font: inherit; border-radius: 8px; padding: 9px 11px; }
-    input, textarea, select { color: #f4f7ff; background: #0c1428; border: 1px solid #334267; }
-    textarea { min-height: 90px; resize: vertical; }
-    button { border: 0; background: #78a6ff; color: #071025; cursor: pointer; font-weight: 700; }
-    button.secondary { background: #263653; color: #e8eefc; }
-    button.danger { background: #ff9c9c; }
-    button:disabled { opacity: .45; cursor: not-allowed; }
-    #items { display: grid; gap: 12px; margin-top: 16px; }
-    .item-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; }
-    .pill { display: inline-block; border-radius: 999px; padding: 3px 9px; background: #263653; font-size: 12px; }
-    .priority-urgent { background: #722d3b; }.priority-high { background: #65451f; }
-    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    .error { color: #ffb3b3; white-space: pre-wrap; }
-    code { word-break: break-all; color: #b9d2ff; }
+    :root { color-scheme: dark; font-family: Inter, "Noto Sans TC", system-ui, sans-serif; background: #070b16; color: #edf3ff; }
+    * { box-sizing: border-box; min-width: 0; }
+    body { margin: 0; min-height: 100dvh; background: radial-gradient(circle at 12% 0%, rgba(80,117,232,.22), transparent 34rem), radial-gradient(circle at 92% 100%, rgba(57,204,168,.12), transparent 32rem), #070b16; }
+    button, input, select, textarea { font: inherit; }
+    button, select, input { min-height: 44px; }
+    button { border: 0; border-radius: 11px; padding: 10px 15px; background: #8cb1ff; color: #071025; cursor: pointer; font-weight: 750; }
+    button.secondary { background: #202d49; color: #e9f0ff; }
+    button.danger { background: #60333e; color: #ffdbe0; }
+    button:disabled { cursor: not-allowed; opacity: .43; }
+    input, select, textarea { width: 100%; border: 1px solid #30405f; border-radius: 11px; background: #0a1121; color: #f6f8ff; padding: 10px 12px; }
+    textarea { min-height: 86px; resize: vertical; line-height: 1.55; }
+    main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; padding: 28px 0 36px; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
+    h1 { margin: 0 0 5px; font-size: clamp(1.55rem, 4vw, 2.15rem); letter-spacing: -.025em; }
+    p { margin-top: 0; }
+    .eyebrow { margin: 0 0 7px; color: #80a8ff; font-size: .78rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    .muted { color: #98a8c5; }
+    .connection { display: flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap; }
+    .connection::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #75829b; }
+    .connection.connected::before { background: #59dab2; box-shadow: 0 0 0 4px rgba(89,218,178,.12); }
+    .conversation-shell, details { border: 1px solid rgba(102,127,178,.34); border-radius: 18px; background: rgba(14,22,40,.88); box-shadow: 0 26px 70px rgba(0,0,0,.28); backdrop-filter: blur(14px); }
+    .conversation-shell { overflow: hidden; }
+    .conversation-toolbar { display: grid; grid-template-columns: minmax(210px,1fr) minmax(240px,1.6fr); align-items: end; gap: 14px; padding: 15px 18px; border-bottom: 1px solid rgba(102,127,178,.26); background: rgba(20,31,55,.78); }
+    label { display: grid; gap: 6px; color: #b9c6dd; font-size: .84rem; font-weight: 700; }
+    .conversation-state { justify-self: end; text-align: right; }
+    .status-text { margin: 0; color: #dce7fc; overflow-wrap: anywhere; }
+    .binding { margin: 5px 0 0; font: .73rem ui-monospace, SFMono-Regular, Consolas, monospace; color: #7f91b2; overflow-wrap: anywhere; }
+    .transcript { display: flex; flex-direction: column; gap: 14px; min-height: clamp(310px,49vh,560px); max-height: 58vh; overflow: auto; padding: 24px 20px; overscroll-behavior: contain; }
+    .empty { margin: auto; max-width: 420px; text-align: center; color: #8fa0bd; line-height: 1.7; }
+    .message { display: grid; gap: 5px; max-width: min(78%,720px); }
+    .message.user { align-self: end; }
+    .message.assistant { align-self: start; }
+    .bubble { margin: 0; padding: 12px 14px; border-radius: 15px; line-height: 1.62; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .user .bubble { background: linear-gradient(135deg,#7da8ff,#9bc0ff); color: #071025; border-bottom-right-radius: 4px; }
+    .assistant .bubble { background: #18243c; border: 1px solid #2b3a59; border-bottom-left-radius: 4px; }
+    .message-meta { color: #7788a7; font-size: .73rem; padding: 0 4px; }
+    .user .message-meta { text-align: right; }
+    .composer { display: grid; gap: 10px; padding: 15px 18px 18px; border-top: 1px solid rgba(102,127,178,.26); }
+    .composer-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 9px; }
+    .composer-actions > div { display: flex; flex-wrap: wrap; gap: 9px; }
+    .error { min-height: 1.45em; margin: 10px 4px 0; color: #ffb5bd; white-space: pre-wrap; overflow-wrap: anywhere; }
+    details { margin-top: 14px; padding: 14px 18px; box-shadow: none; }
+    summary { cursor: pointer; color: #b9c7df; font-weight: 750; }
+    .settings-body { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; padding-top: 16px; }
+    .settings-copy { line-height: 1.65; }
+    #project-form { display: grid; gap: 9px; }
+    .local-note { margin: 13px 4px 0; color: #71819f; font-size: .76rem; }
+    @media (max-width: 640px) {
+      main { width: 100%; padding: 14px 10px 24px; }
+      header { align-items: start; flex-direction: column; gap: 8px; padding: 0 4px; }
+      .connection { white-space: normal; }
+      .conversation-shell, details { border-radius: 14px; }
+      .conversation-toolbar { grid-template-columns: 1fr; padding: 13px; }
+      .conversation-state { justify-self: start; text-align: left; }
+      .transcript { min-height: 48vh; max-height: 54vh; padding: 18px 12px; }
+      .message { max-width: 91%; }
+      .composer { padding: 12px; }
+      .composer-actions, .composer-actions > div { width: 100%; }
+      .composer-actions button { flex: 1 1 120px; }
+      .settings-body { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
 <main>
-  <h1>LATTICE Control</h1>
-  <p class="muted">專案與工作由 LATTICE 保存；執行、續接、核准與封存交給 Codex。</p>
-  <p class="muted">安裝證據由 AI 自動管理，不需要手動輸入。</p>
-  <p id="connection" class="muted"></p>
-  <div class="grid">
-    <section>
-      <h2>新增專案</h2>
+  <header>
+    <div>
+      <p class="eyebrow">Long-lived workspace</p>
+      <h1>LATTICE Control</h1>
+      <p class="muted">你只需要留在這一個對話；底層 Codex 工作階段可安全續接或交接。</p>
+    </div>
+    <p id="connection" class="connection muted">Codex App Server：待命</p>
+  </header>
+  <section class="conversation-shell" aria-label="主要對話">
+    <div class="conversation-toolbar">
+      <label>目前專案<select id="conversation-project" aria-label="目前專案"></select></label>
+      <div class="conversation-state" aria-live="polite">
+        <p id="conversation-status" class="status-text">正在讀取對話狀態…</p>
+        <p id="conversation-binding" class="binding"></p>
+      </div>
+    </div>
+    <div id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions text">
+      <p class="empty">選擇專案並送出第一則訊息。回覆會保存在同一條 LATTICE 對話中。</p>
+    </div>
+    <form id="conversation-form" class="composer">
+      <label for="message">給 Codex 的訊息</label>
+      <textarea id="message" name="text" placeholder="描述你現在希望完成的事…" required></textarea>
+      <div class="composer-actions">
+        <div>
+          <button id="interrupt" type="button" class="danger">停止本次回覆</button>
+          <button id="reconnect" type="button" class="secondary">重新連線</button>
+        </div>
+        <button id="send" type="submit">送出訊息</button>
+      </div>
+    </form>
+  </section>
+  <p id="error" class="error" role="alert"></p>
+  <details>
+    <summary>專案設定</summary>
+    <div class="settings-body">
+      <div class="settings-copy muted">
+        <p>新增一個已存在的本機專案路徑，之後便能在上方切換。切換專案時，使用者看見的對話身份不會改變。</p>
+        <p>安裝證據由 AI 自動管理，不需要手動輸入。</p>
+      </div>
       <form id="project-form">
-        <input name="name" placeholder="專案名稱" required>
-        <input name="rootPath" placeholder="本機專案絕對路徑" required>
+        <input name="name" placeholder="專案名稱" aria-label="專案名稱" required>
+        <input name="rootPath" placeholder="本機專案絕對路徑" aria-label="本機專案絕對路徑" required>
         <button>保存專案</button>
       </form>
-    </section>
-    <section>
-      <h2>新增工作</h2>
-      <form id="work-form">
-        <select name="projectId" required></select>
-        <input name="title" placeholder="工作名稱" required>
-        <textarea name="objective" placeholder="希望 Codex 完成什麼" required></textarea>
-        <select name="priority">
-          <option value="urgent">極需優先</option>
-          <option value="high">高</option>
-          <option value="normal" selected>一般</option>
-          <option value="low">低</option>
-        </select>
-        <button>保存工作</button>
-      </form>
-    </section>
-  </div>
-  <p id="error" class="error"></p>
-  <h2>工作項目</h2>
-  <div id="items"></div>
+    </div>
+  </details>
+  <p class="local-note">本切片的 Codex 對話固定為唯讀；正式專案寫入將由後續已授權的 LATTICE 任務接入。目前服務只監聽這台電腦的 127.0.0.1；手機尺寸介面可用，但實體手機連線需要另行授權網路安全切片。</p>
 </main>
 <script type="module">
-  const state = { projects: [], workItems: [] };
-  const errorNode = document.querySelector("#error");
-
-  function showError(error, source = "action") {
-    errorNode.textContent = error.message;
-    errorNode.dataset.source = source;
-  }
-
+  const pendingKey = "lattice.control.pending-message.v1";
+  const projectKey = "lattice.control.selected-project.v1";
+  const safeMessageId = /^[A-Za-z0-9._:-]{1,128}$/u;
+  const safeProjectId = /^[A-Za-z0-9._:-]{1,256}$/u;
+  const unsafeControls = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u;
+  const state = { projects: [], codexConnected: false, conversation: null };
+  const nodes = {
+    connection: document.querySelector("#connection"), project: document.querySelector("#conversation-project"),
+    status: document.querySelector("#conversation-status"), binding: document.querySelector("#conversation-binding"),
+    transcript: document.querySelector("#transcript"), form: document.querySelector("#conversation-form"),
+    message: document.querySelector("#message"), send: document.querySelector("#send"),
+    interrupt: document.querySelector("#interrupt"), reconnect: document.querySelector("#reconnect"),
+    error: document.querySelector("#error"),
+  };
+  function showError(error, source = "action") { nodes.error.textContent = error.message; nodes.error.dataset.source = source; }
   async function api(path, options = {}) {
-    const response = await fetch(path, {
-      ...options,
-      headers: { "content-type": "application/json", ...(options.headers || {}) },
-    });
+    const response = await fetch(path, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
     const body = await response.json();
-    if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+    if (!response.ok) { const error = new Error(body.error || `HTTP ${response.status}`); error.code = body.code; throw error; }
     return body;
   }
-
-  function element(tag, text, className) {
-    const node = document.createElement(tag);
-    if (text !== undefined) node.textContent = text;
-    if (className) node.className = className;
-    return node;
-  }
-
-  function action(label, path, body = {}, className = "") {
-    const button = element("button", label, className);
-    button.addEventListener("click", async () => {
-      try {
-        button.disabled = true;
-        await api(path, { method: "POST", body: JSON.stringify(body) });
-        await poll();
-      } catch (error) {
-        showError(error);
-      } finally {
-        button.disabled = false;
-      }
-    });
-    return button;
-  }
-
-  function render() {
-    const projectSelect = document.querySelector("#work-form select[name=projectId]");
-    const selected = projectSelect.value;
-    projectSelect.replaceChildren(...state.projects.map((project) => {
-      const option = element("option", project.name);
-      option.value = project.id;
-      return option;
-    }));
-    if (state.projects.some((project) => project.id === selected)) projectSelect.value = selected;
-
-    const items = document.querySelector("#items");
-    items.replaceChildren(...state.workItems.map((item) => {
-      const card = element("article");
-      const head = element("div", undefined, "item-head");
-      const heading = element("div");
-      heading.append(element("h3", item.title), element("div", item.project_name, "muted"));
-      head.append(heading, element("span", `${item.priority} · ${item.status}`, `pill priority-${item.priority}`));
-      card.append(head, element("p", item.objective));
-      card.append(element("p", item.progress || "尚未派工", "muted"));
-      if (item.codex_thread_id) {
-        const thread = element("code", `Codex: ${item.codex_thread_id}`);
-        card.append(thread);
-      }
-      if (item.failure_summary) card.append(element("p", item.failure_summary, "error"));
-      if (item.approval) {
-        card.append(element("p", item.approval.reason || item.approval.command || "Codex 正在等待核准"));
-      }
-      const actions = element("div", undefined, "actions");
-      if (item.status === "draft") actions.append(action("開始", `/api/work-items/${item.id}/start`));
-      if (["codex_done", "failed"].includes(item.status) && item.codex_thread_id) {
-        actions.append(action("續接", `/api/work-items/${item.id}/resume`, { prompt: "Continue from the current state." }, "secondary"));
-      }
-      if (item.status === "waiting_approval") {
-        actions.append(
-          action("允許一次", `/api/work-items/${item.id}/approve`, { decision: "accept" }),
-          action("拒絕", `/api/work-items/${item.id}/approve`, { decision: "decline" }, "danger"),
-        );
-      }
-      if (item.status === "codex_done") {
-        actions.append(action("確認完成", `/api/work-items/${item.id}/verify`, { notes: "使用者已確認" }));
-      }
-      if (item.status === "verified") {
-        actions.append(action("封存", `/api/work-items/${item.id}/archive`, {}, "secondary"));
-      }
-      card.append(actions);
-      return card;
-    }));
-  }
-
-  async function refresh() {
-    const next = await api("/api/state");
-    Object.assign(state, next);
-    document.querySelector("#connection").textContent = next.codexConnected
-      ? "Codex App Server：已連線"
-      : "Codex App Server：待命（開始工作時才連線，不浪費資源）";
-    render();
-  }
-
-  async function poll() {
+  function element(tag, text, className) { const node = document.createElement(tag); if (text !== undefined) node.textContent = text; if (className) node.className = className; return node; }
+  function readPending() {
     try {
-      await refresh();
-      if (errorNode.dataset.source === "poll") {
-        errorNode.textContent = "";
-        delete errorNode.dataset.source;
-      }
-    } catch (error) {
-      showError(error, "poll");
+      const parsed = JSON.parse(localStorage.getItem(pendingKey));
+      const valid = parsed && !Array.isArray(parsed)
+        && Object.keys(parsed).sort().join(",") === "clientMessageId,projectId,text"
+        && typeof parsed.clientMessageId === "string"
+        && safeMessageId.test(parsed.clientMessageId)
+        && typeof parsed.projectId === "string"
+        && safeProjectId.test(parsed.projectId)
+        && typeof parsed.text === "string"
+        && parsed.text === parsed.text.trim()
+        && parsed.text.length > 0
+        && new TextEncoder().encode(parsed.text).byteLength <= 16_384
+        && !unsafeControls.test(parsed.text);
+      if (!valid) { if (parsed !== null) localStorage.removeItem(pendingKey); return null; }
+      return { projectId: parsed.projectId, clientMessageId: parsed.clientMessageId, text: parsed.text };
     }
+    catch { localStorage.removeItem(pendingKey); return null; }
   }
-
+  function selectedProjectId() { return nodes.project.value || null; }
+  function conversationCanSend() {
+    const conversation = state.conversation;
+    return Boolean(selectedProjectId()) && readPending() === null && (
+      conversation?.status === "not_started" || conversation?.can_send === true
+    );
+  }
+  function renderProjects() {
+    const preferred = selectedProjectId() || state.conversation?.project_id || localStorage.getItem(projectKey) || state.projects[0]?.id || "";
+    nodes.project.replaceChildren(...state.projects.map((project) => { const option = element("option", project.name); option.value = project.id; return option; }));
+    if (state.projects.some((project) => project.id === preferred)) nodes.project.value = preferred;
+    else if (state.projects[0]) nodes.project.value = state.projects[0].id;
+  }
+  function renderConversation() {
+    const conversation = state.conversation;
+    nodes.connection.textContent = state.codexConnected ? "Codex App Server：已連線" : "Codex App Server：待命";
+    nodes.connection.classList.toggle("connected", state.codexConnected);
+    const readyForFirstMessage = conversation?.status === "not_started" && Boolean(selectedProjectId());
+    nodes.status.textContent = readyForFirstMessage ? "已選擇專案，可以送出第一則訊息。" : (conversation?.status_text || "選擇專案後即可開始對話。");
+    nodes.binding.textContent = conversation?.codex_thread_id ? `對話 ${conversation.id} · Codex ${conversation.codex_thread_id}` : "固定對話身份：primary";
+    const nearBottom = nodes.transcript.scrollHeight - nodes.transcript.scrollTop - nodes.transcript.clientHeight < 80;
+    const messages = conversation?.messages || [];
+    let pending = readPending();
+    if (pending && messages.some((message) => message.id === pending.clientMessageId)) {
+      localStorage.removeItem(pendingKey);
+      pending = null;
+    }
+    if (pending) {
+      nodes.status.textContent = "正在確認上一則訊息；不會重複送出。重新整理會沿用同一則訊息續接。";
+      if (!nodes.message.value) nodes.message.value = pending.text;
+    }
+    if (messages.length === 0) {
+      nodes.transcript.replaceChildren(element("p", state.projects.length ? "送出第一則訊息後，真實 Codex 回覆會保存在這裡。" : "先在下方「專案設定」新增本機專案。", "empty"));
+    } else {
+      nodes.transcript.replaceChildren(...messages.map((message) => {
+        const article = element("article", undefined, `message ${message.role}`); article.dataset.messageId = message.id;
+        article.append(element("p", message.text, "bubble"));
+        const delivery = message.role === "user" ? (message.delivery_status === "accepted" ? "已交給 Codex" : message.delivery_status === "failed" ? "已保存，尚未完成" : "已保存") : "Codex 回覆";
+        article.append(element("span", delivery, "message-meta")); return article;
+      }));
+    }
+    if (nearBottom) nodes.transcript.scrollTop = nodes.transcript.scrollHeight;
+    const canSend = conversationCanSend();
+    nodes.send.disabled = !canSend; nodes.message.disabled = !canSend;
+    nodes.project.disabled = Boolean(pending);
+    nodes.interrupt.disabled = !conversation?.can_interrupt; nodes.reconnect.disabled = !conversation?.can_reconnect;
+  }
+  async function refresh() {
+    const [controlState, conversation] = await Promise.all([api("/api/state"), api("/api/conversation")]);
+    state.projects = controlState.projects; state.codexConnected = controlState.codexConnected; state.conversation = conversation;
+    renderProjects(); renderConversation();
+  }
+  async function poll() {
+    try { await refresh(); if (nodes.error.dataset.source === "poll") { nodes.error.textContent = ""; delete nodes.error.dataset.source; } }
+    catch (error) { showError(error, "poll"); }
+  }
+  async function deliver(payload) {
+    state.conversation = await api("/api/conversation/messages", { method: "POST", body: JSON.stringify(payload) });
+    if (state.conversation.messages.some((message) => message.id === payload.clientMessageId)) { localStorage.removeItem(pendingKey); nodes.message.value = ""; }
+    await poll();
+  }
+  async function resumePending() { const pending = readPending(); if (!pending) return; try { await deliver(pending); } catch (error) { showError(error); } }
+  nodes.project.addEventListener("change", () => { if (selectedProjectId()) localStorage.setItem(projectKey, selectedProjectId()); renderConversation(); });
+  nodes.form.addEventListener("submit", async (event) => {
+    event.preventDefault(); const projectId = selectedProjectId(); const text = nodes.message.value.trim(); if (!conversationCanSend() || !text) return;
+    const payload = { projectId, clientMessageId: crypto.randomUUID(), text }; localStorage.setItem(pendingKey, JSON.stringify(payload)); nodes.error.textContent = "";
+    try { nodes.send.disabled = true; await deliver(payload); } catch (error) { showError(error); } finally { renderConversation(); }
+  });
+  async function conversationAction(path) {
+    nodes.error.textContent = "";
+    try { state.conversation = await api(path, { method: "POST", body: "{}" }); await poll(); }
+    catch (error) { showError(error); await poll(); }
+  }
+  nodes.interrupt.addEventListener("click", () => void conversationAction("/api/conversation/interrupt"));
+  nodes.reconnect.addEventListener("click", () => void conversationAction("/api/conversation/reconnect"));
   document.querySelector("#project-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(event.currentTarget));
-    try {
-      await api("/api/projects", { method: "POST", body: JSON.stringify(values) });
-      event.currentTarget.reset();
-      await poll();
-    } catch (error) { showError(error); }
+    event.preventDefault(); const projectForm = event.currentTarget; const values = Object.fromEntries(new FormData(projectForm));
+    try { const project = await api("/api/projects", { method: "POST", body: JSON.stringify(values) }); projectForm.reset(); localStorage.setItem(projectKey, project.id); await poll(); }
+    catch (error) { showError(error); }
   });
-
-  document.querySelector("#work-form").addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(event.currentTarget));
-    try {
-      await api("/api/work-items", { method: "POST", body: JSON.stringify(values) });
-      event.currentTarget.reset();
-      await poll();
-    } catch (error) { showError(error); }
-  });
-
   await poll();
+  await resumePending();
   setInterval(() => void poll(), 2000);
 </script>
 </body>

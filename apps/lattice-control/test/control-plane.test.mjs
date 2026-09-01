@@ -22,6 +22,11 @@ class FakeCodex extends EventEmitter {
   interruptCalls = [];
   archived = [];
   resumed = [];
+  emptyResumed = [];
+  readResults = new Map();
+  listResult = null;
+  listCalls = 0;
+  closeCalls = 0;
 
   constructor({ autoThreadStarted = true, autoTurnStarted = true } = {}) {
     super();
@@ -87,10 +92,20 @@ class FakeCodex extends EventEmitter {
     });
   }
 
-  async startThread({ cwd, model }) {
+  async readAuthReadiness() {
+    this.connected = true;
+    return {
+      ready: true,
+      authMode: "chatgpt",
+      appServerGeneration: 1,
+      appServerSessionId: "fake-app-server-session",
+    };
+  }
+
+  async startThread({ cwd, model, sandbox, approvalPolicy, effectIdentity }) {
     this.connected = true;
     this.threads += 1;
-    this.startOptions = { cwd, model };
+    this.startOptions = { cwd, model, sandbox, approvalPolicy, effectIdentity };
     const thread = { id: `thread-${this.threads}` };
     this.threadStarts.push({ ...this.startOptions, threadId: thread.id });
     this.emit("threadStartAccepted", thread);
@@ -103,9 +118,33 @@ class FakeCodex extends EventEmitter {
     return thread;
   }
 
+  async listThreads() {
+    this.listCalls += 1;
+    return this.listResult ?? { data: [], nextCursor: null };
+  }
+
+  async readThread(threadId) {
+    const result = this.readResults.get(threadId);
+    if (!result) {
+      const error = new Error(`Codex thread ${threadId} is not recoverable`);
+      error.code = "CODEX_THREAD_NOT_RECOVERABLE";
+      throw error;
+    }
+    return structuredClone(result);
+  }
+
+  async resumeEmptyThread(threadId) {
+    const thread = await this.readThread(threadId);
+    if (thread.turns.length !== 0) throw new Error("thread is not empty");
+    this.emptyResumed.push(threadId);
+    this.connected = true;
+    return thread;
+  }
+
   async resumeThread(threadId) {
     this.connected = true;
     this.resumed.push(threadId);
+    if (this.resumeError) throw this.resumeError;
     return this.resumeResult ?? {
       id: threadId,
       turns: [{ id: "turn-1", status: "completed" }],
@@ -113,12 +152,13 @@ class FakeCodex extends EventEmitter {
   }
 
   async startTurn(threadId, text) {
+    await this.beforeTurnDispatch?.({ threadId, text });
     this.turns += 1;
     const turn = { id: `turn-${this.turns}`, items: [], status: "inProgress" };
     this.lastTurn = { threadId, text, turnId: turn.id };
     this.turnStarts.push(this.lastTurn);
     this.emit("turnStartAccepted", this.lastTurn);
-    this.beforeTurnResult?.({ threadId, text });
+    await this.beforeTurnResult?.({ threadId, text });
     if (this.autoTurnStarted) {
       this.emit("notification", {
         method: "turn/started",
@@ -129,6 +169,7 @@ class FakeCodex extends EventEmitter {
   }
 
   respond(id, result) {
+    this.beforeRespond?.({ id, result });
     this.deferredRequests.delete(id);
     this.responses.push({ id, result });
   }
@@ -180,6 +221,7 @@ class FakeCodex extends EventEmitter {
   }
 
   async close() {
+    this.closeCalls += 1;
     this.connected = false;
   }
 }
@@ -196,6 +238,18 @@ async function bounded(promise, label, timeoutMs = 250) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+let conversationFenceSequence = 0;
+function acquirePrimaryConversationFence(store, projectId) {
+  store.ensurePrimaryConversation(projectId);
+  conversationFenceSequence += 1;
+  const lease = store.acquirePrimaryConversationLease({
+    ownerId: `test:${process.pid}:${conversationFenceSequence}`,
+    ownerPid: process.pid,
+    ttlMs: 15_000,
+  });
+  return { ownerId: lease.owner_id, generation: lease.generation };
 }
 
 test("installation receipts are normalized, append-only, idempotent, and durable", async () => {
@@ -1074,6 +1128,1376 @@ test("continuation packets bound oversized untrusted work text", () => {
     assert.ok(packet.current.failure_summary.length <= 2_048);
   } finally {
     store.close();
+  }
+});
+
+test("the primary conversation keeps one UI identity, persists real replies, and deduplicates sends", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-primary-conversation-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Primary chat", rootPath: directory });
+
+    const sent = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "message-001",
+      text: "請回覆第一則訊息。",
+    });
+    assert.equal(sent.id, "primary");
+    assert.equal(sent.status, "running");
+    assert.equal(sent.messages.length, 1);
+    assert.deepEqual(sent.messages[0], {
+      id: "message-001",
+      role: "user",
+      text: "請回覆第一則訊息。",
+      delivery_status: "accepted",
+      created_at: sent.messages[0].created_at,
+      turn_id: "turn-1",
+    });
+    assert.equal(firstCodex.threadStarts.length, 1);
+    assert.equal(firstCodex.turnStarts.length, 1);
+    assert.equal(firstCodex.threadStarts[0].sandbox, "read-only");
+    assert.equal(firstCodex.threadStarts[0].approvalPolicy, "never");
+    assert.deepEqual(firstCodex.threadStarts[0].effectIdentity, {
+      expectedGeneration: 1,
+      expectedSessionId: "fake-app-server-session",
+    });
+
+    firstCodex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "agent-message-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "這是 Codex 的真實第一則回覆。",
+        },
+      },
+    });
+    firstCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          items: [{
+            id: "agent-message-001",
+            type: "agentMessage",
+            phase: "final_answer",
+            text: "這是 Codex 的真實第一則回覆。",
+          }],
+        },
+      },
+    });
+
+    const completed = firstService.primaryConversation();
+    assert.equal(completed.status, "codex_done");
+    assert.equal(completed.messages.at(-1).role, "assistant");
+    assert.equal(completed.messages.at(-1).text, "這是 Codex 的真實第一則回覆。");
+
+    const duplicate = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "message-001",
+      text: "請回覆第一則訊息。",
+    });
+    assert.equal(duplicate.id, sent.id);
+    assert.equal(firstCodex.threadStarts.length, 1);
+    assert.equal(firstCodex.turnStarts.length, 1, "an exact retry must not start another turn");
+
+    const terminalReconnect = await firstService.reconnectPrimaryConversation();
+    assert.equal(terminalReconnect.status, "codex_done");
+    const startEvidence = firstStore.listEvents("primary")
+      .filter(({ kind }) => kind === "codex_started");
+    assert.equal(startEvidence.length, 1);
+    assert.equal(startEvidence[0].payload.confirmedBy, "turn/started");
+
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = {
+      id: "thread-1",
+      turns: [{
+        id: "turn-1",
+        status: "completed",
+        items: [{
+          id: "agent-message-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "這是 Codex 的真實第一則回覆。",
+        }],
+      }],
+    };
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const reloaded = restartedService.primaryConversation();
+    assert.equal(reloaded.id, sent.id);
+    assert.equal(reloaded.messages.at(-1).text, "這是 Codex 的真實第一則回覆。");
+
+    const continued = await restartedService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "message-002",
+      text: "請沿用同一條對話繼續。",
+    });
+    assert.equal(continued.id, sent.id);
+    assert.equal(continued.codex_thread_id, "thread-1");
+    assert.equal(continued.codex_turn_id, "turn-2");
+    assert.deepEqual(restartedCodex.resumed, ["thread-1"]);
+    assert.equal(restartedCodex.threadStarts.length, 0, "a recoverable thread must be resumed");
+    assert.equal(restartedCodex.turnStarts.length, 1);
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the primary conversation records a verifiable thread handoff when the project changes", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const firstProject = service.createProject({ name: "First project", rootPath: process.cwd() });
+    const secondProject = service.createProject({ name: "Second project", rootPath: tmpdir() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: firstProject.id,
+      clientMessageId: "handoff-message-001",
+      text: "先在第一個專案對話。",
+    });
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "handoff-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一個專案的回覆。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+
+    const second = await service.sendPrimaryConversationMessage({
+      projectId: secondProject.id,
+      clientMessageId: "handoff-message-002",
+      text: "切到第二個專案，但保持同一個使用者對話。",
+    });
+    assert.equal(second.id, first.id);
+    assert.equal(second.codex_thread_id, "thread-2");
+    assert.equal(second.project_id, secondProject.id);
+    assert.equal(codex.threadStarts.length, 2);
+    assert.equal(codex.threadStarts[1].cwd, path.resolve(tmpdir()));
+    assert.match(codex.turnStarts[1].text, /第一個專案的回覆/u);
+    assert.match(codex.turnStarts[1].text, /切到第二個專案/u);
+    assert.deepEqual(second.handoffs, [{
+      from_thread_id: "thread-1",
+      to_thread_id: "thread-2",
+      reason: "project_changed",
+      created_at: second.handoffs[0].created_at,
+    }]);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("reconnect restores an active primary conversation without resending its message", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Reconnect", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "reconnect-message-001",
+      text: "這一則只能送出一次。",
+    });
+    codex.emit("disconnect", { code: 17, signal: null });
+    const disconnected = service.primaryConversation();
+    assert.equal(disconnected.status, "failed");
+    assert.match(disconnected.status_text, /連線中斷|重新連線/u);
+
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const reconnected = await service.reconnectPrimaryConversation();
+    assert.equal(reconnected.id, sent.id);
+    assert.equal(reconnected.status, "running");
+    assert.match(reconnected.status_text, /正在回覆/u);
+    assert.equal(codex.turnStarts.length, 1, "reconnect must not replay the user message");
+    assert.deepEqual(codex.resumed, [sent.codex_thread_id]);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("an active primary conversation survives a Control restart and resumes the exact turn", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-active-restart-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Active restart", rootPath: directory });
+    const sent = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "active-restart-message-001",
+      text: "Control 重啟時不能重送這一則。",
+    });
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const beforeReconnect = restartedService.primaryConversation();
+    assert.equal(beforeReconnect.id, sent.id);
+    assert.match(beforeReconnect.status_text, /Control 已恢復|重新連線/u);
+    assert.equal(beforeReconnect.can_interrupt, false);
+
+    const resumed = await restartedService.reconnectPrimaryConversation();
+    assert.equal(resumed.id, sent.id);
+    assert.equal(resumed.codex_thread_id, sent.codex_thread_id);
+    assert.equal(resumed.codex_turn_id, sent.codex_turn_id);
+    assert.equal(resumed.status, "running");
+    assert.deepEqual(restartedCodex.resumed, [sent.codex_thread_id]);
+    assert.equal(restartedCodex.turnStarts.length, 0);
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a newer message cannot pass an earlier durable claim that is still unaccepted", () => {
+  const store = new LatticeStore();
+  try {
+    const project = store.createProject({ name: "Ordered claims", rootPath: process.cwd() });
+    const firstInput = {
+      projectId: project.id,
+      clientMessageId: "ordered-claim-message-001",
+      text: "第一則訊息已保存，但尚未交給 Codex。",
+    };
+    const fence = acquirePrimaryConversationFence(store, project.id);
+    const first = store.claimPrimaryConversationMessage({ ...firstInput, fence });
+    store.updateWorkItem("primary", {
+      status: "failed",
+      failure_summary: "模擬 thread/start 前停止",
+    }, fence);
+
+    assert.throws(
+      () => store.claimPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "ordered-claim-message-002",
+        text: "第二則訊息不得越過第一則。",
+        fence,
+      }),
+      { code: "CONVERSATION_BUSY", status: 409 },
+    );
+    const retry = store.claimPrimaryConversationMessage({ ...firstInput, fence });
+    assert.equal(retry.claimed, false, "the exact saved message remains the only retryable claim");
+    assert.equal(store.listEvents("primary")
+      .filter(({ kind }) => kind === "conversation_message_claimed").length, 1);
+    assert.equal(first.event.payload.clientMessageId, retry.event.payload.clientMessageId);
+  } finally {
+    store.close();
+  }
+});
+
+test("a saved message ignores an unbound empty thread after Control stops between claim and binding", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-claim-crash-"));
+  const databasePath = path.join(directory, "control.db");
+  const seedStore = new LatticeStore(databasePath);
+  const project = seedStore.createProject({ name: "Claim crash", rootPath: directory });
+  const input = {
+    projectId: project.id,
+    clientMessageId: "claim-crash-message-001",
+    text: "這則訊息必須從 claim 復原且只送一次。",
+  };
+  const seedFence = acquirePrimaryConversationFence(seedStore, project.id);
+  const claim = seedStore.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  seedStore.releasePrimaryConversationLease(seedFence);
+  seedStore.close();
+
+  const codex = new FakeCodex();
+  const remoteThreads = ["thread-claim-crash-a", "thread-claim-crash-b"].map((id) => ({
+    id,
+    cwd: path.resolve(directory),
+    createdAt: Math.floor(Date.parse(claim.event.created_at) / 1_000),
+    turns: [],
+  }));
+  codex.listResult = { data: remoteThreads, nextCursor: null };
+  for (const remoteThread of remoteThreads) codex.readResults.set(remoteThread.id, remoteThread);
+  const store = new LatticeStore(databasePath);
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const recovered = await service.sendPrimaryConversationMessage(input);
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.codex_thread_id, "thread-1");
+    assert.equal(recovered.messages[0].delivery_status, "accepted");
+    assert.deepEqual(codex.emptyResumed, []);
+    assert.equal(codex.threadStarts.length, 1, "an unmarked empty thread must never be adopted");
+    assert.equal(codex.turnStarts.length, 1);
+    assert.equal(codex.listCalls, 0, "unbound claims must not scan or adopt ambient Codex threads");
+    assert.equal(store.listEvents("primary").some(
+      ({ kind, payload }) => kind === "conversation_unbound_claim_restarted"
+        && payload.clientMessageId === input.clientMessageId,
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a saved message resumes its bound empty thread after Control stops before turn dispatch", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-bind-crash-"));
+  const databasePath = path.join(directory, "control.db");
+  const seedStore = new LatticeStore(databasePath);
+  const project = seedStore.createProject({ name: "Binding crash", rootPath: directory });
+  const input = {
+    projectId: project.id,
+    clientMessageId: "bind-crash-message-001",
+    text: "綁定後的訊息只能建立一個 turn。",
+  };
+  const seedFence = acquirePrimaryConversationFence(seedStore, project.id);
+  seedStore.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  seedStore.bindPrimaryConversationThread({
+    projectId: project.id,
+    threadId: "thread-bind-crash",
+    previousThreadId: null,
+    reason: "initial",
+    fence: seedFence,
+  });
+  seedStore.releasePrimaryConversationLease(seedFence);
+  seedStore.close();
+
+  const codex = new FakeCodex();
+  codex.readResults.set("thread-bind-crash", {
+    id: "thread-bind-crash",
+    cwd: path.resolve(directory),
+    createdAt: Math.floor(Date.now() / 1_000),
+    turns: [],
+  });
+  const store = new LatticeStore(databasePath);
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const recovered = await service.sendPrimaryConversationMessage(input);
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.codex_thread_id, "thread-bind-crash");
+    assert.deepEqual(codex.emptyResumed, ["thread-bind-crash"]);
+    assert.equal(codex.threadStarts.length, 0);
+    assert.equal(codex.turnStarts.length, 1);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a marker-bound remote turn is adopted after Control stops before saving turn acceptance", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-turn-crash-"));
+  const databasePath = path.join(directory, "control.db");
+  const seedStore = new LatticeStore(databasePath);
+  const project = seedStore.createProject({ name: "Turn crash", rootPath: directory });
+  const input = {
+    projectId: project.id,
+    clientMessageId: "turn-crash-message-001",
+    text: "遠端已接受的 turn 不得重送。",
+  };
+  const seedFence = acquirePrimaryConversationFence(seedStore, project.id);
+  const claim = seedStore.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  seedStore.bindPrimaryConversationThread({
+    projectId: project.id,
+    threadId: "thread-turn-crash",
+    previousThreadId: null,
+    reason: "initial",
+    fence: seedFence,
+  });
+  seedStore.releasePrimaryConversationLease(seedFence);
+  seedStore.close();
+
+  const marker = `[LATTICE_CONTROL_MESSAGE id=${input.clientMessageId} digest=${claim.event.payload.promptDigest}]`;
+  const remoteTurn = {
+    id: "turn-crash-accepted",
+    status: "inProgress",
+    items: [{
+      id: "turn-crash-user",
+      type: "userMessage",
+      content: [{ type: "text", text: `${marker}\n${input.text}` }],
+    }],
+  };
+  const remoteThread = {
+    id: "thread-turn-crash",
+    cwd: path.resolve(directory),
+    createdAt: Math.floor(Date.parse(claim.event.created_at) / 1_000),
+    turns: [remoteTurn],
+  };
+  const codex = new FakeCodex();
+  codex.readResults.set(remoteThread.id, remoteThread);
+  codex.resumeResult = remoteThread;
+  const store = new LatticeStore(databasePath);
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const recovered = await service.sendPrimaryConversationMessage(input);
+    assert.equal(recovered.status, "running");
+    assert.equal(recovered.codex_turn_id, remoteTurn.id);
+    assert.equal(recovered.messages[0].delivery_status, "accepted");
+    assert.equal(codex.turnStarts.length, 0, "the exact marker turn must not be replayed");
+    assert.deepEqual(codex.resumed, [remoteThread.id]);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent reuse of one message ID with different content never shares a success", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex({ autoThreadStarted: false });
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Concurrent conflict", rootPath: process.cwd() });
+    const threadAccepted = new Promise((resolve) => codex.once("threadStartAccepted", resolve));
+    const first = service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "concurrent-conflict-message",
+      text: "第一個內容。",
+    });
+    const thread = await threadAccepted;
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "concurrent-conflict-message",
+        text: "第二個不同內容。",
+      }),
+      { code: "CONVERSATION_MESSAGE_CONFLICT" },
+    );
+    codex.emit("notification", { method: "thread/started", params: { thread } });
+    await first;
+    assert.equal(codex.turnStarts.length, 1);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("an unrecoverable saved thread fails closed without starting a replacement", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "No replacement", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "no-replacement-message-001",
+      text: "先建立可驗證的舊回合。",
+    });
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "no-replacement-final",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "舊回合完成。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const notRecoverable = new Error("saved thread missing");
+    notRecoverable.code = "CODEX_THREAD_NOT_RECOVERABLE";
+    codex.resumeError = notRecoverable;
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "no-replacement-message-002",
+        text: "不得自動另開 thread。",
+      }),
+      { code: "CONVERSATION_RECONCILIATION_REQUIRED" },
+    );
+    assert.equal(codex.threadStarts.length, 1);
+    assert.equal(store.primaryConversationMessage("no-replacement-message-002"), null);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("ambiguous marker turns in the exact saved thread fail closed without replay", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-marker-ambiguous-"));
+  const databasePath = path.join(directory, "control.db");
+  const seedStore = new LatticeStore(databasePath);
+  const project = seedStore.createProject({ name: "Ambiguous marker", rootPath: directory });
+  const input = {
+    projectId: project.id,
+    clientMessageId: "ambiguous-marker-message-001",
+    text: "同一 marker 若出現兩次必須停止。",
+  };
+  const seedFence = acquirePrimaryConversationFence(seedStore, project.id);
+  const claim = seedStore.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  seedStore.bindPrimaryConversationThread({
+    projectId: project.id,
+    threadId: "thread-marker-ambiguous",
+    previousThreadId: null,
+    reason: "initial",
+    fence: seedFence,
+  });
+  seedStore.releasePrimaryConversationLease(seedFence);
+  seedStore.close();
+  const marker = `[LATTICE_CONTROL_MESSAGE id=${input.clientMessageId} digest=${claim.event.payload.promptDigest}]`;
+  const codex = new FakeCodex();
+  const candidate = {
+    id: "thread-marker-ambiguous",
+    cwd: path.resolve(directory),
+    createdAt: Math.floor(Date.parse(claim.event.created_at) / 1_000),
+    turns: [0, 1].map((index) => ({
+      id: `turn-marker-${index}`,
+      status: "inProgress",
+      items: [{
+        type: "userMessage",
+        content: [{ type: "text", text: `${marker}\n${input.text}` }],
+      }],
+    })),
+  };
+  codex.readResults.set(candidate.id, candidate);
+  const store = new LatticeStore(databasePath);
+  const service = new LatticeControlService({ store, codex });
+  try {
+    await assert.rejects(
+      service.sendPrimaryConversationMessage(input),
+      { code: "CONVERSATION_RECONCILIATION_REQUIRED" },
+    );
+    assert.equal(codex.threadStarts.length, 0);
+    assert.equal(codex.turnStarts.length, 0);
+    assert.equal(codex.listCalls, 0);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a terminal marker turn restores its real final reply without a second dispatch", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-marker-terminal-"));
+  const databasePath = path.join(directory, "control.db");
+  const seedStore = new LatticeStore(databasePath);
+  const project = seedStore.createProject({ name: "Terminal marker", rootPath: directory });
+  const input = {
+    projectId: project.id,
+    clientMessageId: "terminal-marker-message-001",
+    text: "找回已完成的 marker turn。",
+  };
+  const seedFence = acquirePrimaryConversationFence(seedStore, project.id);
+  const claim = seedStore.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  seedStore.bindPrimaryConversationThread({
+    projectId: project.id,
+    threadId: "thread-marker-terminal",
+    previousThreadId: null,
+    reason: "initial",
+    fence: seedFence,
+  });
+  seedStore.releasePrimaryConversationLease(seedFence);
+  seedStore.close();
+  const marker = `[LATTICE_CONTROL_MESSAGE id=${input.clientMessageId} digest=${claim.event.payload.promptDigest}]`;
+  const turn = {
+    id: "turn-marker-terminal",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        content: [{ type: "text", text: `${marker}\n${input.text}` }],
+      },
+      {
+        id: "terminal-marker-final",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "已找回的真實最終回覆。",
+      },
+    ],
+  };
+  const thread = {
+    id: "thread-marker-terminal",
+    cwd: path.resolve(directory),
+    createdAt: Math.floor(Date.parse(claim.event.created_at) / 1_000),
+    turns: [turn],
+  };
+  const codex = new FakeCodex();
+  codex.readResults.set(thread.id, thread);
+  codex.resumeResult = thread;
+  const store = new LatticeStore(databasePath);
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const recovered = await service.sendPrimaryConversationMessage(input);
+    assert.equal(recovered.status, "codex_done");
+    assert.equal(recovered.messages.at(-1).text, "已找回的真實最終回覆。");
+    assert.equal(codex.turnStarts.length, 0);
+    assert.equal(store.listEvents("primary").some(
+      ({ kind, payload }) => kind === "codex_started"
+        && payload.confirmedBy === "marker-thread/read",
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a completed primary turn without a final reply stays failed and reconnectable", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Missing final", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "missing-final-message-001",
+      text: "沒有 final reply 不得宣稱完成。",
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const failed = service.primaryConversation();
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.can_send, false);
+    assert.equal(failed.can_reconnect, true);
+    assert.doesNotMatch(failed.status_text, /已收到 Codex 回覆/u);
+    assert.equal(store.listEvents("primary").some(
+      ({ kind }) => kind === "conversation_terminal_missing_reply",
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("invalid oversized final output becomes a recorded failure instead of escaping the listener", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Bounded final", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "oversized-final-message-001",
+      text: "超限輸出要留下錯誤。",
+    });
+    assert.doesNotThrow(() => codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        item: {
+          id: "oversized-final",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "X".repeat(262_145),
+        },
+      },
+    }));
+    assert.equal(service.primaryConversation().status, "failed");
+    assert.equal(store.listEvents("primary").some(
+      ({ kind }) => kind === "conversation_notification_failed",
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("an unexpected approval request in the read-only conversation is declined without stranding UI", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Approval boundary", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "approval-boundary-message-001",
+      text: "主對話只允許唯讀回覆。",
+    });
+    codex.emit("serverRequest", {
+      id: 801,
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        reason: "write request must be declined",
+      },
+    });
+    assert.deepEqual(codex.responses.at(-1), { id: 801, result: { decision: "decline" } });
+    assert.equal(service.primaryConversation().status, "running");
+    assert.equal(store.listEvents("primary").some(
+      ({ kind }) => kind === "conversation_approval_declined",
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a primary server response detects writer takeover and closes without a stale event", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-fenced-response-"));
+  const databasePath = path.join(directory, "control.db");
+  const firstStore = new LatticeStore(databasePath);
+  const secondStore = new LatticeStore(databasePath);
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store: firstStore, codex });
+  let takeoverFence;
+  try {
+    const project = service.createProject({ name: "Response fence", rootPath: directory });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "response-fence-message-001",
+      text: "approval 回應也必須受 writer generation 保護。",
+    });
+    const lease = firstStore.database.prepare(`
+      SELECT owner_id, generation FROM conversation_writer_leases WHERE conversation_id = 'primary'
+    `).get();
+    const firstFence = { ownerId: lease.owner_id, generation: lease.generation };
+    codex.beforeRespond = () => {
+      assert.equal(firstStore.releasePrimaryConversationLease(firstFence), true);
+      const takeover = secondStore.acquirePrimaryConversationLease({
+        ownerId: "response-fence-takeover",
+        ownerPid: process.pid,
+        ttlMs: 15_000,
+      });
+      takeoverFence = { ownerId: takeover.owner_id, generation: takeover.generation };
+      codex.beforeRespond = null;
+    };
+
+    codex.emit("serverRequest", {
+      id: 802,
+      method: "item/fileChange/requestApproval",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        reason: "writer changes during response",
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(codex.responses.at(-1), { id: 802, result: { decision: "decline" } });
+    assert.equal(codex.closeCalls, 1, "the stale adapter must close after the post-effect fence fails");
+    assert.equal(secondStore.listEvents("primary").filter(
+      ({ kind }) => kind === "conversation_approval_declined",
+    ).length, 0);
+    assert.equal(takeoverFence.generation, firstFence.generation + 1);
+  } finally {
+    if (takeoverFence) secondStore.releasePrimaryConversationLease(takeoverFence);
+    service.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a primary disconnect race contains writer takeover and leaves zero stale mutation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-fenced-disconnect-"));
+  const databasePath = path.join(directory, "control.db");
+  const firstStore = new LatticeStore(databasePath);
+  const secondStore = new LatticeStore(databasePath);
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store: firstStore, codex });
+  let takeoverFence;
+  try {
+    const project = service.createProject({ name: "Disconnect fence", rootPath: directory });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "disconnect-fence-message-001",
+      text: "disconnect callback 也不能跨 generation 寫入。",
+    });
+    const lease = firstStore.database.prepare(`
+      SELECT owner_id, generation FROM conversation_writer_leases WHERE conversation_id = 'primary'
+    `).get();
+    const firstFence = { ownerId: lease.owner_id, generation: lease.generation };
+    const updateWorkItem = firstStore.updateWorkItem.bind(firstStore);
+    let transferOnUpdate = true;
+    firstStore.updateWorkItem = (...args) => {
+      if (transferOnUpdate && args[0] === "primary") {
+        transferOnUpdate = false;
+        assert.equal(firstStore.releasePrimaryConversationLease(firstFence), true);
+        const takeover = secondStore.acquirePrimaryConversationLease({
+          ownerId: "disconnect-fence-takeover",
+          ownerPid: process.pid,
+          ttlMs: 15_000,
+        });
+        takeoverFence = { ownerId: takeover.owner_id, generation: takeover.generation };
+      }
+      return updateWorkItem(...args);
+    };
+
+    assert.doesNotThrow(() => codex.emit("disconnect", { code: 17, signal: null }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(secondStore.getWorkItem("primary").status, "running");
+    assert.equal(secondStore.listEvents("primary").filter(
+      ({ kind }) => kind === "codex_disconnected",
+    ).length, 0);
+    assert.equal(codex.closeCalls, 1);
+  } finally {
+    if (takeoverFence) secondStore.releasePrimaryConversationLease(takeoverFence);
+    service.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the reserved primary ID fails closed when an older generic work item already uses it", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Identity collision", rootPath: process.cwd() });
+    const timestamp = new Date().toISOString();
+    store.database.prepare(`
+      INSERT INTO work_items (
+        id, project_id, title, objective, priority, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run("primary", project.id, "Legacy", "Not a conversation", "normal", "draft", timestamp, timestamp);
+    store.database.prepare(`
+      INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+      VALUES (?, ?, ?, ?)
+    `).run("primary", "created", JSON.stringify({ priority: "normal" }), timestamp);
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "identity-collision-message",
+        text: "不得接管保留 ID。",
+      }),
+      { code: "CONVERSATION_IDENTITY_COLLISION" },
+    );
+    assert.equal(codex.threadStarts.length, 0);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("the SQLite writer lease prevents two Control instances from owning one conversation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-conversation-dedupe-"));
+  const databasePath = path.join(directory, "control.db");
+  const firstStore = new LatticeStore(databasePath);
+  const secondStore = new LatticeStore(databasePath);
+  const firstCodex = new FakeCodex();
+  const secondCodex = new FakeCodex();
+  const firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+  const secondService = new LatticeControlService({ store: secondStore, codex: secondCodex });
+  try {
+    const project = firstService.createProject({ name: "Atomic conversation", rootPath: directory });
+    const input = {
+      projectId: project.id,
+      clientMessageId: "atomic-message-001",
+      text: "跨程序也只能送出一次。",
+    };
+    const first = await firstService.sendPrimaryConversationMessage(input);
+    await assert.rejects(
+      secondService.sendPrimaryConversationMessage(input),
+      { code: "CONVERSATION_WRITER_BUSY" },
+    );
+    assert.equal(first.id, "primary");
+    assert.equal(firstCodex.turnStarts.length, 1);
+    assert.equal(secondCodex.turnStarts.length, 0);
+    assert.equal(firstStore.listEvents("primary")
+      .filter(({ kind }) => kind === "conversation_message_claimed").length, 1);
+    firstService.close();
+    secondCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const resumed = await secondService.reconnectPrimaryConversation();
+    assert.equal(resumed.status, "running");
+    assert.equal(secondCodex.turnStarts.length, 0, "ownership transfer must not replay the message");
+    await assert.rejects(
+      secondService.sendPrimaryConversationMessage({ ...input, text: "不同內容不得重用 ID。" }),
+      /already used for different content/u,
+    );
+  } finally {
+    firstService.close();
+    secondService.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("writer lease generations fence every stale primary conversation mutation", () => {
+  const store = new LatticeStore();
+  try {
+    const project = store.createProject({ name: "Fence epochs", rootPath: process.cwd() });
+    store.ensurePrimaryConversation(project.id);
+    const firstLease = store.acquirePrimaryConversationLease({
+      ownerId: "fence-owner-a",
+      ownerPid: process.pid,
+      ttlMs: 15_000,
+    });
+    const firstFence = { ownerId: firstLease.owner_id, generation: firstLease.generation };
+    const sameOwner = store.acquirePrimaryConversationLease({
+      ownerId: "fence-owner-a",
+      ownerPid: process.pid,
+      ttlMs: 15_000,
+    });
+    assert.equal(sameOwner.generation, firstFence.generation);
+    assert.equal(store.renewPrimaryConversationLease({ ...firstFence, ttlMs: 15_000 }).generation,
+      firstFence.generation);
+    assert.equal(store.releasePrimaryConversationLease(firstFence), true);
+
+    const secondLease = store.acquirePrimaryConversationLease({
+      ownerId: "fence-owner-b",
+      ownerPid: process.pid,
+      ttlMs: 15_000,
+    });
+    const secondFence = { ownerId: secondLease.owner_id, generation: secondLease.generation };
+    assert.equal(secondFence.generation, firstFence.generation + 1);
+    const input = {
+      projectId: project.id,
+      clientMessageId: "fenced-message-001",
+      text: "舊 epoch 不得寫入。",
+    };
+    assert.throws(
+      () => store.claimPrimaryConversationMessage({ ...input, fence: firstFence }),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    const claim = store.claimPrimaryConversationMessage({ ...input, fence: secondFence });
+    assert.throws(
+      () => store.bindPrimaryConversationThread({
+        projectId: project.id,
+        threadId: "thread-fenced",
+        reason: "initial",
+        fence: firstFence,
+      }),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    store.bindPrimaryConversationThread({
+      projectId: project.id,
+      threadId: "thread-fenced",
+      reason: "initial",
+      fence: secondFence,
+    });
+    store.recordPrimaryConversationDispatchIntent({
+      clientMessageId: input.clientMessageId,
+      threadId: "thread-fenced",
+      promptDigest: claim.event.payload.promptDigest,
+      fence: secondFence,
+    });
+    assert.equal(store.releasePrimaryConversationLease(secondFence), true);
+
+    const thirdLease = store.acquirePrimaryConversationLease({
+      ownerId: "fence-owner-c",
+      ownerPid: process.pid,
+      ttlMs: 15_000,
+    });
+    const thirdFence = { ownerId: thirdLease.owner_id, generation: thirdLease.generation };
+    assert.equal(thirdFence.generation, secondFence.generation + 1);
+    assert.throws(
+      () => store.acceptPrimaryConversationTurn({
+        clientMessageId: input.clientMessageId,
+        threadId: "thread-fenced",
+        turnId: "turn-fenced",
+        fence: secondFence,
+      }),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    store.acceptPrimaryConversationTurn({
+      clientMessageId: input.clientMessageId,
+      threadId: "thread-fenced",
+      turnId: "turn-fenced",
+      fence: thirdFence,
+    });
+    assert.throws(
+      () => store.recordPrimaryConversationReply({
+        threadId: "thread-fenced",
+        turnId: "turn-fenced",
+        messageId: "reply-fenced",
+        text: "過期 writer 不得保存回覆。",
+        fence: secondFence,
+      }),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    assert.throws(
+      () => store.updateWorkItem("primary", { progress: "stale" }, secondFence),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    assert.throws(
+      () => store.appendEvent("primary", "stale_event", {}, secondFence),
+      { code: "CONVERSATION_WRITER_LOST" },
+    );
+    assert.equal(store.recordPrimaryConversationReply({
+      threadId: "thread-fenced",
+      turnId: "turn-fenced",
+      messageId: "reply-fenced",
+      text: "新 writer 可以保存回覆。",
+      fence: thirdFence,
+    }), true);
+    store.releasePrimaryConversationLease(thirdFence);
+  } finally {
+    store.close();
+  }
+});
+
+test("a lost writer with a deferred turn dispatch cannot accept or cause a second turn", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-fenced-turn-"));
+  const databasePath = path.join(directory, "control.db");
+  const firstStore = new LatticeStore(databasePath);
+  const firstCodex = new FakeCodex();
+  let releaseTurn;
+  const turnGate = new Promise((resolve) => { releaseTurn = resolve; });
+  firstCodex.beforeTurnResult = () => turnGate;
+  const firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+  const secondStore = new LatticeStore(databasePath);
+  const secondCodex = new FakeCodex();
+  const secondService = new LatticeControlService({ store: secondStore, codex: secondCodex });
+  try {
+    const project = firstService.createProject({ name: "Deferred fence", rootPath: directory });
+    const input = {
+      projectId: project.id,
+      clientMessageId: "deferred-fence-message-001",
+      text: "lease 轉移後不得再接受這個 turn。",
+    };
+    const turnDispatched = new Promise((resolve) => firstCodex.once("turnStartAccepted", resolve));
+    const firstSend = firstService.sendPrimaryConversationMessage(input);
+    await turnDispatched;
+    const lease = firstStore.database.prepare(`
+      SELECT owner_id, generation FROM conversation_writer_leases WHERE conversation_id = 'primary'
+    `).get();
+    const firstFence = { ownerId: lease.owner_id, generation: lease.generation };
+    assert.equal(firstStore.releasePrimaryConversationLease(firstFence), true);
+    secondCodex.readResults.set("thread-1", { id: "thread-1", turns: [] });
+
+    await assert.rejects(
+      secondService.sendPrimaryConversationMessage(input),
+      { code: "CONVERSATION_RECONCILIATION_REQUIRED" },
+    );
+    assert.equal(secondCodex.turnStarts.length, 0, "takeover must not repeat a dispatched intent");
+    releaseTurn();
+    await assert.rejects(firstSend, { code: "CONVERSATION_WRITER_LOST" });
+    const events = secondStore.listEvents("primary");
+    assert.equal(events.filter(({ kind }) => kind === "conversation_turn_dispatch_intended").length, 1);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_message_accepted").length, 0);
+    assert.equal(firstCodex.turnStarts.length, 1);
+    assert.equal(secondCodex.turnStarts.length, 0);
+  } finally {
+    releaseTurn?.();
+    firstService.close();
+    secondService.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a proven pre-dispatch identity rejection retries the same claim exactly once", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-pre-dispatch-retry-"));
+  const store = new LatticeStore(path.join(directory, "control.db"));
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Pre-dispatch retry", rootPath: directory });
+    codex.beforeTurnDispatch = () => {
+      codex.beforeTurnDispatch = null;
+      const error = new Error("effect identity changed before dispatch");
+      error.code = "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED";
+      throw error;
+    };
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "pre-dispatch-retry-message-001",
+        text: "只有可證明沒有寫入 provider 的錯誤可重試一次。",
+      }),
+      { code: "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED" },
+    );
+    assert.equal(codex.turnStarts.length, 0);
+    const failed = service.primaryConversation();
+    codex.readResults.set(failed.codex_thread_id, { id: failed.codex_thread_id, turns: [] });
+
+    const reconnected = await service.reconnectPrimaryConversation();
+    assert.equal(reconnected.status, "running");
+    assert.equal(codex.turnStarts.length, 1);
+    const events = store.listEvents("primary");
+    assert.equal(events.filter(({ kind }) => kind === "conversation_turn_dispatch_intended").length, 1);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_turn_dispatch_not_sent").length, 1);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_turn_dispatch_retry_intended").length, 1);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_message_accepted").length, 1);
+
+    codex.readResults.set(failed.codex_thread_id, { id: failed.codex_thread_id, turns: [] });
+    assert.equal(events.find(({ kind }) => kind === "conversation_turn_dispatch_retry_intended")
+      .payload.clientMessageId, "pre-dispatch-retry-message-001");
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a later message retries one proven pre-dispatch rejection after exact terminal history", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-later-pre-dispatch-retry-"));
+  const store = new LatticeStore(path.join(directory, "control.db"));
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Later pre-dispatch retry", rootPath: directory });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "later-retry-message-001",
+      text: "先完成第一回合。",
+    });
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "later-retry-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一回合完成。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    assert.equal(service.primaryConversation().status, "codex_done");
+
+    codex.beforeTurnDispatch = () => {
+      codex.beforeTurnDispatch = null;
+      const error = new Error("effect identity changed before later dispatch");
+      error.code = "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED";
+      throw error;
+    };
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "later-retry-message-002",
+        text: "第二回合在 provider 寫入前失敗。",
+      }),
+      { code: "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED" },
+    );
+    assert.equal(codex.turnStarts.length, 1, "the rejected second dispatch had zero provider effect");
+    codex.readResults.set(first.codex_thread_id, { id: first.codex_thread_id, turns: [] });
+    await assert.rejects(
+      service.reconnectPrimaryConversation(),
+      { code: "CONVERSATION_RECONCILIATION_REQUIRED" },
+    );
+    assert.equal(codex.turnStarts.length, 1, "an empty rollout must not erase exact terminal history");
+    codex.readResults.set(first.codex_thread_id, {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "completed", items: [] }],
+    });
+    codex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "completed", items: [] }],
+    };
+
+    const reconnected = await service.reconnectPrimaryConversation();
+    assert.equal(reconnected.status, "running");
+    assert.equal(reconnected.codex_turn_id, "turn-2");
+    assert.equal(codex.turnStarts.length, 2, "only the second message's one retry was dispatched");
+    const secondStarts = codex.turnStarts.filter(({ text }) => text.includes("第二回合在 provider 寫入前失敗"));
+    assert.equal(secondStarts.length, 1);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the loopback conversation API serves one responsive chat entry and durable final replies", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-conversation-http-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const address = application.server.address();
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    const pageHtml = await (await fetch(`${origin}/`)).text();
+    assert.equal(pageHtml.match(/id="conversation-form"/gu)?.length, 1);
+    assert.doesNotMatch(pageHtml, /id="work-form"|id="items"/u);
+    assert.match(pageHtml, /@media\s*\(max-width:/u);
+    assert.match(pageHtml, /localStorage/u);
+    assert.match(pageHtml, /conversation\?\.can_send === true/u);
+    assert.match(pageHtml, /readPending\(\) === null/u);
+    assert.match(pageHtml, /typeof parsed\.projectId === "string"/u);
+    assert.match(pageHtml, /typeof parsed\.text === "string"/u);
+    assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
+    assert.match(pageHtml, /readyForFirstMessage/u);
+    assert.match(pageHtml, /const projectForm = event\.currentTarget/u);
+    assert.match(pageHtml, /projectForm\.reset\(\)/u);
+
+    const projectResponse = await fetch(`${origin}/api/projects`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Conversation API", rootPath: directory }),
+    });
+    assert.equal(projectResponse.status, 201);
+    const project = await projectResponse.json();
+
+    const send = () => fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        clientMessageId: "http-message-001",
+        text: "請透過真實接頭回覆。",
+      }),
+    });
+    const firstResponse = await send();
+    assert.equal(firstResponse.status, 200);
+    const first = await firstResponse.json();
+    assert.equal(first.id, "primary");
+    assert.equal(first.status, "running");
+    assert.equal(codex.turnStarts.length, 1);
+    const controlState = await (await fetch(`${origin}/api/state`)).json();
+    assert.equal(controlState.workItems.length, 0, "the chat projection is not a task card");
+
+    const duplicateResponse = await send();
+    assert.equal(duplicateResponse.status, 200);
+    assert.equal((await duplicateResponse.json()).id, first.id);
+    assert.equal(codex.turnStarts.length, 1);
+
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "http-agent-message-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "這是經由 App Server 事件保存的最終回覆。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const replayResponse = await fetch(`${origin}/api/conversation`);
+    assert.equal(replayResponse.status, 200);
+    const replay = await replayResponse.json();
+    assert.equal(replay.status, "codex_done");
+    assert.equal(replay.messages.at(-1).text, "這是經由 App Server 事件保存的最終回覆。");
+
+    const legacyRead = await fetch(`${origin}/api/work-items/primary`);
+    assert.equal(legacyRead.status, 409);
+    assert.equal((await legacyRead.json()).code, "PRIMARY_CONVERSATION_ROUTE_REQUIRED");
+    const legacyVerify = await fetch(`${origin}/api/work-items/primary/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ notes: "must not mutate the conversation" }),
+    });
+    assert.equal(legacyVerify.status, 409);
+    assert.equal((await legacyVerify.json()).code, "PRIMARY_CONVERSATION_ROUTE_REQUIRED");
+    assert.equal((await (await fetch(`${origin}/api/conversation`)).json()).status, "codex_done");
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the conversation HTTP API rejects a newer ID while an earlier durable claim is unresolved", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-conversation-order-http-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    const project = application.service.createProject({ name: "HTTP claim order", rootPath: directory });
+    const seedFence = acquirePrimaryConversationFence(application.store, project.id);
+    application.store.claimPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "http-ordered-message-001",
+      text: "這一則已保存但尚未 accepted。",
+      fence: seedFence,
+    });
+    application.store.updateWorkItem("primary", {
+      status: "failed",
+      failure_summary: "模擬 thread/start 前停止",
+    }, seedFence);
+    application.store.releasePrimaryConversationLease(seedFence);
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        clientMessageId: "http-ordered-message-002",
+        text: "這一則不得越過前一則。",
+      }),
+    });
+    assert.equal(response.status, 409);
+    assert.equal((await response.json()).code, "CONVERSATION_BUSY");
+    assert.equal(codex.threadStarts.length, 0);
+    assert.equal(codex.turnStarts.length, 0);
+    assert.equal(application.store.listEvents("primary")
+      .filter(({ kind }) => kind === "conversation_message_claimed").length, 1);
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

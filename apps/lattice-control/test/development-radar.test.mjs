@@ -147,9 +147,46 @@ test("a version 1 Control database migrates in place without losing existing dat
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 2);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 4);
     assert.equal(store.listProjects().length, 1);
     assert.equal(store.getDevelopmentRadar(), null);
+  } finally {
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a version 3 Control database gains a monotonic conversation fence generation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-fence-migration-"));
+  const databasePath = path.join(directory, "control.db");
+  let store;
+  try {
+    store = new LatticeStore(databasePath);
+    store.close();
+    store = null;
+
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      DROP TABLE conversation_writer_leases;
+      CREATE TABLE conversation_writer_leases (
+        conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
+          CHECK (conversation_id = 'primary'),
+        owner_id TEXT NOT NULL CHECK (length(owner_id) BETWEEN 1 AND 128),
+        owner_pid INTEGER NOT NULL CHECK (owner_pid > 0),
+        lease_expires_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      PRAGMA user_version = 3;
+    `);
+    legacy.close();
+
+    store = new LatticeStore(databasePath);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 4);
+    assert.deepEqual(
+      store.database.prepare("PRAGMA table_info(conversation_writer_leases)").all()
+        .map(({ name }) => name),
+      ["conversation_id", "owner_id", "owner_pid", "lease_expires_at", "updated_at", "generation"],
+    );
   } finally {
     store?.close();
     await rm(directory, { recursive: true, force: true });
