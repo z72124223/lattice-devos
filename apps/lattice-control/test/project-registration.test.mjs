@@ -868,7 +868,7 @@ test("future and drifted Control schemas fail closed before mutation and release
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-project-schema-"));
   try {
     for (const [filename, version, malformedV0] of [
-      ["future.db", 5, false],
+      ["future.db", 6, false],
       ["negative.db", -1, false],
       ["drifted.db", 1, false],
       ["malformed-v0.db", 0, true],
@@ -1004,7 +1004,7 @@ test("legacy Control data migrates in place and a fresh process reads the same r
     };
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 4);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
     const registered = store.registerProject({ name: "Migrated", inspection });
     assert.equal(registered.created, false);
     assert.equal(registered.project.id, legacyId);

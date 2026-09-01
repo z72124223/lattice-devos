@@ -147,7 +147,7 @@ test("a version 1 Control database migrates in place without losing existing dat
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 4);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
     assert.equal(store.listProjects().length, 1);
     assert.equal(store.getDevelopmentRadar(), null);
   } finally {
@@ -181,7 +181,7 @@ test("a version 3 Control database gains a monotonic conversation fence generati
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 4);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
     assert.deepEqual(
       store.database.prepare("PRAGMA table_info(conversation_writer_leases)").all()
         .map(({ name }) => name),

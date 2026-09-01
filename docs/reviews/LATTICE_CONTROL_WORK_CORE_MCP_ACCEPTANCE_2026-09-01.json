@@ -1,0 +1,51 @@
+{
+  "schema_version": "lattice.control.work-core-mcp-acceptance.v1",
+  "generated_at": "2026-09-01T02:42:37.227Z",
+  "result": "PASS",
+  "transport": "DIRECT_STDIO_REAL_CHILD",
+  "source": {
+    "kind": "TEMP_CONTROL_SQLITE_REAL_STORE",
+    "control_schema_version": 5,
+    "authority": "CONTROL_LOCAL_PRODUCT_STATE",
+    "database_path_included": false
+  },
+  "protocol": {
+    "initialized": true,
+    "server_name": "lattice-control-work-core",
+    "tools_listed": [
+      "lattice_control_work_snapshot",
+      "lattice_control_work_node"
+    ],
+    "snapshot_called": true,
+    "node_called": true
+  },
+  "shared_projection_identity": {
+    "revision": "64ed1c081b48849356b4cc64a83ac529f4660f883a3088dac3b5743a8912b555",
+    "digest": "364276ae33fccfd5f37917cf461e3860d81b3c264869e808e4993c335ff130e5",
+    "tree_graph_revision_equal": true,
+    "tree_graph_digest_equal": true,
+    "node_identity_equal": true
+  },
+  "observed_work": {
+    "node_count": 3,
+    "root_count": 2,
+    "dependency_count": 1,
+    "reverse_dependency_proven": true,
+    "blocker_reason_kinds": [
+      "explicit",
+      "dependency"
+    ]
+  },
+  "bounds": {
+    "request_timeout_ms": 5000,
+    "requested_max_nodes": 10,
+    "requested_max_edges": 20,
+    "response_count": 4,
+    "stdout_bytes": 5998,
+    "maximum_stdout_frame_bytes": 2984,
+    "stderr_bytes": 0
+  },
+  "process": {
+    "exit_code": 0
+  }
+}

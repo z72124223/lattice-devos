@@ -38,7 +38,37 @@ const developmentRadarActions = new Set([
   "ADOPT_OSS",
   "FREEZE_LATTICE",
 ]);
-const controlSchemaVersion = 4;
+const controlSchemaVersion = 5;
+const workCoreSchemaSql = `
+  CREATE INDEX IF NOT EXISTS work_items_project_id_id
+  ON work_items(project_id, id);
+
+  CREATE TABLE IF NOT EXISTS work_item_relations (
+    work_item_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE,
+    parent_work_item_id TEXT REFERENCES work_items(id) ON DELETE RESTRICT,
+    blocker_status TEXT NOT NULL CHECK (blocker_status IN ('clear', 'blocked')),
+    blocker_reason TEXT,
+    CHECK (parent_work_item_id IS NULL OR parent_work_item_id <> work_item_id),
+    CHECK (
+      (blocker_status = 'clear' AND blocker_reason IS NULL)
+      OR (blocker_status = 'blocked' AND length(blocker_reason) BETWEEN 1 AND 2048)
+    )
+  );
+
+  CREATE INDEX IF NOT EXISTS work_item_relations_parent
+  ON work_item_relations(parent_work_item_id);
+
+  CREATE TABLE IF NOT EXISTS work_item_dependencies (
+    work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
+    depends_on_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE RESTRICT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (work_item_id, depends_on_work_item_id),
+    CHECK (work_item_id <> depends_on_work_item_id)
+  );
+
+  CREATE INDEX IF NOT EXISTS work_item_dependencies_reverse
+  ON work_item_dependencies(depends_on_work_item_id);
+`;
 const projectCatalogSchemaVersion = "lattice.control.project-catalog.v1";
 const projectCatalogRecordKind = "CONTROL_LOCAL_CATALOG";
 const legacyProjectRecordKind = "LEGACY_CONTROL_PROJECT";
@@ -480,6 +510,12 @@ const schemaColumns = new Map([
     "failure_summary", "archived_at", "created_at", "updated_at",
   ]],
   ["work_events", ["id", "work_item_id", "kind", "payload_json", "created_at"]],
+  ["work_item_relations", [
+    "work_item_id", "parent_work_item_id", "blocker_status", "blocker_reason",
+  ]],
+  ["work_item_dependencies", [
+    "work_item_id", "depends_on_work_item_id", "created_at",
+  ]],
   ["conversation_writer_leases", [
     "conversation_id", "owner_id", "owner_pid", "lease_expires_at", "updated_at", "generation",
   ]],
@@ -513,6 +549,14 @@ const schemaColumns = new Map([
 const schemaForeignKeys = new Map([
   ["work_items", [["project_id", "projects", "id", "CASCADE"]]],
   ["work_events", [["work_item_id", "work_items", "id", "CASCADE"]]],
+  ["work_item_relations", [
+    ["parent_work_item_id", "work_items", "id", "RESTRICT"],
+    ["work_item_id", "work_items", "id", "CASCADE"],
+  ]],
+  ["work_item_dependencies", [
+    ["depends_on_work_item_id", "work_items", "id", "RESTRICT"],
+    ["work_item_id", "work_items", "id", "CASCADE"],
+  ]],
   ["conversation_writer_leases", [["conversation_id", "work_items", "id", "CASCADE"]]],
   ["installation_receipts", [["project_id", "projects", "id", "NO ACTION"]]],
   ["project_registration_details", [["project_id", "projects", "id", "CASCADE"]]],
@@ -527,6 +571,23 @@ function quotedIdentifier(value) {
 
 function schemaProfileFailure(detail) {
   throw new Error(`Control database schema profile mismatch: ${detail}`);
+}
+
+function validateLegacyWorkCoreMigrationBase(database) {
+  const requiredTables = ["projects", "work_events", "work_items"];
+  const actualTables = database.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN (?, ?, ?)
+    ORDER BY name
+  `).all(...requiredTables).map(({ name }) => name);
+  if (JSON.stringify(actualTables) !== JSON.stringify(requiredTables)) {
+    schemaProfileFailure("legacy base tables");
+  }
+  const workItemColumns = new Set(database.prepare("PRAGMA table_info(work_items)")
+    .all().map(({ name }) => name));
+  if (!workItemColumns.has("id") || !workItemColumns.has("project_id")) {
+    schemaProfileFailure("legacy work_items columns");
+  }
 }
 
 function normalizeSchemaSql(value) {
@@ -797,6 +858,7 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
       );
 
     `);
+    database.exec(workCoreSchemaSql);
     if (validateProfile) validateControlSchemaProfile(database);
     database.exec(`PRAGMA user_version = ${controlSchemaVersion};`);
     database.exec("COMMIT;");
@@ -806,9 +868,10 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
   }
 }
 
-function migrateControlDatabaseV1ToV4(database) {
+function migrateControlDatabaseV1ToV5(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
+    validateLegacyWorkCoreMigrationBase(database);
     database.exec(`
       CREATE TABLE development_radar (
         slot TEXT PRIMARY KEY CHECK (slot = 'current'),
@@ -834,8 +897,9 @@ function migrateControlDatabaseV1ToV4(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 4;
+      PRAGMA user_version = 5;
     `);
+    database.exec(workCoreSchemaSql);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -844,9 +908,10 @@ function migrateControlDatabaseV1ToV4(database) {
   }
 }
 
-function migrateControlDatabaseV2ToV4(database) {
+function migrateControlDatabaseV2ToV5(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
+    validateLegacyWorkCoreMigrationBase(database);
     database.exec(`
       CREATE TABLE IF NOT EXISTS conversation_writer_leases (
         conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
@@ -857,8 +922,9 @@ function migrateControlDatabaseV2ToV4(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 4;
+      PRAGMA user_version = 5;
     `);
+    database.exec(workCoreSchemaSql);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -867,9 +933,10 @@ function migrateControlDatabaseV2ToV4(database) {
   }
 }
 
-function migrateControlDatabaseV3ToV4(database) {
+function migrateControlDatabaseV3ToV5(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
+    validateLegacyWorkCoreMigrationBase(database);
     database.exec(`
       ALTER TABLE conversation_writer_leases RENAME TO conversation_writer_leases_v3;
       CREATE TABLE conversation_writer_leases (
@@ -887,8 +954,23 @@ function migrateControlDatabaseV3ToV4(database) {
       SELECT conversation_id, owner_id, owner_pid, lease_expires_at, updated_at, 1
       FROM conversation_writer_leases_v3;
       DROP TABLE conversation_writer_leases_v3;
-      PRAGMA user_version = 4;
+      PRAGMA user_version = 5;
     `);
+    database.exec(workCoreSchemaSql);
+    validateControlSchemaProfile(database);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV4ToV5(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    validateLegacyWorkCoreMigrationBase(database);
+    database.exec(workCoreSchemaSql);
+    database.exec("PRAGMA user_version = 5;");
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -974,6 +1056,479 @@ function workItemChangeEntries(changes) {
   return entries;
 }
 
+const controlWorkSnapshotSchemaVersion = "lattice.control.work-snapshot.v1";
+const controlWorkTreeSchemaVersion = "lattice.control.work-tree.v1";
+const controlWorkGraphSchemaVersion = "lattice.control.work-graph.v1";
+const controlWorkNodeSchemaVersion = "lattice.control.work-node.v1";
+const controlWorkSource = Object.freeze({
+  kind: "CONTROL_SQLITE_WORK_ITEMS",
+  authority: "CONTROL_LOCAL_PRODUCT_STATE",
+});
+const controlWorkDefaultMaxNodes = 100;
+const controlWorkDefaultMaxEdges = 400;
+const controlWorkMaximumNodes = 256;
+const controlWorkMaximumEdges = 1_024;
+const controlWorkMaximumDependencies = 64;
+const controlWorkMaximumDepth = 64;
+// Leave deterministic headroom for the MCP JSON-RPC envelope around structuredContent.
+const controlWorkMaximumOutputBytes = 1_000_000;
+const satisfiedDependencyStatuses = new Set(["verified", "archived"]);
+
+function controlWorkError(code, message, status = 409) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function normalizedWorkCoreId(value, label) {
+  const id = requireText(value, label);
+  if (id.length > 128 || !/^[A-Za-z0-9._:-]+$/u.test(id)) {
+    throw controlWorkError(
+      "CONTROL_WORK_ID_REJECTED",
+      `${label} must contain 1-128 safe ASCII characters`,
+      400,
+    );
+  }
+  if (id === primaryConversationId) {
+    throw controlWorkError(
+      "CONTROL_WORK_PRIMARY_CONVERSATION_REJECTED",
+      "the primary conversation is not a work-core node",
+      400,
+    );
+  }
+  return id;
+}
+
+function normalizedWorkBound(value, fallback, maximum, label) {
+  const bound = value ?? fallback;
+  if (!Number.isSafeInteger(bound) || bound < 1 || bound > maximum) {
+    throw controlWorkError(
+      "CONTROL_WORK_BOUND_REJECTED",
+      `${label} must be an integer from 1 to ${maximum}`,
+      400,
+    );
+  }
+  return bound;
+}
+
+function normalizedWorkText(value, label, maximumBytes, { nullable = false } = {}) {
+  if (nullable && value == null) return null;
+  const text = requireText(value, label);
+  if (
+    Buffer.byteLength(text, "utf8") > maximumBytes
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(text)
+  ) {
+    throw controlWorkError(
+      "CONTROL_WORK_TEXT_REJECTED",
+      `${label} is too large or contains unsafe control characters`,
+    );
+  }
+  return text;
+}
+
+function normalizedWorkDigest(value, label) {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw controlWorkError(
+      "CONTROL_WORK_REVISION_REJECTED",
+      `${label} must be a lowercase SHA-256 digest`,
+      400,
+    );
+  }
+  return value;
+}
+
+function normalizedBlocker(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw controlWorkError("CONTROL_WORK_BLOCKER_REJECTED", "blocker is required", 400);
+  }
+  const keys = Object.keys(value).sort();
+  if (value.status === "clear") {
+    if (JSON.stringify(keys) !== JSON.stringify(["status"])) {
+      throw controlWorkError(
+        "CONTROL_WORK_BLOCKER_REJECTED",
+        "a clear blocker cannot include a reason",
+        400,
+      );
+    }
+    return { status: "clear", reason: null };
+  }
+  if (
+    value.status !== "blocked"
+    || JSON.stringify(keys) !== JSON.stringify(["reason", "status"])
+  ) {
+    throw controlWorkError(
+      "CONTROL_WORK_BLOCKER_REJECTED",
+      "blocker must be exactly clear or blocked with one reason",
+      400,
+    );
+  }
+  return {
+    status: "blocked",
+    reason: normalizedWorkText(value.reason, "blocker reason", 2_048),
+  };
+}
+
+function workSnapshotHash(value) {
+  return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
+}
+
+function assertWorkGraphAcyclic(nodeIds, adjacency, code, label) {
+  const complete = new Set();
+  const active = new Set();
+  function visit(id, depth) {
+    if (depth > controlWorkMaximumDepth) {
+      throw controlWorkError(
+        "CONTROL_WORK_DEPTH_LIMIT_EXCEEDED",
+        `work ${label} exceeds the maximum depth`,
+      );
+    }
+    if (active.has(id)) throw controlWorkError(code, `work ${label} contains a cycle`);
+    if (complete.has(id)) return;
+    active.add(id);
+    for (const next of adjacency.get(id) ?? []) visit(next, depth + 1);
+    active.delete(id);
+    complete.add(id);
+  }
+  for (const id of nodeIds) visit(id, 1);
+}
+
+function readControlWorkSnapshot(database, {
+  projectId,
+  maxNodes = controlWorkDefaultMaxNodes,
+  maxEdges = controlWorkDefaultMaxEdges,
+}) {
+  const normalizedProjectId = normalizedWorkCoreId(projectId, "project ID");
+  const nodeLimit = normalizedWorkBound(
+    maxNodes,
+    controlWorkDefaultMaxNodes,
+    controlWorkMaximumNodes,
+    "work node limit",
+  );
+  const edgeLimit = normalizedWorkBound(
+    maxEdges,
+    controlWorkDefaultMaxEdges,
+    controlWorkMaximumEdges,
+    "work edge limit",
+  );
+  if (!database.prepare("SELECT 1 FROM projects WHERE id = ?").get(normalizedProjectId)) {
+    throw controlWorkError("CONTROL_WORK_PROJECT_NOT_FOUND", "Control project not found", 404);
+  }
+
+  const nodeRows = database.prepare(`
+    SELECT id, project_id, title, objective, priority, status, progress, updated_at
+    FROM work_items
+    WHERE project_id = ? AND id <> 'primary'
+    ORDER BY id ASC
+    LIMIT ?
+  `).all(normalizedProjectId, nodeLimit + 1);
+  if (nodeRows.length > nodeLimit) {
+    throw controlWorkError(
+      "CONTROL_WORK_NODE_LIMIT_EXCEEDED",
+      `Control work snapshot exceeds ${nodeLimit} nodes`,
+    );
+  }
+  const nodes = nodeRows.map((row) => {
+    const id = normalizedWorkCoreId(row.id, "work item ID");
+    if (!priorities.has(row.priority) || !statuses.has(row.status)) {
+      throw controlWorkError(
+        "CONTROL_WORK_NODE_STATE_REJECTED",
+        `Control work item ${id} has an invalid state`,
+      );
+    }
+    return {
+      id,
+      title: normalizedWorkText(row.title, "work item title", 512),
+      objective: normalizedWorkText(row.objective, "work item objective", 4_096),
+      priority: row.priority,
+      status: row.status,
+      progress: normalizedWorkText(row.progress, "work item progress", 4_096, { nullable: true }),
+      updated_at: normalizedWorkText(row.updated_at, "work item update time", 128),
+    };
+  });
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const primaryConversation = database.prepare(
+    "SELECT project_id FROM work_items WHERE id = ?",
+  ).get(primaryConversationId);
+  if (primaryConversation?.project_id === normalizedProjectId) {
+    const reservedRelation = database.prepare(`
+      SELECT 1 FROM work_item_relations
+      WHERE work_item_id = ? LIMIT 1
+    `).get(primaryConversationId) || database.prepare(`
+      SELECT 1 FROM work_item_relations
+      WHERE parent_work_item_id = ? LIMIT 1
+    `).get(primaryConversationId);
+    const reservedDependency = database.prepare(`
+      SELECT 1 FROM work_item_dependencies
+      WHERE work_item_id = ? LIMIT 1
+    `).get(primaryConversationId) || database.prepare(`
+      SELECT 1 FROM work_item_dependencies
+      WHERE depends_on_work_item_id = ? LIMIT 1
+    `).get(primaryConversationId);
+    if (reservedRelation || reservedDependency) {
+      throw controlWorkError(
+        "CONTROL_WORK_PRIMARY_CONVERSATION_REJECTED",
+        "the primary conversation cannot participate in work-core relations",
+      );
+    }
+  }
+  const nodeIds = nodes.map(({ id }) => id);
+  let relationRows = [];
+  let dependencyRows = [];
+  if (nodeIds.length > 0) {
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    relationRows = database.prepare(`
+      SELECT
+        relations.work_item_id,
+        relations.parent_work_item_id,
+        relations.blocker_status,
+        relations.blocker_reason,
+        child.project_id AS child_project_id,
+        parent.project_id AS parent_project_id
+      FROM work_item_relations AS relations
+      LEFT JOIN work_items AS child ON child.id = relations.work_item_id
+      LEFT JOIN work_items AS parent ON parent.id = relations.parent_work_item_id
+      WHERE relations.work_item_id IN (${placeholders})
+      ORDER BY relations.work_item_id ASC
+      LIMIT ?
+    `).all(...nodeIds, nodeLimit + 1);
+    const invalidIncomingRelation = database.prepare(`
+      SELECT child.id AS child_id
+      FROM work_item_relations AS relations
+      LEFT JOIN work_items AS child ON child.id = relations.work_item_id
+      WHERE relations.parent_work_item_id IN (${placeholders})
+        AND (child.id IS NULL OR child.project_id <> ?)
+      LIMIT 1
+    `).get(...nodeIds, normalizedProjectId);
+    if (invalidIncomingRelation) {
+      throw controlWorkError(
+        invalidIncomingRelation.child_id == null
+          ? "CONTROL_WORK_ORPHAN_REJECTED"
+          : "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+        "incoming parent relation must originate in the same Control project",
+      );
+    }
+
+    dependencyRows = database.prepare(`
+      SELECT
+        dependencies.work_item_id,
+        dependencies.depends_on_work_item_id,
+        child.project_id AS child_project_id,
+        prerequisite.project_id AS prerequisite_project_id
+      FROM work_item_dependencies AS dependencies
+      LEFT JOIN work_items AS child ON child.id = dependencies.work_item_id
+      LEFT JOIN work_items AS prerequisite
+        ON prerequisite.id = dependencies.depends_on_work_item_id
+      WHERE dependencies.work_item_id IN (${placeholders})
+      ORDER BY dependencies.work_item_id ASC, dependencies.depends_on_work_item_id ASC
+      LIMIT ?
+    `).all(...nodeIds, edgeLimit + 1);
+    if (dependencyRows.length > edgeLimit) {
+      throw controlWorkError(
+        "CONTROL_WORK_EDGE_LIMIT_EXCEEDED",
+        `Control work snapshot exceeds ${edgeLimit} edges`,
+      );
+    }
+    const invalidIncomingDependency = database.prepare(`
+      SELECT child.id AS child_id
+      FROM work_item_dependencies AS dependencies
+      LEFT JOIN work_items AS child ON child.id = dependencies.work_item_id
+      WHERE dependencies.depends_on_work_item_id IN (${placeholders})
+        AND (child.id IS NULL OR child.project_id <> ?)
+      LIMIT 1
+    `).get(...nodeIds, normalizedProjectId);
+    if (invalidIncomingDependency) {
+      throw controlWorkError(
+        invalidIncomingDependency.child_id == null
+          ? "CONTROL_WORK_ORPHAN_REJECTED"
+          : "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+        "incoming dependency must originate in the same Control project",
+      );
+    }
+  }
+  const parentEdgeCount = relationRows.filter(({ parent_work_item_id: parentId }) => parentId).length;
+  if (parentEdgeCount + dependencyRows.length > edgeLimit) {
+    throw controlWorkError(
+      "CONTROL_WORK_EDGE_LIMIT_EXCEEDED",
+      `Control work snapshot exceeds ${edgeLimit} edges`,
+    );
+  }
+
+  const relations = relationRows.map((row) => {
+    const workItemId = normalizedWorkCoreId(row.work_item_id, "work item ID");
+    if (!nodeById.has(workItemId)) {
+      throw controlWorkError("CONTROL_WORK_ORPHAN_REJECTED", "work relation has no project node");
+    }
+    const parentId = row.parent_work_item_id == null
+      ? null
+      : normalizedWorkCoreId(row.parent_work_item_id, "parent work item ID");
+    if (
+      row.child_project_id !== normalizedProjectId
+      || (parentId != null
+        && (!nodeById.has(parentId) || row.parent_project_id !== normalizedProjectId))
+    ) {
+      throw controlWorkError(
+        "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+        "parent work item must exist in the same Control project",
+      );
+    }
+    if (row.blocker_status === "clear" && row.blocker_reason !== null) {
+      throw controlWorkError(
+        "CONTROL_WORK_BLOCKER_REJECTED",
+        "a clear stored blocker cannot include a reason",
+      );
+    }
+    if (row.blocker_status !== "clear" && row.blocker_status !== "blocked") {
+      throw controlWorkError(
+        "CONTROL_WORK_BLOCKER_REJECTED",
+        "stored blocker status is invalid",
+      );
+    }
+    const blocker = normalizedBlocker(row.blocker_status === "clear"
+      ? { status: "clear" }
+      : { status: "blocked", reason: row.blocker_reason });
+    return {
+      work_item_id: workItemId,
+      parent_work_item_id: parentId,
+      blocker_status: blocker.status,
+      blocker_reason: blocker.reason,
+    };
+  });
+  const dependencies = dependencyRows.map((row) => {
+    const workItemId = normalizedWorkCoreId(row.work_item_id, "work item ID");
+    const dependsOnId = normalizedWorkCoreId(
+      row.depends_on_work_item_id,
+      "dependency work item ID",
+    );
+    if (
+      !nodeById.has(workItemId)
+      || !nodeById.has(dependsOnId)
+      || row.child_project_id !== normalizedProjectId
+      || row.prerequisite_project_id !== normalizedProjectId
+    ) {
+      throw controlWorkError(
+        "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+        "dependency work item must exist in the same Control project",
+      );
+    }
+    return { work_item_id: workItemId, depends_on_work_item_id: dependsOnId };
+  });
+
+  const parentByChild = new Map();
+  const childrenByParent = new Map(nodes.map(({ id }) => [id, []]));
+  for (const relation of relations) {
+    if (!relation.parent_work_item_id) continue;
+    parentByChild.set(relation.work_item_id, relation.parent_work_item_id);
+    childrenByParent.get(relation.parent_work_item_id).push(relation.work_item_id);
+  }
+  const dependsOnByNode = new Map(nodes.map(({ id }) => [id, []]));
+  const reverseByNode = new Map(nodes.map(({ id }) => [id, []]));
+  for (const dependency of dependencies) {
+    dependsOnByNode.get(dependency.work_item_id).push(dependency.depends_on_work_item_id);
+    reverseByNode.get(dependency.depends_on_work_item_id).push(dependency.work_item_id);
+  }
+  for (const values of [...childrenByParent.values(), ...dependsOnByNode.values(), ...reverseByNode.values()]) {
+    values.sort();
+  }
+  assertWorkGraphAcyclic(
+    nodeById.keys(),
+    new Map([...parentByChild].map(([childId, parentId]) => [childId, [parentId]])),
+    "CONTROL_WORK_HIERARCHY_CYCLE_REJECTED",
+    "hierarchy",
+  );
+  assertWorkGraphAcyclic(
+    nodeById.keys(),
+    dependsOnByNode,
+    "CONTROL_WORK_DEPENDENCY_CYCLE_REJECTED",
+    "dependency graph",
+  );
+
+  const relationByNode = new Map(relations.map((relation) => [relation.work_item_id, relation]));
+  const blockerFor = (id) => {
+    const relation = relationByNode.get(id);
+    const reasons = [];
+    if (relation?.blocker_status === "blocked") {
+      reasons.push({ kind: "explicit", reason: relation.blocker_reason });
+    }
+    for (const dependencyId of dependsOnByNode.get(id)) {
+      const dependencyStatus = nodeById.get(dependencyId).status;
+      if (!satisfiedDependencyStatuses.has(dependencyStatus)) {
+        reasons.push({ kind: "dependency", work_item_id: dependencyId, status: dependencyStatus });
+      }
+    }
+    return { status: reasons.length > 0 ? "blocked" : "clear", reasons };
+  };
+
+  const sourceRows = {
+    schema_version: "lattice.control.work-source.v1",
+    project_id: normalizedProjectId,
+    nodes,
+    relations,
+    dependencies,
+  };
+  const revision = workSnapshotHash(sourceRows);
+  const treeNodes = nodes.map((node) => ({
+    id: node.id,
+    title: node.title,
+    objective: node.objective,
+    priority: node.priority,
+    status: node.status,
+    progress: node.progress,
+    parent_id: parentByChild.get(node.id) ?? null,
+    children: childrenByParent.get(node.id),
+    blocker: blockerFor(node.id),
+  }));
+  const graphNodes = nodes.map((node) => ({
+    id: node.id,
+    title: node.title,
+    status: node.status,
+    depends_on: dependsOnByNode.get(node.id),
+    reverse_dependents: reverseByNode.get(node.id),
+    blocker: blockerFor(node.id),
+  }));
+  const treeProjection = {
+    schema_version: controlWorkTreeSchemaVersion,
+    roots: treeNodes.filter(({ parent_id: parentId }) => parentId == null).map(({ id }) => id),
+    nodes: treeNodes,
+  };
+  const graphProjection = {
+    schema_version: controlWorkGraphSchemaVersion,
+    nodes: graphNodes,
+  };
+  const digest = workSnapshotHash({
+    schema_version: controlWorkSnapshotSchemaVersion,
+    project_id: normalizedProjectId,
+    revision,
+    tree: treeProjection,
+    graph: graphProjection,
+  });
+  const snapshot = {
+    schema_version: controlWorkSnapshotSchemaVersion,
+    source: { ...controlWorkSource },
+    project_id: normalizedProjectId,
+    revision,
+    digest,
+    tree: { ...treeProjection, revision, digest },
+    graph: { ...graphProjection, revision, digest },
+  };
+  if (
+    snapshot.tree.revision !== snapshot.graph.revision
+    || snapshot.tree.digest !== snapshot.graph.digest
+  ) {
+    throw controlWorkError(
+      "CONTROL_WORK_PROJECTION_REVISION_MISMATCH",
+      "Control work projections do not share one revision and digest",
+    );
+  }
+  if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > controlWorkMaximumOutputBytes) {
+    throw controlWorkError(
+      "CONTROL_WORK_OUTPUT_LIMIT_EXCEEDED",
+      "Control work snapshot exceeds the response limit",
+    );
+  }
+  return snapshot;
+}
+
 export class LatticeStore {
   constructor(databasePath = ":memory:") {
     if (databasePath !== ":memory:") {
@@ -982,15 +1537,16 @@ export class LatticeStore {
     const database = new DatabaseSync(databasePath);
     try {
       const version = database.prepare("PRAGMA user_version").get().user_version;
-      if (![0, 1, 2, 3, controlSchemaVersion].includes(version)) {
+      if (![0, 1, 2, 3, 4, controlSchemaVersion].includes(version)) {
         throw new Error(
-          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, or ${controlSchemaVersion}`,
+          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, 4, or ${controlSchemaVersion}`,
         );
       }
       if (version === 0) initializeControlDatabase(database);
-      else if (version === 1) migrateControlDatabaseV1ToV4(database);
-      else if (version === 2) migrateControlDatabaseV2ToV4(database);
-      else if (version === 3) migrateControlDatabaseV3ToV4(database);
+      else if (version === 1) migrateControlDatabaseV1ToV5(database);
+      else if (version === 2) migrateControlDatabaseV2ToV5(database);
+      else if (version === 3) migrateControlDatabaseV3ToV5(database);
+      else if (version === 4) migrateControlDatabaseV4ToV5(database);
       else validateControlSchemaProfile(database);
       database.exec("PRAGMA foreign_keys = ON;");
       if (databasePath !== ":memory:") database.exec("PRAGMA journal_mode = WAL;");
@@ -2317,6 +2873,240 @@ export class LatticeStore {
       this.database.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  setWorkRelations({
+    projectId,
+    workItemId,
+    parentId = null,
+    dependsOn = [],
+    blocker = { status: "clear" },
+    expectedRevision,
+    expectedDigest,
+  }) {
+    const normalizedProjectId = normalizedWorkCoreId(projectId, "project ID");
+    const normalizedWorkItemId = normalizedWorkCoreId(workItemId, "work item ID");
+    const normalizedParentId = parentId == null
+      ? null
+      : normalizedWorkCoreId(parentId, "parent work item ID");
+    if (!Array.isArray(dependsOn) || dependsOn.length > controlWorkMaximumDependencies) {
+      throw controlWorkError(
+        "CONTROL_WORK_DEPENDENCY_LIMIT_REJECTED",
+        `dependsOn must contain at most ${controlWorkMaximumDependencies} work item IDs`,
+        400,
+      );
+    }
+    const normalizedDependencies = dependsOn
+      .map((id) => normalizedWorkCoreId(id, "dependency work item ID"))
+      .sort();
+    if (new Set(normalizedDependencies).size !== normalizedDependencies.length) {
+      throw controlWorkError(
+        "CONTROL_WORK_DUPLICATE_DEPENDENCY_REJECTED",
+        "duplicate dependency edges are not allowed",
+        400,
+      );
+    }
+    if (normalizedParentId === normalizedWorkItemId) {
+      throw controlWorkError(
+        "CONTROL_WORK_SELF_PARENT_REJECTED",
+        "a work item cannot be its own parent",
+        400,
+      );
+    }
+    if (normalizedDependencies.includes(normalizedWorkItemId)) {
+      throw controlWorkError(
+        "CONTROL_WORK_SELF_DEPENDENCY_REJECTED",
+        "a work item cannot depend on itself",
+        400,
+      );
+    }
+    const normalizedBlockerValue = normalizedBlocker(blocker);
+    const normalizedExpectedRevision = normalizedWorkDigest(expectedRevision, "expected revision");
+    const normalizedExpectedDigest = normalizedWorkDigest(expectedDigest, "expected digest");
+
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const before = readControlWorkSnapshot(this.database, {
+        projectId: normalizedProjectId,
+        maxNodes: controlWorkMaximumNodes,
+        maxEdges: controlWorkMaximumEdges,
+      });
+      const target = this.database.prepare(
+        "SELECT project_id FROM work_items WHERE id = ?",
+      ).get(normalizedWorkItemId);
+      if (!target) {
+        throw controlWorkError(
+          "CONTROL_WORK_NODE_NOT_FOUND",
+          `Control work item ${normalizedWorkItemId} was not found`,
+          404,
+        );
+      }
+      if (target.project_id !== normalizedProjectId) {
+        throw controlWorkError(
+          "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+          "work relations cannot cross Control projects",
+        );
+      }
+      const currentRelation = this.database.prepare(`
+        SELECT parent_work_item_id, blocker_status, blocker_reason
+        FROM work_item_relations WHERE work_item_id = ?
+      `).get(normalizedWorkItemId) ?? {
+        parent_work_item_id: null,
+        blocker_status: "clear",
+        blocker_reason: null,
+      };
+      const currentDependencies = this.database.prepare(`
+        SELECT depends_on_work_item_id
+        FROM work_item_dependencies
+        WHERE work_item_id = ?
+        ORDER BY depends_on_work_item_id ASC
+      `).all(normalizedWorkItemId).map(({ depends_on_work_item_id: id }) => id);
+      if (
+        before.revision !== normalizedExpectedRevision
+        || before.digest !== normalizedExpectedDigest
+      ) {
+        throw controlWorkError(
+          "CONTROL_WORK_REVISION_MISMATCH",
+          "Control work state changed before the relation mutation",
+        );
+      }
+      const alreadyApplied = currentRelation.parent_work_item_id === normalizedParentId
+        && currentRelation.blocker_status === normalizedBlockerValue.status
+        && currentRelation.blocker_reason === normalizedBlockerValue.reason
+        && JSON.stringify(currentDependencies) === JSON.stringify(normalizedDependencies);
+      if (alreadyApplied) {
+        this.database.exec("COMMIT;");
+        return { changed: false, snapshot: before };
+      }
+
+      const referencedIds = [normalizedWorkItemId, normalizedParentId, ...normalizedDependencies]
+        .filter((id) => id != null);
+      for (const id of referencedIds) {
+        const item = this.database.prepare(
+          "SELECT project_id FROM work_items WHERE id = ?",
+        ).get(id);
+        if (!item) {
+          throw controlWorkError(
+            "CONTROL_WORK_NODE_NOT_FOUND",
+            `Control work item ${id} was not found`,
+            404,
+          );
+        }
+        if (item.project_id !== normalizedProjectId) {
+          throw controlWorkError(
+            "CONTROL_WORK_CROSS_PROJECT_REJECTED",
+            "work relations cannot cross Control projects",
+          );
+        }
+      }
+
+      if (normalizedParentId == null && normalizedBlockerValue.status === "clear") {
+        this.database.prepare(
+          "DELETE FROM work_item_relations WHERE work_item_id = ?",
+        ).run(normalizedWorkItemId);
+      } else {
+        this.database.prepare(`
+          INSERT INTO work_item_relations (
+            work_item_id, parent_work_item_id, blocker_status, blocker_reason
+          ) VALUES (?, ?, ?, ?)
+          ON CONFLICT(work_item_id) DO UPDATE SET
+            parent_work_item_id = excluded.parent_work_item_id,
+            blocker_status = excluded.blocker_status,
+            blocker_reason = excluded.blocker_reason
+        `).run(
+          normalizedWorkItemId,
+          normalizedParentId,
+          normalizedBlockerValue.status,
+          normalizedBlockerValue.reason,
+        );
+      }
+      this.database.prepare(
+        "DELETE FROM work_item_dependencies WHERE work_item_id = ?",
+      ).run(normalizedWorkItemId);
+      const insertDependency = this.database.prepare(`
+        INSERT INTO work_item_dependencies (
+          work_item_id, depends_on_work_item_id, created_at
+        ) VALUES (?, ?, ?)
+      `);
+      const timestamp = now();
+      for (const dependencyId of normalizedDependencies) {
+        insertDependency.run(normalizedWorkItemId, dependencyId, timestamp);
+      }
+
+      const after = readControlWorkSnapshot(this.database, {
+        projectId: normalizedProjectId,
+        maxNodes: controlWorkMaximumNodes,
+        maxEdges: controlWorkMaximumEdges,
+      });
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, 'work_relations_set', ?, ?)
+      `).run(
+        normalizedWorkItemId,
+        JSON.stringify({
+          parentId: normalizedParentId,
+          dependsOn: normalizedDependencies,
+          blocker: normalizedBlockerValue,
+          revision: after.revision,
+          digest: after.digest,
+        }),
+        timestamp,
+      );
+      this.database.exec("COMMIT;");
+      return { changed: true, snapshot: after };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  getWorkSnapshot(input) {
+    this.database.exec("BEGIN;");
+    try {
+      const snapshot = readControlWorkSnapshot(this.database, input);
+      this.database.exec("COMMIT;");
+      return snapshot;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  getWorkNode({
+    projectId,
+    workItemId,
+    expectedRevision,
+    expectedDigest,
+    maxNodes,
+    maxEdges,
+  }) {
+    const normalizedWorkItemId = normalizedWorkCoreId(workItemId, "work item ID");
+    const normalizedExpectedRevision = normalizedWorkDigest(expectedRevision, "expected revision");
+    const normalizedExpectedDigest = normalizedWorkDigest(expectedDigest, "expected digest");
+    const snapshot = this.getWorkSnapshot({ projectId, maxNodes, maxEdges });
+    if (
+      snapshot.revision !== normalizedExpectedRevision
+      || snapshot.digest !== normalizedExpectedDigest
+    ) {
+      throw controlWorkError(
+        "CONTROL_WORK_REVISION_MISMATCH",
+        "Control work state changed before the node read",
+      );
+    }
+    const treeNode = snapshot.tree.nodes.find(({ id }) => id === normalizedWorkItemId);
+    const graphNode = snapshot.graph.nodes.find(({ id }) => id === normalizedWorkItemId);
+    if (!treeNode || !graphNode) {
+      throw controlWorkError("CONTROL_WORK_NODE_NOT_FOUND", "Control work item not found", 404);
+    }
+    return {
+      schema_version: controlWorkNodeSchemaVersion,
+      source: snapshot.source,
+      project_id: snapshot.project_id,
+      revision: snapshot.revision,
+      digest: snapshot.digest,
+      tree_node: treeNode,
+      graph_node: graphNode,
+    };
   }
 
   createWorkItem({ projectId, title, objective, priority = "normal" }) {

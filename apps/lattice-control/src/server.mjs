@@ -4,6 +4,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import { CodexAppServer } from "./codex-app-server.mjs";
+import { defaultControlDatabasePath } from "./database-path.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
 
@@ -279,14 +280,9 @@ export function createLatticeServer({
   return { server, service, store, codex };
 }
 
-function defaultDatabasePath() {
-  const base = process.env.LOCALAPPDATA || path.join(process.cwd(), ".lattice");
-  return path.join(base, "LATTICE", "control", "lattice-control.db");
-}
-
 export async function startDefaultServer() {
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
-  const application = createLatticeServer({ databasePath: defaultDatabasePath() });
+  const application = createLatticeServer({ databasePath: defaultControlDatabasePath() });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
