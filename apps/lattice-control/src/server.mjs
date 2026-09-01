@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { CodexAppServer } from "./codex-app-server.mjs";
 import { defaultControlDatabasePath } from "./database-path.mjs";
+import { createRuntimeSurface } from "./runtime-surface.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
 
@@ -147,6 +148,10 @@ export function createLatticeServer({
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
         sendJson(response, 200, service.state());
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/api/runtime") {
+        sendJson(response, 200, createRuntimeSurface(service));
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/conversation") {

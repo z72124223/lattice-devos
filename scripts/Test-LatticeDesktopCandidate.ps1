@@ -293,14 +293,31 @@ try {
     $launchFile = [string](Get-RequiredPropertyValue $candidateManifest 'launch')
     $controlOrigin = [string](Get-RequiredPropertyValue $candidateManifest 'control_origin')
     $manifestExecutableSha256 = [string](Get-RequiredPropertyValue $candidateManifest 'executable_sha256')
-    if ($schemaVersion -cne 'lattice.control.desktop-portable-candidate.v1' -or
+    $controlRuntime = Get-RequiredPropertyValue $candidateManifest 'control_runtime'
+    $controlRuntimeIdentitySchema = [string](Get-RequiredPropertyValue $controlRuntime 'identity_schema')
+    $controlRuntimeProduct = [string](Get-RequiredPropertyValue $controlRuntime 'product')
+    $controlRuntimeVersion = [string](Get-RequiredPropertyValue $controlRuntime 'version')
+    $controlRuntimeNodeVersion = [string](Get-RequiredPropertyValue $controlRuntime 'node_version')
+    $controlRuntimeNodeSha256 = [string](Get-RequiredPropertyValue $controlRuntime 'node_sha256')
+    $controlRuntimeExecutable = [string](Get-RequiredPropertyValue $controlRuntime 'executable')
+    $controlRuntimeServer = [string](Get-RequiredPropertyValue $controlRuntime 'server')
+    $controlRuntimeDatabase = [string](Get-RequiredPropertyValue $controlRuntime 'database')
+    if ($schemaVersion -cne 'lattice.control.desktop-portable-candidate.v2' -or
         $artifactType -cne 'PORTABLE_RELEASE_CANDIDATE' -or
         $manifestSourceCommit -cne $headSha -or
         $runtimeIdentifier -cne 'win-x64' -or
         $selfContained -isnot [bool] -or -not $selfContained -or
         $launchFile -cne 'LATTICE.exe' -or
         $controlOrigin -cne 'http://127.0.0.1:4317/' -or
-        $manifestExecutableSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        $manifestExecutableSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $controlRuntimeIdentitySchema -cne 'lattice.control.runtime-identity.v1' -or
+        $controlRuntimeProduct -cne 'LATTICE_CONTROL' -or
+        [string]::IsNullOrWhiteSpace($controlRuntimeVersion) -or
+        $controlRuntimeNodeVersion -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
+        $controlRuntimeNodeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        $controlRuntimeExecutable -cne 'control-runtime/node.exe' -or
+        $controlRuntimeServer -cne 'control-runtime/apps/lattice-control/src/server.mjs' -or
+        $controlRuntimeDatabase -cne '%LOCALAPPDATA%\LATTICE\control\lattice-control.db') {
         throw 'DESKTOP_CANDIDATE_MANIFEST_CONTRACT_MISMATCH'
     }
 
@@ -328,7 +345,13 @@ try {
             Sha256 = $sha256
         }
     }
-    foreach ($requiredRelativePath in @('LATTICE.exe', 'LATTICE.dll', 'PORTABLE_RELEASE_CANDIDATE.txt')) {
+    foreach ($requiredRelativePath in @(
+        'LATTICE.exe',
+        'LATTICE.dll',
+        'PORTABLE_RELEASE_CANDIDATE.txt',
+        $controlRuntimeExecutable,
+        $controlRuntimeServer,
+        'control-runtime/apps/lattice-control/runtime-identity.json')) {
         if (-not $expectedFiles.ContainsKey($requiredRelativePath)) {
             throw 'DESKTOP_CANDIDATE_MANIFEST_CORE_FILE_MISSING'
         }
@@ -352,6 +375,9 @@ try {
     }
     if ($manifestExecutableSha256 -cne $expectedFiles['LATTICE.exe'].Sha256) {
         throw 'DESKTOP_CANDIDATE_EXECUTABLE_HASH_MISMATCH'
+    }
+    if ($controlRuntimeNodeSha256 -cne $expectedFiles[$controlRuntimeExecutable].Sha256) {
+        throw 'DESKTOP_CANDIDATE_CONTROL_RUNTIME_HASH_MISMATCH'
     }
 
     $packageLeaks = @(Get-ChildItem -LiteralPath $candidateDirectoryFull -Directory -Recurse -Force |

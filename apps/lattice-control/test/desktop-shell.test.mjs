@@ -64,12 +64,46 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
   assert.match(controlMarkup, /function renderEmptyCores\(\)[\s\S]*recentList\.replaceChildren\(element\("p","目前沒有工作。","empty"\)\)/u);
 });
 
+test("the desktop probes and owns only its compatible default Control before navigation", async () => {
+  const [windowMarkup, windowCode, desktopPolicy, runtimeCode, project] = await Promise.all([
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml.cs"),
+    repositoryFile("apps/lattice-control-desktop/DesktopPolicy.cs"),
+    repositoryFile("apps/lattice-control-desktop/ControlRuntime.cs"),
+    repositoryFile("apps/lattice-control-desktop/Lattice.Control.Desktop.csproj"),
+  ]);
+
+  assert.match(windowMarkup, /AutomationProperties\.AutomationId="LatticeRuntimeHealth"/u);
+  assert.match(windowCode, /ControlRuntimeManager\.CreatePackaged/u);
+  assert.match(windowCode, /EnsureReadyAsync[\s\S]*core\.Navigate\(_controlUri\.AbsoluteUri\)/u);
+  assert.match(windowCode, /ProbeAsync/u);
+  assert.match(windowCode, /_healthTimer/u);
+  assert.match(windowCode, /HealthTimer_Tick[\s\S]*ProbeAsync/u);
+  assert.match(windowCode, /Core_NavigationCompleted[\s\S]*_healthTimer\.Start\(\)/u);
+  assert.ok((windowCode.match(/CanApplyNavigationResult/gu) ?? []).length >= 2);
+  assert.match(windowCode, /ShowDiagnosedConnectionFailureAsync\(\s*e\.NavigationId/u);
+  assert.doesNotMatch(windowCode, /ShowBlockedNavigation\(\)[\s\S]{0,500}SetRuntimeStatus/u);
+  assert.match(windowCode, /ControlRuntimeHealth\.STOPPED/u);
+  assert.match(windowCode, /ControlRuntimeHealth\.UNREACHABLE/u);
+  assert.match(windowCode, /ControlRuntimeHealth\.INCOMPATIBLE/u);
+  assert.match(windowCode, /_controlRuntime\?\.Dispose\(\)/u);
+  assert.match(desktopPolicy, /ShouldManageControl/u);
+  assert.match(runtimeCode, /ControlRuntimeContract\.EvaluateProbe/u);
+  assert.match(runtimeCode, /ControlRuntimeAction\.StartOwned/u);
+  assert.match(runtimeCode, /Process\.Start/u);
+  assert.match(runtimeCode, /Kill\(entireProcessTree: true\)/u);
+  assert.doesNotMatch(runtimeCode, /GetProcesses|GetProcessById|netstat|Get-NetTCPConnection/u);
+  assert.match(project, /LogicalName="Lattice\.Control\.RuntimeIdentity\.json"/u);
+});
+
 test("the Windows candidate is a repeatable self-contained portable package, not an installer", async () => {
-  const [publishScript, acceptanceScript, externalNavigationFixture, isolatedControlFixture, policyTestIgnore, packageJson] = await Promise.all([
+  const [publishScript, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, policyTestIgnore, packageJson] = await Promise.all([
     repositoryFile("scripts/Publish-LatticeDesktopCandidate.ps1"),
     repositoryFile("scripts/Test-LatticeDesktopCandidate.ps1"),
+    repositoryFile("scripts/Test-LatticeDesktopManagedControl.ps1"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-external-redirect.mjs"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-isolated-control.mjs"),
+    repositoryFile("apps/lattice-control/test/fixtures/desktop-incompatible-control.mjs"),
     repositoryFile("apps/lattice-control-desktop-policy-tests/.gitignore"),
     repositoryFile("package.json"),
   ]);
@@ -80,7 +114,17 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(publishScript, /Compress-Archive/u);
   assert.match(publishScript, /LocalApplicationData/u);
   assert.match(publishScript, /HANDOFF\.md/u);
+  assert.match(publishScript, /\$expectedProtectedDirtyState = ' M HANDOFF\.md'/u);
+  assert.match(publishScript, /git -C \$repositoryRoot diff --cached --name-only/u);
   assert.match(publishScript, /files\s*=\s*\$artifactFiles/u);
+  assert.match(publishScript, /lattice\.control\.desktop-portable-candidate\.v2/u);
+  assert.match(publishScript, /control-runtime[\\/]node\.exe/iu);
+  assert.match(publishScript, /apps[\\/]lattice-control[\\/]runtime-identity\.json/iu);
+  assert.match(publishScript, /Join-Path \$controlSourceRoot 'src'/iu);
+  assert.match(publishScript, /Join-Path \$controlSourceRoot 'public'/iu);
+  assert.match(publishScript, /node_version/u);
+  assert.match(publishScript, /node_sha256/u);
+  assert.match(publishScript, /control_runtime/u);
   assert.doesNotMatch(publishScript, /msi|wix|nsis|installer/iu);
   assert.match(acceptanceScript, /MinimumLifetimeSeconds/u);
   assert.match(acceptanceScript, /\$monitorStartedAt\s*=\s*\[DateTimeOffset\]::UtcNow/u);
@@ -110,6 +154,12 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(acceptanceScript, /-UseBasicParsing/u);
   assert.match(acceptanceScript, /EnvironmentVariables\['LOCALAPPDATA'\]/u);
   assert.match(acceptanceScript, /external_navigation_blocked/u);
+  assert.match(managedControlScript, /no_listener_started_owned_control/u);
+  assert.match(managedControlScript, /interruption_observed_status/u);
+  assert.match(managedControlScript, /compatible_control_reused/u);
+  assert.match(managedControlScript, /incompatible_status/u);
+  assert.match(managedControlScript, /Get-CimInstance Win32_Process -Filter "ParentProcessId/u);
+  assert.doesNotMatch(managedControlScript, /Get-NetTCPConnection|Stop-Process\s+-Name|taskkill|\.ArgumentList|\.Kill\(\$true\)/iu);
   assert.match(externalNavigationFixture, /writeHead\(302/u);
   assert.match(externalNavigationFixture, /\/outside/u);
   assert.match(externalNavigationFixture, /LATTICE_DESKTOP_REDIRECT_MARKER/u);
@@ -117,9 +167,12 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(externalNavigationFixture, /listen\(0, "127\.0\.0\.1"/u);
   assert.match(isolatedControlFixture, /createLatticeServer/u);
   assert.match(isolatedControlFixture, /listen\(0, "127\.0\.0\.1"/u);
+  assert.match(incompatibleControlFixture, /0\.0\.0-foreign/u);
+  assert.match(incompatibleControlFixture, /id: "postgresql"[\s\S]*status: "NOT_IMPLEMENTED"/u);
   assert.match(policyTestIgnore, /^bin\/$/mu);
   assert.match(policyTestIgnore, /^obj\/$/mu);
   assert.match(packageJson, /"desktop:policy-test"/u);
   assert.match(packageJson, /"desktop:publish"/u);
   assert.match(packageJson, /"desktop:candidate-test"/u);
+  assert.match(packageJson, /"desktop:managed-control-test"/u);
 });

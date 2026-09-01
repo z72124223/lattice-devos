@@ -8,7 +8,6 @@
 
   <ItemGroup>
     <Compile Include="..\lattice-control-desktop\ControlRuntime.cs" Link="ControlRuntime.cs" />
-    <Compile Include="..\lattice-control-desktop\DesktopPolicy.cs" Link="DesktopPolicy.cs" />
     <EmbeddedResource Include="..\lattice-control\runtime-identity.json"
                       Link="runtime-identity.json"
                       LogicalName="Lattice.Control.RuntimeIdentity.json" />

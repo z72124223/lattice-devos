@@ -1,0 +1,5 @@
+{
+  "schema_version": "lattice.control.runtime-identity.v1",
+  "product": "LATTICE_CONTROL",
+  "version": "1.0.0-rc.1"
+}

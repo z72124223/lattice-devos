@@ -1,13 +1,18 @@
 LATTICE CONTROL - WINDOWS PORTABLE RELEASE CANDIDATE
 
-This is a portable release-candidate package. It is not installed and it does
-not register a service, change global configuration, or include a database.
+This is a local portable release-candidate package. It is not installed or
+released, and it does not register a service or change global configuration.
 
 Launch: double-click LATTICE.exe
 
-The desktop connects only to a loopback Control origin. With no command-line
-override it uses http://127.0.0.1:4317/. When Control is unavailable, the
-desktop stays open in a normal offline state and retries automatically.
+With no command-line override, the desktop probes http://127.0.0.1:4317/ and
+reuses Control only when its bundled runtime identity matches exactly. If no
+listener exists, it starts the bundled Node.js + Control runtime. A foreign or
+incompatible listener fails closed. Closing LATTICE stops only the Control
+process it started; a reused Control is never stopped by the desktop.
+
+Control stores its existing local SQLite data under:
+%LOCALAPPDATA%\LATTICE\control\lattice-control.db
 
 WebView2 user data is stored outside this package under:
 %LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2

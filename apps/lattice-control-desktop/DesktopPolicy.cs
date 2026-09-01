@@ -8,6 +8,8 @@ internal static class DesktopPolicy
 
     internal static TimeSpan ReconnectInterval { get; } = TimeSpan.FromSeconds(2);
 
+    internal static TimeSpan RuntimeHealthInterval { get; } = TimeSpan.FromSeconds(1);
+
     internal static string WebViewUserDataFolder => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "LATTICE",
@@ -48,5 +50,18 @@ internal static class DesktopPolicy
         return IsApprovedLoopback(target)
             && IsApprovedLoopback(controlUri)
             && target.Port == controlUri.Port;
+    }
+
+    internal static bool ShouldManageControl(Uri controlUri)
+    {
+        return controlUri == DefaultControlUri;
+    }
+
+    internal static bool CanApplyNavigationResult(
+        ulong? currentNavigationId,
+        ulong completedNavigationId,
+        bool isClosing)
+    {
+        return !isClosing && currentNavigationId == completedNavigationId;
     }
 }

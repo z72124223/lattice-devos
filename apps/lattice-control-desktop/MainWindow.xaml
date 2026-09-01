@@ -102,6 +102,16 @@
             <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Visible">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
                     <TextBlock Text="LATTICE 控制核心尚未連線" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="18" TextAlignment="Center" />
+                    <Border Margin="0,14,0,0" Padding="10,5" CornerRadius="10" BorderBrush="#40586C" BorderThickness="1" HorizontalAlignment="Center">
+                        <TextBlock x:Name="RuntimeStatusLabel"
+                                   AutomationProperties.AutomationId="LatticeRuntimeHealth"
+                                   AutomationProperties.ItemStatus="UNREACHABLE"
+                                   Text="UNREACHABLE"
+                                   Foreground="#EF5F5F"
+                                   FontFamily="Consolas"
+                                   FontWeight="SemiBold"
+                                   FontSize="11" />
+                    </Border>
                     <TextBlock x:Name="ConnectionDetail" Text="請先啟動本機 Control，再重新連線。" Foreground="{StaticResource LatticeMuted}" FontSize="12" Margin="0,12,0,0" TextAlignment="Center" TextWrapping="Wrap" />
                     <Button AutomationProperties.AutomationId="LatticeReconnect"
                             Content="重新連線"

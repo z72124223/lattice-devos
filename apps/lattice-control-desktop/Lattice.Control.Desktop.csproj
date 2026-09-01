@@ -18,5 +18,8 @@
 
   <ItemGroup>
     <None Update="PORTABLE_RELEASE_CANDIDATE.txt" CopyToOutputDirectory="PreserveNewest" />
+    <EmbeddedResource Include="..\lattice-control\runtime-identity.json"
+                      Link="runtime-identity.json"
+                      LogicalName="Lattice.Control.RuntimeIdentity.json" />
   </ItemGroup>
 </Project>
