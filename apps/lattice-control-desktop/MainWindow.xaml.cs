@@ -1,20 +1,30 @@
 using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace Lattice.Control.Desktop;
 
 public partial class MainWindow : Window
 {
-    private static readonly Uri DefaultControlUri = new("http://127.0.0.1:4317/");
     private readonly Uri _controlUri;
+    private readonly DispatcherTimer _reconnectTimer;
+    private CoreWebView2Environment? _webViewEnvironment;
+    private bool _eventsConfigured;
+    private bool _isConnecting;
+    private bool _isClosing;
 
     public MainWindow()
     {
         InitializeComponent();
-        _controlUri = ResolveControlUri(Environment.GetCommandLineArgs(), Environment.GetEnvironmentVariable("LATTICE_CONTROL_URL"));
+        _controlUri = DesktopPolicy.ResolveControlUri(
+            Environment.GetCommandLineArgs(),
+            Environment.GetEnvironmentVariable("LATTICE_CONTROL_URL"));
+        _reconnectTimer = new DispatcherTimer { Interval = DesktopPolicy.ReconnectInterval };
+        _reconnectTimer.Tick += ReconnectTimer_Tick;
         Loaded += MainWindow_Loaded;
     }
 
@@ -25,34 +35,47 @@ public partial class MainWindow : Window
 
     private async Task ConnectAsync()
     {
+        if (_isClosing || _isConnecting) return;
+        _isConnecting = true;
+        _reconnectTimer.Stop();
         try
         {
-            ControlView.Visibility = Visibility.Visible;
-            ConnectionOverlay.Visibility = Visibility.Collapsed;
-            ConnectionLabel.Text = "正在連線本機 LATTICE";
-            ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(228, 167, 42));
+            ShowConnectingState();
 
-            await ControlView.EnsureCoreWebView2Async();
+            _webViewEnvironment ??= await CoreWebView2Environment.CreateAsync(
+                browserExecutableFolder: null,
+                userDataFolder: DesktopPolicy.WebViewUserDataFolder);
+            await ControlView.EnsureCoreWebView2Async(_webViewEnvironment);
             CoreWebView2 core = ControlView.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false;
             core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
             core.Settings.IsZoomControlEnabled = false;
-            core.NewWindowRequested -= Core_NewWindowRequested;
-            core.NewWindowRequested += Core_NewWindowRequested;
-            core.NavigationStarting -= Core_NavigationStarting;
-            core.NavigationStarting += Core_NavigationStarting;
-            core.NavigationCompleted -= Core_NavigationCompleted;
-            core.NavigationCompleted += Core_NavigationCompleted;
-            core.ProcessFailed -= Core_ProcessFailed;
-            core.ProcessFailed += Core_ProcessFailed;
+            if (!_eventsConfigured)
+            {
+                core.NewWindowRequested += Core_NewWindowRequested;
+                core.NavigationStarting += Core_NavigationStarting;
+                core.NavigationCompleted += Core_NavigationCompleted;
+                core.ProcessFailed += Core_ProcessFailed;
+                _eventsConfigured = true;
+            }
             core.Navigate(_controlUri.AbsoluteUri);
         }
         catch (Exception error)
         {
             ShowConnectionFailure($"無法啟動桌面顯示核心：{error.Message}");
+            ScheduleReconnect();
         }
+        finally
+        {
+            _isConnecting = false;
+        }
+    }
+
+    private async void ReconnectTimer_Tick(object? sender, EventArgs e)
+    {
+        await ConnectAsync();
     }
 
     private void Core_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
@@ -65,7 +88,10 @@ public partial class MainWindow : Window
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target) || !IsApprovedControlNavigation(target))
         {
             e.Cancel = true;
-            ShowConnectionFailure("LATTICE 桌面程式只允許連線到這台電腦的控制核心。");
+            ShowConnectionFailure(
+                "LATTICE 桌面程式只允許連線到這台電腦的控制核心。",
+                "external_navigation_blocked");
+            ScheduleReconnect();
         }
     }
 
@@ -74,61 +100,53 @@ public partial class MainWindow : Window
         if (!e.IsSuccess)
         {
             ShowConnectionFailure($"Control 尚未就緒（{e.WebErrorStatus}）。");
+            ScheduleReconnect();
             return;
         }
 
+        _reconnectTimer.Stop();
         ConnectionOverlay.Visibility = Visibility.Collapsed;
         ControlView.Visibility = Visibility.Visible;
         ConnectionLabel.Text = "本機 LATTICE 已連線";
+        AutomationProperties.SetItemStatus(ConnectionLabel, "connected");
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(64, 224, 164));
     }
 
     private void Core_ProcessFailed(object? sender, CoreWebView2ProcessFailedEventArgs e)
     {
         ShowConnectionFailure("桌面顯示程序中斷，請重新連線。");
+        ScheduleReconnect();
     }
 
-    private void ShowConnectionFailure(string detail)
+    private void ShowConnectionFailure(string detail, string itemStatus = "offline")
     {
         ControlView.Visibility = Visibility.Collapsed;
         ConnectionDetail.Text = detail;
         ConnectionOverlay.Visibility = Visibility.Visible;
         ConnectionLabel.Text = "LATTICE 未連線";
+        AutomationProperties.SetItemStatus(ConnectionLabel, itemStatus);
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(239, 95, 95));
     }
 
-    private static Uri ResolveControlUri(IReadOnlyList<string> arguments, string? environmentValue)
+    private void ShowConnectingState()
     {
-        string? candidate = null;
-        for (int index = 0; index + 1 < arguments.Count; index += 1)
-        {
-            if (string.Equals(arguments[index], "--url", StringComparison.OrdinalIgnoreCase))
-            {
-                candidate = arguments[index + 1];
-                break;
-            }
-        }
-
-        candidate ??= environmentValue;
-        if (Uri.TryCreate(candidate, UriKind.Absolute, out Uri? parsed) && IsApprovedLoopback(parsed))
-        {
-            return parsed;
-        }
-
-        return DefaultControlUri;
-    }
-
-    private static bool IsApprovedLoopback(Uri uri)
-    {
-        return string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(uri.Host, "127.0.0.1", StringComparison.OrdinalIgnoreCase)
-            && string.IsNullOrEmpty(uri.UserInfo)
-            && !uri.IsDefaultPort;
+        ControlView.Visibility = Visibility.Collapsed;
+        ConnectionOverlay.Visibility = Visibility.Visible;
+        ConnectionDetail.Text = "正在嘗試連線到本機 Control；視窗會保持開啟並自動重試。";
+        ConnectionLabel.Text = "正在連線本機 LATTICE";
+        AutomationProperties.SetItemStatus(ConnectionLabel, "connecting");
+        ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(228, 167, 42));
     }
 
     private bool IsApprovedControlNavigation(Uri uri)
     {
-        return IsApprovedLoopback(uri) && uri.Port == _controlUri.Port;
+        return DesktopPolicy.IsApprovedControlNavigation(uri, _controlUri);
+    }
+
+    private void ScheduleReconnect()
+    {
+        if (_isClosing || _reconnectTimer.IsEnabled) return;
+        _reconnectTimer.Start();
     }
 
     private void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
@@ -151,7 +169,11 @@ public partial class MainWindow : Window
 
     private void Close_Click(object sender, RoutedEventArgs e) => Close();
 
-    private async void Reconnect_Click(object sender, RoutedEventArgs e) => await ConnectAsync();
+    private async void Reconnect_Click(object sender, RoutedEventArgs e)
+    {
+        _reconnectTimer.Stop();
+        await ConnectAsync();
+    }
 
     private void ToggleMaximize()
     {
@@ -160,6 +182,9 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        _isClosing = true;
+        _reconnectTimer.Stop();
+        _reconnectTimer.Tick -= ReconnectTimer_Tick;
         ControlView.Dispose();
         base.OnClosing(e);
     }

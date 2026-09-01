@@ -1,0 +1,16 @@
+LATTICE CONTROL - WINDOWS PORTABLE RELEASE CANDIDATE
+
+This is a portable release-candidate package. It is not installed and it does
+not register a service, change global configuration, or include a database.
+
+Launch: double-click LATTICE.exe
+
+The desktop connects only to a loopback Control origin. With no command-line
+override it uses http://127.0.0.1:4317/. When Control is unavailable, the
+desktop stays open in a normal offline state and retries automatically.
+
+WebView2 user data is stored outside this package under:
+%LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2
+
+The Microsoft Edge WebView2 Runtime must be present on Windows. The package
+contains the self-contained .NET runtime needed by this candidate.

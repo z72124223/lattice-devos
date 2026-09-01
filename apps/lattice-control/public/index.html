@@ -527,7 +527,7 @@
   }
   function renderEmptyCores(){
     nodes.graphIdentity.textContent=nodes.treeIdentity.textContent=nodes.decisionIdentity.textContent="not ready";nodes.treeCurrent.textContent="目前無法確認工作脈絡。";
-    nodes.graphList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.treeList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.decisionList.replaceChildren(element("div",state.surface.context.status_text,"empty"));
+    nodes.graphList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.treeList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.decisionList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));
   }
   function renderSurface(){
     renderContext();renderConversation();const workSnapshot=state.surface.work_snapshot;

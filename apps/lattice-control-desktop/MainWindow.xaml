@@ -81,7 +81,12 @@
 
                 <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
                     <Ellipse x:Name="ConnectionDot" Width="6" Height="6" Fill="#E4A72A" Margin="0,0,7,0" />
-                    <TextBlock x:Name="ConnectionLabel" Text="正在連線本機 LATTICE" Foreground="{StaticResource LatticeMuted}" FontSize="10" />
+                    <TextBlock x:Name="ConnectionLabel"
+                               AutomationProperties.AutomationId="LatticeConnectionStatus"
+                               AutomationProperties.ItemStatus="connecting"
+                               Text="正在連線本機 LATTICE"
+                               Foreground="{StaticResource LatticeMuted}"
+                               FontSize="10" />
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" Orientation="Horizontal" WindowChrome.IsHitTestVisibleInChrome="True">
@@ -94,11 +99,19 @@
 
         <Grid Grid.Row="1" Background="{StaticResource LatticeBackground}">
             <wv2:WebView2 x:Name="ControlView" DefaultBackgroundColor="#050A10" />
-            <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Collapsed">
+            <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Visible">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
                     <TextBlock Text="LATTICE 控制核心尚未連線" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="18" TextAlignment="Center" />
                     <TextBlock x:Name="ConnectionDetail" Text="請先啟動本機 Control，再重新連線。" Foreground="{StaticResource LatticeMuted}" FontSize="12" Margin="0,12,0,0" TextAlignment="Center" TextWrapping="Wrap" />
-                    <Button Content="重新連線" Click="Reconnect_Click" Margin="0,22,0,0" Padding="20,8" HorizontalAlignment="Center" Background="#102535" Foreground="{StaticResource LatticeText}" BorderBrush="{StaticResource LatticeCyan}" />
+                    <Button AutomationProperties.AutomationId="LatticeReconnect"
+                            Content="重新連線"
+                            Click="Reconnect_Click"
+                            Margin="0,22,0,0"
+                            Padding="20,8"
+                            HorizontalAlignment="Center"
+                            Background="#102535"
+                            Foreground="{StaticResource LatticeText}"
+                            BorderBrush="{StaticResource LatticeCyan}" />
                 </StackPanel>
             </Border>
         </Grid>
