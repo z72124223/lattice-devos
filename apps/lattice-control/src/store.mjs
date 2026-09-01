@@ -38,7 +38,7 @@ const developmentRadarActions = new Set([
   "ADOPT_OSS",
   "FREEZE_LATTICE",
 ]);
-const controlSchemaVersion = 5;
+const controlSchemaVersion = 6;
 const workCoreSchemaSql = `
   CREATE INDEX IF NOT EXISTS work_items_project_id_id
   ON work_items(project_id, id);
@@ -69,6 +69,111 @@ const workCoreSchemaSql = `
   CREATE INDEX IF NOT EXISTS work_item_dependencies_reverse
   ON work_item_dependencies(depends_on_work_item_id);
 `;
+const decisionCoreSchemaSql = `
+  CREATE TABLE IF NOT EXISTS decisions (
+    id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL CHECK (length(scope) BETWEEN 1 AND 128),
+    subject TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 256),
+    content TEXT NOT NULL CHECK (length(content) BETWEEN 1 AND 4096),
+    rationale TEXT NOT NULL CHECK (length(rationale) BETWEEN 1 AND 4096),
+    source_kind TEXT NOT NULL
+      CHECK (source_kind IN ('user_confirmation', 'approved_document')),
+    source_reference TEXT NOT NULL CHECK (length(source_reference) BETWEEN 1 AND 512),
+    status TEXT NOT NULL CHECK (status IN ('current', 'superseded')),
+    supersedes_decision_id TEXT,
+    client_request_id TEXT NOT NULL UNIQUE
+      CHECK (length(client_request_id) BETWEEN 1 AND 128),
+    request_digest TEXT NOT NULL
+      CHECK (length(request_digest) = 64 AND request_digest NOT GLOB '*[^0-9a-f]*'),
+    created_at TEXT NOT NULL CHECK (length(created_at) BETWEEN 20 AND 32),
+    UNIQUE (scope, subject, id),
+    CHECK (supersedes_decision_id IS NULL OR supersedes_decision_id <> id),
+    FOREIGN KEY (scope, subject, supersedes_decision_id)
+      REFERENCES decisions(scope, subject, id) ON DELETE RESTRICT
+  );
+
+  CREATE UNIQUE INDEX IF NOT EXISTS decisions_current_scope_subject
+  ON decisions(scope, subject) WHERE status = 'current';
+
+  CREATE UNIQUE INDEX IF NOT EXISTS decisions_unique_successor
+  ON decisions(supersedes_decision_id) WHERE supersedes_decision_id IS NOT NULL;
+
+  CREATE INDEX IF NOT EXISTS decisions_scope_created_at
+  ON decisions(scope, created_at DESC, id DESC);
+
+  CREATE TRIGGER IF NOT EXISTS decisions_no_delete
+  BEFORE DELETE ON decisions
+  BEGIN
+    SELECT RAISE(ABORT, 'decisions are retained permanently');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS decisions_immutable_update
+  BEFORE UPDATE ON decisions
+  WHEN
+    NEW.id IS NOT OLD.id
+    OR NEW.scope IS NOT OLD.scope
+    OR NEW.subject IS NOT OLD.subject
+    OR NEW.content IS NOT OLD.content
+    OR NEW.rationale IS NOT OLD.rationale
+    OR NEW.source_kind IS NOT OLD.source_kind
+    OR NEW.source_reference IS NOT OLD.source_reference
+    OR NEW.supersedes_decision_id IS NOT OLD.supersedes_decision_id
+    OR NEW.client_request_id IS NOT OLD.client_request_id
+    OR NEW.request_digest IS NOT OLD.request_digest
+    OR NEW.created_at IS NOT OLD.created_at
+    OR OLD.status <> 'current'
+    OR NEW.status <> 'superseded'
+  BEGIN
+    SELECT RAISE(ABORT, 'decision history is immutable');
+  END;
+
+  CREATE TABLE IF NOT EXISTS decision_state (
+    slot TEXT PRIMARY KEY CHECK (slot = 'current'),
+    schema_version TEXT NOT NULL
+      CHECK (schema_version = 'lattice.control.decision-state.v1'),
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    digest TEXT NOT NULL
+      CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+    updated_at TEXT NOT NULL CHECK (length(updated_at) BETWEEN 20 AND 32)
+  );
+
+  CREATE TRIGGER IF NOT EXISTS decision_state_no_delete
+  BEFORE DELETE ON decision_state
+  BEGIN
+    SELECT RAISE(ABORT, 'decision state cannot be deleted');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS decision_state_revision_guard
+  BEFORE UPDATE ON decision_state
+  WHEN
+    NEW.slot IS NOT OLD.slot
+    OR NEW.schema_version IS NOT OLD.schema_version
+    OR NEW.revision <> OLD.revision + 1
+  BEGIN
+    SELECT RAISE(ABORT, 'decision revision must advance exactly once');
+  END;
+`;
+const decisionStateSchemaVersion = "lattice.control.decision-state.v1";
+const decisionMutationSchemaVersion = "lattice.control.decision-mutation.v1";
+const currentDecisionsPacketSchemaVersion = "lattice.control.current-decisions-packet.v1";
+const decisionReadSchemaVersion = "lattice.control.decision-read.v1";
+const decisionSearchSchemaVersion = "lattice.control.decision-search.v1";
+const decisionSourceKinds = new Set([
+  "user_confirmation",
+  "approved_document",
+]);
+const decisionSourcePrefixes = new Map([
+  ["user_confirmation", ["thread:"]],
+  ["approved_document", ["file:", "document:"]],
+]);
+const decisionMaximumRows = 10_000;
+const decisionMaximumCurrentResults = 32;
+const decisionMaximumLineageDepth = 64;
+const decisionMaximumSearchResults = 20;
+const decisionStoreSource = Object.freeze({
+  kind: "CONTROL_SQLITE_DECISIONS",
+  authority: "CONTROL_LOCAL_PRODUCT_STATE",
+});
 const projectCatalogSchemaVersion = "lattice.control.project-catalog.v1";
 const projectCatalogRecordKind = "CONTROL_LOCAL_CATALOG";
 const legacyProjectRecordKind = "LEGACY_CONTROL_PROJECT";
@@ -502,6 +607,527 @@ function parseJsonArray(value) {
   return parsed;
 }
 
+function decisionError(code, message, status = 409) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function exactDecisionObject(value, requiredKeys, optionalKeys = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const allowed = new Set([...requiredKeys, ...optionalKeys]);
+  const keys = Object.keys(value);
+  return requiredKeys.every((key) => Object.hasOwn(value, key))
+    && keys.every((key) => allowed.has(key));
+}
+
+function normalizedDecisionIdentifier(value, label, maximumLength) {
+  if (
+    typeof value !== "string"
+    || value.length < 1
+    || value.length > maximumLength
+    || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(value)
+  ) {
+    throw decisionError(
+      "DECISION_INPUT_REJECTED",
+      `${label} must be a bounded stable identifier`,
+      400,
+    );
+  }
+  assertDecisionTextIsSafe(value, label);
+  return value;
+}
+
+function assertDecisionTextIsSafe(value, label) {
+  const secretLikePatterns = [
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
+    /\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}\b/u,
+    /\bsk_[A-Za-z0-9_-]{12,}\b/u,
+    /\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/u,
+    /\bAKIA[0-9A-Z]{16}\b/u,
+    /\bxox[baprs]-[A-Za-z0-9-]{12,}\b/u,
+    /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/u,
+    /\bBearer\s+[A-Za-z0-9._~-]{12,}\b/iu,
+    /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]+@/u,
+    /(?:^|[^A-Za-z0-9])(?:(?:access|refresh|service|client|session|api)[_-]?)?(?:token|secret|key|password|passwd|pwd)\s*[:=]\s*\S+/iu,
+    /(?:^|[^A-Za-z0-9])(?:otp|one[- ]time[- ]password)(?:\s*[:=]\s*|\s+)[A-Za-z0-9-]{4,}/iu,
+    /(?:^|[\s,;])(?:[A-Z][A-Z0-9_]{2,}|[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+)\s*=\s*[^\s]+/mu,
+    /(?:^|\s)(?:user|assistant|system|developer)\s*:[\s\S]*?(?:^|\s)(?:user|assistant|system|developer)\s*:/iu,
+    /(?:hidden reasoning|chain[- ]of[- ]thought|<analysis>)/iu,
+    /\b(?:model|assistant)?\s*internal\s+(?:reasoning|deliberation|thoughts?)\b/iu,
+  ];
+  if (secretLikePatterns.some((pattern) => pattern.test(value))) {
+    throw decisionError(
+      "DECISION_SENSITIVE_CONTENT_REJECTED",
+      `${label} looks like secret, environment, or hidden-reasoning material`,
+      400,
+    );
+  }
+}
+
+function normalizedDecisionText(value, label, maximumBytes) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw decisionError("DECISION_INPUT_REJECTED", `${label} is required`, 400);
+  }
+  const text = value.trim();
+  if (
+    Buffer.byteLength(text, "utf8") > maximumBytes
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(text)
+  ) {
+    throw decisionError(
+      "DECISION_INPUT_REJECTED",
+      `${label} is too long or contains unsafe control characters`,
+      400,
+    );
+  }
+  assertDecisionTextIsSafe(text, label);
+  return text;
+}
+
+function normalizedDecisionSource(value) {
+  if (!exactDecisionObject(value, ["kind", "reference"])) {
+    throw decisionError(
+      "DECISION_SOURCE_REJECTED",
+      "decision source must contain only kind and reference",
+      400,
+    );
+  }
+  if (!decisionSourceKinds.has(value.kind)) {
+    throw decisionError("DECISION_SOURCE_REJECTED", "decision source kind is invalid", 400);
+  }
+  if (
+    typeof value.reference !== "string"
+    || value.reference.length < 1
+    || value.reference.length > 512
+    || !/^[A-Za-z0-9][A-Za-z0-9._:/#@+-]*$/u.test(value.reference)
+  ) {
+    throw decisionError(
+      "DECISION_SOURCE_REJECTED",
+      "decision source reference must be a bounded credential-free reference",
+      400,
+    );
+  }
+  const preciseReference = value.kind === "user_confirmation"
+    ? /^thread:[A-Za-z0-9][A-Za-z0-9._-]{0,127}\/(?:turn|delegation):[A-Za-z0-9][A-Za-z0-9._:-]{0,127}(?:#[A-Za-z0-9][A-Za-z0-9._:-]{0,127})?$/u.test(value.reference)
+    : /^(?:file:[A-Za-z0-9][A-Za-z0-9._/-]{0,383}|document:[A-Za-z0-9][A-Za-z0-9._:/-]{0,383})#[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.reference);
+  if (
+    !decisionSourcePrefixes.get(value.kind).some((prefix) => value.reference.startsWith(prefix))
+    || !preciseReference
+  ) {
+    throw decisionError(
+      "DECISION_SOURCE_REJECTED",
+      "decision source reference does not identify an explicit confirmation or approved document",
+      400,
+    );
+  }
+  assertDecisionTextIsSafe(value.reference, "decision source reference");
+  return { kind: value.kind, reference: value.reference };
+}
+
+function normalizedDecisionRequestId(value) {
+  if (
+    typeof value !== "string"
+    || value.length < 1
+    || value.length > 128
+    || !/^[A-Za-z0-9._:-]+$/u.test(value)
+  ) {
+    throw decisionError(
+      "DECISION_INPUT_REJECTED",
+      "client request ID must contain 1-128 safe ASCII characters",
+      400,
+    );
+  }
+  assertDecisionTextIsSafe(value, "client request ID");
+  return value;
+}
+
+function normalizedDecisionRevision(value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw decisionError(
+      "DECISION_INPUT_REJECTED",
+      "decision revision must be a non-negative safe integer",
+      400,
+    );
+  }
+  return value;
+}
+
+function normalizedDecisionDigest(value, label = "decision digest") {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/u.test(value)) {
+    throw decisionError("DECISION_INPUT_REJECTED", `${label} must be a lowercase SHA-256 digest`, 400);
+  }
+  return value;
+}
+
+function normalizedDecisionRecordInput(input) {
+  if (!exactDecisionObject(
+    input,
+    [
+      "scope",
+      "subject",
+      "content",
+      "rationale",
+      "source",
+      "clientRequestId",
+      "expectedRevision",
+      "expectedDigest",
+    ],
+    ["supersedesDecisionId"],
+  )) {
+    throw decisionError(
+      "DECISION_INPUT_REJECTED",
+      "decision record input has missing or unsupported fields",
+      400,
+    );
+  }
+  return {
+    scope: normalizedDecisionIdentifier(input.scope, "decision scope", 128),
+    subject: normalizedDecisionIdentifier(input.subject, "decision subject", 256),
+    content: normalizedDecisionText(input.content, "decision content", 4_096),
+    rationale: normalizedDecisionText(input.rationale, "decision rationale", 4_096),
+    source: normalizedDecisionSource(input.source),
+    clientRequestId: normalizedDecisionRequestId(input.clientRequestId),
+    expectedRevision: normalizedDecisionRevision(input.expectedRevision),
+    expectedDigest: normalizedDecisionDigest(input.expectedDigest),
+    supersedesDecisionId: input.supersedesDecisionId == null
+      ? null
+      : normalizedDecisionIdentifier(input.supersedesDecisionId, "superseded decision ID", 128),
+  };
+}
+
+function normalizedCurrentDecisionQuery(input) {
+  if (!exactDecisionObject(input, ["scope", "limit"], ["subject"])) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      "current decision query requires bounded scope and limit",
+      400,
+    );
+  }
+  if (
+    !Number.isSafeInteger(input.limit)
+    || input.limit < 1
+    || input.limit > decisionMaximumCurrentResults
+  ) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      `current decision limit must be between 1 and ${decisionMaximumCurrentResults}`,
+      400,
+    );
+  }
+  return {
+    scope: normalizedDecisionIdentifier(input.scope, "decision scope", 128),
+    subject: input.subject == null
+      ? null
+      : normalizedDecisionIdentifier(input.subject, "decision subject", 256),
+    limit: input.limit,
+  };
+}
+
+function normalizedDecisionReadQuery(input) {
+  if (!exactDecisionObject(
+    input,
+    ["decisionId", "maxDepth", "expectedRevision", "expectedDigest"],
+  )) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      "decision read requires identity, bounded depth, revision, and digest",
+      400,
+    );
+  }
+  if (
+    !Number.isSafeInteger(input.maxDepth)
+    || input.maxDepth < 1
+    || input.maxDepth > decisionMaximumLineageDepth
+  ) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      `decision lineage depth must be between 1 and ${decisionMaximumLineageDepth}`,
+      400,
+    );
+  }
+  return {
+    decisionId: normalizedDecisionIdentifier(input.decisionId, "decision ID", 128),
+    maxDepth: input.maxDepth,
+    expectedRevision: normalizedDecisionRevision(input.expectedRevision),
+    expectedDigest: normalizedDecisionDigest(input.expectedDigest),
+  };
+}
+
+function normalizedDecisionSearchQuery(input) {
+  if (!exactDecisionObject(
+    input,
+    ["scope", "query", "limit", "expectedRevision", "expectedDigest"],
+  )) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      "decision search requires bounded scope, query, limit, revision, and digest",
+      400,
+    );
+  }
+  if (
+    typeof input.query !== "string"
+    || !input.query.trim()
+    || Buffer.byteLength(input.query.trim(), "utf8") > 128
+    || /[\u0000-\u001f\u007f-\u009f]/u.test(input.query)
+  ) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      "decision search query must contain 1-128 bounded UTF-8 bytes",
+      400,
+    );
+  }
+  if (
+    !Number.isSafeInteger(input.limit)
+    || input.limit < 1
+    || input.limit > decisionMaximumSearchResults
+  ) {
+    throw decisionError(
+      "DECISION_QUERY_REJECTED",
+      `decision search limit must be between 1 and ${decisionMaximumSearchResults}`,
+      400,
+    );
+  }
+  return {
+    scope: normalizedDecisionIdentifier(input.scope, "decision scope", 128),
+    query: input.query.trim(),
+    limit: input.limit,
+    expectedRevision: normalizedDecisionRevision(input.expectedRevision),
+    expectedDigest: normalizedDecisionDigest(input.expectedDigest),
+  };
+}
+
+function decisionRequestDigest(input) {
+  return createHash("sha256").update(JSON.stringify({
+    operation: input.supersedesDecisionId == null ? "record" : "supersede",
+    scope: input.scope,
+    subject: input.subject,
+    content: input.content,
+    rationale: input.rationale,
+    source: input.source,
+    supersedes_decision_id: input.supersedesDecisionId,
+    expected_revision: input.expectedRevision,
+    expected_digest: input.expectedDigest,
+  }), "utf8").digest("hex");
+}
+
+function normalizedDecisionTimestamp(value, label) {
+  if (typeof value !== "string" || value.length > 32) {
+    throw decisionError("DECISION_STATE_CORRUPT", `${label} is invalid`);
+  }
+  const parsed = new Date(value);
+  if (
+    !Number.isFinite(parsed.getTime())
+    || parsed.getUTCFullYear() < 2000
+    || parsed.toISOString() !== value
+    || parsed.getTime() > Date.now() + 300_000
+  ) {
+    throw decisionError("DECISION_STATE_CORRUPT", `${label} is invalid`);
+  }
+  return value;
+}
+
+function decisionRows(database) {
+  return database.prepare(`
+    SELECT
+      id, scope, subject, content, rationale, source_kind, source_reference,
+      status, supersedes_decision_id, client_request_id, request_digest, created_at
+    FROM decisions
+    ORDER BY scope ASC, subject ASC, created_at ASC, id ASC
+  `).all();
+}
+
+function decisionRowsDigest(rows) {
+  return createHash("sha256").update(JSON.stringify(rows.map((row) => [
+    row.id,
+    row.scope,
+    row.subject,
+    row.content,
+    row.rationale,
+    row.source_kind,
+    row.source_reference,
+    row.status,
+    row.supersedes_decision_id,
+    row.client_request_id,
+    row.request_digest,
+    row.created_at,
+  ])), "utf8").digest("hex");
+}
+
+function decodeDecision(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    scope: row.scope,
+    subject: row.subject,
+    content: row.content,
+    rationale: row.rationale,
+    source: { kind: row.source_kind, reference: row.source_reference },
+    status: row.status,
+    supersedes_decision_id: row.supersedes_decision_id,
+    created_at: row.created_at,
+  };
+}
+
+function initializeDecisionState(database) {
+  const rows = decisionRows(database);
+  if (rows.length > decisionMaximumRows) {
+    throw decisionError("DECISION_STORE_LIMIT_EXCEEDED", "decision store row limit exceeded");
+  }
+  database.prepare(`
+    INSERT OR IGNORE INTO decision_state (
+      slot, schema_version, revision, digest, updated_at
+    ) VALUES ('current', ?, ?, ?, ?)
+  `).run(decisionStateSchemaVersion, rows.length, decisionRowsDigest(rows), now());
+  return assertDecisionStateIntegrity(database);
+}
+
+function assertDecisionStateIntegrity(database) {
+  const states = database.prepare(`
+    SELECT slot, schema_version, revision, digest, updated_at
+    FROM decision_state ORDER BY slot
+  `).all();
+  if (states.length !== 1) {
+    throw decisionError("DECISION_STATE_CORRUPT", "decision state singleton is missing or duplicated");
+  }
+  const state = states[0];
+  if (
+    state.slot !== "current"
+    || state.schema_version !== decisionStateSchemaVersion
+    || !Number.isSafeInteger(state.revision)
+    || state.revision < 0
+    || !/^[a-f0-9]{64}$/u.test(state.digest)
+  ) {
+    throw decisionError("DECISION_STATE_CORRUPT", "decision state metadata is invalid");
+  }
+  normalizedDecisionTimestamp(state.updated_at, "decision state timestamp");
+  const rows = decisionRows(database);
+  if (rows.length > decisionMaximumRows) {
+    throw decisionError("DECISION_STORE_LIMIT_EXCEEDED", "decision store row limit exceeded");
+  }
+  if (state.revision !== rows.length) {
+    throw decisionError(
+      "DECISION_STATE_REVISION_MISMATCH",
+      "decision revision does not match retained history",
+    );
+  }
+  const digest = decisionRowsDigest(rows);
+  if (state.digest !== digest) {
+    throw decisionError(
+      "DECISION_STATE_DIGEST_MISMATCH",
+      "decision digest does not match retained history",
+    );
+  }
+
+  const byId = new Map();
+  const groups = new Map();
+  const childByParent = new Map();
+  for (const row of rows) {
+    normalizedDecisionIdentifier(row.id, "stored decision ID", 128);
+    normalizedDecisionIdentifier(row.scope, "stored decision scope", 128);
+    normalizedDecisionIdentifier(row.subject, "stored decision subject", 256);
+    normalizedDecisionText(row.content, "stored decision content", 4_096);
+    normalizedDecisionText(row.rationale, "stored decision rationale", 4_096);
+    normalizedDecisionSource({ kind: row.source_kind, reference: row.source_reference });
+    normalizedDecisionRequestId(row.client_request_id);
+    normalizedDecisionDigest(row.request_digest, "stored request digest");
+    normalizedDecisionTimestamp(row.created_at, "stored decision timestamp");
+    if (!new Set(["current", "superseded"]).has(row.status)) {
+      throw decisionError("DECISION_STATE_CORRUPT", "stored decision status is invalid");
+    }
+    if (byId.has(row.id)) {
+      throw decisionError("DECISION_STATE_CORRUPT", "duplicate stored decision identity");
+    }
+    byId.set(row.id, row);
+    const key = `${row.scope}\u0000${row.subject}`;
+    const group = groups.get(key) ?? [];
+    group.push(row);
+    groups.set(key, group);
+    if (row.supersedes_decision_id != null) {
+      if (childByParent.has(row.supersedes_decision_id)) {
+        throw decisionError("DECISION_LINEAGE_BRANCH_REJECTED", "decision lineage branches");
+      }
+      childByParent.set(row.supersedes_decision_id, row);
+    }
+  }
+  for (const group of groups.values()) {
+    const current = group.filter(({ status }) => status === "current");
+    if (current.length !== 1) {
+      throw decisionError(
+        "DECISION_CURRENT_INVARIANT_VIOLATED",
+        "each decision scope and subject must have exactly one current decision",
+      );
+    }
+    for (const row of group) {
+      const child = childByParent.get(row.id) ?? null;
+      if ((row.status === "current") !== (child === null)) {
+        throw decisionError(
+          "DECISION_LINEAGE_STATUS_MISMATCH",
+          "decision current and superseded status does not match lineage",
+        );
+      }
+      if (row.supersedes_decision_id != null) {
+        const parent = byId.get(row.supersedes_decision_id);
+        if (!parent) {
+          throw decisionError("DECISION_LINEAGE_DANGLING", "decision lineage target is missing");
+        }
+        if (parent.scope !== row.scope || parent.subject !== row.subject) {
+          throw decisionError("DECISION_CROSS_SCOPE_SUPERSESSION_REJECTED", "decision lineage crosses scope or subject");
+        }
+        if (row.created_at < parent.created_at) {
+          throw decisionError("DECISION_LINEAGE_TIME_INVALID", "decision lineage time moves backwards");
+        }
+      }
+    }
+    const visited = new Set();
+    let cursor = current[0];
+    while (cursor) {
+      if (visited.has(cursor.id)) {
+        throw decisionError("DECISION_LINEAGE_CYCLE_REJECTED", "decision lineage contains a cycle");
+      }
+      visited.add(cursor.id);
+      cursor = cursor.supersedes_decision_id == null
+        ? null
+        : byId.get(cursor.supersedes_decision_id);
+    }
+    if (visited.size !== group.length) {
+      throw decisionError("DECISION_LINEAGE_DISCONNECTED", "decision lineage is disconnected");
+    }
+  }
+  return { state, rows, byId, childByParent };
+}
+
+function assertExpectedDecisionState(state, expectedRevision, expectedDigest) {
+  if (state.revision !== expectedRevision || state.digest !== expectedDigest) {
+    throw decisionError(
+      "DECISION_REVISION_MISMATCH",
+      "decision state changed before the requested operation",
+    );
+  }
+}
+
+function advanceDecisionState(database, previousState, timestamp) {
+  const rows = decisionRows(database);
+  if (rows.length > decisionMaximumRows) {
+    throw decisionError("DECISION_STORE_LIMIT_EXCEEDED", "decision store row limit exceeded");
+  }
+  const result = database.prepare(`
+    UPDATE decision_state
+    SET revision = ?, digest = ?, updated_at = ?
+    WHERE slot = 'current' AND revision = ? AND digest = ?
+  `).run(
+    previousState.revision + 1,
+    decisionRowsDigest(rows),
+    timestamp,
+    previousState.revision,
+    previousState.digest,
+  );
+  if (result.changes !== 1) {
+    throw decisionError("DECISION_REVISION_MISMATCH", "decision state changed during mutation");
+  }
+  return assertDecisionStateIntegrity(database);
+}
+
 const schemaColumns = new Map([
   ["projects", ["id", "name", "root_path", "created_at", "updated_at"]],
   ["work_items", [
@@ -544,6 +1170,11 @@ const schemaColumns = new Map([
   ["project_rule_documents", [
     "observation_id", "relative_path", "sha256", "purpose", "observed_at",
   ]],
+  ["decisions", [
+    "id", "scope", "subject", "content", "rationale", "source_kind", "source_reference",
+    "status", "supersedes_decision_id", "client_request_id", "request_digest", "created_at",
+  ]],
+  ["decision_state", ["slot", "schema_version", "revision", "digest", "updated_at"]],
 ]);
 
 const schemaForeignKeys = new Map([
@@ -563,6 +1194,11 @@ const schemaForeignKeys = new Map([
   ["project_observations", [["project_id", "projects", "id", "CASCADE"]]],
   ["project_git_remotes", [["observation_id", "project_observations", "id", "CASCADE"]]],
   ["project_rule_documents", [["observation_id", "project_observations", "id", "CASCADE"]]],
+  ["decisions", [
+    ["scope", "decisions", "scope", "RESTRICT"],
+    ["subject", "decisions", "subject", "RESTRICT"],
+    ["supersedes_decision_id", "decisions", "id", "RESTRICT"],
+  ]],
 ]);
 
 function quotedIdentifier(value) {
@@ -587,6 +1223,31 @@ function validateLegacyWorkCoreMigrationBase(database) {
     .all().map(({ name }) => name));
   if (!workItemColumns.has("id") || !workItemColumns.has("project_id")) {
     schemaProfileFailure("legacy work_items columns");
+  }
+}
+
+const decisionCoreOwnedObjectNames = new Set([
+  "decisions",
+  "decision_state",
+  "decisions_current_scope_subject",
+  "decisions_unique_successor",
+  "decisions_scope_created_at",
+  "decisions_no_delete",
+  "decisions_immutable_update",
+  "decision_state_no_delete",
+  "decision_state_revision_guard",
+]);
+
+function validateLegacyDecisionCoreAbsent(database) {
+  const collisions = database.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE name NOT LIKE 'sqlite_%'
+    ORDER BY name
+  `).all()
+    .map(({ name }) => name)
+    .filter((name) => decisionCoreOwnedObjectNames.has(name));
+  if (collisions.length > 0) {
+    schemaProfileFailure(`legacy decision core objects: ${collisions.join(", ")}`);
   }
 }
 
@@ -702,6 +1363,7 @@ function validateControlSchemaProfile(database) {
 function initializeControlDatabase(database, { validateProfile = true } = {}) {
   database.exec("BEGIN IMMEDIATE;");
   try {
+    validateLegacyDecisionCoreAbsent(database);
     database.exec(`
       CREATE TABLE IF NOT EXISTS projects (
         id TEXT PRIMARY KEY,
@@ -859,6 +1521,8 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
 
     `);
     database.exec(workCoreSchemaSql);
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
     if (validateProfile) validateControlSchemaProfile(database);
     database.exec(`PRAGMA user_version = ${controlSchemaVersion};`);
     database.exec("COMMIT;");
@@ -868,10 +1532,11 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
   }
 }
 
-function migrateControlDatabaseV1ToV5(database) {
+function migrateControlDatabaseV1ToV6(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
+    validateLegacyDecisionCoreAbsent(database);
     database.exec(`
       CREATE TABLE development_radar (
         slot TEXT PRIMARY KEY CHECK (slot = 'current'),
@@ -897,9 +1562,11 @@ function migrateControlDatabaseV1ToV5(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 5;
+      PRAGMA user_version = 6;
     `);
     database.exec(workCoreSchemaSql);
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -908,10 +1575,11 @@ function migrateControlDatabaseV1ToV5(database) {
   }
 }
 
-function migrateControlDatabaseV2ToV5(database) {
+function migrateControlDatabaseV2ToV6(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
+    validateLegacyDecisionCoreAbsent(database);
     database.exec(`
       CREATE TABLE IF NOT EXISTS conversation_writer_leases (
         conversation_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE
@@ -922,9 +1590,11 @@ function migrateControlDatabaseV2ToV5(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 5;
+      PRAGMA user_version = 6;
     `);
     database.exec(workCoreSchemaSql);
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -933,10 +1603,11 @@ function migrateControlDatabaseV2ToV5(database) {
   }
 }
 
-function migrateControlDatabaseV3ToV5(database) {
+function migrateControlDatabaseV3ToV6(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
+    validateLegacyDecisionCoreAbsent(database);
     database.exec(`
       ALTER TABLE conversation_writer_leases RENAME TO conversation_writer_leases_v3;
       CREATE TABLE conversation_writer_leases (
@@ -954,9 +1625,11 @@ function migrateControlDatabaseV3ToV5(database) {
       SELECT conversation_id, owner_id, owner_pid, lease_expires_at, updated_at, 1
       FROM conversation_writer_leases_v3;
       DROP TABLE conversation_writer_leases_v3;
-      PRAGMA user_version = 5;
+      PRAGMA user_version = 6;
     `);
     database.exec(workCoreSchemaSql);
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -965,12 +1638,31 @@ function migrateControlDatabaseV3ToV5(database) {
   }
 }
 
-function migrateControlDatabaseV4ToV5(database) {
+function migrateControlDatabaseV4ToV6(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
+    validateLegacyDecisionCoreAbsent(database);
     database.exec(workCoreSchemaSql);
-    database.exec("PRAGMA user_version = 5;");
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
+    database.exec("PRAGMA user_version = 6;");
+    validateControlSchemaProfile(database);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV5ToV6(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    validateLegacyWorkCoreMigrationBase(database);
+    validateLegacyDecisionCoreAbsent(database);
+    database.exec(decisionCoreSchemaSql);
+    initializeDecisionState(database);
+    database.exec("PRAGMA user_version = 6;");
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -1537,16 +2229,17 @@ export class LatticeStore {
     const database = new DatabaseSync(databasePath);
     try {
       const version = database.prepare("PRAGMA user_version").get().user_version;
-      if (![0, 1, 2, 3, 4, controlSchemaVersion].includes(version)) {
+      if (![0, 1, 2, 3, 4, 5, controlSchemaVersion].includes(version)) {
         throw new Error(
-          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, 4, or ${controlSchemaVersion}`,
+          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, 4, 5, or ${controlSchemaVersion}`,
         );
       }
       if (version === 0) initializeControlDatabase(database);
-      else if (version === 1) migrateControlDatabaseV1ToV5(database);
-      else if (version === 2) migrateControlDatabaseV2ToV5(database);
-      else if (version === 3) migrateControlDatabaseV3ToV5(database);
-      else if (version === 4) migrateControlDatabaseV4ToV5(database);
+      else if (version === 1) migrateControlDatabaseV1ToV6(database);
+      else if (version === 2) migrateControlDatabaseV2ToV6(database);
+      else if (version === 3) migrateControlDatabaseV3ToV6(database);
+      else if (version === 4) migrateControlDatabaseV4ToV6(database);
+      else if (version === 5) migrateControlDatabaseV5ToV6(database);
       else validateControlSchemaProfile(database);
       database.exec("PRAGMA foreign_keys = ON;");
       if (databasePath !== ":memory:") database.exec("PRAGMA journal_mode = WAL;");
@@ -2869,6 +3562,264 @@ export class LatticeStore {
       );
       this.database.exec("COMMIT;");
       return true;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  recordDecision(input) {
+    const normalized = normalizedDecisionRecordInput(input);
+    const requestDigest = decisionRequestDigest(normalized);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const before = assertDecisionStateIntegrity(this.database);
+      const replay = before.rows.find(
+        ({ client_request_id: requestId }) => requestId === normalized.clientRequestId,
+      );
+      if (replay) {
+        if (replay.request_digest !== requestDigest) {
+          throw decisionError(
+            "DECISION_IDEMPOTENCY_CONFLICT",
+            "client request ID was already used with a different decision payload",
+          );
+        }
+        this.database.exec("COMMIT;");
+        return {
+          schema_version: decisionMutationSchemaVersion,
+          source: decisionStoreSource,
+          changed: false,
+          revision: before.state.revision,
+          digest: before.state.digest,
+          decision: decodeDecision(replay),
+        };
+      }
+      assertExpectedDecisionState(
+        before.state,
+        normalized.expectedRevision,
+        normalized.expectedDigest,
+      );
+
+      const current = before.rows.find((row) => (
+        row.scope === normalized.scope
+        && row.subject === normalized.subject
+        && row.status === "current"
+      ));
+      let predecessor = null;
+      if (normalized.supersedesDecisionId == null) {
+        if (current) {
+          throw decisionError(
+            "DECISION_CURRENT_EXISTS",
+            "a current decision already exists; explicitly supersede it",
+          );
+        }
+      } else {
+        predecessor = before.byId.get(normalized.supersedesDecisionId);
+        if (!predecessor) {
+          throw decisionError(
+            "DECISION_SUPERSESSION_TARGET_NOT_FOUND",
+            "superseded decision was not found",
+            404,
+          );
+        }
+        if (
+          predecessor.scope !== normalized.scope
+          || predecessor.subject !== normalized.subject
+        ) {
+          throw decisionError(
+            "DECISION_CROSS_SCOPE_SUPERSESSION_REJECTED",
+            "a decision can supersede only the current decision for the same scope and subject",
+          );
+        }
+        if (predecessor.status !== "current" || current?.id !== predecessor.id) {
+          throw decisionError(
+            "DECISION_SUPERSESSION_TARGET_NOT_CURRENT",
+            "only the current decision can be superseded",
+          );
+        }
+      }
+      if (before.rows.length >= decisionMaximumRows) {
+        throw decisionError("DECISION_STORE_LIMIT_EXCEEDED", "decision store row limit exceeded");
+      }
+
+      const previousTimestamp = Math.max(
+        new Date(before.state.updated_at).getTime(),
+        predecessor == null ? 0 : new Date(predecessor.created_at).getTime(),
+      );
+      const createdAt = new Date(Math.max(Date.now(), previousTimestamp + 1)).toISOString();
+      const id = randomUUID();
+      if (predecessor) {
+        const superseded = this.database.prepare(`
+          UPDATE decisions SET status = 'superseded'
+          WHERE id = ? AND status = 'current'
+        `).run(predecessor.id);
+        if (superseded.changes !== 1) {
+          throw decisionError(
+            "DECISION_SUPERSESSION_RACE_REJECTED",
+            "the decision stopped being current during supersession",
+          );
+        }
+      }
+      this.database.prepare(`
+        INSERT INTO decisions (
+          id, scope, subject, content, rationale, source_kind, source_reference,
+          status, supersedes_decision_id, client_request_id, request_digest, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'current', ?, ?, ?, ?)
+      `).run(
+        id,
+        normalized.scope,
+        normalized.subject,
+        normalized.content,
+        normalized.rationale,
+        normalized.source.kind,
+        normalized.source.reference,
+        normalized.supersedesDecisionId,
+        normalized.clientRequestId,
+        requestDigest,
+        createdAt,
+      );
+      const after = advanceDecisionState(this.database, before.state, createdAt);
+      const recorded = after.byId.get(id);
+      this.database.exec("COMMIT;");
+      return {
+        schema_version: decisionMutationSchemaVersion,
+        source: decisionStoreSource,
+        changed: true,
+        revision: after.state.revision,
+        digest: after.state.digest,
+        decision: decodeDecision(recorded),
+      };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  getCurrentDecisionsPacket(input) {
+    const query = normalizedCurrentDecisionQuery(input);
+    this.database.exec("BEGIN;");
+    try {
+      const snapshot = assertDecisionStateIntegrity(this.database);
+      const matching = snapshot.rows.filter((row) => (
+        row.status === "current"
+        && row.scope === query.scope
+        && (query.subject == null || row.subject === query.subject)
+      )).sort((left, right) => (
+        left.subject.localeCompare(right.subject)
+        || left.id.localeCompare(right.id)
+      ));
+      const packet = {
+        schema_version: currentDecisionsPacketSchemaVersion,
+        source: decisionStoreSource,
+        scope: query.scope,
+        subject: query.subject,
+        revision: snapshot.state.revision,
+        digest: snapshot.state.digest,
+        decisions: matching.slice(0, query.limit).map(decodeDecision),
+        truncated: matching.length > query.limit,
+      };
+      if (Buffer.byteLength(JSON.stringify(packet), "utf8") > 262_144) {
+        throw decisionError(
+          "DECISION_OUTPUT_LIMIT_EXCEEDED",
+          "current decisions packet exceeds the output bound",
+        );
+      }
+      this.database.exec("COMMIT;");
+      return packet;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  readDecision(input) {
+    const query = normalizedDecisionReadQuery(input);
+    this.database.exec("BEGIN;");
+    try {
+      const snapshot = assertDecisionStateIntegrity(this.database);
+      assertExpectedDecisionState(
+        snapshot.state,
+        query.expectedRevision,
+        query.expectedDigest,
+      );
+      const target = snapshot.byId.get(query.decisionId);
+      if (!target) {
+        throw decisionError("DECISION_NOT_FOUND", "decision was not found", 404);
+      }
+      const group = snapshot.rows.filter((row) => (
+        row.scope === target.scope && row.subject === target.subject
+      ));
+      let cursor = group.find(({ supersedes_decision_id: parentId }) => parentId == null);
+      const lineage = [];
+      while (cursor) {
+        lineage.push(cursor);
+        cursor = snapshot.childByParent.get(cursor.id) ?? null;
+      }
+      const targetIndex = lineage.findIndex(({ id }) => id === target.id);
+      if (targetIndex < 0) {
+        throw decisionError("DECISION_LINEAGE_DISCONNECTED", "decision lineage is disconnected");
+      }
+      const start = Math.min(targetIndex, Math.max(0, lineage.length - query.maxDepth));
+      const end = Math.min(lineage.length, start + query.maxDepth);
+      const result = {
+        schema_version: decisionReadSchemaVersion,
+        source: decisionStoreSource,
+        revision: snapshot.state.revision,
+        digest: snapshot.state.digest,
+        decision: decodeDecision(target),
+        lineage: lineage.slice(start, end).map(decodeDecision),
+        truncated_before: start > 0,
+        truncated_after: end < lineage.length,
+      };
+      if (Buffer.byteLength(JSON.stringify(result), "utf8") > 524_288) {
+        throw decisionError("DECISION_OUTPUT_LIMIT_EXCEEDED", "decision read exceeds the output bound");
+      }
+      this.database.exec("COMMIT;");
+      return result;
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  searchDecisions(input) {
+    const query = normalizedDecisionSearchQuery(input);
+    this.database.exec("BEGIN;");
+    try {
+      const snapshot = assertDecisionStateIntegrity(this.database);
+      assertExpectedDecisionState(
+        snapshot.state,
+        query.expectedRevision,
+        query.expectedDigest,
+      );
+      const needle = query.query.toLocaleLowerCase("en-US");
+      const matches = snapshot.rows.filter((row) => (
+        row.scope === query.scope
+        && [
+          row.subject,
+          row.content,
+          row.rationale,
+          row.source_reference,
+        ].some((value) => value.toLocaleLowerCase("en-US").includes(needle))
+      )).sort((left, right) => (
+        right.created_at.localeCompare(left.created_at)
+        || right.id.localeCompare(left.id)
+      ));
+      const result = {
+        schema_version: decisionSearchSchemaVersion,
+        source: decisionStoreSource,
+        scope: query.scope,
+        query: query.query,
+        revision: snapshot.state.revision,
+        digest: snapshot.state.digest,
+        decisions: matches.slice(0, query.limit).map(decodeDecision),
+        truncated: matches.length > query.limit,
+      };
+      if (Buffer.byteLength(JSON.stringify(result), "utf8") > 196_608) {
+        throw decisionError("DECISION_OUTPUT_LIMIT_EXCEEDED", "decision search exceeds the output bound");
+      }
+      this.database.exec("COMMIT;");
+      return result;
     } catch (error) {
       this.database.exec("ROLLBACK;");
       throw error;

@@ -8,6 +8,20 @@ import test from "node:test";
 import { createLatticeServer } from "../src/server.mjs";
 import { LatticeStore } from "../src/store.mjs";
 
+function removeDecisionCoreFromLegacyFixture(database) {
+  database.exec(`
+    DROP TRIGGER IF EXISTS decisions_no_delete;
+    DROP TRIGGER IF EXISTS decisions_immutable_update;
+    DROP TRIGGER IF EXISTS decision_state_no_delete;
+    DROP TRIGGER IF EXISTS decision_state_revision_guard;
+    DROP INDEX IF EXISTS decisions_current_scope_subject;
+    DROP INDEX IF EXISTS decisions_unique_successor;
+    DROP INDEX IF EXISTS decisions_scope_created_at;
+    DROP TABLE IF EXISTS decision_state;
+    DROP TABLE IF EXISTS decisions;
+  `);
+}
+
 class QuietCodex extends EventEmitter {
   connected = false;
 
@@ -143,11 +157,12 @@ test("a version 1 Control database migrates in place without losing existing dat
     store = null;
 
     const legacy = new DatabaseSync(databasePath);
+    removeDecisionCoreFromLegacyFixture(legacy);
     legacy.exec("DROP TABLE development_radar; PRAGMA user_version = 1;");
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
     assert.equal(store.listProjects().length, 1);
     assert.equal(store.getDevelopmentRadar(), null);
   } finally {
@@ -166,6 +181,7 @@ test("a version 3 Control database gains a monotonic conversation fence generati
     store = null;
 
     const legacy = new DatabaseSync(databasePath);
+    removeDecisionCoreFromLegacyFixture(legacy);
     legacy.exec(`
       DROP TABLE conversation_writer_leases;
       CREATE TABLE conversation_writer_leases (
@@ -181,7 +197,7 @@ test("a version 3 Control database gains a monotonic conversation fence generati
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
     assert.deepEqual(
       store.database.prepare("PRAGMA table_info(conversation_writer_leases)").all()
         .map(({ name }) => name),

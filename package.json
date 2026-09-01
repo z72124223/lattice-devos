@@ -14,6 +14,8 @@
     "control:primary-conversation-acceptance": "node scripts/run-primary-conversation-acceptance.mjs",
     "control:project": "node apps/lattice-control/src/project-client.mjs",
     "control:receipt": "node apps/lattice-control/src/installation-receipt-client.mjs",
+    "control:decision-mcp": "node apps/lattice-control/src/decision-core-mcp.mjs",
+    "control:decision-mcp-acceptance": "node scripts/run-lattice-control-decision-core-mcp-acceptance.mjs",
     "control:work-mcp": "node apps/lattice-control/src/work-core-mcp.mjs",
     "control:work-mcp-acceptance": "node scripts/run-lattice-control-work-core-mcp-acceptance.mjs",
     "control:test": "node --test \"apps/lattice-control/test/*.test.mjs\"",

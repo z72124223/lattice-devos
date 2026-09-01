@@ -7,6 +7,20 @@ import test from "node:test";
 import { LatticeStore } from "../src/store.mjs";
 import { ControlWorkService } from "../src/work-core-service.mjs";
 
+function removeDecisionCoreFromLegacyFixture(database) {
+  database.exec(`
+    DROP TRIGGER IF EXISTS decisions_no_delete;
+    DROP TRIGGER IF EXISTS decisions_immutable_update;
+    DROP TRIGGER IF EXISTS decision_state_no_delete;
+    DROP TRIGGER IF EXISTS decision_state_revision_guard;
+    DROP INDEX IF EXISTS decisions_current_scope_subject;
+    DROP INDEX IF EXISTS decisions_unique_successor;
+    DROP INDEX IF EXISTS decisions_scope_created_at;
+    DROP TABLE IF EXISTS decision_state;
+    DROP TABLE IF EXISTS decisions;
+  `);
+}
+
 test("Control schema v4 migrates work-core tables without losing work items or events", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-work-core-migration-"));
   const databasePath = path.join(directory, "control.db");
@@ -23,6 +37,7 @@ test("Control schema v4 migrates work-core tables without losing work items or e
     store = null;
 
     const legacy = new DatabaseSync(databasePath);
+    removeDecisionCoreFromLegacyFixture(legacy);
     legacy.exec(`
       DROP INDEX IF EXISTS work_items_project_id_id;
       DROP TABLE IF EXISTS work_item_dependencies;
@@ -32,7 +47,7 @@ test("Control schema v4 migrates work-core tables without losing work items or e
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
     assert.equal(store.getWorkItem(item.id).title, "Preserve me");
     assert.deepEqual(store.listEvents(item.id).map(({ kind }) => kind), ["created"]);
     assert.deepEqual(
@@ -49,7 +64,7 @@ test("Control schema v4 migrates work-core tables without losing work items or e
   }
 });
 
-test("Control schema v2 migrates directly to v5 and preserves existing work", async () => {
+test("Control schema v2 migrates directly to v6 and preserves existing work", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-work-core-v2-"));
   const databasePath = path.join(directory, "control.db");
   let store;
@@ -65,6 +80,7 @@ test("Control schema v2 migrates directly to v5 and preserves existing work", as
     store = null;
 
     const legacy = new DatabaseSync(databasePath);
+    removeDecisionCoreFromLegacyFixture(legacy);
     legacy.exec(`
       DROP INDEX IF EXISTS work_items_project_id_id;
       DROP TABLE work_item_dependencies;
@@ -75,7 +91,7 @@ test("Control schema v2 migrates directly to v5 and preserves existing work", as
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 5);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
     assert.equal(store.getWorkItem(item.id).objective, "Survive the direct migration.");
     assert.deepEqual(store.listEvents(item.id).map(({ kind }) => kind), ["created"]);
   } finally {

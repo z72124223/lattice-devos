@@ -1,0 +1,55 @@
+{
+  "schema_version": "lattice.control.decision-core-mcp-acceptance.v1",
+  "generated_at": "2026-09-01T03:50:51.005Z",
+  "result": "PASS",
+  "transport": "DIRECT_STDIO_REAL_CHILD",
+  "source": {
+    "kind": "TEMP_CONTROL_SQLITE_REAL_STORE",
+    "control_schema_version": 6,
+    "authority": "CONTROL_LOCAL_PRODUCT_STATE",
+    "database_path_included": false
+  },
+  "protocol": {
+    "initialized": true,
+    "server_name": "lattice-control-decision-core",
+    "tools_listed": [
+      "lattice_control_decision_record",
+      "lattice_control_decision_current",
+      "lattice_control_decision_read",
+      "lattice_control_decision_search"
+    ],
+    "record_called": true,
+    "supersede_called": true,
+    "current_called": true,
+    "search_called": true,
+    "read_called": true
+  },
+  "mutation": {
+    "record_changed": true,
+    "supersede_changed": true,
+    "replay_changed": false,
+    "retained_history_count": 2,
+    "current_count": 1,
+    "search_result_count": 2
+  },
+  "shared_state_identity": {
+    "revision": 2,
+    "digest": "a039879a24b4b05ac435378df161d6aa005914e0954da60b721ca8f91579b837",
+    "current_search_equal": true,
+    "current_read_equal": true,
+    "fresh_process_equal": true
+  },
+  "bounds": {
+    "request_timeout_ms": 5000,
+    "requested_current_limit": 10,
+    "requested_search_limit": 10,
+    "requested_lineage_depth": 10,
+    "response_count": 8,
+    "stdout_bytes": 11614,
+    "maximum_stdout_frame_bytes": 3300,
+    "stderr_bytes": 0
+  },
+  "process": {
+    "exit_code": 0
+  }
+}
