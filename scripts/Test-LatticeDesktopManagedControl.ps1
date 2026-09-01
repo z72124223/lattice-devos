@@ -243,6 +243,7 @@ $candidateDirectory = Join-Path $temporaryRoot 'candidate'
 $managedData = Join-Path $temporaryRoot 'managed-data'
 $reuseData = Join-Path $temporaryRoot 'reuse-data'
 $externalData = Join-Path $temporaryRoot 'external-data'
+$unknownData = Join-Path $temporaryRoot 'unknown-data'
 $foreignReady = Join-Path $temporaryRoot 'foreign-ready.txt'
 $unknownReady = Join-Path $temporaryRoot 'unknown-ready.txt'
 $desktop = $null
@@ -364,6 +365,11 @@ try {
 
     # Unknown/malformed runtime on fixed 4317: the packaged candidate must fail
     # closed, launch no bundled child, and never stop the foreign listener.
+    $unknownDatabase = Join-Path $unknownData 'LATTICE\control\lattice-control.db'
+    $unknownStoreDirectory = Split-Path -Parent $unknownDatabase
+    if (Test-Path -LiteralPath $unknownStoreDirectory) {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_STORE_PREEXISTING'
+    }
     $unknownControl = Start-ControlProcess $nodePath $foreignFixture $repositoryRoot @{
         'LATTICE_DESKTOP_INCOMPATIBLE_PORT' = '4317'
         'LATTICE_DESKTOP_INCOMPATIBLE_READY' = $unknownReady
@@ -380,8 +386,11 @@ try {
         [string]$unknownSurface.Content -cne 'not-a-lattice-runtime') {
         throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_SURFACE_NOT_MALFORMED'
     }
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $unknownData
     Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
+    if (Test-Path -LiteralPath $unknownStoreDirectory) {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_BUNDLED_STORE_CREATED'
+    }
     if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
         throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_STARTED_CHILD'
     }
@@ -397,6 +406,9 @@ try {
     if ($unknownAfterClose.StatusCode -ne 200 -or
         [string]$unknownAfterClose.Content -cne 'not-a-lattice-runtime') {
         throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_LISTENER_NOT_SERVING_AFTER_CLOSE'
+    }
+    if (Test-Path -LiteralPath $unknownStoreDirectory) {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_BUNDLED_STORE_CREATED_AFTER_CLOSE'
     }
     $unknownPid = $unknownControl.Id
     Stop-TestOwnedProcess $unknownControl
@@ -447,6 +459,7 @@ try {
         cross_scope_process_survived_close = $true
         unknown_runtime_status = 'INCOMPATIBLE'
         unknown_runtime_bundled_child_started = $false
+        unknown_runtime_bundled_store_artifacts_created = $false
         unknown_runtime_process_pid = $unknownPid
         unknown_runtime_process_survived_close = $true
         unknown_runtime_surface_served_after_close = $true
