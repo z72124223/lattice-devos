@@ -187,6 +187,8 @@ export class CodexAppServer extends EventEmitter {
     this.closingProcess = null;
     this.closePromise = null;
     this.connectionGeneration = 0;
+    this.currentGenerationRecord = null;
+    this.closingGenerationRecord = null;
     this.appServerSessionId = null;
     this.ready = false;
     this.connectPromise = null;
@@ -286,17 +288,83 @@ export class CodexAppServer extends EventEmitter {
     }).map((entry) => structuredClone(entry));
   }
 
+  #emitDisconnectOnce(record, details) {
+    if (!record || record.disconnectEmitted) return false;
+    record.disconnectEmitted = true;
+    for (const listener of this.rawListeners("disconnect")) {
+      try {
+        listener.call(this, details);
+      } catch {
+        record.disconnectListenerFailure = true;
+      }
+    }
+    return true;
+  }
+
+  #finalizeGenerationExit(record, code, signal) {
+    if (!record || record.exitObserved) return;
+    record.exitObserved = true;
+    record.lines?.close();
+    const child = record.child;
+    const isCurrent = this.currentGenerationRecord === record;
+    const isClosing = this.closingGenerationRecord === record;
+    const ownedClose = record.closing === true;
+    const error = new Error(`Codex App Server exited (${code ?? signal ?? "unknown"})`);
+    if (!ownedClose) error.code = "CODEX_APP_SERVER_PROCESS_EXITED";
+    if (
+      isCurrent
+      && !ownedClose
+      && this.processDomainContract
+      && !this.subtreeExitReceipt
+    ) {
+      this.processDomainFailure ??= error;
+    }
+    if (isCurrent || isClosing) {
+      this.#rejectProcessDomainWaiter(error, child, record.generation);
+    }
+    if (isCurrent) {
+      this.ready = false;
+      if (this.process === child) this.process = null;
+      this.currentGenerationRecord = null;
+      this.appServerSessionId = null;
+      this.#rejectOutstanding(error);
+    }
+    if (isClosing) {
+      if (this.closingProcess === child) this.closingProcess = null;
+      this.closingGenerationRecord = null;
+      this.appServerSessionId = null;
+      this.diagnosticDrain = null;
+    }
+    if (this.lines === record.lines) this.lines = null;
+    this.#emitDisconnectOnce(record, ownedClose
+      ? { code: null, signal: "client-close" }
+      : { code, signal });
+  }
+
   async connect() {
     if (this.closePromise) await this.closePromise;
+    const retained = this.currentGenerationRecord ?? this.closingGenerationRecord;
+    if (retained && !retained.exitObserved && retained.child.exitCode !== null) {
+      this.#finalizeGenerationExit(
+        retained,
+        retained.child.exitCode,
+        retained.child.signalCode ?? null,
+      );
+    }
     if (this.connectPromise) return this.connectPromise;
-    if (this.closingProcess && this.closingProcess.exitCode === null) {
+    if (this.closingGenerationRecord && !this.closingGenerationRecord.exitObserved) {
       const error = new Error(
         "Codex App Server reconnect requires the prior owned process to exit first",
       );
       error.code = "CODEX_APP_SERVER_CLOSE_PENDING";
       throw error;
     }
-    if (this.process && this.process.exitCode === null && !this.connected) {
+    if (
+      this.currentGenerationRecord
+      && !this.currentGenerationRecord.exitObserved
+      && this.currentGenerationRecord.child.exitCode === null
+      && !this.connected
+    ) {
       const error = new Error(
         "Codex App Server has a live unready process and cannot start a replacement",
       );
@@ -363,7 +431,17 @@ export class CodexAppServer extends EventEmitter {
       windowsHide: true,
     });
     const generation = this.connectionGeneration += 1;
+    const generationRecord = {
+      generation,
+      child,
+      disconnectEmitted: false,
+      disconnectListenerFailure: false,
+      exitObserved: false,
+      closing: false,
+      lines: null,
+    };
     this.process = child;
+    this.currentGenerationRecord = generationRecord;
     this.appServerSessionId = sessionId;
     this.ready = false;
     this.notificationSequence = 0;
@@ -380,32 +458,18 @@ export class CodexAppServer extends EventEmitter {
       : null;
     this.#clearServerRequests();
     const lines = readline.createInterface({ input: child.stdout });
+    generationRecord.lines = lines;
     this.lines = lines;
     lines.on("line", (line) => this.#receive(line, child, generation));
     child.once("exit", (code, signal) => {
-      lines.close();
-      const ownedClose = this.closingProcess === child;
-      if (this.process !== child && !ownedClose) return;
-      const error = new Error(`Codex App Server exited (${code ?? signal ?? "unknown"})`);
-      if (!ownedClose) error.code = "CODEX_APP_SERVER_PROCESS_EXITED";
-      if (!ownedClose && this.processDomainContract && !this.subtreeExitReceipt) {
-        this.processDomainFailure ??= error;
-      }
-      this.#rejectProcessDomainWaiter(error, child, generation);
-      this.ready = false;
-      if (this.process === child) {
-        this.process = null;
-        this.appServerSessionId = null;
-      }
-      if (this.lines === lines) this.lines = null;
-      this.#rejectOutstanding(error);
-      this.emit("disconnect", ownedClose
-        ? { code: null, signal: "client-close" }
-        : { code, signal });
+      this.#finalizeGenerationExit(generationRecord, code, signal);
     });
     child.on("error", (cause) => {
       lines.close();
-      if (this.process !== child && this.closingProcess !== child) return;
+      if (
+        this.currentGenerationRecord !== generationRecord
+        && this.closingGenerationRecord !== generationRecord
+      ) return;
       const error = new Error(`Unable to start Codex App Server: ${cause.message}`);
       error.code = "CODEX_APP_SERVER_TRANSPORT_ERROR";
       error.causeCode = cause.code ?? null;
@@ -415,7 +479,7 @@ export class CodexAppServer extends EventEmitter {
       // still null (for example when kill itself reports an error).
       if (this.lines === lines) this.lines = null;
       this.#rejectOutstanding(error);
-      this.emit("disconnect", { code: cause.code ?? null, signal: null });
+      this.#emitDisconnectOnce(generationRecord, { code: cause.code ?? null, signal: null });
     });
     const diagnosticLines = readline.createInterface({ input: child.stderr });
     this.diagnosticDrain = new Promise((resolve) => {
@@ -446,19 +510,29 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  async close() {
+  close() {
     if (this.closePromise) return this.closePromise;
-    const attempt = this.#closeOnce();
-    this.closePromise = attempt;
-    try {
-      return await attempt;
-    } finally {
-      if (this.closePromise === attempt) this.closePromise = null;
-    }
+    const attempt = Promise.resolve().then(() => this.#closeOnce());
+    let tracked;
+    tracked = attempt.finally(() => {
+      if (this.closePromise === tracked) this.closePromise = null;
+    });
+    this.closePromise = tracked;
+    return tracked;
   }
 
   async #closeOnce() {
-    const child = this.process ?? this.closingProcess;
+    let record = this.currentGenerationRecord ?? this.closingGenerationRecord;
+    if (record && !record.exitObserved && record.child.exitCode !== null) {
+      this.#finalizeGenerationExit(
+        record,
+        record.child.exitCode,
+        record.child.signalCode ?? null,
+      );
+      record = this.currentGenerationRecord ?? this.closingGenerationRecord;
+    }
+    const child = record?.child ?? this.process ?? this.closingProcess;
+    const generation = this.connectionGeneration;
     const lines = this.lines;
     const diagnosticDrain = this.diagnosticDrain;
     this.ready = false;
@@ -480,7 +554,15 @@ export class CodexAppServer extends EventEmitter {
       });
     }
     const processId = Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
+    if (!record) {
+      const error = new Error("Codex App Server process generation was unavailable");
+      error.code = "CODEX_APP_SERVER_GENERATION_MISSING";
+      throw error;
+    }
+    record.closing = true;
     this.closingProcess = child;
+    this.closingGenerationRecord = record;
+    this.#emitDisconnectOnce(record, { code: null, signal: "client-close" });
     if (this.lines === lines) this.lines = null;
     lines?.close();
     const exit = child.exitCode !== null
@@ -506,9 +588,18 @@ export class CodexAppServer extends EventEmitter {
       if (this.launchSpec?.processFence && diagnosticDrain) {
         await Promise.race([diagnosticDrain, timeout]);
       }
-      if (this.process === child || this.closingProcess === child) {
-        if (this.process === child) this.process = null;
-        this.closingProcess = null;
+      if (
+        this.currentGenerationRecord === record
+        || this.closingGenerationRecord === record
+      ) {
+        if (this.currentGenerationRecord === record) {
+          this.currentGenerationRecord = null;
+          if (this.process === child) this.process = null;
+        }
+        if (this.closingGenerationRecord === record) {
+          this.closingGenerationRecord = null;
+          if (this.closingProcess === child) this.closingProcess = null;
+        }
         this.appServerSessionId = null;
         this.diagnosticDrain = null;
       }
@@ -1073,7 +1164,7 @@ export class CodexAppServer extends EventEmitter {
     const requestController = new AbortController();
     const terminal = this.waitForTurnCompleted(threadId, turnId, {
       timeoutMs,
-      statuses: ["interrupted", "failed"],
+      statuses: ["completed", "interrupted", "failed"],
       signal: terminalController.signal,
     });
     terminal.catch(() => {});

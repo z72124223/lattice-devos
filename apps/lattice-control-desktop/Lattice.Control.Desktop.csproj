@@ -8,7 +8,7 @@
     <AssemblyName>LATTICE</AssemblyName>
     <RootNamespace>Lattice.Control.Desktop</RootNamespace>
     <UseAppHost>true</UseAppHost>
-    <Version>1.0.0-rc.1</Version>
+    <Version>1.0.0-rc.2</Version>
     <Product>LATTICE Control</Product>
   </PropertyGroup>
 
@@ -21,5 +21,8 @@
     <EmbeddedResource Include="..\lattice-control\runtime-identity.json"
                       Link="runtime-identity.json"
                       LogicalName="Lattice.Control.RuntimeIdentity.json" />
+    <EmbeddedResource Include="..\lattice-control\data-scope-contract.json"
+                      Link="data-scope-contract.json"
+                      LogicalName="Lattice.Control.DataScopeContract.json" />
   </ItemGroup>
 </Project>

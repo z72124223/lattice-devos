@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -29,6 +30,7 @@ class FakeCodex extends EventEmitter {
   listResult = null;
   listCalls = 0;
   closeCalls = 0;
+  disconnectOnInterruptTimeout = false;
 
   constructor({ autoThreadStarted = true, autoTurnStarted = true } = {}) {
     super();
@@ -146,6 +148,7 @@ class FakeCodex extends EventEmitter {
   async resumeThread(threadId) {
     this.connected = true;
     this.resumed.push(threadId);
+    await this.beforeResumeResult?.({ threadId });
     if (this.resumeError) throw this.resumeError;
     return this.resumeResult ?? {
       id: threadId,
@@ -202,7 +205,7 @@ class FakeCodex extends EventEmitter {
           message.method !== "turn/completed"
           || message.params?.threadId !== threadId
           || turn?.id !== turnId
-          || !["interrupted", "failed"].includes(turn.status)
+          || !["completed", "interrupted", "failed"].includes(turn.status)
         ) return;
         clearTimeout(timer);
         this.off("notification", listener);
@@ -210,6 +213,9 @@ class FakeCodex extends EventEmitter {
       };
       const timer = setTimeout(() => {
         this.off("notification", listener);
+        if (this.disconnectOnInterruptTimeout) {
+          this.emit("disconnect", { code: null, signal: "client-close" });
+        }
         reject(new Error(`interrupt ${threadId}/${turnId} timed out`));
       }, timeoutMs);
       timer.unref?.();
@@ -543,6 +549,749 @@ test("start remains non-running until the exact turn/started notification", { ti
   }
 });
 
+test("owned shutdown stops admission and persists the exact active-turn interrupt terminal", { timeout: 2_000 }, async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 500 });
+  try {
+    const project = service.createProject({ name: "Shutdown", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "Drain active turn",
+      objective: "Interrupt and persist the exact terminal before owned shutdown.",
+    });
+    const running = await service.start(item.id);
+    assert.equal(running.status, "running");
+    assert.equal(service.reconciliationRequired(), false,
+      "a turn started by the current process was mistaken for inherited ambiguity");
+    const interruptAccepted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    const shuttingDown = service.shutdown({ timeoutMs: 500 });
+    await interruptAccepted;
+    await assert.rejects(
+      service.resume(item.id),
+      (error) => error?.code === "CONTROL_SHUTTING_DOWN",
+    );
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: running.codex_thread_id,
+        turn: { id: running.codex_turn_id, status: "interrupted" },
+      },
+    });
+    const result = await shuttingDown;
+    assert.equal(codex.interruptCalls.length, 1);
+    assert.equal(codex.interruptCalls[0].threadId, running.codex_thread_id);
+    assert.equal(codex.interruptCalls[0].turnId, running.codex_turn_id);
+    assert.ok(codex.interruptCalls[0].timeoutMs > 0 && codex.interruptCalls[0].timeoutMs <= 500);
+    assert.equal(result.clean, true);
+    assert.equal(result.reconciliation_required, false);
+    assert.equal(store.getWorkItem(item.id).status, "failed");
+    assert.equal(store.listEvents(item.id).filter(({ kind }) => kind === "turn_completed").length, 1);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("owned shutdown leaves ambiguous timeout state for next-start reconciliation", { timeout: 2_000 }, async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  codex.disconnectOnInterruptTimeout = true;
+  const service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 25 });
+  try {
+    const project = service.createProject({ name: "Shutdown timeout", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "Preserve ambiguous turn",
+      objective: "Do not invent a terminal when bounded interruption times out.",
+    });
+    await service.start(item.id);
+    const result = await service.shutdown({ timeoutMs: 25 });
+    assert.equal(result.clean, false);
+    assert.equal(result.reconciliation_required, true);
+    assert.equal(store.getWorkItem(item.id).status, "running");
+    assert.equal(service.reconciliationRequired(), true);
+    assert.equal(store.listEvents(item.id).filter(({ kind, payload }) => (
+      kind === "codex_disconnected" && payload.controlled_shutdown === true
+    )).length, 1, "client-close disconnect erased the controlled-shutdown ambiguity");
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("owned shutdown is clean when no active effect exists", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const result = await service.shutdown({ timeoutMs: 250 });
+    assert.deepEqual(result, { clean: true, reconciliation_required: false });
+    assert.deepEqual(codex.interruptCalls, []);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("fresh Control marks only inherited active rows as reconciliation-required", async () => {
+  const store = new LatticeStore();
+  const firstCodex = new FakeCodex();
+  const first = new LatticeControlService({ store, codex: firstCodex });
+  let second;
+  try {
+    const project = first.createProject({ name: "Inherited", rootPath: process.cwd() });
+    const item = first.createWorkItem({
+      projectId: project.id,
+      title: "Inherited active turn",
+      objective: "Separate current-process activity from crash-recovery ambiguity.",
+    });
+    await first.start(item.id);
+    assert.equal(first.reconciliationRequired(), false);
+    first.close();
+
+    second = new LatticeControlService({ store, codex: new FakeCodex() });
+    assert.equal(second.reconciliationRequired(), true);
+  } finally {
+    second?.close();
+    first.close();
+    store.close();
+  }
+});
+
+test("owned shutdown applies one deadline to a never-settling operation", { timeout: 2_000 }, async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const never = new Promise(() => {});
+  codex.beforeTurnResult = async () => never;
+  const service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 40 });
+  try {
+    const project = service.createProject({ name: "Stuck drain", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "Never settling start",
+      objective: "Force the parent-owned hard-kill fallback without closing the store early.",
+    });
+    const accepted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    void service.start(item.id);
+    await accepted;
+    await assert.rejects(
+      bounded(service.shutdown({ timeoutMs: 40 }), "bounded service shutdown", 500),
+      (error) => error?.code === "CONTROL_SHUTDOWN_DRAIN_TIMEOUT",
+    );
+    assert.equal(store.getWorkItem(item.id).status, "starting");
+    assert.equal(service.reconciliationRequired(), true);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("owned shutdown applies its absolute deadline to Codex close", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-codex-close-deadline-"));
+  const codex = new FakeCodex();
+  codex.close = async () => new Promise(() => {});
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+    mcpHealth: {
+      current: async () => ({ work_mcp: "HEALTHY", decision_mcp: "HEALTHY" }),
+    },
+  });
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    await assert.rejects(
+      bounded(application.shutdownOwned({ timeoutMs: 40 }), "bounded Codex close", 500),
+      (error) => error?.code === "CONTROL_SHUTDOWN_DRAIN_TIMEOUT",
+    );
+    assert.doesNotThrow(() => application.store.listWorkItems());
+  } finally {
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    application.service.close();
+    try { application.store.close(); } catch { /* closed only after a complete owned shutdown */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owned shutdown retains listener ownership until services and store are closed", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-listener-ownership-"));
+  const codex = new FakeCodex();
+  let closeStartedResolve;
+  let closeReleaseResolve;
+  const closeStarted = new Promise((resolve) => { closeStartedResolve = resolve; });
+  const closeRelease = new Promise((resolve) => { closeReleaseResolve = resolve; });
+  codex.close = async () => {
+    codex.closeCalls += 1;
+    closeStartedResolve();
+    await closeRelease;
+  };
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+    mcpHealth: {
+      current: async () => ({ work_mcp: "HEALTHY", decision_mcp: "HEALTHY" }),
+    },
+  });
+  const contender = createHttpServer();
+  let shuttingDown;
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    shuttingDown = application.shutdownOwned({ timeoutMs: 750 });
+    await bounded(closeStarted, "Codex close admission", 250);
+    const bindResult = await new Promise((resolve) => {
+      contender.once("error", (error) => resolve({ error }));
+      contender.listen(port, "127.0.0.1", () => resolve({ error: null }));
+    });
+    if (contender.listening) {
+      await new Promise((resolve) => contender.close(resolve));
+    }
+    assert.equal(bindResult.error?.code, "EADDRINUSE");
+    closeReleaseResolve();
+    assert.deepEqual(await shuttingDown, { clean: true, reconciliation_required: false });
+  } finally {
+    closeReleaseResolve?.();
+    await shuttingDown?.catch(() => {});
+    if (contender.listening) await new Promise((resolve) => contender.close(resolve));
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    application.service.close();
+    try { application.store.close(); } catch { /* closed by graceful shutdown */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owned shutdown keeps its listener bound when store close fails", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-store-close-ownership-"));
+  let mcpHealthCalls = 0;
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex: new FakeCodex(),
+    mcpHealth: {
+      current: async () => {
+        mcpHealthCalls += 1;
+        return { work_mcp: "HEALTHY", decision_mcp: "HEALTHY" };
+      },
+    },
+  });
+  const originalStoreClose = application.store.close.bind(application.store);
+  const contender = createHttpServer();
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    application.store.close = () => {
+      const error = new Error("simulated SQLite close failure");
+      error.code = "CONTROL_STORE_CLOSE_FAILED";
+      throw error;
+    };
+    await assert.rejects(
+      application.shutdownOwned({ timeoutMs: 750 }),
+      (error) => error?.code === "CONTROL_STORE_CLOSE_FAILED",
+    );
+
+    const bindResult = await new Promise((resolve) => {
+      contender.once("error", (error) => resolve({ error }));
+      contender.listen(port, "127.0.0.1", () => resolve({ error: null }));
+    });
+    if (contender.listening) await new Promise((resolve) => contender.close(resolve));
+    assert.equal(bindResult.error?.code, "EADDRINUSE");
+
+    const rejected = await fetch(`http://127.0.0.1:${port}/api/runtime`);
+    assert.equal(rejected.status, 503);
+    assert.equal((await rejected.json()).code, "CONTROL_SHUTTING_DOWN");
+    const rejectedPost = await fetch(`http://127.0.0.1:${port}/api/work-items`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(rejectedPost.status, 503);
+    assert.equal((await rejectedPost.json()).code, "CONTROL_SHUTTING_DOWN");
+    assert.equal(mcpHealthCalls, 0, "shutdown rejections must not reach MCP health probes");
+  } finally {
+    application.store.close = originalStoreClose;
+    if (contender.listening) await new Promise((resolve) => contender.close(resolve));
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    application.service.close();
+    try { originalStoreClose(); } catch { /* closed during cleanup */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owned shutdown drains an admitted runtime GET before closing its store", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-runtime-get-drain-"));
+  let probeEnteredResolve;
+  let probeReleaseResolve;
+  const probeEntered = new Promise((resolve) => { probeEnteredResolve = resolve; });
+  const probeRelease = new Promise((resolve) => { probeReleaseResolve = resolve; });
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex: new FakeCodex(),
+    mcpHealth: {
+      current: async () => {
+        probeEnteredResolve();
+        await probeRelease;
+        return { work_mcp: "HEALTHY", decision_mcp: "HEALTHY" };
+      },
+    },
+  });
+  const originalStoreClose = application.store.close.bind(application.store);
+  let storeClosed = false;
+  let shuttingDown;
+  try {
+    application.store.close = () => {
+      storeClosed = true;
+      originalStoreClose();
+    };
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const runtimeRequest = fetch(`http://127.0.0.1:${port}/api/runtime`);
+    await bounded(probeEntered, "runtime probe admission", 250);
+    shuttingDown = application.shutdownOwned({ timeoutMs: 750 });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(storeClosed, false);
+
+    probeReleaseResolve();
+    assert.equal((await runtimeRequest).status, 200);
+    assert.deepEqual(await shuttingDown, { clean: true, reconciliation_required: false });
+    assert.equal(storeClosed, true);
+  } finally {
+    probeReleaseResolve?.();
+    await shuttingDown?.catch(() => {});
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    application.service.close();
+    if (!storeClosed) {
+      try { originalStoreClose(); } catch { /* closed during cleanup */ }
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("owned shutdown rescans and interrupts a turn resumed after the first snapshot", { timeout: 2_000 }, async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 500 });
+  try {
+    const project = service.createProject({ name: "Late resume", rootPath: process.cwd() });
+    const accepted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    const sending = service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "late-resume-message-001",
+      text: "關閉開始後不得漏掉晚到的 active turn。",
+    });
+    const started = await accepted;
+    codex.emit("notification", {
+      method: "turn/started",
+      params: {
+        threadId: started.threadId,
+        turn: { id: started.turnId, status: "inProgress", items: [] },
+      },
+    });
+    const sent = await sending;
+    codex.emit("disconnect", { code: 17, signal: null });
+    assert.equal(service.primaryConversation().status, "failed");
+
+    let resumeEnteredResolve;
+    let resumeReleaseResolve;
+    const resumeEntered = new Promise((resolve) => { resumeEnteredResolve = resolve; });
+    const resumeRelease = new Promise((resolve) => { resumeReleaseResolve = resolve; });
+    codex.beforeResumeResult = async () => {
+      resumeEnteredResolve();
+      await resumeRelease;
+    };
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const reconnecting = service.reconnectPrimaryConversation();
+    await bounded(resumeEntered, "deferred resume", 250);
+    const shuttingDown = service.shutdown({ timeoutMs: 600 });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    const interruptAccepted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    resumeReleaseResolve();
+    const driveTerminal = (async () => {
+      const interrupted = await bounded(interruptAccepted, "late resume interrupt", 400);
+      codex.emit("notification", {
+        method: "turn/completed",
+        params: {
+          threadId: interrupted.threadId,
+          turn: { id: interrupted.turnId, status: "interrupted", items: [] },
+        },
+      });
+    })();
+    const outcome = await bounded(
+      Promise.all([shuttingDown, driveTerminal]).then(([value]) => value),
+      "late resume shutdown",
+      900,
+    );
+    await Promise.allSettled([reconnecting]);
+    assert.equal(codex.interruptCalls.length, 1);
+    assert.equal(outcome.clean, true);
+    assert.equal(store.getWorkItem(sent.id).status, "failed");
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("owned shutdown rejects a slow POST after its body crosses the admission boundary", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-slow-post-shutdown-"));
+  const databasePath = path.join(directory, "control.db");
+  const application = createLatticeServer({
+    databasePath,
+    codex: new FakeCodex(),
+    mcpHealth: {
+      current: async () => ({ work_mcp: "HEALTHY", decision_mcp: "HEALTHY" }),
+    },
+  });
+  try {
+    const project = application.service.createProject({ name: "Slow body", rootPath: directory });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const payload = JSON.stringify({
+      projectId: project.id,
+      title: "Must not be written",
+      objective: "The body completed only after shutdown stopped admission.",
+    });
+    const requestObserved = new Promise((resolve) => application.server.once("request", resolve));
+    let clientRequest;
+    const responsePromise = new Promise((resolve, reject) => {
+      clientRequest = httpRequest({
+        hostname: "127.0.0.1",
+        port,
+        path: "/api/work-items",
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+      }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => resolve({
+          status: response.statusCode,
+          body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+        }));
+      });
+      clientRequest.on("error", reject);
+    });
+    const split = Math.max(1, Math.floor(payload.length / 2));
+    clientRequest.write(payload.slice(0, split));
+    await requestObserved;
+    const shuttingDown = application.shutdownOwned({ timeoutMs: 750 });
+    clientRequest.end(payload.slice(split));
+    const response = await responsePromise;
+    assert.equal(response.status, 503);
+    assert.equal(response.body.code, "CONTROL_SHUTTING_DOWN");
+    assert.deepEqual(await shuttingDown, { clean: true, reconciliation_required: false });
+    const replay = new LatticeStore(databasePath);
+    try {
+      assert.equal(replay.listWorkItems().length, 0);
+    } finally {
+      replay.close();
+    }
+  } finally {
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    application.service.close();
+    try { application.store.close(); } catch { /* already closed by graceful shutdown */ }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("fresh Control exposes inherited ambiguity but admits only exact recovery mutations", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-recovery-admission-"));
+  const databasePath = path.join(directory, "control.db");
+  const seed = new LatticeStore(databasePath);
+  const project = seed.createProject({ name: "Recovery gate", rootPath: directory });
+  const item = seed.createWorkItem({
+    projectId: project.id,
+    title: "Inherited active",
+    objective: "Require an exact terminal before accepting new effects.",
+  });
+  seed.updateWorkItem(item.id, {
+    status: "running",
+    codex_thread_id: "thread-1",
+    codex_turn_id: "turn-1",
+    progress: "inherited active turn",
+  });
+  seed.appendEvent(item.id, "codex_started", {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    confirmedBy: "turn/started",
+  });
+  seed.close();
+
+  const application = createLatticeServer({
+    databasePath,
+    codex: new FakeCodex(),
+    mcpHealth: {
+      current: async () => ({ work_mcp: "HEALTHY", decision_mcp: "HEALTHY" }),
+    },
+  });
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+    const runtimeBefore = await (await fetch(`${origin}/api/runtime`)).json();
+    assert.equal(runtimeBefore.reconciliation_required, true);
+
+    const denied = await fetch(`${origin}/api/work-items`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        title: "Denied until recovery",
+        objective: "Must not be persisted while inherited state is ambiguous.",
+      }),
+    });
+    assert.equal(denied.status, 409);
+    assert.equal((await denied.json()).code, "CONTROL_RECONCILIATION_REQUIRED");
+
+    const unrelatedConversation = await fetch(`${origin}/api/conversation/reconnect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(unrelatedConversation.status, 409);
+    assert.equal((await unrelatedConversation.json()).code, "CONTROL_RECONCILIATION_REQUIRED");
+    const unrelatedItem = await fetch(`${origin}/api/work-items/not-the-ambiguous-item/reconcile`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(unrelatedItem.status, 409);
+    assert.equal((await unrelatedItem.json()).code, "CONTROL_RECONCILIATION_REQUIRED");
+
+    const reconciled = await fetch(`${origin}/api/work-items/${item.id}/reconcile`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reconciled.status, 200);
+    assert.equal((await (await fetch(`${origin}/api/runtime`)).json()).reconciliation_required, false);
+    assert.equal(application.store.listWorkItems().filter(({ title }) => (
+      title === "Denied until recovery"
+    )).length, 0);
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed primary recovery keeps admission closed until an exact terminal", { timeout: 3_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-primary-recovery-gate-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore = new LatticeStore(databasePath);
+  const firstCodex = new FakeCodex();
+  let firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+  let application;
+  try {
+    const project = firstService.createProject({ name: "Primary recovery", rootPath: directory });
+    const accepted = new Promise((resolve) => firstCodex.once("turnStartAccepted", resolve));
+    const sending = firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "primary-recovery-message-001",
+      text: "只有精確終態可以解除 inherited recovery gate。",
+    });
+    const started = await accepted;
+    firstCodex.emit("notification", {
+      method: "turn/started",
+      params: {
+        threadId: started.threadId,
+        turn: { id: started.turnId, status: "inProgress", items: [] },
+      },
+    });
+    const sent = await sending;
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    const recoveringCodex = new FakeCodex();
+    recoveringCodex.resumeError = Object.assign(new Error("resume transport unavailable"), {
+      code: "CODEX_APP_SERVER_TRANSPORT_ERROR",
+    });
+    application = createLatticeServer({
+      databasePath,
+      codex: recoveringCodex,
+      mcpHealth: {
+        current: async () => ({ work_mcp: "HEALTHY", decision_mcp: "HEALTHY" }),
+      },
+    });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+    assert.equal((await (await fetch(`${origin}/api/runtime`)).json()).reconciliation_required, true);
+
+    const failedRecovery = await fetch(`${origin}/api/conversation/reconnect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.notEqual(failedRecovery.status, 200);
+    assert.equal(application.store.getWorkItem(sent.id).status, "running");
+    assert.equal((await (await fetch(`${origin}/api/runtime`)).json()).reconciliation_required, true);
+    const denied = await fetch(`${origin}/api/work-items`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        title: "Still denied",
+        objective: "A transport error is not terminal evidence.",
+      }),
+    });
+    assert.equal(denied.status, 409);
+
+    recoveringCodex.resumeError = null;
+    recoveringCodex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const reconciled = await fetch(`${origin}/api/conversation/reconnect`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reconciled.status, 200);
+    assert.equal((await (await fetch(`${origin}/api/runtime`)).json()).reconciliation_required, false);
+  } finally {
+    firstService?.close();
+    firstStore?.close();
+    if (application?.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("generic interrupt timeout keeps durable reconciliation active across restart", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-generic-interrupt-recovery-"));
+  const databasePath = path.join(directory, "control.db");
+  let store = new LatticeStore(databasePath);
+  let service;
+  let replayStore;
+  let replayService;
+  try {
+    const codex = new FakeCodex();
+    service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 30 });
+    const project = service.createProject({ name: "Generic recovery", rootPath: directory });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "Inherited generic turn",
+      objective: "An interrupt timeout must remain ambiguous after restart.",
+    });
+    const peer = service.createWorkItem({
+      projectId: project.id,
+      title: "Peer turn sharing the App Server",
+      objective: "The shared transport loss makes every active peer ambiguous.",
+    });
+    store.updateWorkItem(item.id, {
+      status: "running",
+      codex_thread_id: "generic-thread-1",
+      codex_turn_id: "generic-turn-1",
+    });
+    store.updateWorkItem(peer.id, {
+      status: "running",
+      codex_thread_id: "generic-thread-peer",
+      codex_turn_id: "generic-turn-peer",
+    });
+    store.appendEvent(item.id, "codex_started", {
+      threadId: "generic-thread-1",
+      turnId: "generic-turn-1",
+      confirmedBy: "turn/started",
+    });
+    codex.activeTurns.set("generic-thread-1", "generic-turn-1");
+    codex.disconnectOnInterruptTimeout = true;
+    await assert.rejects(
+      bounded(service.interrupt(item.id), "generic interrupt timeout", 250),
+      /timed out/u,
+    );
+    assert.equal(store.getWorkItem(item.id).status, "running");
+    assert.equal(store.getWorkItem(peer.id).status, "running");
+    assert.equal(service.reconciliationRequired(item.id), true);
+    assert.equal(service.reconciliationRequired(peer.id), true);
+    service.close();
+    service = null;
+    store.close();
+    store = null;
+
+    replayStore = new LatticeStore(databasePath);
+    replayService = new LatticeControlService({ store: replayStore, codex: new FakeCodex() });
+    assert.equal(replayStore.getWorkItem(item.id).status, "running");
+    assert.equal(replayStore.getWorkItem(peer.id).status, "running");
+    assert.equal(replayService.reconciliationRequired(item.id), true);
+    assert.equal(replayService.reconciliationRequired(peer.id), true);
+  } finally {
+    replayService?.close();
+    replayStore?.close();
+    service?.close();
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("primary interrupt timeout keeps durable reconciliation active across restart", { timeout: 2_000 }, async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-primary-interrupt-recovery-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore = new LatticeStore(databasePath);
+  let firstService = new LatticeControlService({
+    store: firstStore,
+    codex: new FakeCodex(),
+    lifecycleTimeoutMs: 30,
+  });
+  let replayStore;
+  let replayService;
+  try {
+    const firstCodex = firstService.codex;
+    const project = firstService.createProject({ name: "Primary interrupt", rootPath: directory });
+    const accepted = new Promise((resolve) => firstCodex.once("turnStartAccepted", resolve));
+    const sending = firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "primary-interrupt-message-001",
+      text: "Interrupt timeout must remain recovery-only after restart.",
+    });
+    const started = await accepted;
+    firstCodex.emit("notification", {
+      method: "turn/started",
+      params: {
+        threadId: started.threadId,
+        turn: { id: started.turnId, status: "inProgress", items: [] },
+      },
+    });
+    const sent = await sending;
+    firstCodex.disconnectOnInterruptTimeout = true;
+    await assert.rejects(
+      bounded(firstService.interruptPrimaryConversation(), "primary interrupt timeout", 250),
+      /timed out/u,
+    );
+    assert.equal(firstStore.getWorkItem(sent.id).status, "running");
+    assert.equal(firstService.reconciliationRequired(sent.id), true);
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    replayStore = new LatticeStore(databasePath);
+    replayService = new LatticeControlService({ store: replayStore, codex: new FakeCodex() });
+    assert.equal(replayStore.getWorkItem(sent.id).status, "running");
+    assert.equal(replayService.reconciliationRequired(sent.id), true);
+  } finally {
+    replayService?.close();
+    replayStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("parallel start calls for one work item create only one Codex thread", { timeout: 2_000 }, async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex({ autoTurnStarted: false });
@@ -865,6 +1614,46 @@ test("approval cancel waits for the exact interrupted terminal before failing wo
     assert.equal(cancelled.status, "failed");
     assert.equal(cancelled.failure_summary, "Codex turn interrupted");
     assert.deepEqual(codex.responses.at(-1), { id: 73, result: { decision: "cancel" } });
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("approval cancel accepts an exact natural completion without closing transport", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex, lifecycleTimeoutMs: 100 });
+  try {
+    const project = service.createProject({ name: "Cancel completion", rootPath: process.cwd() });
+    const item = service.createWorkItem({
+      projectId: project.id,
+      title: "Natural completion during cancel",
+      objective: "Accept an exact terminal that wins the cancellation race.",
+    });
+    const started = await service.start(item.id);
+    codex.emit("serverRequest", {
+      id: 74,
+      method: "item/commandExecution/requestApproval",
+      params: {
+        threadId: started.codex_thread_id,
+        turnId: started.codex_turn_id,
+        itemId: "command-natural-completion",
+      },
+    });
+    const cancelling = service.approve(item.id, "cancel");
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: started.codex_thread_id,
+        turn: { id: started.codex_turn_id, status: "completed" },
+      },
+    });
+
+    const completed = await bounded(cancelling, "approval cancel natural completion");
+    assert.equal(completed.status, "codex_done");
+    assert.equal(codex.closeCalls, 0);
+    assert.deepEqual(codex.responses.at(-1), { id: 74, result: { decision: "cancel" } });
   } finally {
     service.close();
     store.close();

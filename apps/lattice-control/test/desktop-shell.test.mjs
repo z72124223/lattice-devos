@@ -33,6 +33,8 @@ test("the desktop shell is a dedicated WebView2 window rather than an external b
   assert.match(windowCode, /CreateWebResourceResponse/u);
   assert.match(windowCode, /HashSet<ulong>/u);
   assert.match(windowCode, /e\.NavigationId/u);
+  assert.match(windowCode, /_currentNavigationId = e\.NavigationId;[\s\S]{0,250}IsApprovedControlNavigation/u);
+  assert.match(windowCode, /_navigationGeneration/u);
   assert.match(windowCode, /ControlView\.Source/u);
   assert.match(desktopPolicy, /target\.Port == controlUri\.Port/u);
   assert.doesNotMatch(windowCode, /msedge\.exe|Process\.Start\([^\n]*https?:/iu);
@@ -62,6 +64,7 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
   assert.match(desktopPolicy, /target\.Port == controlUri\.Port/u);
   assert.doesNotMatch(desktopPolicy, /AppContext\.BaseDirectory|Environment\.CurrentDirectory/u);
   assert.match(controlMarkup, /function renderEmptyCores\(\)[\s\S]*recentList\.replaceChildren\(element\("p","目前沒有工作。","empty"\)\)/u);
+  assert.match(controlMarkup, /grid-template-rows:\s*auto auto auto minmax\(520px,1fr\) auto/u);
 });
 
 test("the desktop probes and owns only its compatible default Control before navigation", async () => {
@@ -86,14 +89,30 @@ test("the desktop probes and owns only its compatible default Control before nav
   assert.match(windowCode, /ControlRuntimeHealth\.STOPPED/u);
   assert.match(windowCode, /ControlRuntimeHealth\.UNREACHABLE/u);
   assert.match(windowCode, /ControlRuntimeHealth\.INCOMPATIBLE/u);
-  assert.match(windowCode, /_controlRuntime\?\.Dispose\(\)/u);
-  assert.match(desktopPolicy, /ShouldManageControl/u);
+  assert.match(windowCode, /CompleteShutdownAsync/u);
+  assert.match(windowCode, /_controlRuntime\.ShutdownAsync\(CancellationToken\.None\)/u);
+  const shutdownBody = windowCode.match(
+    /private async Task CompleteShutdownAsync\(\)[\s\S]+?\n    \}\n\}/u,
+  )?.[0] ?? "";
+  assert.match(shutdownBody, /catch \(Exception error\)/u);
+  assert.match(shutdownBody, /_isClosing = false/u);
+  assert.match(windowMarkup, /x:Name="ReconnectButton"/u);
+  assert.match(shutdownBody, /ReconnectButton\.Content = "重試安全關閉"/u);
+  assert.match(windowCode, /Reconnect_Click[\s\S]*?_shutdownFailed[\s\S]*?CompleteShutdownAsync/u);
+  assert.doesNotMatch(shutdownBody, /shutdown_failed[\s\S]*?ScheduleReconnect/u);
+  assert.doesNotMatch(shutdownBody, /finally[\s\S]+?_shutdownComplete = true/u);
+  assert.match(desktopPolicy, /ResolveControlTarget/u);
+  assert.match(desktopPolicy, /ManageControl/u);
   assert.match(runtimeCode, /ControlRuntimeContract\.EvaluateProbe/u);
   assert.match(runtimeCode, /ControlRuntimeAction\.StartOwned/u);
   assert.match(runtimeCode, /Process\.Start/u);
-  assert.match(runtimeCode, /Kill\(entireProcessTree: true\)/u);
+  assert.match(runtimeCode, /RedirectStandardInput = true/u);
+  assert.match(runtimeCode, /lattice\.control\.desktop-shutdown\.v1/u);
+  assert.match(runtimeCode, /killOwnedProcess = killOwnedProcess[\s\S]*Kill\(entireProcessTree: true\)/u);
+  assert.match(runtimeCode, /LastStopUsedHardKill = true[\s\S]*killOwnedProcess\(process\)/u);
   assert.doesNotMatch(runtimeCode, /GetProcesses|GetProcessById|netstat|Get-NetTCPConnection/u);
   assert.match(project, /LogicalName="Lattice\.Control\.RuntimeIdentity\.json"/u);
+  assert.match(project, /LogicalName="Lattice\.Control\.DataScopeContract\.json"/u);
 });
 
 test("the Windows candidate is a repeatable self-contained portable package, not an installer", async () => {
@@ -120,6 +139,7 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(publishScript, /lattice\.control\.desktop-portable-candidate\.v2/u);
   assert.match(publishScript, /control-runtime[\\/]node\.exe/iu);
   assert.match(publishScript, /apps[\\/]lattice-control[\\/]runtime-identity\.json/iu);
+  assert.match(publishScript, /apps[\\/]lattice-control[\\/]data-scope-contract\.json/iu);
   assert.match(publishScript, /Join-Path \$controlSourceRoot 'src'/iu);
   assert.match(publishScript, /Join-Path \$controlSourceRoot 'public'/iu);
   assert.match(publishScript, /node_version/u);

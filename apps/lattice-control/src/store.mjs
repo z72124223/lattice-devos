@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { controlStoreSchemaVersion } from "./database-path.mjs";
 
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const statuses = new Set([
@@ -38,7 +39,7 @@ const developmentRadarActions = new Set([
   "ADOPT_OSS",
   "FREEZE_LATTICE",
 ]);
-const controlSchemaVersion = 7;
+const controlSchemaVersion = controlStoreSchemaVersion;
 const primaryConversationIdempotentKinds = [
   "codex_disconnected",
   "conversation_message_failed",
@@ -4359,6 +4360,18 @@ export class LatticeStore {
         CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
         work_items.created_at DESC
     `).all().map(decodeItem);
+  }
+
+  runtimeDataPresence() {
+    const row = this.database.prepare(`
+      SELECT
+        EXISTS(SELECT 1 FROM work_items WHERE id <> 'primary' LIMIT 1) AS work_data,
+        EXISTS(SELECT 1 FROM decisions LIMIT 1) AS decision_data
+    `).get();
+    return {
+      work: row.work_data === 1,
+      decisions: row.decision_data === 1,
+    };
   }
 
   updateWorkItem(id, changes, fence = null) {

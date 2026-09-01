@@ -29,17 +29,30 @@ static string FindNode()
     throw new InvalidOperationException("node executable was not found");
 }
 
-static ControlRuntimeLaunchSpec LaunchSpec(string repositoryRoot, string nodePath, int port, string localData)
+static ControlRuntimeLaunchSpec LaunchSpec(
+    string repositoryRoot,
+    string nodePath,
+    int port,
+    string localData,
+    string? serverPath = null)
 {
+    string databasePath = Path.GetFullPath(Path.Combine(
+        localData,
+        "LATTICE",
+        "control",
+        "lattice-control.db"));
     return new(
         nodePath,
-        Path.Combine(repositoryRoot, "apps", "lattice-control", "src", "server.mjs"),
+        serverPath ?? Path.Combine(repositoryRoot, "apps", "lattice-control", "src", "server.mjs"),
         repositoryRoot,
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
             ["LATTICE_CONTROL_PORT"] = port.ToString(System.Globalization.CultureInfo.InvariantCulture),
             ["LOCALAPPDATA"] = localData,
-        });
+            ["LATTICE_CONTROL_DATABASE_PATH"] = databasePath,
+            ["LATTICE_CONTROL_DESKTOP_OWNED"] = "1",
+        },
+        databasePath);
 }
 
 static Process StartExternal(ControlRuntimeLaunchSpec spec)
@@ -77,6 +90,21 @@ static async Task WaitForRuntimeAsync(Uri origin, Process process)
         await Task.Delay(100);
     }
     throw new TimeoutException("Control runtime probe did not become ready");
+}
+
+static async Task<int> WaitForPidFileAsync(string path)
+{
+    DateTimeOffset deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+    while (DateTimeOffset.UtcNow < deadline)
+    {
+        if (File.Exists(path))
+        {
+            string text = await File.ReadAllTextAsync(path);
+            if (int.TryParse(text, out int pid) && pid > 0) return pid;
+        }
+        await Task.Delay(50);
+    }
+    throw new TimeoutException("owned Control fixture did not publish its child PID");
 }
 
 static void StopTestProcess(Process? process)
@@ -144,6 +172,52 @@ try
             "concurrent dispose allowed a post-dispose Control launch");
     }
 
+    int missingFilesPort = ReservePort();
+    string missingFilesData = Path.Combine(temporaryRoot, "missing-files-data");
+    ControlRuntimeLaunchSpec missingFilesSpec = LaunchSpec(
+        repositoryRoot,
+        Path.Combine(temporaryRoot, "missing-node.exe"),
+        missingFilesPort,
+        missingFilesData);
+    using (ControlRuntimeManager manager = new(
+        new Uri($"http://127.0.0.1:{missingFilesPort}/"),
+        missingFilesSpec,
+        probeTimeout: TimeSpan.FromMilliseconds(250)))
+    {
+        ControlRuntimeEvaluation result = await manager.EnsureReadyAsync();
+        Require(result.Health == ControlRuntimeHealth.STOPPED,
+            "missing runtime files did not produce STOPPED");
+        Require(result.Action == ControlRuntimeAction.FailClosed,
+            "missing runtime files did not fail closed");
+        Require(result.Detail == "CONTROL_RUNTIME_FILES_MISSING",
+            "missing runtime files did not preserve the exact detail");
+        Require(!manager.OwnsControl, "missing runtime files created an owned process");
+    }
+
+    int startFailurePort = ReservePort();
+    string startFailureData = Path.Combine(temporaryRoot, "start-failure-data");
+    string invalidExecutable = Path.Combine(temporaryRoot, "not-an-executable.txt");
+    await File.WriteAllTextAsync(invalidExecutable, "not an executable");
+    ControlRuntimeLaunchSpec startFailureSpec = LaunchSpec(
+        repositoryRoot,
+        invalidExecutable,
+        startFailurePort,
+        startFailureData);
+    using (ControlRuntimeManager manager = new(
+        new Uri($"http://127.0.0.1:{startFailurePort}/"),
+        startFailureSpec,
+        probeTimeout: TimeSpan.FromMilliseconds(250)))
+    {
+        ControlRuntimeEvaluation result = await manager.EnsureReadyAsync();
+        Require(result.Health == ControlRuntimeHealth.STOPPED,
+            "process start failure did not produce STOPPED");
+        Require(result.Action == ControlRuntimeAction.FailClosed,
+            "process start failure did not fail closed");
+        Require(result.Detail == "CONTROL_PROCESS_START_FAILED",
+            "process start failure did not preserve the exact detail");
+        Require(!manager.OwnsControl, "process start failure retained an owned process");
+    }
+
     int reusedPort = ReservePort();
     Uri reusedOrigin = new($"http://127.0.0.1:{reusedPort}/");
     ControlRuntimeLaunchSpec reusedSpec = LaunchSpec(
@@ -167,6 +241,41 @@ try
     finally
     {
         StopTestProcess(external);
+    }
+
+    int crossScopePort = ReservePort();
+    Uri crossScopeOrigin = new($"http://127.0.0.1:{crossScopePort}/");
+    ControlRuntimeLaunchSpec externalScopeSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        crossScopePort,
+        Path.Combine(temporaryRoot, "cross-scope-external-data"));
+    ControlRuntimeLaunchSpec desktopScopeSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        crossScopePort,
+        Path.Combine(temporaryRoot, "cross-scope-desktop-data"));
+    Process? crossScopeExternal = null;
+    try
+    {
+        crossScopeExternal = StartExternal(externalScopeSpec);
+        await WaitForRuntimeAsync(crossScopeOrigin, crossScopeExternal);
+        using (ControlRuntimeManager manager = new(crossScopeOrigin, desktopScopeSpec))
+        {
+            ControlRuntimeEvaluation result = await manager.EnsureReadyAsync();
+            Require(result.Health == ControlRuntimeHealth.INCOMPATIBLE,
+                "same-version different-scope Control was not incompatible");
+            Require(result.Detail == "CONTROL_DATA_SCOPE_INCOMPATIBLE",
+                "different data scope did not produce the exact fail-closed detail");
+            Require(!manager.OwnsControl,
+                "same-version different-scope Control was incorrectly owned");
+        }
+        Require(!crossScopeExternal.HasExited,
+            "disposing the desktop manager stopped a different-scope Control");
+    }
+    finally
+    {
+        StopTestProcess(crossScopeExternal);
     }
 
     int foreignPort = ReservePort();
@@ -215,27 +324,30 @@ try
         Path.Combine(temporaryRoot, "owned-data"));
     int firstOwnedPid;
     int replacementOwnedPid;
-    using (ControlRuntimeManager manager = new(ownedOrigin, ownedSpec))
+    ControlRuntimeManager ownedManager = new(ownedOrigin, ownedSpec);
+    using (ownedManager)
     {
-        ControlRuntimeEvaluation started = await manager.EnsureReadyAsync();
+        ControlRuntimeEvaluation started = await ownedManager.EnsureReadyAsync();
         Require(started.Health == ControlRuntimeHealth.HEALTHY, "absent Control did not auto-start");
-        Require(manager.OwnsControl, "auto-started Control was not owned");
-        firstOwnedPid = manager.OwnedProcessId ?? throw new InvalidOperationException("owned PID missing");
+        Require(ownedManager.OwnsControl, "auto-started Control was not owned");
+        firstOwnedPid = ownedManager.OwnedProcessId ?? throw new InvalidOperationException("owned PID missing");
 
         using (Process interrupted = Process.GetProcessById(firstOwnedPid))
         {
             interrupted.Kill(entireProcessTree: true);
             Require(interrupted.WaitForExit(5_000), "owned Control interruption timed out");
         }
-        ControlRuntimeEvaluation stopped = await manager.ProbeAsync();
+        ControlRuntimeEvaluation stopped = await ownedManager.ProbeAsync();
         Require(stopped.Health == ControlRuntimeHealth.STOPPED, "owned Control interruption was not diagnosed");
 
-        ControlRuntimeEvaluation reconnected = await manager.EnsureReadyAsync();
+        ControlRuntimeEvaluation reconnected = await ownedManager.EnsureReadyAsync();
         Require(reconnected.Health == ControlRuntimeHealth.HEALTHY, "owned Control did not reconnect");
-        Require(manager.OwnsControl, "replacement Control was not owned");
-        replacementOwnedPid = manager.OwnedProcessId ?? throw new InvalidOperationException("replacement PID missing");
+        Require(ownedManager.OwnsControl, "replacement Control was not owned");
+        replacementOwnedPid = ownedManager.OwnedProcessId ?? throw new InvalidOperationException("replacement PID missing");
         Require(replacementOwnedPid != firstOwnedPid, "owned Control reconnect reused the interrupted PID");
     }
+    Require(!ownedManager.LastStopUsedHardKill,
+        "clean owned Control close unexpectedly used hard kill");
 
     try
     {
@@ -244,6 +356,186 @@ try
     }
     catch (ArgumentException)
     {
+    }
+
+    int alreadyExitedPort = ReservePort();
+    ControlRuntimeLaunchSpec alreadyExitedSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        alreadyExitedPort,
+        Path.Combine(temporaryRoot, "already-exited-data"));
+    ControlRuntimeManager alreadyExitedManager = new(
+        new Uri($"http://127.0.0.1:{alreadyExitedPort}/"),
+        alreadyExitedSpec);
+    try
+    {
+        ControlRuntimeEvaluation started = await alreadyExitedManager.EnsureReadyAsync();
+        Require(started.Health == ControlRuntimeHealth.HEALTHY,
+            "already-exited fixture did not start as compatible owned Control");
+        int processId = alreadyExitedManager.OwnedProcessId
+            ?? throw new InvalidOperationException("already-exited owned PID missing");
+        using (Process owned = Process.GetProcessById(processId))
+        {
+            owned.Kill(entireProcessTree: true);
+            await owned.WaitForExitAsync();
+        }
+        Task? stopped = alreadyExitedManager.StopOwnedCoreAsync(CancellationToken.None);
+        Require(stopped is not null,
+            "already-exited owned stop returned a null shared task");
+        await (stopped ?? throw new InvalidOperationException(
+            "already-exited owned stop returned a null shared task"));
+    }
+    finally
+    {
+        await alreadyExitedManager.ShutdownAsync(CancellationToken.None);
+    }
+
+    int rejectedShutdownPort = ReservePort();
+    ControlRuntimeLaunchSpec rejectedShutdownSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        rejectedShutdownPort,
+        Path.Combine(temporaryRoot, "rejected-shutdown-data"),
+        Path.Combine(
+            repositoryRoot,
+            "apps",
+            "lattice-control",
+            "test",
+            "fixtures",
+            "desktop-owned-shutdown-reject.mjs"));
+    ControlRuntimeManager rejectedShutdownManager = new(
+        new Uri($"http://127.0.0.1:{rejectedShutdownPort}/"),
+        rejectedShutdownSpec);
+    try
+    {
+        ControlRuntimeEvaluation started = await rejectedShutdownManager.EnsureReadyAsync();
+        Require(started.Health == ControlRuntimeHealth.HEALTHY,
+            "shutdown-rejection fixture did not become a compatible owned Control");
+        bool rejected = false;
+        try
+        {
+            await rejectedShutdownManager.StopOwnedCoreAsync(CancellationToken.None);
+        }
+        catch (InvalidOperationException error)
+            when (error.Message == "CONTROL_OWNED_PROCESS_SHUTDOWN_REJECTED")
+        {
+            rejected = true;
+        }
+        Require(rejected, "owned Control exit 1 was incorrectly accepted as graceful shutdown");
+        Require(!rejectedShutdownManager.LastStopUsedHardKill,
+            "an explicit shutdown NACK was misclassified as the timeout hard-kill fallback");
+    }
+    finally
+    {
+        await rejectedShutdownManager.ShutdownAsync(CancellationToken.None);
+    }
+
+    int hungShutdownPort = ReservePort();
+    Uri hungShutdownOrigin = new($"http://127.0.0.1:{hungShutdownPort}/");
+    ControlRuntimeLaunchSpec hungShutdownSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        hungShutdownPort,
+        Path.Combine(temporaryRoot, "hung-shutdown-data"),
+        Path.Combine(
+            repositoryRoot,
+            "apps",
+            "lattice-control",
+            "test",
+            "fixtures",
+            "desktop-owned-shutdown-hang.mjs"));
+    bool allowHungShutdownKill = true;
+    ControlRuntimeManager hungShutdownManager = new(
+        hungShutdownOrigin,
+        hungShutdownSpec,
+        shutdownTimeout: TimeSpan.FromMilliseconds(250),
+        killOwnedProcess: process =>
+        {
+            if (!allowHungShutdownKill)
+            {
+                throw new System.ComponentModel.Win32Exception(
+                    "simulated process-tree kill failure");
+            }
+            process.Kill(entireProcessTree: true);
+        });
+    int hungShutdownPid;
+    using (hungShutdownManager)
+    {
+        ControlRuntimeEvaluation started = await hungShutdownManager.EnsureReadyAsync();
+        Require(started.Health == ControlRuntimeHealth.HEALTHY,
+            "hung-shutdown fixture did not become a compatible owned Control");
+        hungShutdownPid = hungShutdownManager.OwnedProcessId
+            ?? throw new InvalidOperationException("hung-shutdown owned PID missing");
+        allowHungShutdownKill = false;
+        Task stopping = hungShutdownManager.StopOwnedCoreAsync(CancellationToken.None);
+        await Task.Delay(50);
+        Task concurrentShutdown = hungShutdownManager.ShutdownAsync(CancellationToken.None);
+        Require(!concurrentShutdown.IsCompleted,
+            "concurrent window shutdown did not join the in-flight owned stop");
+        bool firstStopFailed = false;
+        try
+        {
+            await Task.WhenAll(stopping, concurrentShutdown);
+        }
+        catch (InvalidOperationException error)
+            when (error.Message == "CONTROL_OWNED_PROCESS_STOP_FAILED")
+        {
+            firstStopFailed = true;
+        }
+        Require(firstStopFailed, "injected live-process kill failure was not surfaced");
+        Require(hungShutdownManager.OwnsControl,
+            "failed stop discarded the only live owned-process handle");
+        Require(hungShutdownManager.OwnedProcessId == hungShutdownPid,
+            "failed stop replaced or lost the exact owned PID");
+
+        allowHungShutdownKill = true;
+        await hungShutdownManager.ShutdownAsync(CancellationToken.None);
+        Require(!hungShutdownManager.OwnsControl,
+            "retrying shutdown did not stop the retained owned process");
+    }
+    Require(hungShutdownManager.LastStopUsedHardKill,
+        "owned shutdown timeout did not use the bounded hard-kill fallback");
+    try
+    {
+        using Process hungShutdown = Process.GetProcessById(hungShutdownPid);
+        Require(hungShutdown.HasExited,
+            "hard-kill fallback left the owned hung Control running");
+    }
+    catch (ArgumentException)
+    {
+    }
+
+    int treeShutdownPort = ReservePort();
+    Uri treeShutdownOrigin = new($"http://127.0.0.1:{treeShutdownPort}/");
+    ControlRuntimeLaunchSpec treeShutdownSpec = LaunchSpec(
+        repositoryRoot,
+        nodePath,
+        treeShutdownPort,
+        Path.Combine(temporaryRoot, "tree-shutdown-data"),
+        Path.Combine(
+            repositoryRoot,
+            "apps",
+            "lattice-control",
+            "test",
+            "fixtures",
+            "desktop-owned-shutdown-hang.mjs"));
+    string childPidPath = $"{treeShutdownSpec.DatabasePath}.child.pid";
+    ControlRuntimeManager treeShutdownManager = new(
+        treeShutdownOrigin,
+        treeShutdownSpec,
+        shutdownTimeout: TimeSpan.FromMilliseconds(250));
+    using (treeShutdownManager)
+    {
+        ControlRuntimeEvaluation started = await treeShutdownManager.EnsureReadyAsync();
+        Require(started.Health == ControlRuntimeHealth.HEALTHY,
+            "process-tree shutdown fixture did not become a compatible owned Control");
+        int childPid = await WaitForPidFileAsync(childPidPath);
+        using Process childProcess = Process.GetProcessById(childPid);
+        await treeShutdownManager.ShutdownAsync(CancellationToken.None);
+        Require(treeShutdownManager.LastStopUsedHardKill,
+            "default owned shutdown did not use its bounded hard-kill fallback");
+        Require(childProcess.WaitForExit(5_000),
+            "default entire-process-tree fallback left an owned child running");
     }
 
     Console.WriteLine("LATTICE_DESKTOP_LIFECYCLE_TEST_PASS");

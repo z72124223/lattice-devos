@@ -32,6 +32,7 @@ $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $repositoryRoot 'apps\lattice-control-desktop\Lattice.Control.Desktop.csproj'
 $controlSourceRoot = Join-Path $repositoryRoot 'apps\lattice-control'
 $runtimeIdentityPath = Join-Path $repositoryRoot 'apps\lattice-control\runtime-identity.json'
+$dataScopeContractPath = Join-Path $repositoryRoot 'apps\lattice-control\data-scope-contract.json'
 $nodePath = [IO.Path]::GetFullPath(
     (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source)
 $nodeVersion = ([string](& $nodePath --version)).Trim()
@@ -54,6 +55,21 @@ if (
     [string]::IsNullOrWhiteSpace([string]$runtimeIdentity.version)
 ) {
     throw 'DESKTOP_CANDIDATE_CONTROL_IDENTITY_INVALID'
+}
+try {
+    $dataScopeContract = Get-Content -LiteralPath $dataScopeContractPath -Raw | ConvertFrom-Json
+}
+catch {
+    throw 'DESKTOP_CANDIDATE_DATA_SCOPE_CONTRACT_INVALID_JSON'
+}
+if (
+    [string]$dataScopeContract.schema_version -cne 'lattice.control.data-scope.v1' -or
+    [string]$dataScopeContract.store -cne 'CONTROL_SQLITE' -or
+    [int]$dataScopeContract.store_schema_version -ne 7 -or
+    [string]$dataScopeContract.authority_class -cne 'CONTROL_LOCAL_PRODUCT_STATE' -or
+    [string]$dataScopeContract.registry_authority -cne 'NONE'
+) {
+    throw 'DESKTOP_CANDIDATE_DATA_SCOPE_CONTRACT_INVALID'
 }
 
 $headSha = [string](& git -C $repositoryRoot rev-parse HEAD)
@@ -123,6 +139,8 @@ Copy-Item -LiteralPath (Join-Path $controlSourceRoot 'src') -Destination $bundle
 Copy-Item -LiteralPath (Join-Path $controlSourceRoot 'public') -Destination $bundledControlRoot -Recurse
 Copy-Item -LiteralPath $runtimeIdentityPath -Destination (
     Join-Path $bundledControlRoot 'runtime-identity.json')
+Copy-Item -LiteralPath $dataScopeContractPath -Destination (
+    Join-Path $bundledControlRoot 'data-scope-contract.json')
 
 $runtimeNodeRelativePath = 'control-runtime/node.exe'
 $runtimeServerRelativePath = 'control-runtime/apps/lattice-control/src/server.mjs'
@@ -173,6 +191,8 @@ $manifest = [ordered]@{
         identity_schema = [string]$runtimeIdentity.schema_version
         product = [string]$runtimeIdentity.product
         version = [string]$runtimeIdentity.version
+        data_scope_schema = [string]$dataScopeContract.schema_version
+        store_schema_version = [int]$dataScopeContract.store_schema_version
         node_version = $nodeVersion
         node_sha256 = Get-Sha256Hex -LiteralPath $runtimeNodePath
         executable = $runtimeNodeRelativePath

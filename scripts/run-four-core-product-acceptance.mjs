@@ -20,7 +20,9 @@ const mutationTimeoutMs = 120_000;
 const maximumMcpOutputBytes = 2_097_152;
 const maximumMcpStderrBytes = 65_536;
 const sourcePaths = [
+  "apps/lattice-control/data-scope-contract.json",
   "apps/lattice-control/public/index.html",
+  "apps/lattice-control/runtime-identity.json",
   "apps/lattice-control/test/control-plane.test.mjs",
   "package.json",
   "package-lock.json",
@@ -459,8 +461,8 @@ async function seedWork(databasePath, projectRoot) {
       progress: "需要重新核對 snapshot identity",
     });
     store.updateWorkItem(child.id, {
-      status: "running",
-      progress: "正在檢查桌面與手機畫面",
+      status: "codex_done",
+      progress: "等待桌面與手機畫面驗收",
     });
     return {
       project,

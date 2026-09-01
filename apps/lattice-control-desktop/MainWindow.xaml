@@ -113,7 +113,8 @@
                                    FontSize="11" />
                     </Border>
                     <TextBlock x:Name="ConnectionDetail" Text="請先啟動本機 Control，再重新連線。" Foreground="{StaticResource LatticeMuted}" FontSize="12" Margin="0,12,0,0" TextAlignment="Center" TextWrapping="Wrap" />
-                    <Button AutomationProperties.AutomationId="LatticeReconnect"
+                    <Button x:Name="ReconnectButton"
+                            AutomationProperties.AutomationId="LatticeReconnect"
                             Content="重新連線"
                             Click="Reconnect_Click"
                             Margin="0,22,0,0"

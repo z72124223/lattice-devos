@@ -1,0 +1,7 @@
+{
+  "schema_version": "lattice.control.data-scope.v1",
+  "store": "CONTROL_SQLITE",
+  "store_schema_version": 7,
+  "authority_class": "CONTROL_LOCAL_PRODUCT_STATE",
+  "registry_authority": "NONE"
+}

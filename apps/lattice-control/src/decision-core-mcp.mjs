@@ -130,6 +130,7 @@ const searchTool = Object.freeze({
 });
 
 const tools = Object.freeze([recordTool, currentTool, readTool, searchTool]);
+export const controlDecisionMcpTools = tools;
 
 function exactObject(value, requiredKeys, optionalKeys = []) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;

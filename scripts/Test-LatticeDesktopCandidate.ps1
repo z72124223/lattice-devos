@@ -297,6 +297,8 @@ try {
     $controlRuntimeIdentitySchema = [string](Get-RequiredPropertyValue $controlRuntime 'identity_schema')
     $controlRuntimeProduct = [string](Get-RequiredPropertyValue $controlRuntime 'product')
     $controlRuntimeVersion = [string](Get-RequiredPropertyValue $controlRuntime 'version')
+    $controlRuntimeDataScopeSchema = [string](Get-RequiredPropertyValue $controlRuntime 'data_scope_schema')
+    $controlRuntimeStoreSchemaVersion = [int](Get-RequiredPropertyValue $controlRuntime 'store_schema_version')
     $controlRuntimeNodeVersion = [string](Get-RequiredPropertyValue $controlRuntime 'node_version')
     $controlRuntimeNodeSha256 = [string](Get-RequiredPropertyValue $controlRuntime 'node_sha256')
     $controlRuntimeExecutable = [string](Get-RequiredPropertyValue $controlRuntime 'executable')
@@ -313,6 +315,8 @@ try {
         $controlRuntimeIdentitySchema -cne 'lattice.control.runtime-identity.v1' -or
         $controlRuntimeProduct -cne 'LATTICE_CONTROL' -or
         [string]::IsNullOrWhiteSpace($controlRuntimeVersion) -or
+        $controlRuntimeDataScopeSchema -cne 'lattice.control.data-scope.v1' -or
+        $controlRuntimeStoreSchemaVersion -ne 7 -or
         $controlRuntimeNodeVersion -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
         $controlRuntimeNodeSha256 -cnotmatch '^[0-9a-f]{64}$' -or
         $controlRuntimeExecutable -cne 'control-runtime/node.exe' -or
@@ -351,7 +355,8 @@ try {
         'PORTABLE_RELEASE_CANDIDATE.txt',
         $controlRuntimeExecutable,
         $controlRuntimeServer,
-        'control-runtime/apps/lattice-control/runtime-identity.json')) {
+        'control-runtime/apps/lattice-control/runtime-identity.json',
+        'control-runtime/apps/lattice-control/data-scope-contract.json')) {
         if (-not $expectedFiles.ContainsKey($requiredRelativePath)) {
             throw 'DESKTOP_CANDIDATE_MANIFEST_CORE_FILE_MISSING'
         }

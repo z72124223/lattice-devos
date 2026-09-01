@@ -4,13 +4,19 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import process from "node:process";
 import { CodexAppServer } from "./codex-app-server.mjs";
-import { defaultControlDatabasePath } from "./database-path.mjs";
+import {
+  controlDataScopeDescriptor,
+  defaultControlDatabasePath,
+} from "./database-path.mjs";
+import { ControlMcpHealthMonitor } from "./mcp-health.mjs";
 import { createRuntimeSurface } from "./runtime-surface.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicDirectory = path.resolve(sourceDirectory, "..", "public");
+const maximumDesktopShutdownFrameBytes = 4_096;
+const desktopShutdownSchemaVersion = "lattice.control.desktop-shutdown.v1";
 
 class HttpRequestError extends Error {
   constructor(status, code, message) {
@@ -44,6 +50,31 @@ function publicErrorCode(error) {
   return typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
     ? error.code
     : "CONTROL_REQUEST_FAILED";
+}
+
+async function settleWithin(promise, deadline) {
+  const remaining = Math.max(0, deadline - Date.now());
+  if (remaining === 0) return { settled: false };
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        (value) => ({ settled: true, value }),
+        (error) => ({ settled: true, error }),
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ settled: false }), remaining);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function shutdownDrainTimeoutError() {
+  const error = new Error("Control HTTP effects did not drain before shutdown deadline");
+  error.code = "CONTROL_SHUTDOWN_DRAIN_TIMEOUT";
+  return error;
 }
 
 async function readJson(request) {
@@ -125,6 +156,7 @@ export function createLatticeServer({
   databasePath,
   codex = new CodexAppServer(),
   projectInspector,
+  mcpHealth,
 }) {
   const store = new LatticeStore(databasePath);
   const service = new LatticeControlService({
@@ -132,10 +164,73 @@ export function createLatticeServer({
     codex,
     ...(projectInspector ? { projectInspector } : {}),
   });
+  const resolvedMcpHealth = mcpHealth ?? (typeof databasePath === "string"
+    ? new ControlMcpHealthMonitor({ databasePath })
+    : {
+        current: async () => ({
+          work_mcp: "UNREACHABLE",
+          decision_mcp: "UNREACHABLE",
+        }),
+      });
+  let acceptingEffects = true;
+  let ownedShutdown = false;
+  let ownedShutdownPromise = null;
+  let serverClosePromise = null;
+  const inFlightRequests = new Set();
+  const recoveryMutationTarget = (pathname) => {
+    if (
+      pathname === "/api/conversation/reconnect"
+      || pathname === "/api/conversation/interrupt"
+    ) return "primary";
+    const match = pathname.match(/^\/api\/work-items\/([^/]+)\/(?:interrupt|reconcile)$/u);
+    if (!match) return null;
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return null;
+    }
+  };
+  const assertMutationAdmission = (request, url) => {
+    if (request.method !== "POST") return;
+    if (!acceptingEffects) {
+      throw new HttpRequestError(
+        503,
+        "CONTROL_SHUTTING_DOWN",
+        "Control is shutting down and is not accepting new effects",
+      );
+    }
+    if (service.reconciliationRequired()) {
+      const recoveryTarget = recoveryMutationTarget(url.pathname);
+      if (recoveryTarget === null || !service.reconciliationRequired(recoveryTarget)) {
+        throw new HttpRequestError(
+          409,
+          "CONTROL_RECONCILIATION_REQUIRED",
+          "Control must reconcile the inherited active turn before accepting new effects",
+        );
+      }
+    }
+  };
+  const readMutationJson = async (request, url) => {
+    const body = await readJson(request);
+    assertMutationAdmission(request, url);
+    return body;
+  };
   const server = createServer(async (request, response) => {
-    const url = new URL(request.url, "http://127.0.0.1");
+    let finishTrackedRequest = null;
+    let trackedRequest = null;
     try {
       validateLoopbackRequest(request);
+      if (ownedShutdown) {
+        throw new HttpRequestError(
+          503,
+          "CONTROL_SHUTTING_DOWN",
+          "Control is shutting down",
+        );
+      }
+      trackedRequest = new Promise((resolve) => { finishTrackedRequest = resolve; });
+      inFlightRequests.add(trackedRequest);
+      const url = new URL(request.url, "http://127.0.0.1");
+      assertMutationAdmission(request, url);
       if (request.method === "GET" && url.pathname === "/") {
         const body = await readFile(path.join(publicDirectory, "index.html"));
         response.writeHead(200, {
@@ -151,7 +246,10 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/runtime") {
-        sendJson(response, 200, createRuntimeSurface(service));
+        sendJson(response, 200, createRuntimeSurface(service, {
+          databasePath,
+          mcpHealth: await resolvedMcpHealth.current(),
+        }));
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/conversation") {
@@ -182,7 +280,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/conversation/messages") {
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         const conversation = await service.sendPrimaryConversationMessage({
           projectId: body.projectId,
           clientMessageId: body.clientMessageId,
@@ -195,12 +293,12 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/conversation/reconnect") {
-        await readJson(request);
+        await readMutationJson(request, url);
         sendJson(response, 200, await service.reconnectPrimaryConversation());
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/conversation/interrupt") {
-        await readJson(request);
+        await readMutationJson(request, url);
         sendJson(response, 200, await service.interruptPrimaryConversation());
         return;
       }
@@ -210,7 +308,7 @@ export function createLatticeServer({
       }
       const refreshProjectId = projectRouteId(url.pathname, "refresh");
       if (request.method === "POST" && refreshProjectId) {
-        await readJson(request);
+        await readMutationJson(request, url);
         sendJson(response, 200, await service.refreshProject(refreshProjectId));
         return;
       }
@@ -251,7 +349,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/projects") {
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         const result = await service.registerProject({ name: body.name, rootPath: body.rootPath });
         sendJson(response, result.created ? 201 : 200, {
           ...result.project,
@@ -260,7 +358,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/work-items") {
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         sendJson(response, 201, service.createWorkItem({
           projectId: body.projectId,
           title: body.title,
@@ -270,7 +368,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/installation-receipts") {
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         const result = service.recordInstallationReceipt({
           projectId: body.projectId,
           component: body.component,
@@ -282,7 +380,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/development-radar") {
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         sendJson(response, 200, service.replaceDevelopmentRadar(body));
         return;
       }
@@ -298,7 +396,7 @@ export function createLatticeServer({
       ]) {
         const id = routeId(url.pathname, action);
         if (!id || request.method !== "POST") continue;
-        const body = await readJson(request);
+        const body = await readMutationJson(request, url);
         let result;
         if (action === "start") result = await service.start(id);
         else if (action === "resume") result = await service.resume(id, body.prompt);
@@ -317,25 +415,152 @@ export function createLatticeServer({
         error: publicErrorMessage(error?.message),
         code: publicErrorCode(error),
       });
+    } finally {
+      if (trackedRequest) inFlightRequests.delete(trackedRequest);
+      finishTrackedRequest?.();
     }
   });
 
+  const closeListener = () => {
+    if (serverClosePromise) return serverClosePromise;
+    if (!server.listening) {
+      serverClosePromise = Promise.resolve();
+      return serverClosePromise;
+    }
+    serverClosePromise = new Promise((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+    return serverClosePromise;
+  };
+
+  const drainRequests = async (deadline) => {
+    while (inFlightRequests.size > 0) {
+      const snapshot = [...inFlightRequests];
+      const result = await settleWithin(Promise.allSettled(snapshot), deadline);
+      if (!result.settled) throw shutdownDrainTimeoutError();
+    }
+  };
+
   server.on("close", () => {
+    if (ownedShutdown) return;
     service.close();
     void codex.close();
     store.close();
   });
-  return { server, service, store, codex };
+  const application = {
+    server,
+    service,
+    store,
+    codex,
+    stopAcceptingEffects() {
+      acceptingEffects = false;
+      service.stopAcceptingEffects();
+    },
+    shutdownOwned({ timeoutMs = 5_000 } = {}) {
+      if (ownedShutdownPromise) return ownedShutdownPromise;
+      ownedShutdown = true;
+      application.stopAcceptingEffects();
+      ownedShutdownPromise = (async () => {
+        const deadline = Date.now() + timeoutMs;
+        const outcome = await service.shutdown({
+          timeoutMs: Math.max(1, deadline - Date.now()),
+        });
+        await drainRequests(deadline);
+        service.close();
+        const codexResult = await settleWithin(codex.close(), deadline);
+        if (!codexResult.settled) throw shutdownDrainTimeoutError();
+        if (codexResult.error) throw codexResult.error;
+        store.close();
+        server.closeIdleConnections?.();
+        const listenerResult = await settleWithin(closeListener(), deadline);
+        if (!listenerResult.settled || listenerResult.error) throw shutdownDrainTimeoutError();
+        return outcome;
+      })();
+      return ownedShutdownPromise;
+    },
+  };
+  return application;
+}
+
+export function attachDesktopShutdownChannel(application, {
+  input = process.stdin,
+  databasePath,
+  timeoutMs = 5_000,
+} = {}) {
+  const expectedDigest = controlDataScopeDescriptor(databasePath).digest;
+  let buffer = Buffer.alloc(0);
+  let detached = false;
+  const detach = ({ destroy = false } = {}) => {
+    if (detached) return;
+    detached = true;
+    input.off("data", onData);
+    input.off("end", onEnd);
+    input.off("error", onEnd);
+    input.pause();
+    if (destroy) input.destroy?.();
+  };
+  const failClosed = () => detach();
+  const accept = (frame) => {
+    if (
+      frame === null
+      || typeof frame !== "object"
+      || Array.isArray(frame)
+      || Object.keys(frame).sort().join("\0")
+        !== ["schema_version", "operation", "data_scope_digest"].sort().join("\0")
+      || frame.schema_version !== desktopShutdownSchemaVersion
+      || frame.operation !== "shutdown"
+      || frame.data_scope_digest !== expectedDigest
+    ) {
+      failClosed();
+      return;
+    }
+    detach({ destroy: true });
+    void application.shutdownOwned({ timeoutMs }).then(
+      () => { process.exitCode = 0; },
+      () => { process.exitCode = 1; },
+    );
+  };
+  function onData(chunk) {
+    if (detached) return;
+    if (buffer.length + chunk.length > maximumDesktopShutdownFrameBytes) {
+      failClosed();
+      return;
+    }
+    buffer = Buffer.concat([buffer, chunk]);
+    const newline = buffer.indexOf(0x0a);
+    if (newline < 0) return;
+    const frame = buffer.subarray(0, newline);
+    if (frame.length === 0 || buffer.subarray(newline + 1).length !== 0) {
+      failClosed();
+      return;
+    }
+    try {
+      accept(JSON.parse(frame.toString("utf8")));
+    } catch {
+      failClosed();
+    }
+  }
+  function onEnd() {
+    failClosed();
+  }
+  input.on("data", onData);
+  input.on("end", onEnd);
+  input.on("error", onEnd);
+  return { close: failClosed };
 }
 
 export async function startDefaultServer() {
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
-  const application = createLatticeServer({ databasePath: defaultControlDatabasePath() });
+  const databasePath = defaultControlDatabasePath();
+  const application = createLatticeServer({ databasePath });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
   process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
+  if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
+    attachDesktopShutdownChannel(application, { databasePath });
+  }
   return application;
 }
 

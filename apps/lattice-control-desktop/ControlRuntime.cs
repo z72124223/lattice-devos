@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -5,6 +6,7 @@ using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -29,6 +31,21 @@ internal enum ControlRuntimeAction
 
 internal sealed record ControlRuntimeIdentity(string SchemaVersion, string Product, string Version);
 
+internal sealed record ControlRuntimeDataScope(
+    string SchemaVersion,
+    string Store,
+    int StoreSchemaVersion,
+    string AuthorityClass,
+    string RegistryAuthority,
+    string Digest);
+
+internal sealed record ControlDataScopeContract(
+    string SchemaVersion,
+    string Store,
+    int StoreSchemaVersion,
+    string AuthorityClass,
+    string RegistryAuthority);
+
 internal sealed record ControlRuntimeEvaluation(
     ControlRuntimeHealth Health,
     ControlRuntimeAction Action,
@@ -38,13 +55,21 @@ internal sealed record ControlRuntimeLaunchSpec(
     string ExecutablePath,
     string ServerPath,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string> Environment);
+    IReadOnlyDictionary<string, string> Environment,
+    string DatabasePath);
 
 internal static class ControlRuntimeContract
 {
-    internal const string SurfaceSchemaVersion = "lattice.control.runtime-surface.v1";
+    internal const string SurfaceSchemaVersion = "lattice.control.runtime-surface.v2";
     internal const string IdentitySchemaVersion = "lattice.control.runtime-identity.v1";
     internal const string IdentityResourceName = "Lattice.Control.RuntimeIdentity.json";
+    internal const string DataScopeContractResourceName = "Lattice.Control.DataScopeContract.json";
+    private static readonly ControlDataScopeContract DataScopeContract = LoadDataScopeContract();
+    internal static readonly string DataScopeSchemaVersion = DataScopeContract.SchemaVersion;
+    internal static readonly string DataScopeStore = DataScopeContract.Store;
+    internal static readonly int DataScopeStoreSchemaVersion = DataScopeContract.StoreSchemaVersion;
+    internal static readonly string DataScopeAuthorityClass = DataScopeContract.AuthorityClass;
+    internal static readonly string DataScopeRegistryAuthority = DataScopeContract.RegistryAuthority;
 
     private static readonly string[] ExpectedCapabilityIds =
     [
@@ -60,11 +85,13 @@ internal static class ControlRuntimeContract
     internal static ControlRuntimeEvaluation EvaluateProbe(
         bool tcpReachable,
         int? statusCode,
-        string? responseBody)
+        string? responseBody,
+        ControlRuntimeDataScope expectedScope)
     {
-        if (statusCode == 200 && TryValidateSurface(responseBody))
+        string detail = "CONTROL_LISTENER_INCOMPATIBLE";
+        if (statusCode == 200 && TryValidateSurface(responseBody, expectedScope, out detail))
         {
-            return new(ControlRuntimeHealth.HEALTHY, ControlRuntimeAction.Reuse, "CONTROL_COMPATIBLE");
+            return new(ControlRuntimeHealth.HEALTHY, ControlRuntimeAction.Reuse, detail);
         }
 
         if (statusCode.HasValue || responseBody is not null || tcpReachable)
@@ -72,13 +99,107 @@ internal static class ControlRuntimeContract
             return new(
                 ControlRuntimeHealth.INCOMPATIBLE,
                 ControlRuntimeAction.FailClosed,
-                "CONTROL_LISTENER_INCOMPATIBLE");
+                statusCode == 200 ? detail : "CONTROL_LISTENER_INCOMPATIBLE");
         }
 
         return new(
             ControlRuntimeHealth.UNREACHABLE,
             ControlRuntimeAction.StartOwned,
             "CONTROL_LISTENER_ABSENT");
+    }
+
+    internal static ControlRuntimeDataScope DataScopeForDatabasePath(string databasePath)
+    {
+        if (string.IsNullOrEmpty(databasePath) || databasePath.IndexOf('\0') >= 0)
+        {
+            throw new ArgumentException("CONTROL_DATABASE_PATH_INVALID", nameof(databasePath));
+        }
+        string normalized = Path.GetFullPath(databasePath).Replace('\\', '/');
+        if (OperatingSystem.IsWindows())
+        {
+            char[] characters = normalized.ToCharArray();
+            for (int index = 0; index < characters.Length; index += 1)
+            {
+                if (characters[index] is >= 'A' and <= 'Z')
+                {
+                    characters[index] = (char)(characters[index] + ('a' - 'A'));
+                }
+            }
+            normalized = new string(characters);
+        }
+        string[] identity =
+        [
+            DataScopeSchemaVersion,
+            DataScopeStore,
+            DataScopeStoreSchemaVersion.ToString(CultureInfo.InvariantCulture),
+            DataScopeAuthorityClass,
+            DataScopeRegistryAuthority,
+            normalized,
+        ];
+        using MemoryStream preimage = new();
+        byte[] encodedLength = new byte[4];
+        foreach (string value in identity)
+        {
+            byte[] encoded = Encoding.UTF8.GetBytes(value);
+            BinaryPrimitives.WriteUInt32BigEndian(encodedLength, checked((uint)encoded.Length));
+            preimage.Write(encodedLength);
+            preimage.Write(encoded);
+        }
+        byte[] digest = SHA256.HashData(preimage.ToArray());
+        return new(
+            DataScopeSchemaVersion,
+            DataScopeStore,
+            DataScopeStoreSchemaVersion,
+            DataScopeAuthorityClass,
+            DataScopeRegistryAuthority,
+            Convert.ToHexString(digest).ToLowerInvariant());
+    }
+
+    private static ControlDataScopeContract LoadDataScopeContract()
+    {
+        Assembly assembly = typeof(ControlRuntimeContract).Assembly;
+        using Stream stream = assembly.GetManifestResourceStream(DataScopeContractResourceName)
+            ?? throw new InvalidOperationException("CONTROL_DATA_SCOPE_CONTRACT_MISSING");
+        using JsonDocument document = JsonDocument.Parse(stream, new JsonDocumentOptions
+        {
+            AllowTrailingCommas = false,
+            CommentHandling = JsonCommentHandling.Disallow,
+            MaxDepth = 8,
+        });
+        JsonElement root = document.RootElement;
+        if (!HasExactProperties(
+            root,
+            "schema_version",
+            "store",
+            "store_schema_version",
+            "authority_class",
+            "registry_authority"))
+        {
+            throw new InvalidOperationException("CONTROL_DATA_SCOPE_CONTRACT_INVALID");
+        }
+        string? schemaVersion = StringProperty(root, "schema_version");
+        string? store = StringProperty(root, "store");
+        string? authorityClass = StringProperty(root, "authority_class");
+        string? registryAuthority = StringProperty(root, "registry_authority");
+        if (
+            schemaVersion != "lattice.control.data-scope.v1"
+            || store != "CONTROL_SQLITE"
+            || !root.TryGetProperty("store_schema_version", out JsonElement storeSchemaVersion)
+            || storeSchemaVersion.ValueKind != JsonValueKind.Number
+            || !storeSchemaVersion.TryGetInt32(out int parsedStoreSchemaVersion)
+            || parsedStoreSchemaVersion < 1
+            || authorityClass != "CONTROL_LOCAL_PRODUCT_STATE"
+            || registryAuthority != "NONE"
+        )
+        {
+            throw new InvalidOperationException("CONTROL_DATA_SCOPE_CONTRACT_INVALID");
+        }
+        return new(
+            schemaVersion,
+            store,
+            parsedStoreSchemaVersion,
+            authorityClass,
+            registryAuthority);
     }
 
     private static ControlRuntimeIdentity LoadExpectedIdentity()
@@ -113,8 +234,12 @@ internal static class ControlRuntimeContract
         return new(schemaVersion, product, version);
     }
 
-    private static bool TryValidateSurface(string? responseBody)
+    private static bool TryValidateSurface(
+        string? responseBody,
+        ControlRuntimeDataScope expectedScope,
+        out string detail)
     {
+        detail = "CONTROL_LISTENER_INCOMPATIBLE";
         if (string.IsNullOrEmpty(responseBody) || responseBody.Length > 65_536)
         {
             return false;
@@ -130,7 +255,14 @@ internal static class ControlRuntimeContract
             });
             JsonElement root = document.RootElement;
             if (
-                !HasExactProperties(root, "schema_version", "identity", "health", "capabilities")
+                !HasExactProperties(
+                    root,
+                    "schema_version",
+                    "identity",
+                    "data_scope",
+                    "reconciliation_required",
+                    "health",
+                    "capabilities")
                 || StringProperty(root, "schema_version") != SurfaceSchemaVersion
                 || StringProperty(root, "health") != nameof(ControlRuntimeHealth.HEALTHY)
                 || !root.TryGetProperty("identity", out JsonElement identity)
@@ -146,20 +278,57 @@ internal static class ControlRuntimeContract
                 return false;
             }
 
+            if (
+                !root.TryGetProperty("data_scope", out JsonElement dataScope)
+                || !HasExactProperties(
+                    dataScope,
+                    "schema_version",
+                    "store",
+                    "store_schema_version",
+                    "authority_class",
+                    "registry_authority",
+                    "digest")
+                || StringProperty(dataScope, "schema_version") != expectedScope.SchemaVersion
+                || StringProperty(dataScope, "store") != expectedScope.Store
+                || !dataScope.TryGetProperty("store_schema_version", out JsonElement storeSchemaVersion)
+                || storeSchemaVersion.ValueKind != JsonValueKind.Number
+                || !storeSchemaVersion.TryGetInt32(out int observedStoreSchemaVersion)
+                || observedStoreSchemaVersion != expectedScope.StoreSchemaVersion
+                || StringProperty(dataScope, "authority_class") != expectedScope.AuthorityClass
+                || StringProperty(dataScope, "registry_authority") != expectedScope.RegistryAuthority
+                || StringProperty(dataScope, "digest") != expectedScope.Digest
+            )
+            {
+                detail = "CONTROL_DATA_SCOPE_INCOMPATIBLE";
+                return false;
+            }
+            if (
+                !root.TryGetProperty("reconciliation_required", out JsonElement reconciliation)
+                || reconciliation.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
+            )
+            {
+                return false;
+            }
+            bool reconciliationRequired = reconciliation.GetBoolean();
+
             int index = 0;
             foreach (JsonElement capability in capabilities.EnumerateArray())
             {
                 if (
-                    !HasExactProperties(capability, "id", "label", "status")
+                    !HasExactProperties(capability, "id", "label", "status", "has_data")
                     || StringProperty(capability, "id") != ExpectedCapabilityIds[index]
                     || !IsBoundedDisplayText(StringProperty(capability, "label"))
                     || !ValidCapabilityStatus(ExpectedCapabilityIds[index], StringProperty(capability, "status"))
+                    || !ValidCapabilityData(ExpectedCapabilityIds[index], capability)
                 )
                 {
                     return false;
                 }
                 index += 1;
             }
+            detail = reconciliationRequired
+                ? "CONTROL_RECONCILIATION_REQUIRED"
+                : "CONTROL_COMPATIBLE";
             return true;
         }
         catch (JsonException)
@@ -176,10 +345,19 @@ internal static class ControlRuntimeContract
             "codex_app_server" => status is nameof(ControlRuntimeHealth.HEALTHY)
                 or nameof(ControlRuntimeHealth.STOPPED),
             "work_mcp" or "decision_mcp" => status is nameof(ControlRuntimeHealth.HEALTHY)
-                or nameof(ControlRuntimeHealth.NO_DATA),
+                or nameof(ControlRuntimeHealth.UNREACHABLE)
+                or nameof(ControlRuntimeHealth.INCOMPATIBLE),
             "postgresql" => status == nameof(ControlRuntimeHealth.NOT_IMPLEMENTED),
             _ => false,
         };
+    }
+
+    private static bool ValidCapabilityData(string id, JsonElement capability)
+    {
+        if (!capability.TryGetProperty("has_data", out JsonElement hasData)) return false;
+        return id is "work_mcp" or "decision_mcp"
+            ? hasData.ValueKind is JsonValueKind.True or JsonValueKind.False
+            : hasData.ValueKind == JsonValueKind.Null;
     }
 
     private static bool IsBoundedDisplayText(string? value)
@@ -225,9 +403,14 @@ internal sealed class ControlRuntimeManager : IDisposable
     private readonly HttpClient httpClient;
     private readonly TimeSpan probeTimeout;
     private readonly TimeSpan startupTimeout;
+    private readonly TimeSpan shutdownTimeout;
+    private readonly Action<Process> killOwnedProcess;
+    private readonly ControlRuntimeDataScope expectedDataScope;
     private readonly SemaphoreSlim lifecycleGate = new(1, 1);
     private readonly object ownershipSync = new();
     private Process? ownedProcess;
+    private Task? ownedStopTask;
+    private Task? shutdownTask;
     private volatile bool disposed;
 
     internal ControlRuntimeManager(
@@ -235,7 +418,9 @@ internal sealed class ControlRuntimeManager : IDisposable
         ControlRuntimeLaunchSpec launchSpec,
         TimeSpan? probeTimeout = null,
         TimeSpan? startupTimeout = null,
-        HttpMessageHandler? probeHandler = null)
+        TimeSpan? shutdownTimeout = null,
+        HttpMessageHandler? probeHandler = null,
+        Action<Process>? killOwnedProcess = null)
     {
         if (
             controlOrigin.Scheme != Uri.UriSchemeHttp
@@ -249,8 +434,12 @@ internal sealed class ControlRuntimeManager : IDisposable
         this.controlOrigin = new Uri(controlOrigin.GetLeftPart(UriPartial.Authority) + "/");
         runtimeProbeUri = new Uri(this.controlOrigin, "api/runtime");
         this.launchSpec = launchSpec;
+        expectedDataScope = ControlRuntimeContract.DataScopeForDatabasePath(launchSpec.DatabasePath);
         this.probeTimeout = probeTimeout ?? TimeSpan.FromSeconds(2);
         this.startupTimeout = startupTimeout ?? TimeSpan.FromSeconds(10);
+        this.shutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(8);
+        this.killOwnedProcess = killOwnedProcess
+            ?? (process => process.Kill(entireProcessTree: true));
         HttpMessageHandler handler = probeHandler ?? new SocketsHttpHandler
         {
             AllowAutoRedirect = false,
@@ -276,6 +465,13 @@ internal sealed class ControlRuntimeManager : IDisposable
             "lattice-control",
             "src",
             "server.mjs");
+        string localApplicationData = Environment.GetEnvironmentVariable("LOCALAPPDATA")
+            ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string databasePath = Path.GetFullPath(Path.Combine(
+            localApplicationData,
+            "LATTICE",
+            "control",
+            "lattice-control.db"));
         return new ControlRuntimeManager(
             controlOrigin,
             new ControlRuntimeLaunchSpec(
@@ -285,7 +481,10 @@ internal sealed class ControlRuntimeManager : IDisposable
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["LATTICE_CONTROL_PORT"] = controlOrigin.Port.ToString(CultureInfo.InvariantCulture),
-                }));
+                    ["LATTICE_CONTROL_DATABASE_PATH"] = databasePath,
+                    ["LATTICE_CONTROL_DESKTOP_OWNED"] = "1",
+                },
+                databasePath));
     }
 
     internal bool OwnsControl
@@ -311,6 +510,8 @@ internal sealed class ControlRuntimeManager : IDisposable
             }
         }
     }
+
+    internal bool LastStopUsedHardKill { get; private set; }
 
     internal async Task<ControlRuntimeEvaluation> ProbeAsync(CancellationToken cancellationToken = default)
     {
@@ -407,13 +608,13 @@ internal sealed class ControlRuntimeManager : IDisposable
                 }
                 if (probe.Health == ControlRuntimeHealth.INCOMPATIBLE)
                 {
-                    StopOwnedCore();
+                    await StopOwnedCoreAsync(CancellationToken.None);
                     return probe;
                 }
                 await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
             }
 
-            StopOwnedCore();
+            await StopOwnedCoreAsync(CancellationToken.None);
             return new(
                 ControlRuntimeHealth.UNREACHABLE,
                 ControlRuntimeAction.FailClosed,
@@ -421,7 +622,7 @@ internal sealed class ControlRuntimeManager : IDisposable
         }
         catch
         {
-            StopOwnedCore();
+            await StopOwnedCoreAsync(CancellationToken.None);
             throw;
         }
         finally
@@ -448,10 +649,10 @@ internal sealed class ControlRuntimeManager : IDisposable
         (int? statusCode, string? body) = await ProbeHttpAsync(cancellationToken);
         if (statusCode.HasValue || body is not null)
         {
-            return ControlRuntimeContract.EvaluateProbe(true, statusCode, body);
+            return ControlRuntimeContract.EvaluateProbe(true, statusCode, body, expectedDataScope);
         }
         bool tcpReachable = await ProbeTcpAsync(cancellationToken);
-        return ControlRuntimeContract.EvaluateProbe(tcpReachable, null, null);
+        return ControlRuntimeContract.EvaluateProbe(tcpReachable, null, null, expectedDataScope);
     }
 
     private async Task<(int? StatusCode, string? Body)> ProbeHttpAsync(
@@ -536,9 +737,15 @@ internal sealed class ControlRuntimeManager : IDisposable
         return Path.IsPathFullyQualified(launchSpec.ExecutablePath)
             && Path.IsPathFullyQualified(launchSpec.ServerPath)
             && Path.IsPathFullyQualified(launchSpec.WorkingDirectory)
+            && Path.IsPathFullyQualified(launchSpec.DatabasePath)
             && File.Exists(launchSpec.ExecutablePath)
             && File.Exists(launchSpec.ServerPath)
             && Directory.Exists(launchSpec.WorkingDirectory)
+            && launchSpec.Environment.TryGetValue(
+                "LATTICE_CONTROL_DATABASE_PATH",
+                out string? configuredDatabasePath)
+            && Path.GetFullPath(configuredDatabasePath)
+                .Equals(Path.GetFullPath(launchSpec.DatabasePath), StringComparison.OrdinalIgnoreCase)
             && launchSpec.Environment.All(pair =>
                 pair.Key.Length is >= 1 and <= 128
                 && pair.Value.Length <= 4_096
@@ -561,6 +768,7 @@ internal sealed class ControlRuntimeManager : IDisposable
                 WorkingDirectory = launchSpec.WorkingDirectory,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardInput = true,
             };
             start.ArgumentList.Add(launchSpec.ServerPath);
             foreach ((string key, string value) in launchSpec.Environment)
@@ -594,21 +802,55 @@ internal sealed class ControlRuntimeManager : IDisposable
         }
     }
 
-    private void StopOwnedCore()
+    internal Task StopOwnedCoreAsync(CancellationToken cancellationToken)
     {
+        Task stopTask;
         lock (ownershipSync)
         {
-            StopOwnedUnderLock();
+            stopTask = GetOrStartOwnedStopLocked();
         }
+        return cancellationToken.CanBeCanceled
+            ? stopTask.WaitAsync(cancellationToken)
+            : stopTask;
     }
 
-    private void StopOwnedUnderLock()
+    private Task GetOrStartOwnedStopLocked()
     {
+        if (ownedStopTask is not null) return ownedStopTask;
         Process? process = ownedProcess;
-        if (process is null) return;
-        StopProcessAndVerify(process);
-        ownedProcess = null;
-        process.Dispose();
+        if (process is null) return Task.CompletedTask;
+        TaskCompletionSource completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task stopTask = completion.Task;
+        ownedStopTask = stopTask;
+        _ = StopOwnedAndReleaseAsync(process, completion);
+        return stopTask;
+    }
+
+    private async Task StopOwnedAndReleaseAsync(
+        Process process,
+        TaskCompletionSource completion)
+    {
+        Exception? failure = null;
+        try
+        {
+            await StopProcessAndVerifyAsync(process, CancellationToken.None);
+        }
+        catch (Exception error)
+        {
+            failure = error;
+        }
+        finally
+        {
+            bool exited = HasExited(process);
+            lock (ownershipSync)
+            {
+                if (exited && ReferenceEquals(ownedProcess, process)) ownedProcess = null;
+                if (ReferenceEquals(ownedStopTask, completion.Task)) ownedStopTask = null;
+            }
+            if (exited) process.Dispose();
+        }
+        if (failure is null) completion.TrySetResult();
+        else completion.TrySetException(failure);
     }
 
     private Process OwnedProcessOrThrow()
@@ -646,14 +888,45 @@ internal sealed class ControlRuntimeManager : IDisposable
         }
     }
 
-    private static void StopProcessAndVerify(Process process)
+    private async Task StopProcessAndVerifyAsync(
+        Process process,
+        CancellationToken cancellationToken)
     {
+        LastStopUsedHardKill = false;
+        bool shutdownAttempted = false;
         try
         {
             if (!HasExited(process))
             {
-                process.Kill(entireProcessTree: true);
-                if (!process.WaitForExit(10_000))
+                using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+                timeout.CancelAfter(shutdownTimeout);
+                try
+                {
+                    string frame = JsonSerializer.Serialize(new
+                    {
+                        schema_version = "lattice.control.desktop-shutdown.v1",
+                        operation = "shutdown",
+                        data_scope_digest = expectedDataScope.Digest,
+                    });
+                    shutdownAttempted = true;
+                    await process.StandardInput.WriteLineAsync(frame.AsMemory(), timeout.Token);
+                    await process.StandardInput.FlushAsync(timeout.Token);
+                    await process.WaitForExitAsync(timeout.Token);
+                }
+                catch (Exception error) when (
+                    error is OperationCanceledException
+                        or InvalidOperationException
+                        or IOException
+                        or ObjectDisposedException)
+                {
+                    if (!HasExited(process))
+                    {
+                        LastStopUsedHardKill = true;
+                        killOwnedProcess(process);
+                    }
+                }
+                if (!HasExited(process) && !process.WaitForExit(10_000))
                 {
                     throw new InvalidOperationException("CONTROL_OWNED_PROCESS_STOP_TIMEOUT");
                 }
@@ -666,6 +939,14 @@ internal sealed class ControlRuntimeManager : IDisposable
                 throw new InvalidOperationException("CONTROL_OWNED_PROCESS_STOP_FAILED", error);
             }
         }
+        if (
+            shutdownAttempted
+            && !LastStopUsedHardKill
+            && HasExited(process)
+            && process.ExitCode != 0)
+        {
+            throw new InvalidOperationException("CONTROL_OWNED_PROCESS_SHUTDOWN_REJECTED");
+        }
     }
 
     private void ThrowIfDisposed()
@@ -675,20 +956,41 @@ internal sealed class ControlRuntimeManager : IDisposable
 
     public void Dispose()
     {
+        ShutdownAsync(CancellationToken.None).GetAwaiter().GetResult();
+    }
+
+    internal Task ShutdownAsync(CancellationToken cancellationToken = default)
+    {
+        lock (ownershipSync)
+        {
+            if (shutdownTask is not null) return shutdownTask;
+            disposed = true;
+            Task stopTask = GetOrStartOwnedStopLocked();
+            shutdownTask = ShutdownAfterOwnedStopAsync(stopTask);
+            return shutdownTask;
+        }
+    }
+
+    private async Task ShutdownAfterOwnedStopAsync(Task stopTask)
+    {
         try
+        {
+            await stopTask;
+        }
+        catch
         {
             lock (ownershipSync)
             {
-                if (disposed && ownedProcess is null) return;
-                disposed = true;
-                StopOwnedUnderLock();
+                if (ownedProcess is not null && !HasExited(ownedProcess))
+                {
+                    shutdownTask = null;
+                }
             }
+            throw;
         }
         finally
         {
             httpClient.Dispose();
         }
-        // A cancelled probe can still be unwinding through the finally block and
-        // must be allowed to release this gate during desktop shutdown.
     }
 }

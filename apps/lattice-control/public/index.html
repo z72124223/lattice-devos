@@ -35,6 +35,7 @@
     .runtime-capabilities { display:flex; align-items:center; gap:7px; min-height:38px; padding:6px 12px; overflow-x:auto; border-bottom:1px solid var(--line); background:rgba(8,18,29,.8); scrollbar-width:thin; }
     .runtime-capability { display:flex; align-items:center; gap:7px; flex:0 0 auto; padding:5px 8px; border:1px solid #314252; border-radius:999px; color:#aab9c4; font-size:.7rem; white-space:nowrap; }
     .runtime-capability strong { color:#dce8ed; font-weight:760; }
+    .runtime-data { padding-left:7px; border-left:1px solid #405064; color:#90c7dc; font-style:normal; }
     .runtime-capability span::before { content:""; display:inline-block; width:7px; height:7px; margin-right:5px; border-radius:50%; background:#75808a; }
     [data-runtime-status="HEALTHY"] span { color:#8de5aa; }
     [data-runtime-status="HEALTHY"] span::before { background:#66df7d; }
@@ -271,7 +272,7 @@
       .core-nav { grid-template-columns:repeat(4,minmax(0,1fr)); gap:3px; }
       .core-tab { min-height:56px; justify-content:center; flex-direction:column; gap:2px; padding:5px 2px; border-left:0; font-size:.7rem; }
       .core-tab .nav-icon { width:auto; font-size:1rem; }
-      .workspace { display:grid; grid-template-rows:auto auto minmax(520px,1fr) auto; min-height:100dvh; padding-bottom:76px; }
+      .workspace { display:grid; grid-template-rows:auto auto auto minmax(520px,1fr) auto; min-height:100dvh; padding-bottom:76px; }
       .topbar { align-items:flex-start; padding:13px 14px; }
       .workspace-title { display:grid; gap:3px; font-size:.78rem; }
       .system-pill { padding:6px 9px; font-size:.7rem; }
@@ -420,7 +421,7 @@
   function conversationCanSend(){
     const conversation=state.surface?.conversation;
     const pending=readPending(),pendingForCurrentContext=pending?.projectId===currentProjectId();
-    return Boolean(currentProjectId()) && !pendingForCurrentContext && (conversation?.status==="not_started"||conversation?.can_send === true);
+    return state.runtime?.reconciliation_required!==true && Boolean(currentProjectId()) && !pendingForCurrentContext && (conversation?.status==="not_started"||conversation?.can_send === true);
   }
   function activateCore(core){
     state.activeCore=core;
@@ -431,8 +432,9 @@
   function renderContext(){
     const context=state.surface.context,ready=context.status==="ready";
     nodes.headerContext.textContent=ready?context.project_name:"主要專案尚未確認";
-    nodes.contextStatus.textContent=context.status_text;
-    nodes.contextSource.textContent=ready?("context · "+context.source+" · "+context.project_id):("not ready · "+context.reason);
+    const reconciliationRequired=state.runtime?.reconciliation_required===true;
+    nodes.contextStatus.textContent=reconciliationRequired?"上次執行尚無可驗證終態；目前只允許精確重連、中斷或核對。":context.status_text;
+    nodes.contextSource.textContent=reconciliationRequired?"reconciliation required":ready?("context · "+context.source+" · "+context.project_id):("not ready · "+context.reason);
     nodes.projectName.textContent=ready?context.project_name:"尚未確認";
   }
   function renderRuntime(){
@@ -443,6 +445,7 @@
       item.dataset.runtimeStatus=capability.status;
       item.title="本機 Control 觀察；不是 PostgreSQL 或交付收據權威。";
       item.append(element("strong",capability.label),element("span",runtimeStatusLabels.get(capability.status)||capability.status));
+      if(capability.has_data===false){item.dataset.runtimeDataStatus="NO_DATA";item.append(element("em","NO_DATA","runtime-data"));}
       return item;
     }));
   }
@@ -452,6 +455,7 @@
     nodes.connection.classList.toggle("connected",conversation.codex_connected);
     const readyForFirstMessage=conversation.status==="not_started"&&Boolean(currentProjectId());
     nodes.status.textContent=readyForFirstMessage?"主要專案已確認，可以送出第一則訊息。":conversation.status_text;
+    if(state.runtime?.reconciliation_required===true)nodes.status.textContent="先核對上次執行的精確終態，暫不接受新訊息。";
     nodes.binding.textContent=conversation.codex_thread_id?("對話 "+conversation.id+" · Codex "+conversation.codex_thread_id):"固定對話身份：primary";
     const nearBottom=nodes.transcript.scrollHeight-nodes.transcript.scrollTop-nodes.transcript.clientHeight<80;
     const messages=conversation.messages||[]; let pending=readPending();

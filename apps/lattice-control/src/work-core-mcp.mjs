@@ -51,6 +51,7 @@ const nodeTool = Object.freeze({
 });
 
 const tools = Object.freeze([snapshotTool, nodeTool]);
+export const controlWorkMcpTools = tools;
 
 function exactObject(value, requiredKeys, optionalKeys = []) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;

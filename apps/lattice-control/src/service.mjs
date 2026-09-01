@@ -12,6 +12,7 @@ const approvalMethods = new Set([
   "item/fileChange/requestApproval",
 ]);
 const terminalTurnStatuses = new Set(["completed", "interrupted", "failed"]);
+const activeWorkStatuses = new Set(["starting", "running", "waiting_approval"]);
 const primaryConversationId = "primary";
 const primaryConversationLeaseTtlMs = 15_000;
 const primaryConversationDiscoveryPasses = 3;
@@ -25,6 +26,31 @@ function conversationError(code, message, status = 409) {
   const error = new Error(message);
   error.code = code;
   error.status = status;
+  return error;
+}
+
+async function settleWithin(promise, deadline) {
+  const remaining = Math.max(0, deadline - Date.now());
+  if (remaining === 0) return { settled: false };
+  let timer;
+  try {
+    return await Promise.race([
+      Promise.resolve(promise).then(
+        (value) => ({ settled: true, value }),
+        (error) => ({ settled: true, error }),
+      ),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve({ settled: false }), remaining);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function shutdownDrainTimeoutError() {
+  const error = new Error("Control shutdown could not safely drain before its deadline");
+  error.code = "CONTROL_SHUTDOWN_DRAIN_TIMEOUT";
   return error;
 }
 
@@ -249,6 +275,15 @@ export class LatticeControlService {
     this.conversationLeaseLossPromise = null;
     this.requestOwners = new Map();
     this.operations = new Map();
+    this.acceptingEffects = true;
+    this.shutdownPromise = null;
+    this.shutdownInProgress = false;
+    this.reconciliationItemIds = new Set(
+      store.listWorkItems()
+        .filter((item) => activeWorkStatuses.has(item.status))
+        .map((item) => item.id),
+    );
+    this.closed = false;
     this.primaryConversationCache = null;
     this.fourCoreDecisionCache = null;
     this.onNotification = (message) => this.#onNotification(message);
@@ -256,14 +291,25 @@ export class LatticeControlService {
     this.onServerRequestSettled = (settlement) => this.#onServerRequestSettled(settlement);
     this.onDisconnect = ({ code, signal }) => {
       const reason = `Codex App Server disconnected (${code ?? signal ?? "unknown"})`;
+      const preserveActive = this.shutdownInProgress || this.reconciliationRequired();
       try {
         for (const item of this.store.listWorkItems().filter(
-          (entry) => ["starting", "running", "waiting_approval"].includes(entry.status),
+          (entry) => activeWorkStatuses.has(entry.status),
         )) {
           const primaryConversation = item.id === primaryConversationId;
           const fence = primaryConversation ? this.conversationLeaseFence : null;
           if (primaryConversation && !this.#ownsPrimaryConversationLease(fence)) continue;
           try {
+            if (preserveActive) {
+              this.reconciliationItemIds.add(item.id);
+              this.#appendEventOnce(item.id, "codex_disconnected", {
+                code: code ?? null,
+                signal: signal ?? null,
+                controlled_shutdown: this.shutdownInProgress,
+                reconciliation_required: true,
+              }, fence);
+              continue;
+            }
             this.store.updateWorkItem(item.id, {
               status: "failed",
               approval_json: null,
@@ -295,6 +341,9 @@ export class LatticeControlService {
   }
 
   close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.acceptingEffects = false;
     this.codex.off("notification", this.onNotification);
     this.codex.off("serverRequest", this.onServerRequest);
     this.codex.off("serverRequestSettled", this.onServerRequestSettled);
@@ -312,6 +361,101 @@ export class LatticeControlService {
         // Store shutdown may already be in progress.
       }
     }
+  }
+
+  reconciliationRequired(itemId = null) {
+    return itemId === null
+      ? this.reconciliationItemIds.size > 0
+      : this.reconciliationItemIds.has(itemId);
+  }
+
+  stopAcceptingEffects() {
+    this.acceptingEffects = false;
+  }
+
+  shutdown({ timeoutMs = this.lifecycleTimeoutMs } = {}) {
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 300_000) {
+      throw new TypeError("CONTROL_SHUTDOWN_TIMEOUT_INVALID");
+    }
+    this.stopAcceptingEffects();
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.shutdownInProgress = true;
+    this.shutdownPromise = (async () => {
+      const deadline = Date.now() + timeoutMs;
+      const ambiguous = new Set();
+      const ambiguousBindings = new Map();
+      const bindingKey = (item) => [
+        item.status,
+        item.codex_thread_id ?? "",
+        item.codex_turn_id ?? "",
+      ].join("\0");
+      while (true) {
+        const activeItems = this.store.listWorkItems().filter(
+          (item) => activeWorkStatuses.has(item.status)
+            && ambiguousBindings.get(item.id) !== bindingKey(item),
+        );
+        if (activeItems.length > 0) {
+          const interruption = Promise.all(activeItems.map(async (item) => {
+            try {
+              const remaining = Math.max(1, deadline - Date.now());
+              const cleanupMargin = Math.min(100, Math.max(5, Math.floor(remaining / 10)));
+              const interruptBudget = Math.max(1, remaining - cleanupMargin);
+              return { id: item.id, terminal: await this.#shutdownActiveItem(item, interruptBudget) };
+            } catch {
+              return { id: item.id, terminal: false };
+            }
+          }));
+          const interruptionResult = await settleWithin(interruption, deadline);
+          if (!interruptionResult.settled || interruptionResult.error) {
+            for (const item of this.store.listWorkItems()) {
+              if (activeWorkStatuses.has(item.status)) this.reconciliationItemIds.add(item.id);
+            }
+            throw shutdownDrainTimeoutError();
+          }
+          for (const result of interruptionResult.value) {
+            if (result.terminal) {
+              ambiguous.delete(result.id);
+              ambiguousBindings.delete(result.id);
+              continue;
+            }
+            const current = this.store.getWorkItem(result.id);
+            ambiguous.add(result.id);
+            this.reconciliationItemIds.add(result.id);
+            if (current && activeWorkStatuses.has(current.status)) {
+              ambiguousBindings.set(result.id, bindingKey(current));
+            }
+          }
+          continue;
+        }
+
+        const pendingEntries = [...this.operations.entries()];
+        if (pendingEntries.length === 0) break;
+        const sliceDeadline = Math.min(
+          deadline,
+          Date.now() + Math.min(100, Math.max(1, Math.floor(timeoutMs / 8))),
+        );
+        const drainResult = await settleWithin(
+          Promise.allSettled(pendingEntries.map(([, { promise }]) => promise)),
+          sliceDeadline,
+        );
+        for (const [id] of pendingEntries) ambiguousBindings.delete(id);
+        if (!drainResult.settled && Date.now() >= deadline) {
+          for (const item of this.store.listWorkItems()) {
+            if (activeWorkStatuses.has(item.status)) this.reconciliationItemIds.add(item.id);
+          }
+          throw shutdownDrainTimeoutError();
+        }
+      }
+      for (const id of [...ambiguous]) {
+        if (!this.reconciliationItemIds.has(id)) ambiguous.delete(id);
+      }
+      const reconciliationRequired = this.reconciliationRequired();
+      return {
+        clean: ambiguous.size === 0 && !reconciliationRequired,
+        reconciliation_required: reconciliationRequired,
+      };
+    })();
+    return this.shutdownPromise;
   }
 
   createProject(input) {
@@ -550,6 +694,10 @@ export class LatticeControlService {
       work_snapshot: workSnapshot,
       decisions: this.#fourCoreDecisions(context.project_id),
     };
+  }
+
+  runtimeDataPresence() {
+    return this.store.runtimeDataPresence();
   }
 
   #fourCoreDecisions(scope) {
@@ -1307,6 +1455,9 @@ export class LatticeControlService {
   reconnectPrimaryConversation() {
     return this.#runExclusive(primaryConversationId, "conversation-reconnect", async () => {
       const fence = this.#acquirePrimaryConversationLease();
+      const inheritedReconciliationStatus = this.reconciliationItemIds.has(primaryConversationId)
+        ? this.store.getWorkItem(primaryConversationId)?.status ?? null
+        : null;
       try {
         const unresolved = this.store.primaryConversationUnresolvedMessage();
         const effectIdentity = await this.#conversationEffectIdentity(fence);
@@ -1361,11 +1512,19 @@ export class LatticeControlService {
         return result;
       } catch (error) {
         if (this.#ownsPrimaryConversationLease(fence)) {
-          this.store.updateWorkItem(primaryConversationId, {
-            status: "failed",
-            progress: "重新連線失敗；訊息不會自動重送",
-            failure_summary: boundedText(error?.message ?? error, 2_048),
-          }, fence);
+          const preserveInheritedState = activeWorkStatuses.has(inheritedReconciliationStatus)
+            && this.reconciliationItemIds.has(primaryConversationId);
+          this.store.updateWorkItem(primaryConversationId, preserveInheritedState
+            ? {
+              status: inheritedReconciliationStatus,
+              progress: "重新連線失敗；仍需對帳，訊息不會自動重送",
+              failure_summary: boundedText(error?.message ?? error, 2_048),
+            }
+            : {
+              status: "failed",
+              progress: "重新連線失敗；訊息不會自動重送",
+              failure_summary: boundedText(error?.message ?? error, 2_048),
+            }, fence);
           this.#appendEventOnce(primaryConversationId, "conversation_reconnect_failed", {
             threadId: this.store.getWorkItem(primaryConversationId)?.codex_thread_id ?? null,
             turnId: this.store.getWorkItem(primaryConversationId)?.codex_turn_id ?? null,
@@ -1394,10 +1553,13 @@ export class LatticeControlService {
         const effectIdentity = await this.#conversationEffectIdentity(fence);
         const terminal = await this.#fencedConversationEffect(
           fence,
-          () => this.codex.interruptTurn(threadId, turnId, {
-            timeoutMs: this.lifecycleTimeoutMs,
-            effectIdentity,
-          }),
+          () => {
+            this.reconciliationItemIds.add(primaryConversationId);
+            return this.codex.interruptTurn(threadId, turnId, {
+              timeoutMs: this.lifecycleTimeoutMs,
+              effectIdentity,
+            });
+          },
         );
         this.#applyTerminal(primaryConversationId, {
           method: "turn/completed",
@@ -1655,6 +1817,7 @@ export class LatticeControlService {
       if (!this.codex.isTurnActive(threadId, turnId)) {
         throw new Error(`Codex turn ${threadId}/${turnId} is not confirmed active`);
       }
+      this.reconciliationItemIds.add(id);
       try {
         const terminal = await this.codex.interruptTurn(threadId, turnId, {
           timeoutMs: this.lifecycleTimeoutMs,
@@ -1685,7 +1848,7 @@ export class LatticeControlService {
     const terminal = cancelled
       ? this.codex.waitForTurnCompleted(item.codex_thread_id, item.codex_turn_id, {
           timeoutMs: this.lifecycleTimeoutMs,
-          statuses: ["interrupted", "failed"],
+          statuses: ["completed", "interrupted", "failed"],
           signal: controller.signal,
         })
       : null;
@@ -1862,6 +2025,11 @@ export class LatticeControlService {
   }
 
   #runExclusive(id, kind, operation) {
+    if (!this.acceptingEffects) {
+      const error = new Error("Control is shutting down and is not accepting new effects");
+      error.code = "CONTROL_SHUTTING_DOWN";
+      return Promise.reject(error);
+    }
     const existing = this.operations.get(id);
     if (existing) {
       if (existing.kind === kind) return existing.promise;
@@ -1881,6 +2049,33 @@ export class LatticeControlService {
     };
     promise.then(cleanup, cleanup);
     return promise;
+  }
+
+  async #shutdownActiveItem(item, timeoutMs) {
+    const threadId = requireProtocolId(item.codex_thread_id, "shutdown thread ID");
+    const turnId = requireProtocolId(item.codex_turn_id, "shutdown turn ID");
+    const fence = item.id === primaryConversationId ? this.conversationLeaseFence : null;
+    if (item.id === primaryConversationId && !this.#ownsPrimaryConversationLease(fence)) {
+      return false;
+    }
+    if (!this.codex.isTurnActive(threadId, turnId)) {
+      const thread = await this.codex.resumeThread(threadId, { expectedTurnId: turnId });
+      const turn = Array.isArray(thread?.turns)
+        ? thread.turns.find((candidate) => candidate.id === turnId)
+        : null;
+      if (turn && terminalTurnStatuses.has(turn.status)) {
+        return this.#applyTerminal(item.id, {
+          method: "turn/completed",
+          params: { threadId, turn },
+        }, fence);
+      }
+      if (!this.codex.isTurnActive(threadId, turnId)) return false;
+    }
+    const terminal = await this.codex.interruptTurn(threadId, turnId, { timeoutMs });
+    return this.#applyTerminal(item.id, {
+      method: "turn/completed",
+      params: { threadId, turn: terminal },
+    }, fence);
   }
 
   #findByThread(threadId) {
@@ -2012,7 +2207,9 @@ export class LatticeControlService {
           ignoredStatus: status,
         }, fence);
       }
-      return existingTerminal.payload.status === status;
+      const matches = existingTerminal.payload.status === status;
+      if (matches) this.reconciliationItemIds.delete(id);
+      return matches;
     }
 
     const completed = status === "completed";
@@ -2054,6 +2251,7 @@ export class LatticeControlService {
         this.requestOwners.delete(item.approval.requestId);
       }
     }
+    this.reconciliationItemIds.delete(id);
     return true;
   }
 
@@ -2102,6 +2300,19 @@ export class LatticeControlService {
   #failLifecycle(id, error, fence = null) {
     const item = this.store.getWorkItem(id);
     if (!item || !["starting", "running", "waiting_approval"].includes(item.status)) return;
+    if (this.reconciliationItemIds.has(id)) {
+      this.store.updateWorkItem(id, {
+        progress: id === primaryConversationId
+          ? "中斷結果不明；仍需對帳，訊息不會自動重送"
+          : "Codex lifecycle outcome is ambiguous; reconciliation is required",
+        failure_summary: boundedText(error?.message ?? error, 2_048),
+      }, id === primaryConversationId ? fence : null);
+      this.store.appendEvent(id, "codex_reconciliation_required", {
+        message: boundedText(error?.message ?? error, 2_048),
+        code: error?.code ?? null,
+      }, id === primaryConversationId ? fence : null);
+      return;
+    }
     this.store.updateWorkItem(id, {
       status: "failed",
       approval_json: null,

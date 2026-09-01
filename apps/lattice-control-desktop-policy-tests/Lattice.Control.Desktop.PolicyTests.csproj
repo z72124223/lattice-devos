@@ -12,5 +12,8 @@
     <EmbeddedResource Include="..\lattice-control\runtime-identity.json"
                       Link="runtime-identity.json"
                       LogicalName="Lattice.Control.RuntimeIdentity.json" />
+    <EmbeddedResource Include="..\lattice-control\data-scope-contract.json"
+                      Link="data-scope-contract.json"
+                      LogicalName="Lattice.Control.DataScopeContract.json" />
   </ItemGroup>
 </Project>

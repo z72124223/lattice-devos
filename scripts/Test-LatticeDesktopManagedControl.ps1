@@ -87,10 +87,14 @@ function Wait-CompatibleRuntime {
         try {
             $surface = Invoke-RestMethod -Uri 'http://127.0.0.1:4317/api/runtime' -TimeoutSec 2
             if (
-                [string]$surface.schema_version -ceq 'lattice.control.runtime-surface.v1' -and
+                [string]$surface.schema_version -ceq 'lattice.control.runtime-surface.v2' -and
                 [string]$surface.identity.schema_version -ceq 'lattice.control.runtime-identity.v1' -and
                 [string]$surface.identity.product -ceq 'LATTICE_CONTROL' -and
                 [string]$surface.identity.version -ceq $ExpectedVersion -and
+                [string]$surface.data_scope.schema_version -ceq 'lattice.control.data-scope.v1' -and
+                [string]$surface.data_scope.store -ceq 'CONTROL_SQLITE' -and
+                [string]$surface.data_scope.digest -cmatch '^[a-f0-9]{64}$' -and
+                $surface.reconciliation_required -eq $false -and
                 [string]$surface.health -ceq 'HEALTHY'
             ) {
                 return $surface
@@ -243,6 +247,7 @@ $foreignReady = Join-Path $temporaryRoot 'foreign-ready.txt'
 $desktop = $null
 $managedControl = $null
 $externalControl = $null
+$crossScopeControl = $null
 $foreignControl = $null
 $result = $null
 $primaryFailure = $null
@@ -298,11 +303,14 @@ try {
     $managedControl = $null
 
     # Compatible listener: reuse it, launch no child, and leave it alive on close.
+    $reuseDatabase = Join-Path $reuseData 'LATTICE\control\lattice-control.db'
     $externalControl = Start-ControlProcess $runtimeNode $runtimeServer $runtimeRoot @{
         'LATTICE_CONTROL_PORT' = '4317'
-        'LOCALAPPDATA' = $externalData
+        'LOCALAPPDATA' = $reuseData
+        'LATTICE_CONTROL_DATABASE_PATH' = $reuseDatabase
     }
-    Wait-CompatibleRuntime $expectedVersion $TimeoutSeconds | Out-Null
+    $reuseSurface = Wait-CompatibleRuntime $expectedVersion $TimeoutSeconds
+    $reuseScopeDigest = [string]$reuseSurface.data_scope.digest
     $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
     Wait-AutomationItemStatus $desktop 'LatticeConnectionStatus' 'connected' $TimeoutSeconds | Out-Null
     if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
@@ -319,6 +327,34 @@ try {
     $externalControl = $null
     Wait-ControlPort $false $TimeoutSeconds
 
+    # Same version but a different SQLite scope on fixed 4317: fail closed,
+    # launch no child, and leave the different-scope listener alive.
+    $crossScopeDatabase = Join-Path $externalData 'LATTICE\control\lattice-control.db'
+    $crossScopeControl = Start-ControlProcess $runtimeNode $runtimeServer $runtimeRoot @{
+        'LATTICE_CONTROL_PORT' = '4317'
+        'LOCALAPPDATA' = $externalData
+        'LATTICE_CONTROL_DATABASE_PATH' = $crossScopeDatabase
+    }
+    $crossScopeSurface = Wait-CompatibleRuntime $expectedVersion $TimeoutSeconds
+    $crossScopeDigest = [string]$crossScopeSurface.data_scope.digest
+    if ($crossScopeDigest -ceq $reuseScopeDigest) {
+        throw 'DESKTOP_MANAGED_CONTROL_CROSS_SCOPE_DIGEST_COLLISION'
+    }
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
+    if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
+        throw 'DESKTOP_MANAGED_CONTROL_CROSS_SCOPE_STARTED_CHILD'
+    }
+    Close-TestDesktop $desktop
+    $desktop = $null
+    if (-not (Test-ProcessAlive $crossScopeControl)) {
+        throw 'DESKTOP_MANAGED_CONTROL_CROSS_SCOPE_PROCESS_STOPPED'
+    }
+    $crossScopePid = $crossScopeControl.Id
+    Stop-TestOwnedProcess $crossScopeControl
+    $crossScopeControl = $null
+    Wait-ControlPort $false $TimeoutSeconds
+
     # Wrong version on 4317: fail closed, launch no child, and never stop it.
     $nodePath = [IO.Path]::GetFullPath(
         (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source)
@@ -327,6 +363,7 @@ try {
     $foreignControl = Start-ControlProcess $nodePath $foreignFixture $repositoryRoot @{
         'LATTICE_DESKTOP_INCOMPATIBLE_PORT' = '4317'
         'LATTICE_DESKTOP_INCOMPATIBLE_READY' = $foreignReady
+        'LATTICE_CONTROL_DATABASE_PATH' = $reuseDatabase
     }
     if ((Wait-TextFile $foreignReady $foreignControl $TimeoutSeconds) -cne '4317') {
         throw 'DESKTOP_MANAGED_CONTROL_FOREIGN_PORT_INVALID'
@@ -359,6 +396,11 @@ try {
         compatible_control_reused = $true
         reused_control_pid = $reusedPid
         reused_control_survived_close = $true
+        same_scope_digest = $reuseScopeDigest
+        cross_scope_status = 'INCOMPATIBLE'
+        cross_scope_digest = $crossScopeDigest
+        cross_scope_process_pid = $crossScopePid
+        cross_scope_process_survived_close = $true
         incompatible_status = 'INCOMPATIBLE'
         incompatible_process_pid = $foreignPid
         incompatible_process_survived_close = $true
@@ -368,7 +410,7 @@ try {
 catch { $primaryFailure = $_ }
 finally {
     try { Close-TestDesktop $desktop } catch { $cleanupFailure = $_ }
-    foreach ($owned in @($managedControl, $externalControl, $foreignControl)) {
+    foreach ($owned in @($managedControl, $externalControl, $crossScopeControl, $foreignControl)) {
         try { Stop-TestOwnedProcess $owned } catch { if ($null -eq $cleanupFailure) { $cleanupFailure = $_ } }
     }
     try { Remove-TestRoot $temporaryRoot } catch { if ($null -eq $cleanupFailure) { $cleanupFailure = $_ } }

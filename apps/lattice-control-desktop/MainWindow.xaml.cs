@@ -19,17 +19,21 @@ public partial class MainWindow : Window
     private readonly HashSet<ulong> _blockedNavigationIds = new();
     private CoreWebView2Environment? _webViewEnvironment;
     private ulong? _currentNavigationId;
+    private long _navigationGeneration;
     private bool _eventsConfigured;
     private bool _isConnecting;
     private bool _isClosing;
+    private bool _shutdownComplete;
+    private bool _shutdownFailed;
 
     public MainWindow()
     {
         InitializeComponent();
-        _controlUri = DesktopPolicy.ResolveControlUri(
+        ControlEndpointSelection controlTarget = DesktopPolicy.ResolveControlTarget(
             Environment.GetCommandLineArgs(),
             Environment.GetEnvironmentVariable("LATTICE_CONTROL_URL"));
-        if (DesktopPolicy.ShouldManageControl(_controlUri))
+        _controlUri = controlTarget.Uri;
+        if (controlTarget.ManageControl)
         {
             _controlRuntime = ControlRuntimeManager.CreatePackaged(_controlUri);
         }
@@ -49,6 +53,8 @@ public partial class MainWindow : Window
     {
         if (_isClosing || _isConnecting) return;
         _isConnecting = true;
+        _navigationGeneration = DesktopPolicy.NextNavigationGeneration(_navigationGeneration);
+        _currentNavigationId = null;
         _reconnectTimer.Stop();
         try
         {
@@ -60,8 +66,7 @@ public partial class MainWindow : Window
                     _lifetimeCancellation.Token);
                 if (runtime.Health != ControlRuntimeHealth.HEALTHY)
                 {
-                    ShowRuntimeFailure(runtime);
-                    ScheduleReconnect();
+                    if (ShowRuntimeFailure(runtime)) ScheduleReconnect();
                     return;
                 }
                 SetRuntimeStatus(ControlRuntimeHealth.HEALTHY);
@@ -87,7 +92,6 @@ public partial class MainWindow : Window
                 core.ProcessFailed += Core_ProcessFailed;
                 _eventsConfigured = true;
             }
-            _currentNavigationId = null;
             core.Navigate(_controlUri.AbsoluteUri);
         }
         catch (OperationCanceledException) when (_isClosing)
@@ -122,8 +126,7 @@ public partial class MainWindow : Window
                 _lifetimeCancellation.Token);
             if (runtime.Health != ControlRuntimeHealth.HEALTHY)
             {
-                ShowRuntimeFailure(runtime);
-                ScheduleReconnect();
+                if (ShowRuntimeFailure(runtime)) ScheduleReconnect();
                 return;
             }
             _healthTimer.Start();
@@ -149,15 +152,16 @@ public partial class MainWindow : Window
 
     private void Core_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
     {
+        _currentNavigationId = e.NavigationId;
+        _navigationGeneration = DesktopPolicy.NextNavigationGeneration(_navigationGeneration);
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target) || !IsApprovedControlNavigation(target))
         {
             e.Cancel = true;
-            BlockNavigation(e.NavigationId);
+            BlockNavigation(e.NavigationId, advanceGeneration: false);
             return;
         }
 
         _blockedNavigationIds.Clear();
-        _currentNavigationId = e.NavigationId;
     }
 
     private void Core_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
@@ -181,10 +185,13 @@ public partial class MainWindow : Window
 
     private async void Core_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
+        long navigationGeneration = _navigationGeneration;
         bool wasBlocked = _blockedNavigationIds.Remove(e.NavigationId);
         if (!DesktopPolicy.CanApplyNavigationResult(
             _currentNavigationId,
             e.NavigationId,
+            _navigationGeneration,
+            navigationGeneration,
             _isClosing))
         {
             return;
@@ -199,6 +206,7 @@ public partial class MainWindow : Window
         {
             bool applied = await ShowDiagnosedConnectionFailureAsync(
                 e.NavigationId,
+                navigationGeneration,
                 $"Control 尚未就緒（{e.WebErrorStatus}）。");
             if (applied) ScheduleReconnect();
             return;
@@ -231,11 +239,14 @@ public partial class MainWindow : Window
 
     private async Task<bool> ShowDiagnosedConnectionFailureAsync(
         ulong navigationId,
+        long navigationGeneration,
         string fallbackDetail)
     {
         if (!DesktopPolicy.CanApplyNavigationResult(
             _currentNavigationId,
             navigationId,
+            _navigationGeneration,
+            navigationGeneration,
             _isClosing)) return false;
         if (_controlRuntime is not null)
         {
@@ -246,11 +257,12 @@ public partial class MainWindow : Window
                 if (!DesktopPolicy.CanApplyNavigationResult(
                     _currentNavigationId,
                     navigationId,
+                    _navigationGeneration,
+                    navigationGeneration,
                     _isClosing)) return false;
                 if (runtime.Health != ControlRuntimeHealth.HEALTHY)
                 {
-                    ShowRuntimeFailure(runtime);
-                    return true;
+                    return ShowRuntimeFailure(runtime);
                 }
             }
             catch (OperationCanceledException) when (_isClosing)
@@ -266,6 +278,8 @@ public partial class MainWindow : Window
                 if (!DesktopPolicy.CanApplyNavigationResult(
                     _currentNavigationId,
                     navigationId,
+                    _navigationGeneration,
+                    navigationGeneration,
                     _isClosing)) return false;
                 ShowConnectionFailure($"Control 診斷失敗：{error.Message}");
                 return true;
@@ -274,25 +288,19 @@ public partial class MainWindow : Window
         if (!DesktopPolicy.CanApplyNavigationResult(
             _currentNavigationId,
             navigationId,
+            _navigationGeneration,
+            navigationGeneration,
             _isClosing)) return false;
         ShowConnectionFailure(fallbackDetail);
         return true;
     }
 
-    private void ShowRuntimeFailure(ControlRuntimeEvaluation runtime)
+    private bool ShowRuntimeFailure(ControlRuntimeEvaluation runtime)
     {
-        string detail = runtime.Health switch
-        {
-            ControlRuntimeHealth.STOPPED =>
-                "Control 程序已停止；LATTICE 會在下一次重連啟動新的自有程序。",
-            ControlRuntimeHealth.INCOMPATIBLE =>
-                "127.0.0.1:4317 已有陌生或不相容的服務；LATTICE 已停止接管，也不會關閉它。",
-            ControlRuntimeHealth.UNREACHABLE =>
-                "Control 無法連線；只有確認 4317 沒有 listener 時，LATTICE 才會啟動封裝版本。",
-            _ => $"Control 目前狀態：{runtime.Health}。",
-        };
+        ControlRuntimeFailurePresentation presentation = DesktopPolicy.DescribeRuntimeFailure(runtime);
         SetRuntimeStatus(runtime.Health);
-        ShowConnectionFailure(detail, runtime.Health.ToString().ToLowerInvariant());
+        ShowConnectionFailure(presentation.Detail, runtime.Health.ToString().ToLowerInvariant());
+        return presentation.AutoReconnect;
     }
 
     private void ShowConnectionFailure(
@@ -308,8 +316,12 @@ public partial class MainWindow : Window
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(239, 95, 95));
     }
 
-    private void BlockNavigation(ulong? navigationId)
+    private void BlockNavigation(ulong? navigationId, bool advanceGeneration = true)
     {
+        if (advanceGeneration)
+        {
+            _navigationGeneration = DesktopPolicy.NextNavigationGeneration(_navigationGeneration);
+        }
         if (navigationId.HasValue)
         {
             _blockedNavigationIds.Add(navigationId.Value);
@@ -384,6 +396,14 @@ public partial class MainWindow : Window
 
     private async void Reconnect_Click(object sender, RoutedEventArgs e)
     {
+        if (_shutdownFailed)
+        {
+            _shutdownFailed = false;
+            _isClosing = true;
+            ReconnectButton.IsEnabled = false;
+            await CompleteShutdownAsync();
+            return;
+        }
         _reconnectTimer.Stop();
         await ConnectAsync();
     }
@@ -395,15 +415,51 @@ public partial class MainWindow : Window
 
     protected override void OnClosing(CancelEventArgs e)
     {
+        if (_shutdownComplete)
+        {
+            base.OnClosing(e);
+            return;
+        }
+        e.Cancel = true;
+        if (_isClosing) return;
         _isClosing = true;
         _lifetimeCancellation.Cancel();
         _reconnectTimer.Stop();
         _healthTimer.Stop();
         _reconnectTimer.Tick -= ReconnectTimer_Tick;
         _healthTimer.Tick -= HealthTimer_Tick;
-        _controlRuntime?.Dispose();
+        ReconnectButton.IsEnabled = false;
+        _ = CompleteShutdownAsync();
+    }
+
+    private async Task CompleteShutdownAsync()
+    {
+        try
+        {
+            if (_controlRuntime is not null)
+            {
+                await _controlRuntime.ShutdownAsync(CancellationToken.None);
+            }
+        }
+        catch (Exception error)
+        {
+            if (_controlRuntime?.OwnsControl == true)
+            {
+                _shutdownFailed = true;
+                _isClosing = false;
+                SetRuntimeStatus(ControlRuntimeHealth.UNREACHABLE);
+                ShowConnectionFailure(
+                    $"無法安全停止這個桌面啟動的 Control：{error.Message}。請按下「重試安全關閉」。",
+                    "shutdown_failed");
+                ReconnectButton.Content = "重試安全關閉";
+                ReconnectButton.IsEnabled = true;
+                AutomationProperties.SetItemStatus(ReconnectButton, "retry_safe_shutdown");
+                return;
+            }
+        }
         _lifetimeCancellation.Dispose();
         ControlView.Dispose();
-        base.OnClosing(e);
+        _shutdownComplete = true;
+        _ = Dispatcher.BeginInvoke(Close);
     }
 }

@@ -1005,12 +1005,8 @@ test("interrupt waits past RPC acceptance for the exact interrupted or failed te
           method: "turn/completed",
           params: { threadId, turn: { id: "other-turn", status: terminalStatus } },
         });
-        sendServerMessage(child, {
-          method: "turn/completed",
-          params: { threadId, turn: { id: turnId, status: "completed" } },
-        });
         await nextMacrotask();
-        assert.equal(settled, false, "wrong IDs or a non-interrupt terminal cannot release the waiter");
+        assert.equal(settled, false, "wrong IDs cannot release the interrupt waiter");
       }
 
       sendServerMessage(child, {
@@ -1035,12 +1031,61 @@ test("interrupt waits past RPC acceptance for the exact interrupted or failed te
   }
 });
 
+test("an exact completed terminal ends interrupt without closing active peers", async () => {
+  const interruptObserved = deferred();
+  const { child, codex } = createInitializedConnector((message, server) => {
+    if (message.method !== "turn/interrupt") return;
+    sendServerMessage(server, { id: message.id, result: {} });
+    interruptObserved.resolve();
+  });
+  const disconnects = [];
+  codex.on("disconnect", (details) => disconnects.push(details));
+  try {
+    await codex.connect();
+    for (const [threadId, turnId] of [
+      ["thread-completed", "turn-completed"],
+      ["thread-peer", "turn-peer"],
+    ]) {
+      sendServerMessage(child, {
+        method: "turn/started",
+        params: { threadId, turn: { id: turnId, status: "inProgress" } },
+      });
+    }
+    await nextMacrotask();
+
+    const interrupted = codex.interruptTurn("thread-completed", "turn-completed", {
+      timeoutMs: 50,
+    });
+    await interruptObserved.promise;
+    sendServerMessage(child, {
+      method: "turn/completed",
+      params: {
+        threadId: "thread-completed",
+        turn: { id: "turn-completed", status: "completed" },
+      },
+    });
+
+    assert.equal((await interrupted).status, "completed");
+    assert.equal(codex.isTurnActive("thread-peer", "turn-peer"), true);
+    assert.equal(child.killCount, 0);
+    assert.deepEqual(disconnects, []);
+  } finally {
+    await codex.close();
+  }
+});
+
 test("interrupt timeout clears its waiter and only then kills the owned process", async () => {
   const interruptObserved = deferred();
   const { child, codex } = createInitializedConnector((message, server) => {
     if (message.method !== "turn/interrupt") return;
     sendServerMessage(server, { id: message.id, result: {} });
     interruptObserved.resolve();
+  });
+  const disconnects = [];
+  let interruptRejected = false;
+  codex.on("disconnect", (details) => {
+    assert.equal(interruptRejected, false, "disconnect must precede interrupt rejection");
+    disconnects.push(details);
   });
   let interrupted;
   let guardTimer;
@@ -1054,6 +1099,7 @@ test("interrupt timeout clears its waiter and only then kills the owned process"
     await nextMacrotask();
 
     interrupted = codex.interruptTurn("thread-timeout", "turn-timeout", { timeoutMs: 20 });
+    void interrupted.catch(() => { interruptRejected = true; });
     await interruptObserved.promise;
     await nextMacrotask();
     assert.equal(child.killCount, 0, "RPC acceptance alone must not kill the App Server");
@@ -1072,11 +1118,107 @@ test("interrupt timeout clears its waiter and only then kills the owned process"
     assert.equal(codex.pendingNotificationCount, 0);
     assert.equal(codex.isTurnActive("thread-timeout", "turn-timeout"), false);
     assert.equal(child.killCount, 1);
+    assert.deepEqual(disconnects, [{ code: null, signal: "client-close" }]);
   } finally {
     clearTimeout(guardTimer);
     await codex.close();
     if (interrupted) await Promise.allSettled([interrupted]);
   }
+});
+
+test("logical close emits one disconnect even when the owned process has no exit receipt", async () => {
+  const { child, codex } = createInitializedConnector(() => {}, { lifecycleTimeoutMs: 20 });
+  child.kill = () => {
+    child.killCount += 1;
+  };
+  const disconnects = [];
+  codex.on("disconnect", (details) => disconnects.push(details));
+  try {
+    await codex.connect();
+    for (const [threadId, turnId] of [
+      ["thread-close-timeout", "turn-close-timeout"],
+      ["thread-close-peer", "turn-close-peer"],
+    ]) {
+      sendServerMessage(child, {
+        method: "turn/started",
+        params: { threadId, turn: { id: turnId, status: "inProgress" } },
+      });
+    }
+    await nextMacrotask();
+
+    await assert.rejects(codex.close(), { code: "CODEX_APP_SERVER_CLOSE_TIMEOUT" });
+    assert.deepEqual(disconnects, [{ code: null, signal: "client-close" }]);
+    child.exitCode = 0;
+    child.emit("exit", 0, null);
+    await nextMacrotask();
+    assert.deepEqual(disconnects, [{ code: null, signal: "client-close" }]);
+  } finally {
+    if (child.exitCode === null) {
+      child.exitCode = 0;
+      child.emit("exit", 0, null);
+    }
+    await codex.close().catch(() => {});
+  }
+});
+
+test("an observed exitCode is finalized before a new App Server generation starts", async () => {
+  const children = [new FakeProcess(), new FakeProcess()];
+  let spawnIndex = 0;
+  for (const child of children) {
+    observeClientMessages(child, (message) => {
+      if (message.method === "initialize") {
+        sendServerMessage(child, { id: message.id, result: { platformFamily: "windows" } });
+      }
+    });
+  }
+  const codex = new CodexAppServer({
+    codexBin: "codex-test",
+    spawnProcess: () => children[spawnIndex++],
+  });
+  const disconnects = [];
+  codex.on("disconnect", (details) => disconnects.push(details));
+  try {
+    await codex.connect();
+    children[0].exitCode = 91;
+    await codex.connect();
+    assert.equal(spawnIndex, 2);
+    assert.deepEqual(disconnects, [{ code: 91, signal: null }]);
+
+    children[0].emit("exit", 91, null);
+    await nextMacrotask();
+    assert.deepEqual(disconnects, [{ code: 91, signal: null }]);
+    await codex.close();
+    assert.deepEqual(disconnects, [
+      { code: 91, signal: null },
+      { code: null, signal: "client-close" },
+    ]);
+  } finally {
+    await codex.close().catch(() => {});
+  }
+});
+
+test("a disconnect listener can reenter close without starting a second close path", async () => {
+  const { child, codex } = createInitializedConnector();
+  let reentrantClose;
+  codex.on("disconnect", () => {
+    reentrantClose = codex.close();
+  });
+  await codex.connect();
+  const initialClose = codex.close();
+  await initialClose;
+  assert.equal(reentrantClose, initialClose);
+  assert.equal(child.killCount, 1);
+});
+
+test("a throwing disconnect listener cannot skip owned process teardown", async () => {
+  const { child, codex } = createInitializedConnector();
+  codex.on("disconnect", () => {
+    throw new Error("simulated disconnect observer failure");
+  });
+  await codex.connect();
+  await codex.close();
+  assert.equal(child.killCount, 1);
+  assert.equal(child.exitCode, 0);
 });
 
 test("an exact interrupt terminal wins over a lost RPC acknowledgement without killing peers", async () => {

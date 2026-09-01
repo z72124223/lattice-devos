@@ -1,7 +1,8 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { controlDataScopeDescriptor } from "./database-path.mjs";
 
-const runtimeSurfaceSchemaVersion = "lattice.control.runtime-surface.v1";
+const runtimeSurfaceSchemaVersion = "lattice.control.runtime-surface.v2";
 const runtimeIdentitySchemaVersion = "lattice.control.runtime-identity.v1";
 const capabilityStatuses = new Set([
   "HEALTHY",
@@ -36,24 +37,25 @@ function loadRuntimeIdentity() {
 
 export const controlRuntimeIdentity = loadRuntimeIdentity();
 
-function capability(id, label, status) {
+function capability(id, label, status, hasData = null) {
   if (!capabilityStatuses.has(status)) {
     throw new Error("CONTROL_RUNTIME_CAPABILITY_STATUS_INVALID");
   }
-  return { id, label, status };
+  if (hasData !== null && typeof hasData !== "boolean") {
+    throw new Error("CONTROL_RUNTIME_CAPABILITY_DATA_INVALID");
+  }
+  return { id, label, status, has_data: hasData };
 }
 
-export function createRuntimeSurface(service) {
+export function createRuntimeSurface(service, { databasePath, mcpHealth }) {
   const state = service.state();
-  const fourCore = service.fourCoreSurface();
-  const hasWorkData = Array.isArray(fourCore.work_snapshot?.graph?.nodes)
-    && fourCore.work_snapshot.graph.nodes.length > 0;
-  const hasDecisionData = Array.isArray(fourCore.decisions?.decisions)
-    && fourCore.decisions.decisions.length > 0;
+  const dataPresence = service.runtimeDataPresence();
 
   return {
     schema_version: runtimeSurfaceSchemaVersion,
     identity: { ...controlRuntimeIdentity },
+    data_scope: controlDataScopeDescriptor(databasePath),
+    reconciliation_required: service.reconciliationRequired(),
     health: "HEALTHY",
     capabilities: [
       capability("control_sqlite", "Control／SQLite", "HEALTHY"),
@@ -62,11 +64,12 @@ export function createRuntimeSurface(service) {
         "Codex App Server",
         state.codexConnected ? "HEALTHY" : "STOPPED",
       ),
-      capability("work_mcp", "Work MCP", hasWorkData ? "HEALTHY" : "NO_DATA"),
+      capability("work_mcp", "Work MCP", mcpHealth.work_mcp, dataPresence.work),
       capability(
         "decision_mcp",
         "Decision MCP",
-        hasDecisionData ? "HEALTHY" : "NO_DATA",
+        mcpHealth.decision_mcp,
+        dataPresence.decisions,
       ),
       capability("postgresql", "正式 PostgreSQL", "NOT_IMPLEMENTED"),
     ],
