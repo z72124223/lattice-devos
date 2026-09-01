@@ -6,6 +6,28 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+
+    $stream = [IO.File]::Open(
+        [IO.Path]::GetFullPath($LiteralPath),
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $repositoryRoot 'apps\lattice-control-desktop\Lattice.Control.Desktop.csproj'
 
@@ -85,7 +107,7 @@ $artifactFiles = @(Get-ChildItem -LiteralPath $candidateDirectory -File -Recurse
         [ordered]@{
             path = $_.FullName.Substring($candidateDirectory.Length + 1).Replace('\', '/')
             length = [long]$_.Length
-            sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            sha256 = Get-Sha256Hex -LiteralPath $_.FullName
         }
     })
 if ($artifactFiles.Count -eq 0) {
@@ -101,7 +123,7 @@ $manifest = [ordered]@{
     launch = 'LATTICE.exe'
     control_origin = 'http://127.0.0.1:4317/'
     webview_user_data = '%LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2'
-    executable_sha256 = (Get-FileHash -LiteralPath $executablePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    executable_sha256 = Get-Sha256Hex -LiteralPath $executablePath
     files = $artifactFiles
 }
 $manifestPath = Join-Path $candidateDirectory 'candidate-manifest.json'
@@ -111,7 +133,7 @@ $manifestPath = Join-Path $candidateDirectory 'candidate-manifest.json'
     [Text.UTF8Encoding]::new($false))
 
 Compress-Archive -Path (Join-Path $candidateDirectory '*') -DestinationPath $zipPath -CompressionLevel Optimal
-$archiveSha256 = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$archiveSha256 = Get-Sha256Hex -LiteralPath $zipPath
 
 [ordered]@{
     result = 'PASS'

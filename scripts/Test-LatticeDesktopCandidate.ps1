@@ -16,6 +16,28 @@ $offlineConnectionStatus = 'LATTICE ' + [string][char]0x672A + [char]0x9023 + [c
 $connectedConnectionStatus = [string][char]0x672C + [char]0x6A5F + ' LATTICE ' +
     [char]0x5DF2 + [char]0x9023 + [char]0x7DDA
 
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+
+    $stream = [IO.File]::Open(
+        [IO.Path]::GetFullPath($LiteralPath),
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Get-RequiredPropertyValue {
     param(
         [object]$InputObject,
@@ -174,7 +196,7 @@ $candidateArchiveFull = [IO.Path]::GetFullPath($CandidateArchive)
 if (-not (Test-Path -LiteralPath $candidateArchiveFull -PathType Leaf)) {
     throw 'DESKTOP_CANDIDATE_TEST_ARCHIVE_MISSING'
 }
-$candidateArchiveSha256 = (Get-FileHash -LiteralPath $candidateArchiveFull -Algorithm SHA256).Hash.ToLowerInvariant()
+$candidateArchiveSha256 = Get-Sha256Hex -LiteralPath $candidateArchiveFull
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'lattice-desktop-candidate-' + [Guid]::NewGuid().ToString('N'))
@@ -274,7 +296,7 @@ try {
             throw "DESKTOP_CANDIDATE_PACKAGE_UNDECLARED_FILE:$relativePath"
         }
         $expectedFile = $expectedFiles[$relativePath]
-        $actualSha256 = (Get-FileHash -LiteralPath $actualFile.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actualSha256 = Get-Sha256Hex -LiteralPath $actualFile.FullName
         if ($actualFile.Length -ne $expectedFile.Length -or $actualSha256 -cne $expectedFile.Sha256) {
             throw "DESKTOP_CANDIDATE_PACKAGE_FILE_MISMATCH:$relativePath"
         }

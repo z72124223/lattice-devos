@@ -88,7 +88,10 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(acceptanceScript, /runtime_identifier/u);
   assert.match(acceptanceScript, /self_contained/u);
   assert.match(acceptanceScript, /executable_sha256/u);
-  assert.match(acceptanceScript, /Get-FileHash/u);
+  assert.match(publishScript, /function Get-Sha256Hex/u);
+  assert.match(acceptanceScript, /function Get-Sha256Hex/u);
+  assert.doesNotMatch(publishScript, /Get-FileHash/u);
+  assert.doesNotMatch(acceptanceScript, /Get-FileHash/u);
   assert.match(acceptanceScript, /Expand-Archive/u);
   assert.match(acceptanceScript, /desktop-webview2/u);
   assert.match(acceptanceScript, /WEBVIEW2_USER_DATA_FOLDER/u);
