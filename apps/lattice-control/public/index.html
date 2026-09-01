@@ -149,47 +149,199 @@
       .detail-grid { grid-template-columns:1fr; }
     }
   </style>
+  <style id="lattice-reference-shell">
+    :root { --cyan:#16d5f3; --cyan-soft:rgba(22,213,243,.16); --amber:#ffb51b; --green:#66df7d; --purple:#ad78ff; --surface:#09131d; --surface-2:#0d1a26; --rail:#0a1722; --stroke:#243746; }
+    html,body { height:100%; }
+    body { overflow:hidden; background:#07111a; }
+    .app { display:grid; grid-template-columns:248px minmax(0,1fr); width:100vw; height:100dvh; margin:0; padding:0; background:radial-gradient(circle at 58% 44%,rgba(12,117,143,.12),transparent 36rem),#07111a; }
+    .side-rail { display:flex; flex-direction:column; min-width:0; padding:18px 12px 14px; border-right:1px solid var(--stroke); background:linear-gradient(180deg,#0b1924,#07121b); }
+    .brand { display:flex; align-items:center; gap:12px; padding:4px 14px 23px; color:#fff; font-size:1.28rem; font-weight:820; letter-spacing:.12em; }
+    .brand-mark { display:grid; place-items:center; width:35px; height:40px; color:var(--cyan); font-size:1.9rem; filter:drop-shadow(0 0 12px rgba(22,213,243,.35)); }
+    .new-work { width:100%; min-height:52px; margin-bottom:22px; border-radius:6px; background:linear-gradient(135deg,#12d8ef,#08afd8); color:#001018; font-weight:850; box-shadow:0 10px 28px rgba(4,181,218,.2); }
+    .rail-label { margin:0 12px 8px; color:#647786; font-size:.68rem; font-weight:800; letter-spacing:.12em; }
+    .core-nav { display:grid; grid-template-columns:1fr; gap:4px; padding:0; border:0; border-radius:0; background:transparent; box-shadow:none; }
+    .core-tab { justify-content:flex-start; min-height:50px; padding:10px 14px; border-radius:7px; color:#aebbc6; font-weight:720; }
+    .core-tab small { display:none; }
+    .core-tab .nav-icon { display:grid; place-items:center; width:26px; color:#9cabb6; font-size:1.18rem; }
+    .core-tab.is-active { border-color:transparent; border-left:3px solid var(--cyan); background:linear-gradient(90deg,rgba(12,181,218,.28),rgba(12,181,218,.11)); color:#fff; box-shadow:inset 0 0 28px rgba(16,205,234,.06); }
+    .core-tab.is-active .nav-icon { color:var(--cyan); }
+    .recent-work { margin-top:22px; padding:18px 8px 0; border-top:1px solid var(--stroke); }
+    .recent-work h2 { margin:0 4px 10px; color:#7f909c; font-size:.74rem; letter-spacing:.08em; }
+    .recent-item { display:flex; align-items:center; gap:9px; width:100%; margin:0 0 7px; padding:9px 8px; border:1px solid #223643; border-radius:6px; background:transparent; color:#a9b7c1; font-size:.78rem; text-align:left; }
+    .recent-dot { width:9px; height:9px; border-radius:50%; background:#7d8b94; }
+    .recent-dot.cyan { background:var(--cyan); box-shadow:0 0 10px rgba(22,213,243,.5); }
+    .recent-dot.amber { background:var(--amber); }
+    .recent-dot.green { background:var(--green); }
+    .rail-footer { margin-top:auto; padding:14px 12px 0; border-top:1px solid var(--stroke); color:#667986; font-size:.72rem; line-height:1.5; }
+    .workspace { display:grid; grid-template-rows:68px 42px minmax(0,1fr) auto; min-width:0; min-height:0; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:20px; margin:0; padding:0 24px; border-bottom:1px solid var(--stroke); background:rgba(7,17,26,.94); }
+    .workspace-title { display:flex; align-items:center; gap:12px; min-width:0; }
+    .workspace-title span { color:#758997; }
+    .workspace-title strong { overflow:hidden; color:#edf7fb; text-overflow:ellipsis; white-space:nowrap; }
+    .top-status { display:flex; align-items:center; gap:14px; }
+    .system-pill { display:flex; align-items:center; gap:9px; min-height:36px; padding:7px 14px; border:1px solid #2a3d4b; border-radius:999px; background:#0d1a25; color:#d6e1e7; font-size:.78rem; }
+    .connection { color:#8fa0aa; }
+    .connection.connected { color:#8de5aa; }
+    .context-banner { min-height:42px; margin:0; padding:9px 24px; border:0; border-bottom:1px solid #182b38; background:#091722; font-size:.75rem; }
+    .context-banner strong { color:#afbec7; }
+    .workspace-canvas { display:grid; grid-template-columns:minmax(0,1fr) 370px; min-height:0; overflow:hidden; }
+    .core-stage { min-width:0; min-height:0; overflow:hidden; }
+    .core-panel { height:100%; min-height:0; }
+    .panel { height:100%; min-height:0; border:0; border-radius:0; background:rgba(8,19,29,.7); box-shadow:none; backdrop-filter:none; }
+    .panel-heading { min-height:78px; padding:16px 24px; border-bottom:1px solid var(--stroke); background:#091722; }
+    .panel-heading h2 { margin-bottom:5px; font-size:1.35rem; }
+    .panel-heading p { color:#8396a2; }
+    .identity { max-width:34%; border-color:#263b48; background:#0c1a24; color:#607783; }
+    .conversation { grid-template-rows:auto minmax(0,1fr); height:100%; min-height:0; }
+    .conversation-toolbar { grid-template-columns:minmax(180px,.8fr) minmax(260px,1.6fr); padding:14px 24px; border-bottom:1px solid var(--stroke); background:#091722; }
+    .transcript { padding:22px 28px; background:radial-gradient(circle at 50% 18%,rgba(24,104,123,.1),transparent 32rem); }
+    .bubble { border-radius:8px; }
+    .user .bubble { background:#0c7591; color:#edfbff; }
+    .assistant .bubble { border-color:#29404d; background:#0f202d; }
+    .scroll-body { min-height:0; max-height:none; height:calc(100% - 78px); overflow:auto; padding:20px 24px; }
+    .graph-panel .scroll-body { padding:0; }
+    .graph-viewport { position:relative; height:100%; min-height:430px; overflow:auto; background-image:radial-gradient(circle,rgba(72,105,122,.19) 1px,transparent 1px); background-size:24px 24px; }
+    #graph-edge-layer { position:absolute; inset:0; width:100%; height:100%; min-width:860px; min-height:520px; overflow:visible; pointer-events:none; }
+    .graph-edge { fill:none; stroke:#758795; stroke-width:1.6; marker-end:url(#graph-arrow); opacity:.82; }
+    .graph-edge.reverse { stroke:var(--cyan); stroke-dasharray:5 5; }
+    .graph-list { position:relative; display:block; width:100%; min-width:860px; height:100%; min-height:520px; }
+    .graph-node { position:absolute; display:grid; gap:7px; width:210px; min-height:100px; padding:14px; border:1px solid #40525d; border-radius:9px; background:linear-gradient(145deg,#10202b,#0a1721); box-shadow:0 12px 26px rgba(0,0,0,.28); z-index:2; }
+    .graph-node:nth-of-type(6n+1) { left:7%; top:24%; }
+    .graph-node:nth-of-type(6n+2) { left:36%; top:8%; }
+    .graph-node:nth-of-type(6n+3) { left:38%; top:43%; }
+    .graph-node:nth-of-type(6n+4) { left:69%; top:25%; }
+    .graph-node:nth-of-type(6n+5) { left:66%; top:64%; }
+    .graph-node:nth-of-type(6n+6) { left:12%; top:66%; }
+    .graph-node[data-status="running"],.graph-node[data-status="starting"] { border-color:var(--cyan); box-shadow:0 0 0 1px rgba(22,213,243,.24),0 14px 30px rgba(0,0,0,.34); }
+    .graph-node[data-status="verified"],.graph-node[data-status="archived"] { border-color:#61d873; }
+    .graph-node[data-blocked="true"],.graph-node[data-status="failed"] { border-color:var(--amber); box-shadow:0 0 18px rgba(255,181,27,.09); }
+    .node-head { align-items:center; }
+    .relations { font-size:.7rem; }
+    .blocker { color:#d9a443; }
+    .tree-current { border-color:#295367; background:#0c2631; color:#8fdce7; }
+    .tree-node { border-radius:7px; background:#0c1a25; }
+    .decision-card { border-radius:7px; background:#0c1a25; }
+    .inspector { min-width:0; overflow:auto; border-left:1px solid var(--stroke); background:#091722; }
+    .inspector-head { padding:16px 22px; border-bottom:1px solid var(--stroke); }
+    .inspector-label { margin:0 0 7px; color:#718692; font-size:.72rem; letter-spacing:.08em; }
+    .inspector-head h2 { margin:0 0 7px; font-size:1.3rem; }
+    .inspector-status { display:flex; align-items:center; gap:8px; margin:0; color:var(--amber); font-size:.78rem; }
+    .inspector-status::before { content:""; width:9px; height:9px; border-radius:50%; background:currentColor; }
+    .inspector-body { display:grid; gap:12px; padding:16px 18px; }
+    .inspector-card { padding:14px; border:1px solid #263a47; border-radius:8px; background:#0b1a25; }
+    .inspector-card h3 { margin:0 0 9px; color:#8ba0ac; font-size:.72rem; font-weight:760; }
+    .inspector-card p { margin:0; color:#d7e2e7; font-size:.82rem; line-height:1.55; overflow-wrap:anywhere; }
+    .inspector-card.problem { border-color:#6d5114; background:rgba(78,54,7,.22); }
+    .inspector-card.problem h3 { color:var(--amber); }
+    .inspector-action { width:100%; min-height:46px; border:1px solid var(--amber); border-radius:7px; background:rgba(88,57,0,.24); color:var(--amber); font-weight:820; }
+    .command-dock { display:grid; grid-template-columns:auto minmax(120px,1fr) auto; align-items:center; gap:10px; margin:10px 16px 14px; padding:9px 10px; border:1px solid #334955; border-radius:8px; background:#0c1b26; box-shadow:0 18px 50px rgba(0,0,0,.32); }
+    .command-dock label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+    .command-dock textarea { min-height:48px; max-height:92px; resize:none; border:0; background:transparent; padding:12px 8px; font-size:.92rem; }
+    .composer-actions { align-items:center; justify-content:flex-end; }
+    .composer-actions>div { flex-wrap:nowrap; }
+    .action { min-height:44px; border-radius:6px; background:var(--cyan); color:#021319; }
+    .action.secondary { background:#152735; color:#bcd0da; }
+    .action.danger { background:#2a1d25; color:#e8a7b4; }
+    #send { min-width:112px; }
+    .error { position:fixed; right:386px; bottom:112px; z-index:10; max-width:560px; margin:0; padding:8px 12px; border-radius:6px; background:#351722; }
+    .error:empty { display:none; }
+    .local-note { display:none; }
+    dialog { border-radius:9px; background:#0b1924; }
+    @media (max-width:980px) {
+      body { overflow:auto; }
+      .app { display:block; min-height:100dvh; height:auto; }
+      .side-rail { position:fixed; inset:auto 8px max(7px,env(safe-area-inset-bottom)) 8px; z-index:30; display:block; padding:5px; border:1px solid #2a414e; border-radius:14px; background:rgba(7,18,27,.97); }
+      .brand,.new-work,.rail-label,.recent-work,.rail-footer { display:none; }
+      .core-nav { grid-template-columns:repeat(4,minmax(0,1fr)); gap:3px; }
+      .core-tab { min-height:56px; justify-content:center; flex-direction:column; gap:2px; padding:5px 2px; border-left:0; font-size:.7rem; }
+      .core-tab .nav-icon { width:auto; font-size:1rem; }
+      .workspace { display:grid; grid-template-rows:auto auto minmax(520px,1fr) auto; min-height:100dvh; padding-bottom:76px; }
+      .topbar { align-items:flex-start; padding:13px 14px; }
+      .workspace-title { display:grid; gap:3px; font-size:.78rem; }
+      .system-pill { padding:6px 9px; font-size:.7rem; }
+      .context-banner { align-items:flex-start; flex-direction:column; padding:8px 14px; }
+      .workspace-canvas { display:block; min-height:0; }
+      .inspector { display:none; }
+      .core-stage { min-height:520px; }
+      .panel-heading { min-height:68px; padding:12px 14px; }
+      .panel-heading h2 { font-size:1.05rem; }
+      .identity { max-width:40%; font-size:.57rem; }
+      .conversation-toolbar { grid-template-columns:1fr; gap:7px; padding:10px 14px; }
+      .conversation-state { text-align:left; }
+      .conversation { height:calc(100dvh - 300px); min-height:500px; }
+      .transcript { padding:13px; }
+      .scroll-body { height:calc(100dvh - 280px); padding:12px; }
+      .graph-viewport { min-height:500px; }
+      .graph-list,#graph-edge-layer { min-width:720px; min-height:500px; }
+      .graph-node { width:180px; }
+      .command-dock { position:sticky; bottom:75px; z-index:20; grid-template-columns:1fr auto; margin:7px 9px; padding:7px; }
+      .command-dock .composer-actions>div { display:none; }
+      .command-dock textarea { min-height:48px; }
+      #send { min-width:82px; }
+      .error { position:static; margin:0 10px 6px; }
+    }
+  </style>
 </head>
 <body>
-<main class="app">
-  <header class="topbar">
-    <div><p class="eyebrow">Long-lived workspace</p><h1>LATTICE Control</h1><p class="subtitle">一個長期對話，連同工作圖譜、工作樹與可追溯的決策記憶。</p></div>
-    <div class="top-status"><p id="header-context" class="context-name">正在確認主要專案…</p><p id="connection" class="connection">Codex App Server：待命</p></div>
-  </header>
-  <nav class="core-nav" role="tablist" aria-label="LATTICE 四核心">
-    <button id="tab-conversation" class="core-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="core-conversation" tabindex="0" data-core-target="conversation"><small>01</small><span>對話</span></button>
-    <button id="tab-work-graph" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-work-graph" tabindex="-1" data-core-target="work-graph"><small>02</small><span>工作圖譜</span></button>
-    <button id="tab-work-tree" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-work-tree" tabindex="-1" data-core-target="work-tree"><small>03</small><span>工作樹</span></button>
-    <button id="tab-decisions" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-decisions" tabindex="-1" data-core-target="decisions"><small>04</small><span>決策記憶</span></button>
-  </nav>
-  <div class="context-banner" aria-live="polite"><strong id="context-status">正在讀取四核心狀態…</strong><span id="context-source" class="mono"></span></div>
-  <div class="core-stage">
-    <section id="core-conversation" class="core-panel" role="tabpanel" aria-labelledby="tab-conversation" data-core-panel="conversation">
-      <div class="panel conversation">
-        <div class="conversation-toolbar">
-          <div><p class="field-label">目前工作脈絡</p><p id="conversation-project-name" class="field-value">尚未確認</p></div>
-          <div class="conversation-state" aria-live="polite"><p id="conversation-status" class="status-text">正在讀取對話狀態…</p><p id="conversation-binding" class="binding mono"></p></div>
-        </div>
-        <div id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions text"><div class="empty">確認主要專案後，就能從這裡送出第一則訊息。</div></div>
-        <form id="conversation-form" class="composer">
-          <label for="message">給 Codex 的訊息</label>
-          <textarea id="message" name="text" placeholder="描述你現在希望完成的事…" required></textarea>
-          <div class="composer-actions"><div><button id="interrupt" type="button" class="action danger">停止本次回覆</button><button id="reconnect" type="button" class="action secondary">重新連線</button></div><button id="send" type="submit" class="action">送出訊息</button></div>
-        </form>
+<main class="app" data-lattice-shell="desktop-cockpit">
+  <aside class="side-rail">
+    <div class="brand"><span class="brand-mark">◇</span><span>LATTICE</span></div>
+    <button id="new-work" class="new-work" type="button">＋ 新工作</button>
+    <p class="rail-label">四核心</p>
+    <nav class="core-nav" role="tablist" aria-label="LATTICE 四核心">
+      <button id="tab-conversation" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-conversation" tabindex="-1" data-core-target="conversation"><small>01</small><span class="nav-icon" aria-hidden="true">◌</span><span>對話</span></button>
+      <button id="tab-work-graph" class="core-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="core-work-graph" tabindex="0" data-core-target="work-graph"><small>02</small><span class="nav-icon" aria-hidden="true">⌘</span><span>工作圖譜</span></button>
+      <button id="tab-work-tree" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-work-tree" tabindex="-1" data-core-target="work-tree"><small>03</small><span class="nav-icon" aria-hidden="true">⌗</span><span>工作樹</span></button>
+      <button id="tab-decisions" class="core-tab" type="button" role="tab" aria-selected="false" aria-controls="core-decisions" tabindex="-1" data-core-target="decisions"><small>04</small><span class="nav-icon" aria-hidden="true">◈</span><span>決策記憶</span></button>
+    </nav>
+    <div class="recent-work" aria-label="最近工作">
+      <h2>最近工作</h2>
+      <div id="recent-work-list"><p class="empty">正在讀取工作快照…</p></div>
+    </div>
+    <div class="rail-footer">單一長期入口<br>由 LATTICE 保存工作與決策</div>
+  </aside>
+  <section class="workspace">
+    <header class="topbar">
+      <div class="workspace-title"><span>目前脈絡</span><strong id="header-context">正在確認主要專案…</strong></div>
+      <div class="top-status"><div class="system-pill"><p id="connection" class="connection">Codex App Server：待命</p></div></div>
+    </header>
+    <div class="context-banner" aria-live="polite"><strong id="context-status">正在讀取四核心狀態…</strong><span id="context-source" class="mono"></span></div>
+    <div class="workspace-canvas">
+      <div class="core-stage">
+        <section id="core-conversation" class="core-panel" role="tabpanel" aria-labelledby="tab-conversation" data-core-panel="conversation" hidden>
+          <div class="panel conversation">
+            <div class="conversation-toolbar"><div><p class="field-label">目前工作脈絡</p><p id="conversation-project-name" class="field-value">尚未確認</p></div><div class="conversation-state" aria-live="polite"><p id="conversation-status" class="status-text">正在讀取對話狀態…</p><p id="conversation-binding" class="binding mono"></p></div></div>
+            <div id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions text"><div class="empty">確認主要專案後，就能從這裡送出第一則訊息。</div></div>
+          </div>
+        </section>
+        <section id="core-work-graph" class="core-panel" role="tabpanel" aria-labelledby="tab-work-graph" data-core-panel="work-graph">
+          <div class="panel graph-panel"><div class="panel-heading"><div><h2>工作圖譜</h2><p>與目前目標有關的工作、依賴與反向影響。</p></div><span id="graph-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div class="graph-viewport"><svg id="graph-edge-layer" aria-hidden="true"><defs><marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path></marker></defs></svg><div id="graph-list" class="graph-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div></div>
+        </section>
+        <section id="core-work-tree" class="core-panel" role="tabpanel" aria-labelledby="tab-work-tree" data-core-panel="work-tree" hidden>
+          <div class="panel"><div class="panel-heading"><div><h2>工作樹</h2><p>從目標一路展開子工作與目前施工區段。</p></div><span id="tree-identity" class="identity">尚未載入</span></div><div class="scroll-body"><p id="tree-current" class="tree-current">目前沒有進行中的工作。</p><div id="tree-list" class="tree-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div>
+        </section>
+        <section id="core-decisions" class="core-panel" role="tabpanel" aria-labelledby="tab-decisions" data-core-panel="decisions" hidden>
+          <div class="panel"><div class="panel-heading"><div><h2>決策記憶</h2><p>只保存明確決策、來源與取代關係。</p></div><span id="decision-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div id="decision-list" class="decision-list"><div class="empty">目前沒有已確認的決策。</div></div></div></div>
+        </section>
       </div>
-    </section>
-    <section id="core-work-graph" class="core-panel" role="tabpanel" aria-labelledby="tab-work-graph" data-core-panel="work-graph" hidden>
-      <div class="panel"><div class="panel-heading"><div><h2>工作圖譜</h2><p>節點、依賴、反向依賴與阻塞原因，都來自同一份工作快照。</p></div><span id="graph-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div id="graph-list" class="graph-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div>
-    </section>
-    <section id="core-work-tree" class="core-panel" role="tabpanel" aria-labelledby="tab-work-tree" data-core-panel="work-tree" hidden>
-      <div class="panel"><div class="panel-heading"><div><h2>工作樹</h2><p>從目標一路展開子工作，並標出目前正在處理的區段。</p></div><span id="tree-identity" class="identity">尚未載入</span></div><div class="scroll-body"><p id="tree-current" class="tree-current">目前沒有進行中的工作。</p><div id="tree-list" class="tree-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div>
-    </section>
-    <section id="core-decisions" class="core-panel" role="tabpanel" aria-labelledby="tab-decisions" data-core-panel="decisions" hidden>
-      <div class="panel"><div class="panel-heading"><div><h2>決策記憶</h2><p>只顯示已記錄的決策、來源與取代關係；不顯示內部推理或秘密。</p></div><span id="decision-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div id="decision-list" class="decision-list"><div class="empty">目前沒有已確認的決策。</div></div></div></div>
-    </section>
-  </div>
-  <p id="error" class="error" role="alert"></p>
-  <p class="local-note">目前只在這台電腦的 127.0.0.1 提供服務；未啟用實體手機網路、登入、多租戶或部署。</p>
+      <aside id="desktop-inspector" class="inspector" aria-live="polite">
+        <div class="inspector-head"><p class="inspector-label">已選工作</p><h2 id="inspector-title">選擇一個工作節點</h2><p id="inspector-status" class="inspector-status">等待選擇</p></div>
+        <div class="inspector-body">
+          <section class="inspector-card problem"><h3>遇到的問題</h3><p id="inspector-problem">選擇節點後，這裡會顯示阻塞原因。</p></section>
+          <section class="inspector-card"><h3>它依賴什麼</h3><p id="inspector-dependencies">尚未選擇</p></section>
+          <section class="inspector-card"><h3>反向影響</h3><p id="inspector-reverse">尚未選擇</p></section>
+          <button id="inspector-open-detail" class="inspector-action" type="button" disabled>查看完整工作詳情</button>
+        </div>
+      </aside>
+    </div>
+    <form id="conversation-form" class="composer command-dock">
+      <label for="message">告訴 LATTICE 你想完成什麼</label>
+      <textarea id="message" name="text" placeholder="告訴 LATTICE 你想完成什麼…" required></textarea>
+      <div class="composer-actions"><div><button id="interrupt" type="button" class="action danger" title="停止本次回覆">■</button><button id="reconnect" type="button" class="action secondary" title="重新連線">↻</button></div><button id="send" type="submit" class="action">送出 ➤</button></div>
+    </form>
+    <p id="error" class="error" role="alert"></p>
+    <p class="local-note">目前只在這台電腦的 127.0.0.1 提供服務；未啟用實體手機網路、登入、多租戶或部署。</p>
+  </section>
 </main>
 <dialog id="work-detail-dialog" aria-labelledby="work-detail-title"><div class="dialog-head"><h2 id="work-detail-title">工作詳情</h2><button class="dialog-close" type="button" data-close-dialog="work-detail-dialog" aria-label="關閉">×</button></div><div id="work-detail-body" class="dialog-body"></div></dialog>
 <dialog id="decision-detail-dialog" aria-labelledby="decision-detail-title"><div class="dialog-head"><h2 id="decision-detail-title">決策歷史</h2><button class="dialog-close" type="button" data-close-dialog="decision-detail-dialog" aria-label="關閉">×</button></div><div id="decision-detail-body" class="dialog-body"></div></dialog>
@@ -200,7 +352,7 @@
   const unsafeControls = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u;
   const activeWorkStatuses = new Set(["starting","running","waiting_approval"]);
   const statusLabels = new Map([["draft","待開始"],["starting","啟動中"],["running","進行中"],["waiting_approval","等待核准"],["codex_done","待驗證"],["verified","已驗證"],["failed","失敗"],["archived","已封存"]]);
-  const state = { surface:null, activeCore:"conversation", pollPromise:null, rendered:{work:null,decisions:null,empty:null} };
+  const state = { surface:null, activeCore:"work-graph", selectedWorkId:null, pollPromise:null, rendered:{work:null,decisions:null,empty:null} };
   const nodes = {
     connection:document.querySelector("#connection"), headerContext:document.querySelector("#header-context"),
     contextStatus:document.querySelector("#context-status"), contextSource:document.querySelector("#context-source"),
@@ -214,6 +366,10 @@
     decisionIdentity:document.querySelector("#decision-identity"), decisionList:document.querySelector("#decision-list"),
     workDialog:document.querySelector("#work-detail-dialog"), workDetail:document.querySelector("#work-detail-body"),
     decisionDialog:document.querySelector("#decision-detail-dialog"), decisionDetail:document.querySelector("#decision-detail-body"),
+    edgeLayer:document.querySelector("#graph-edge-layer"), inspectorTitle:document.querySelector("#inspector-title"),
+    inspectorStatus:document.querySelector("#inspector-status"), inspectorProblem:document.querySelector("#inspector-problem"),
+    inspectorDependencies:document.querySelector("#inspector-dependencies"), inspectorReverse:document.querySelector("#inspector-reverse"),
+    inspectorOpen:document.querySelector("#inspector-open-detail"), newWork:document.querySelector("#new-work"), recentList:document.querySelector("#recent-work-list"),
     error:document.querySelector("#error"),
   };
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
@@ -249,6 +405,7 @@
   }
   function activateCore(core){
     state.activeCore=core;
+    document.body.dataset.activeCore=core;
     for(const tab of document.querySelectorAll("[data-core-target]")){const active=tab.dataset.coreTarget===core;tab.classList.toggle("is-active",active);tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;}
     for(const panel of document.querySelectorAll("[data-core-panel]"))panel.hidden=panel.dataset.corePanel!==core;
   }
@@ -296,8 +453,36 @@
     if(!blocker||blocker.status==="clear")return "目前無阻塞";
     return blocker.reasons.map((reason)=>reason.kind==="explicit"?reason.reason:(workLabel(reason.work_item_id)+" 尚為 "+(statusLabels.get(reason.status)||reason.status))).join("；");
   }
+  function selectWork(work){
+    if(!work)return;
+    state.selectedWorkId=work.id;
+    for(const node of document.querySelectorAll("[data-node-id]"))node.classList.toggle("is-selected",node.dataset.nodeId===work.id);
+    nodes.inspectorTitle.textContent=work.title;
+    nodes.inspectorStatus.textContent=statusLabels.get(work.status)||work.status;
+    nodes.inspectorProblem.textContent=blockerText(work.blocker);
+    nodes.inspectorDependencies.textContent=relationText(work.depends_on||[]);
+    nodes.inspectorReverse.textContent=relationText(work.reverse_dependents||[]);
+    nodes.inspectorOpen.disabled=false;
+    nodes.inspectorOpen.dataset.workItemId=work.id;
+  }
+  function renderGraphEdges(graph){
+    for(const edge of nodes.edgeLayer.querySelectorAll(".graph-edge"))edge.remove();
+    const graphBounds=nodes.graphList.getBoundingClientRect(),byId=new Map(graph.nodes.map((work)=>[work.id,work]));
+    nodes.edgeLayer.setAttribute("viewBox","0 0 "+Math.max(nodes.graphList.scrollWidth,860)+" "+Math.max(nodes.graphList.scrollHeight,520));
+    const point=(id,side)=>{const node=nodes.graphList.querySelector('[data-node-id="'+CSS.escape(id)+'"]');if(!node)return null;const bounds=node.getBoundingClientRect();return {x:side==="out"?bounds.right-graphBounds.left:bounds.left-graphBounds.left,y:bounds.top-graphBounds.top+bounds.height/2};};
+    for(const work of graph.nodes){for(const dependencyId of work.depends_on){if(!byId.has(dependencyId))continue;const start=point(dependencyId,"out"),end=point(work.id,"in");if(!start||!end)continue;const bend=Math.max(42,Math.abs(end.x-start.x)*.42),path=document.createElementNS("http://www.w3.org/2000/svg","path");path.setAttribute("class","graph-edge");path.setAttribute("d","M "+start.x+" "+start.y+" C "+(start.x+bend)+" "+start.y+", "+(end.x-bend)+" "+end.y+", "+end.x+" "+end.y);path.setAttribute("marker-end","url(#graph-arrow)");nodes.edgeLayer.append(path);}}
+  }
+  function renderRecentWork(graph){
+    if(!graph.nodes.length){nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));return;}
+    nodes.recentList.replaceChildren(...graph.nodes.slice(0,3).map((work)=>{
+      const button=element("button",undefined,"recent-item");button.type="button";
+      const dot=element("span",undefined,"recent-dot "+(work.blocker.status==="blocked"||work.status==="failed"?"amber":work.status==="verified"||work.status==="archived"?"green":"cyan"));
+      button.append(dot,document.createTextNode(work.title));button.addEventListener("click",()=>{activateCore("work-graph");selectWork(work);});return button;
+    }));
+  }
   function renderWorkGraph(graph){
     nodes.graphIdentity.textContent="rev "+graph.revision+" · "+graph.digest;
+    renderRecentWork(graph);
     if(!graph.nodes.length){nodes.graphList.replaceChildren(element("div","這個專案目前沒有工作節點。","empty"));return;}
     nodes.graphList.replaceChildren(...graph.nodes.map((work)=>{
       const button=element("button",undefined,"graph-node");button.type="button";button.dataset.nodeId=work.id;button.dataset.status=work.status;button.dataset.blocked=String(work.blocker.status==="blocked");
@@ -306,8 +491,10 @@
       dependency.append(element("strong","依賴："),document.createTextNode(relationText(work.depends_on)));
       reverse.append(element("strong","反向依賴："),document.createTextNode(relationText(work.reverse_dependents)));
       relations.append(dependency,reverse);button.append(head,relations,element("div",blockerText(work.blocker),"blocker"));
-      button.addEventListener("click",()=>void openWorkDetail(work.id));return button;
+      button.addEventListener("click",()=>selectWork(work));return button;
     }));
+    const selected=graph.nodes.find((work)=>work.id===state.selectedWorkId)||graph.nodes.find((work)=>work.blocker.status==="blocked")||graph.nodes.find((work)=>activeWorkStatuses.has(work.status))||graph.nodes[0];
+    selectWork(selected);requestAnimationFrame(()=>renderGraphEdges(graph));
   }
   function renderWorkTree(tree){
     nodes.treeIdentity.textContent="rev "+tree.revision+" · "+tree.digest;
@@ -320,7 +507,7 @@
         button.type="button";button.dataset.nodeId=work.id;button.dataset.status=work.status;button.dataset.blocked=String(work.blocker.status==="blocked");
         button.append(element("span",depth===0?"◆":"└","tree-branch"));const copy=element("span",undefined,"tree-copy");
         copy.append(element("span",work.title,"node-title"),element("small",work.progress||blockerText(work.blocker)));
-        button.append(copy,element("span",statusLabels.get(work.status)||work.status,"badge"));button.addEventListener("click",()=>void openWorkDetail(work.id));item.append(button);
+        button.append(copy,element("span",statusLabels.get(work.status)||work.status,"badge"));button.addEventListener("click",()=>{selectWork(state.surface.work_snapshot.graph.nodes.find((candidate)=>candidate.id===work.id));if(matchMedia("(max-width:980px)").matches)void openWorkDetail(work.id);});item.append(button);
         if(work.children.length)item.append(branch(work.children,depth+1));list.append(item);
       }return list;
     };
@@ -406,7 +593,10 @@
   });
   nodes.interrupt.addEventListener("click",()=>void conversationAction("/api/conversation/interrupt"));
   nodes.reconnect.addEventListener("click",()=>void conversationAction("/api/conversation/reconnect"));
-  activateCore("conversation");await poll();await resumePending();setInterval(()=>void poll(),2_000);
+  nodes.inspectorOpen.addEventListener("click",()=>{if(nodes.inspectorOpen.dataset.workItemId)void openWorkDetail(nodes.inspectorOpen.dataset.workItemId);});
+  nodes.newWork.addEventListener("click",()=>{activateCore("conversation");nodes.message.focus();});
+  addEventListener("resize",()=>{const graph=state.surface?.work_snapshot?.graph;if(graph)requestAnimationFrame(()=>renderGraphEdges(graph));});
+  activateCore("work-graph");await poll();await resumePending();setInterval(()=>void poll(),2_000);
 </script>
 </body>
 </html>

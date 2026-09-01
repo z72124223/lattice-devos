@@ -3013,6 +3013,15 @@ test("local HTTP API persists projects and work items without starting Codex", a
     const pageHtml = await page.text();
     assert.match(pageHtml, /LATTICE Control/u);
     assert.match(pageHtml, /對話.*工作圖譜.*工作樹.*決策記憶/su);
+    assert.match(pageHtml, /data-lattice-shell="desktop-cockpit"/u);
+    assert.match(pageHtml, /class="side-rail"/u);
+    assert.match(pageHtml, /class="workspace-canvas"/u);
+    assert.match(pageHtml, /id="desktop-inspector"/u);
+    assert.match(pageHtml, /id="graph-edge-layer"/u);
+    assert.match(pageHtml, /id="recent-work-list"/u);
+    assert.match(pageHtml, /class="composer command-dock"/u);
+    assert.doesNotMatch(pageHtml, /Long-lived workspace/u);
+    assert.doesNotMatch(pageHtml, /Codex 用量 68%/u);
     assert.doesNotMatch(pageHtml, /id="receipt-form"/u);
     assert.doesNotMatch(pageHtml, /\/api\/installation-receipts/u);
     assert.doesNotMatch(pageHtml, /來源 commit|安裝位置|產物 SHA-256|收據指紋/u);

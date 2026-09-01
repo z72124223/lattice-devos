@@ -1,0 +1,107 @@
+<Window x:Class="Lattice.Control.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:wv2="clr-namespace:Microsoft.Web.WebView2.Wpf;assembly=Microsoft.Web.WebView2.Wpf"
+        Title="LATTICE"
+        Width="1600"
+        Height="900"
+        MinWidth="1000"
+        MinHeight="640"
+        WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="CanResize"
+        Background="{StaticResource LatticeBackground}">
+    <WindowChrome.WindowChrome>
+        <WindowChrome CaptionHeight="42"
+                      ResizeBorderThickness="7"
+                      CornerRadius="0"
+                      GlassFrameThickness="0" />
+    </WindowChrome.WindowChrome>
+
+    <Window.Resources>
+        <Style x:Key="WindowButton" TargetType="Button">
+            <Setter Property="Width" Value="46" />
+            <Setter Property="Height" Value="42" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Foreground" Value="{StaticResource LatticeMuted}" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#152536" />
+                                <Setter Property="Foreground" Value="{StaticResource LatticeText}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="CloseWindowButton" TargetType="Button" BasedOn="{StaticResource WindowButton}">
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#C42B1C" />
+                    <Setter Property="Foreground" Value="White" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Background="{StaticResource LatticePanel}"
+                BorderBrush="{StaticResource LatticeBorder}"
+                BorderThickness="0,0,0,1"
+                MouseLeftButtonDown="TitleBar_MouseLeftButtonDown">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
+                    <Border Width="18" Height="18" CornerRadius="4" BorderBrush="{StaticResource LatticeCyan}" BorderThickness="1">
+                        <TextBlock Text="L" Foreground="{StaticResource LatticeCyan}" FontSize="11" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
+                    <TextBlock Text="LATTICE" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="12" Margin="9,0,0,0" VerticalAlignment="Center" />
+                    <TextBlock Text="CONTROL" Foreground="{StaticResource LatticeMuted}" FontSize="9" Margin="8,1,0,0" VerticalAlignment="Center" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <Ellipse x:Name="ConnectionDot" Width="6" Height="6" Fill="#E4A72A" Margin="0,0,7,0" />
+                    <TextBlock x:Name="ConnectionLabel" Text="正在連線本機 LATTICE" Foreground="{StaticResource LatticeMuted}" FontSize="10" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="2" Orientation="Horizontal" WindowChrome.IsHitTestVisibleInChrome="True">
+                    <Button Style="{StaticResource WindowButton}" Content="&#xE921;" Click="Minimize_Click" />
+                    <Button Style="{StaticResource WindowButton}" Content="&#xE922;" Click="MaximizeRestore_Click" />
+                    <Button Style="{StaticResource CloseWindowButton}" Content="&#xE8BB;" Click="Close_Click" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1" Background="{StaticResource LatticeBackground}">
+            <wv2:WebView2 x:Name="ControlView" DefaultBackgroundColor="#050A10" />
+            <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
+                    <TextBlock Text="LATTICE 控制核心尚未連線" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="18" TextAlignment="Center" />
+                    <TextBlock x:Name="ConnectionDetail" Text="請先啟動本機 Control，再重新連線。" Foreground="{StaticResource LatticeMuted}" FontSize="12" Margin="0,12,0,0" TextAlignment="Center" TextWrapping="Wrap" />
+                    <Button Content="重新連線" Click="Reconnect_Click" Margin="0,22,0,0" Padding="20,8" HorizontalAlignment="Center" Background="#102535" Foreground="{StaticResource LatticeText}" BorderBrush="{StaticResource LatticeCyan}" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+
+</Window>

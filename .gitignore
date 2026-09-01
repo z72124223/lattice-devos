@@ -2,6 +2,8 @@ node_modules/
 __pycache__/
 coverage/
 target/
+apps/lattice-control-desktop/bin/
+apps/lattice-control-desktop/obj/
 .lattice/
 *.log
 *.tmp
