@@ -244,11 +244,13 @@ $managedData = Join-Path $temporaryRoot 'managed-data'
 $reuseData = Join-Path $temporaryRoot 'reuse-data'
 $externalData = Join-Path $temporaryRoot 'external-data'
 $foreignReady = Join-Path $temporaryRoot 'foreign-ready.txt'
+$unknownReady = Join-Path $temporaryRoot 'unknown-ready.txt'
 $desktop = $null
 $managedControl = $null
 $externalControl = $null
 $crossScopeControl = $null
 $foreignControl = $null
+$unknownControl = $null
 $result = $null
 $primaryFailure = $null
 $cleanupFailure = $null
@@ -355,11 +357,53 @@ try {
     $crossScopeControl = $null
     Wait-ControlPort $false $TimeoutSeconds
 
-    # Wrong version on 4317: fail closed, launch no child, and never stop it.
     $nodePath = [IO.Path]::GetFullPath(
         (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source)
     $foreignFixture = Join-Path $repositoryRoot (
         'apps\lattice-control\test\fixtures\desktop-incompatible-control.mjs')
+
+    # Unknown/malformed runtime on fixed 4317: the packaged candidate must fail
+    # closed, launch no bundled child, and never stop the foreign listener.
+    $unknownControl = Start-ControlProcess $nodePath $foreignFixture $repositoryRoot @{
+        'LATTICE_DESKTOP_INCOMPATIBLE_PORT' = '4317'
+        'LATTICE_DESKTOP_INCOMPATIBLE_READY' = $unknownReady
+        'LATTICE_DESKTOP_INCOMPATIBLE_MODE' = 'malformed'
+    }
+    if ((Wait-TextFile $unknownReady $unknownControl $TimeoutSeconds) -cne '4317') {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_PORT_INVALID'
+    }
+    $unknownSurface = Invoke-WebRequest `
+        -Uri 'http://127.0.0.1:4317/api/runtime' `
+        -TimeoutSec 2 `
+        -UseBasicParsing
+    if ($unknownSurface.StatusCode -ne 200 -or
+        [string]$unknownSurface.Content -cne 'not-a-lattice-runtime') {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_SURFACE_NOT_MALFORMED'
+    }
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
+    if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_STARTED_CHILD'
+    }
+    Close-TestDesktop $desktop
+    $desktop = $null
+    if (-not (Test-ProcessAlive $unknownControl)) {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_PROCESS_STOPPED'
+    }
+    $unknownAfterClose = Invoke-WebRequest `
+        -Uri 'http://127.0.0.1:4317/api/runtime' `
+        -TimeoutSec 2 `
+        -UseBasicParsing
+    if ($unknownAfterClose.StatusCode -ne 200 -or
+        [string]$unknownAfterClose.Content -cne 'not-a-lattice-runtime') {
+        throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_LISTENER_NOT_SERVING_AFTER_CLOSE'
+    }
+    $unknownPid = $unknownControl.Id
+    Stop-TestOwnedProcess $unknownControl
+    $unknownControl = $null
+    Wait-ControlPort $false $TimeoutSeconds
+
+    # Wrong version on 4317: fail closed, launch no child, and never stop it.
     $foreignControl = Start-ControlProcess $nodePath $foreignFixture $repositoryRoot @{
         'LATTICE_DESKTOP_INCOMPATIBLE_PORT' = '4317'
         'LATTICE_DESKTOP_INCOMPATIBLE_READY' = $foreignReady
@@ -401,6 +445,11 @@ try {
         cross_scope_digest = $crossScopeDigest
         cross_scope_process_pid = $crossScopePid
         cross_scope_process_survived_close = $true
+        unknown_runtime_status = 'INCOMPATIBLE'
+        unknown_runtime_bundled_child_started = $false
+        unknown_runtime_process_pid = $unknownPid
+        unknown_runtime_process_survived_close = $true
+        unknown_runtime_surface_served_after_close = $true
         incompatible_status = 'INCOMPATIBLE'
         incompatible_process_pid = $foreignPid
         incompatible_process_survived_close = $true
@@ -410,7 +459,13 @@ try {
 catch { $primaryFailure = $_ }
 finally {
     try { Close-TestDesktop $desktop } catch { $cleanupFailure = $_ }
-    foreach ($owned in @($managedControl, $externalControl, $crossScopeControl, $foreignControl)) {
+    foreach ($owned in @(
+        $managedControl,
+        $externalControl,
+        $crossScopeControl,
+        $unknownControl,
+        $foreignControl
+    )) {
         try { Stop-TestOwnedProcess $owned } catch { if ($null -eq $cleanupFailure) { $cleanupFailure = $_ } }
     }
     try { Remove-TestRoot $temporaryRoot } catch { if ($null -eq $cleanupFailure) { $cleanupFailure = $_ } }

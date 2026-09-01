@@ -4,12 +4,20 @@ import { controlDataScopeDescriptor } from "../../src/database-path.mjs";
 
 const readyPath = process.env.LATTICE_DESKTOP_INCOMPATIBLE_READY;
 const port = Number.parseInt(process.env.LATTICE_DESKTOP_INCOMPATIBLE_PORT ?? "4317", 10);
+const mode = process.env.LATTICE_DESKTOP_INCOMPATIBLE_MODE ?? "wrong-version";
 const databasePath = process.env.LATTICE_CONTROL_DATABASE_PATH;
-if (!readyPath || !databasePath || !Number.isInteger(port) || port < 1 || port > 65_535) {
+if (
+  !readyPath
+  || !["malformed", "wrong-version"].includes(mode)
+  || (mode === "wrong-version" && !databasePath)
+  || !Number.isInteger(port)
+  || port < 1
+  || port > 65_535
+) {
   throw new Error("valid incompatible Control ready path and port are required");
 }
 
-const surface = JSON.stringify({
+const surface = mode === "malformed" ? "not-a-lattice-runtime" : JSON.stringify({
   schema_version: "lattice.control.runtime-surface.v2",
   identity: {
     schema_version: "lattice.control.runtime-identity.v1",
@@ -31,7 +39,9 @@ const surface = JSON.stringify({
 const server = createServer((request, response) => {
   if (request.url === "/api/runtime") {
     response.writeHead(200, {
-      "content-type": "application/json; charset=utf-8",
+      "content-type": mode === "malformed"
+        ? "text/plain; charset=utf-8"
+        : "application/json; charset=utf-8",
       "content-length": Buffer.byteLength(surface),
       "cache-control": "no-store",
     });
