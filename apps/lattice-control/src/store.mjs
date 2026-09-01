@@ -38,8 +38,67 @@ const developmentRadarActions = new Set([
   "ADOPT_OSS",
   "FREEZE_LATTICE",
 ]);
-const controlSchemaVersion = 6;
+const controlSchemaVersion = 7;
+const primaryConversationIdempotentKinds = [
+  "codex_disconnected",
+  "conversation_message_failed",
+  "conversation_turn_dispatch_retry_intended",
+  "conversation_turn_dispatch_not_sent",
+  "conversation_unbound_claim_restarted",
+  "codex_started",
+  "conversation_reconnected",
+  "conversation_reconnect_failed",
+  "codex_thread_started",
+  "codex_retry_started",
+  "codex_reconciled",
+  "conversation_server_response_failed",
+  "conversation_terminal_missing_reply",
+  "turn_terminal_conflict_ignored",
+  "turn_completed",
+  "mcp_server_startup_status_updated",
+  "conversation_approval_declined",
+  "conversation_notification_failed",
+];
+const primaryConversationIdempotentKindSet = new Set(primaryConversationIdempotentKinds);
+const primaryConversationIdempotentKindsSql = primaryConversationIdempotentKinds
+  .map((kind) => `'${kind}'`).join(", ");
+const conversationEventReadIndexesSql = `
+  CREATE INDEX IF NOT EXISTS work_events_work_item_kind_id
+  ON work_events(work_item_id, kind, id DESC);
+
+  CREATE INDEX IF NOT EXISTS work_events_client_message_lookup
+  ON work_events(
+    work_item_id,
+    kind,
+    json_extract(payload_json, '$.clientMessageId'),
+    id DESC
+  );
+
+  CREATE INDEX IF NOT EXISTS work_events_thread_turn_lookup
+  ON work_events(
+    work_item_id,
+    kind,
+    json_extract(payload_json, '$.threadId'),
+    json_extract(payload_json, '$.turnId'),
+    id DESC
+  );
+
+  CREATE INDEX IF NOT EXISTS work_events_message_lookup
+  ON work_events(
+    work_item_id,
+    kind,
+    json_extract(payload_json, '$.messageId'),
+    id DESC
+  );
+
+  CREATE INDEX IF NOT EXISTS work_events_idempotent_payload_lookup
+  ON work_events(work_item_id, kind, payload_json)
+  WHERE kind IN (${primaryConversationIdempotentKindsSql})
+    AND length(CAST(payload_json AS BLOB)) <= 16384;
+`;
 const workCoreSchemaSql = `
+  ${conversationEventReadIndexesSql}
+
   CREATE INDEX IF NOT EXISTS work_items_project_id_id
   ON work_items(project_id, id);
 
@@ -934,7 +993,8 @@ function decisionRows(database) {
       status, supersedes_decision_id, client_request_id, request_digest, created_at
     FROM decisions
     ORDER BY scope ASC, subject ASC, created_at ASC, id ASC
-  `).all();
+    LIMIT ?
+  `).all(decisionMaximumRows + 1);
 }
 
 function decisionRowsDigest(rows) {
@@ -982,7 +1042,7 @@ function initializeDecisionState(database) {
   return assertDecisionStateIntegrity(database);
 }
 
-function assertDecisionStateIntegrity(database) {
+function decisionStateMetadata(database) {
   const states = database.prepare(`
     SELECT slot, schema_version, revision, digest, updated_at
     FROM decision_state ORDER BY slot
@@ -1001,6 +1061,11 @@ function assertDecisionStateIntegrity(database) {
     throw decisionError("DECISION_STATE_CORRUPT", "decision state metadata is invalid");
   }
   normalizedDecisionTimestamp(state.updated_at, "decision state timestamp");
+  return state;
+}
+
+function assertDecisionStateIntegrity(database) {
+  const state = decisionStateMetadata(database);
   const rows = decisionRows(database);
   if (rows.length > decisionMaximumRows) {
     throw decisionError("DECISION_STORE_LIMIT_EXCEEDED", "decision store row limit exceeded");
@@ -1532,7 +1597,7 @@ function initializeControlDatabase(database, { validateProfile = true } = {}) {
   }
 }
 
-function migrateControlDatabaseV1ToV6(database) {
+function migrateControlDatabaseV1ToV7(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
@@ -1562,7 +1627,7 @@ function migrateControlDatabaseV1ToV6(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 6;
+      PRAGMA user_version = 7;
     `);
     database.exec(workCoreSchemaSql);
     database.exec(decisionCoreSchemaSql);
@@ -1575,7 +1640,7 @@ function migrateControlDatabaseV1ToV6(database) {
   }
 }
 
-function migrateControlDatabaseV2ToV6(database) {
+function migrateControlDatabaseV2ToV7(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
@@ -1590,7 +1655,7 @@ function migrateControlDatabaseV2ToV6(database) {
         updated_at TEXT NOT NULL,
         generation INTEGER NOT NULL CHECK (generation > 0)
       );
-      PRAGMA user_version = 6;
+      PRAGMA user_version = 7;
     `);
     database.exec(workCoreSchemaSql);
     database.exec(decisionCoreSchemaSql);
@@ -1603,7 +1668,7 @@ function migrateControlDatabaseV2ToV6(database) {
   }
 }
 
-function migrateControlDatabaseV3ToV6(database) {
+function migrateControlDatabaseV3ToV7(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
@@ -1625,7 +1690,7 @@ function migrateControlDatabaseV3ToV6(database) {
       SELECT conversation_id, owner_id, owner_pid, lease_expires_at, updated_at, 1
       FROM conversation_writer_leases_v3;
       DROP TABLE conversation_writer_leases_v3;
-      PRAGMA user_version = 6;
+      PRAGMA user_version = 7;
     `);
     database.exec(workCoreSchemaSql);
     database.exec(decisionCoreSchemaSql);
@@ -1638,7 +1703,7 @@ function migrateControlDatabaseV3ToV6(database) {
   }
 }
 
-function migrateControlDatabaseV4ToV6(database) {
+function migrateControlDatabaseV4ToV7(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
@@ -1646,7 +1711,7 @@ function migrateControlDatabaseV4ToV6(database) {
     database.exec(workCoreSchemaSql);
     database.exec(decisionCoreSchemaSql);
     initializeDecisionState(database);
-    database.exec("PRAGMA user_version = 6;");
+    database.exec("PRAGMA user_version = 7;");
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -1655,14 +1720,29 @@ function migrateControlDatabaseV4ToV6(database) {
   }
 }
 
-function migrateControlDatabaseV5ToV6(database) {
+function migrateControlDatabaseV5ToV7(database) {
   database.exec("BEGIN IMMEDIATE;");
   try {
     validateLegacyWorkCoreMigrationBase(database);
     validateLegacyDecisionCoreAbsent(database);
+    database.exec(conversationEventReadIndexesSql);
     database.exec(decisionCoreSchemaSql);
     initializeDecisionState(database);
-    database.exec("PRAGMA user_version = 6;");
+    database.exec("PRAGMA user_version = 7;");
+    validateControlSchemaProfile(database);
+    database.exec("COMMIT;");
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+function migrateControlDatabaseV6ToV7(database) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    validateLegacyWorkCoreMigrationBase(database);
+    database.exec(conversationEventReadIndexesSql);
+    database.exec("PRAGMA user_version = 7;");
     validateControlSchemaProfile(database);
     database.exec("COMMIT;");
   } catch (error) {
@@ -1715,6 +1795,16 @@ function decodeItem(row) {
     ...row,
     approval: row.approval_json ? JSON.parse(row.approval_json) : null,
     approval_json: undefined,
+  };
+}
+
+function decodeWorkEvent(event) {
+  if (!event) return null;
+  return {
+    id: event.id,
+    kind: event.kind,
+    payload: JSON.parse(event.payload_json),
+    created_at: event.created_at,
   };
 }
 
@@ -2229,17 +2319,18 @@ export class LatticeStore {
     const database = new DatabaseSync(databasePath);
     try {
       const version = database.prepare("PRAGMA user_version").get().user_version;
-      if (![0, 1, 2, 3, 4, 5, controlSchemaVersion].includes(version)) {
+      if (![0, 1, 2, 3, 4, 5, 6, controlSchemaVersion].includes(version)) {
         throw new Error(
-          `Control database schema ${version} is unsupported; expected 0, 1, 2, 3, 4, 5, or ${controlSchemaVersion}`,
+          `Control database schema ${version} is unsupported; expected 0 through ${controlSchemaVersion}`,
         );
       }
       if (version === 0) initializeControlDatabase(database);
-      else if (version === 1) migrateControlDatabaseV1ToV6(database);
-      else if (version === 2) migrateControlDatabaseV2ToV6(database);
-      else if (version === 3) migrateControlDatabaseV3ToV6(database);
-      else if (version === 4) migrateControlDatabaseV4ToV6(database);
-      else if (version === 5) migrateControlDatabaseV5ToV6(database);
+      else if (version === 1) migrateControlDatabaseV1ToV7(database);
+      else if (version === 2) migrateControlDatabaseV2ToV7(database);
+      else if (version === 3) migrateControlDatabaseV3ToV7(database);
+      else if (version === 4) migrateControlDatabaseV4ToV7(database);
+      else if (version === 5) migrateControlDatabaseV5ToV7(database);
+      else if (version === 6) migrateControlDatabaseV6ToV7(database);
       else validateControlSchemaProfile(database);
       database.exec("PRAGMA foreign_keys = ON;");
       if (databasePath !== ":memory:") database.exec("PRAGMA journal_mode = WAL;");
@@ -2841,6 +2932,14 @@ export class LatticeStore {
     }));
   }
 
+  projectContextCandidates() {
+    return this.database.prepare(`
+      SELECT id, name
+      FROM projects
+      LIMIT 2
+    `).all();
+  }
+
   getProject(id) {
     return this.database.prepare("SELECT * FROM projects WHERE id = ?").get(id) ?? null;
   }
@@ -3114,10 +3213,115 @@ export class LatticeStore {
 
   primaryConversationMessage(clientMessageId) {
     const normalizedId = normalizeClientMessageId(clientMessageId);
-    return this.listEvents(primaryConversationId).find(({ kind, payload }) => (
-      kind === "conversation_message_claimed"
-      && payload.clientMessageId === normalizedId
-    )) ?? null;
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_claimed'
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedId));
+  }
+
+  primaryConversationUnresolvedMessage() {
+    const latestClaim = this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_claimed'
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId);
+    if (!latestClaim) return null;
+    const latestAcceptance = this.database.prepare(`
+      SELECT id FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId)?.id ?? null;
+    // Claiming a newer message is forbidden until the prior claim is accepted.
+    return latestAcceptance === null || latestClaim.id > latestAcceptance
+      ? decodeWorkEvent(latestClaim)
+      : null;
+  }
+
+  hasUnresolvedPrimaryConversationMessage() {
+    return this.primaryConversationUnresolvedMessage() !== null;
+  }
+
+  latestPrimaryConversationBinding() {
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_thread_bound'
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId));
+  }
+
+  primaryConversationAcceptedEvent(clientMessageId) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedId));
+  }
+
+  primaryConversationAcceptedForTurn(threadId, turnId) {
+    const normalizedThreadId = requireText(threadId, "Codex thread ID");
+    const normalizedTurnId = requireText(turnId, "Codex turn ID");
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
+  }
+
+  primaryConversationHasAcceptedThread(threadId) {
+    const normalizedThreadId = requireText(threadId, "Codex thread ID");
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS found FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
+        AND json_extract(payload_json, '$.threadId') = ?
+      LIMIT 1
+    `).get(primaryConversationId, normalizedThreadId)?.found);
+  }
+
+  primaryConversationTerminalEvent(threadId, turnId) {
+    const normalizedThreadId = requireText(threadId, "Codex thread ID");
+    const normalizedTurnId = requireText(turnId, "Codex turn ID");
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'turn_completed'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+        AND json_extract(payload_json, '$.status') IN ('completed', 'interrupted', 'failed')
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
+  }
+
+  primaryConversationMissingFinal(threadId, turnId) {
+    if (typeof threadId !== "string" || !threadId || typeof turnId !== "string" || !turnId) {
+      return false;
+    }
+    const latestMissing = this.database.prepare(`
+      SELECT id FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_terminal_missing_reply'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, threadId, turnId)?.id ?? null;
+    if (latestMissing === null) return false;
+    const latestReply = this.database.prepare(`
+      SELECT id FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, threadId, turnId)?.id ?? null;
+    return latestReply === null || latestMissing > latestReply;
   }
 
   claimPrimaryConversationMessage({ projectId, clientMessageId, text, fence }) {
@@ -3162,34 +3366,11 @@ export class LatticeStore {
 
       assertPrimaryConversationIdentity(this.database, item);
       assertPrimaryConversationFence(this.database, fence);
-      const claimedMessages = this.database.prepare(`
-        SELECT id, kind, payload_json, created_at
-        FROM work_events
-        WHERE work_item_id = ? AND kind = ?
-        ORDER BY id ASC
-      `).all(primaryConversationId, "conversation_message_claimed")
-        .map((event) => ({
-          id: event.id,
-          kind: event.kind,
-          payload: JSON.parse(event.payload_json),
-          created_at: event.created_at,
-        }));
-      const acceptedMessageIds = new Set(this.database.prepare(`
-        SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = 'conversation_message_accepted'
-      `).all(primaryConversationId).map(({ payload_json: payloadJson }) => (
-        JSON.parse(payloadJson).clientMessageId
-      )));
-      const existing = claimedMessages
-        .find(({ payload }) => payload.clientMessageId === normalizedId);
-      const unresolvedMessages = claimedMessages.filter(
-        ({ payload }) => !acceptedMessageIds.has(payload.clientMessageId),
-      );
+      const existing = this.primaryConversationMessage(normalizedId);
+      const unresolved = this.primaryConversationUnresolvedMessage();
       if (
-        unresolvedMessages.length > 0
-        && (!existing || unresolvedMessages.some(
-          ({ payload }) => payload.clientMessageId !== normalizedId,
-        ))
+        unresolved
+        && (!existing || unresolved.payload.clientMessageId !== normalizedId)
       ) {
         const error = new Error("an earlier saved conversation message must be reconnected first");
         error.code = "CONVERSATION_BUSY";
@@ -3203,7 +3384,7 @@ export class LatticeStore {
         ) {
           throw new TypeError("client message ID was already used for different content");
         }
-        const accepted = acceptedMessageIds.has(normalizedId);
+        const accepted = this.primaryConversationAcceptedEvent(normalizedId) !== null;
         if (!accepted && item.status === "failed") {
           const timestamp = now();
           this.database.prepare(`
@@ -3287,10 +3468,72 @@ export class LatticeStore {
 
   primaryConversationDispatchIntent(clientMessageId) {
     const normalizedId = normalizeClientMessageId(clientMessageId);
-    return this.listEvents(primaryConversationId).find(({ kind, payload }) => (
-      kind === "conversation_turn_dispatch_intended"
-      && payload.clientMessageId === normalizedId
-    )) ?? null;
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_turn_dispatch_intended'
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+      ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedId));
+  }
+
+  primaryConversationDispatchNotSent({
+    clientMessageId,
+    threadId,
+    promptDigest,
+    originalIntentEventId,
+  }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_turn_dispatch_not_sent'
+        AND id > ?
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.promptDigest') = ?
+        AND json_extract(payload_json, '$.originalIntentEventId') = ?
+        AND json_extract(payload_json, '$.attempt') = 1
+        AND json_extract(payload_json, '$.errorCode')
+          = 'CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED'
+      ORDER BY id ASC LIMIT 1
+    `).get(
+      primaryConversationId,
+      originalIntentEventId,
+      normalizedId,
+      threadId,
+      promptDigest,
+      originalIntentEventId,
+    ));
+  }
+
+  primaryConversationRetryIntent({
+    clientMessageId,
+    threadId,
+    promptDigest,
+    originalIntentEventId,
+    afterEventId,
+  }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_turn_dispatch_retry_intended'
+        AND id > ?
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.promptDigest') = ?
+        AND json_extract(payload_json, '$.originalIntentEventId') = ?
+        AND json_extract(payload_json, '$.attempt') = 2
+      ORDER BY id ASC LIMIT 1
+    `).get(
+      primaryConversationId,
+      afterEventId,
+      normalizedId,
+      threadId,
+      promptDigest,
+      originalIntentEventId,
+    ));
   }
 
   recordPrimaryConversationDispatchIntent({
@@ -3312,24 +3555,11 @@ export class LatticeStore {
       if (item.codex_thread_id !== normalizedThreadId || item.status !== "starting") {
         throw new Error("primary conversation changed before turn dispatch intent was saved");
       }
-      const claimed = this.database.prepare(`
-        SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = 'conversation_message_claimed'
-        ORDER BY id ASC
-      `).all(primaryConversationId)
-        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson))
-        .find((payload) => payload.clientMessageId === normalizedId);
+      const claimed = this.primaryConversationMessage(normalizedId)?.payload ?? null;
       if (!claimed || claimed.promptDigest !== normalizedDigest) {
         throw new Error("turn dispatch intent has no exact saved message claim");
       }
-      const intents = this.database.prepare(`
-        SELECT id, payload_json, created_at FROM work_events
-        WHERE work_item_id = ? AND kind = 'conversation_turn_dispatch_intended'
-        ORDER BY id ASC
-      `).all(primaryConversationId);
-      const existing = intents
-        .map((event) => ({ ...event, payload: JSON.parse(event.payload_json) }))
-        .find(({ payload }) => payload.clientMessageId === normalizedId);
+      const existing = this.primaryConversationDispatchIntent(normalizedId);
       if (existing) {
         if (
           existing.payload.threadId !== normalizedThreadId
@@ -3339,10 +3569,7 @@ export class LatticeStore {
         return {
           created: false,
           event: {
-            id: existing.id,
-            kind: "conversation_turn_dispatch_intended",
-            payload: existing.payload,
-            created_at: existing.created_at,
+            ...existing,
           },
         };
       }
@@ -3391,10 +3618,12 @@ export class LatticeStore {
         error.status = 409;
         throw error;
       }
-      const generation = this.database.prepare(`
-        SELECT COUNT(*) AS count FROM work_events
-        WHERE work_item_id = ? AND kind = ?
-      `).get(primaryConversationId, "conversation_thread_bound").count + 1;
+      const previousBinding = this.latestPrimaryConversationBinding();
+      const previousGeneration = previousBinding?.payload.generation ?? 0;
+      if (!Number.isInteger(previousGeneration) || previousGeneration < 0) {
+        throw new Error("primary conversation binding generation is invalid");
+      }
+      const generation = previousGeneration + 1;
       const timestamp = now();
       this.database.prepare(`
         UPDATE work_items
@@ -3458,13 +3687,7 @@ export class LatticeStore {
       if (item.codex_thread_id !== normalizedThreadId || item.status !== "starting") {
         throw new Error("primary conversation changed before its Codex turn was saved");
       }
-      const events = this.database.prepare(`
-        SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = ?
-        ORDER BY id ASC
-      `).all(primaryConversationId, "conversation_message_accepted")
-        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson));
-      const existing = events.find((payload) => payload.clientMessageId === normalizedId);
+      const existing = this.primaryConversationAcceptedEvent(normalizedId)?.payload ?? null;
       if (existing) {
         if (existing.threadId !== normalizedThreadId || existing.turnId !== normalizedTurnId) {
           throw new Error("client message is already bound to a different Codex turn");
@@ -3525,13 +3748,13 @@ export class LatticeStore {
         this.database.exec("COMMIT;");
         return false;
       }
-      const existing = this.database.prepare(`
+      const existingRow = this.database.prepare(`
         SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = ?
-        ORDER BY id ASC
-      `).all(primaryConversationId, "conversation_assistant_message")
-        .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson))
-        .find((payload) => payload.messageId === normalizedMessageId);
+        WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+          AND json_extract(payload_json, '$.messageId') = ?
+        ORDER BY id DESC LIMIT 1
+      `).get(primaryConversationId, normalizedMessageId);
+      const existing = existingRow ? JSON.parse(existingRow.payload_json) : null;
       if (existing) {
         if (
           existing.threadId !== normalizedThreadId
@@ -3695,19 +3918,50 @@ export class LatticeStore {
     }
   }
 
+  decisionStateIdentity() {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = this.conversationReadIdentity();
+      const state = decisionStateMetadata(this.database);
+      const after = this.conversationReadIdentity();
+      if (
+        before.connection_changes === after.connection_changes
+        && before.data_version === after.data_version
+      ) {
+        return {
+          revision: state.revision,
+          digest: state.digest,
+          connection_changes: after.connection_changes,
+          data_version: after.data_version,
+        };
+      }
+    }
+    throw decisionError("DECISION_READ_UNSTABLE", "decision state changed repeatedly");
+  }
+
   getCurrentDecisionsPacket(input) {
     const query = normalizedCurrentDecisionQuery(input);
     this.database.exec("BEGIN;");
     try {
       const snapshot = assertDecisionStateIntegrity(this.database);
-      const matching = snapshot.rows.filter((row) => (
-        row.status === "current"
-        && row.scope === query.scope
-        && (query.subject == null || row.subject === query.subject)
-      )).sort((left, right) => (
-        left.subject.localeCompare(right.subject)
-        || left.id.localeCompare(right.id)
-      ));
+      const matching = query.subject == null
+        ? this.database.prepare(`
+          SELECT
+            id, scope, subject, content, rationale, source_kind, source_reference,
+            status, supersedes_decision_id, client_request_id, request_digest, created_at
+          FROM decisions
+          WHERE status = 'current' AND scope = ?
+          ORDER BY subject ASC, id ASC
+          LIMIT ?
+        `).all(query.scope, query.limit + 1)
+        : this.database.prepare(`
+          SELECT
+            id, scope, subject, content, rationale, source_kind, source_reference,
+            status, supersedes_decision_id, client_request_id, request_digest, created_at
+          FROM decisions
+          WHERE status = 'current' AND scope = ? AND subject = ?
+          ORDER BY subject ASC, id ASC
+          LIMIT ?
+        `).all(query.scope, query.subject, query.limit + 1);
       const packet = {
         schema_version: currentDecisionsPacketSchemaVersion,
         source: decisionStoreSource,
@@ -4174,15 +4428,198 @@ export class LatticeStore {
     }
   }
 
+  hasEventPayload(workItemId, kind, payload) {
+    if (primaryConversationIdempotentKindSet.has(kind)) {
+      return Boolean(this.database.prepare(`
+        SELECT 1 AS found FROM work_events
+        WHERE work_item_id = ? AND kind = ? AND payload_json = ?
+          AND kind IN (${primaryConversationIdempotentKindsSql})
+          AND length(CAST(payload_json AS BLOB)) <= 16384
+        LIMIT 1
+      `).get(workItemId, kind, JSON.stringify(payload))?.found);
+    }
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS found FROM work_events
+      WHERE work_item_id = ? AND kind = ? AND payload_json = ?
+      LIMIT 1
+    `).get(workItemId, kind, JSON.stringify(payload))?.found);
+  }
+
+  hasEventKind(workItemId, kind) {
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS found FROM work_events
+      WHERE work_item_id = ? AND kind = ? LIMIT 1
+    `).get(workItemId, kind)?.found);
+  }
+
+  hasConfirmedStartEvent(workItemId, threadId, turnId) {
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS found FROM work_events
+      WHERE work_item_id = ? AND kind = 'codex_started'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+        AND json_extract(payload_json, '$.confirmedBy')
+          IN ('turn/started', 'thread/resume', 'marker-thread/read')
+      LIMIT 1
+    `).get(workItemId, threadId, turnId)?.found);
+  }
+
+  hasConversationAssistantMessage(threadId, turnId) {
+    return Boolean(this.database.prepare(`
+      SELECT 1 AS found FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      LIMIT 1
+    `).get(primaryConversationId, threadId, turnId)?.found);
+  }
+
+  turnCompletedEvent(workItemId, threadId, turnId) {
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'turn_completed'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id ASC LIMIT 1
+    `).get(workItemId, threadId, turnId));
+  }
+
   listEvents(workItemId) {
     return this.database.prepare(`
       SELECT id, kind, payload_json, created_at
       FROM work_events WHERE work_item_id = ? ORDER BY id ASC
-    `).all(workItemId).map((event) => ({
-      id: event.id,
-      kind: event.kind,
-      payload: JSON.parse(event.payload_json),
-      created_at: event.created_at,
-    }));
+    `).all(workItemId).map(decodeWorkEvent);
+  }
+
+  conversationReadIdentity() {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = this.database.prepare("PRAGMA data_version").get().data_version;
+      const connectionChanges = this.database.prepare("SELECT total_changes() AS value").get().value;
+      const after = this.database.prepare("PRAGMA data_version").get().data_version;
+      if (before === after) {
+        return { connection_changes: connectionChanges, data_version: after };
+      }
+    }
+    const error = new Error("conversation read identity changed repeatedly");
+    error.code = "CONVERSATION_READ_UNSTABLE";
+    throw error;
+  }
+
+  primaryConversationWindow({
+    maximumMessages,
+    maximumMessageBytes,
+    maximumHandoffs,
+    maximumHandoffBytes,
+  }) {
+    for (const [value, maximum, label] of [
+      [maximumMessages, 64, "message count"],
+      [maximumMessageBytes, 524_288, "message bytes"],
+      [maximumHandoffs, 32, "handoff count"],
+      [maximumHandoffBytes, 65_536, "handoff bytes"],
+    ]) {
+      if (!Number.isInteger(value) || value < 1 || value > maximum) {
+        throw new Error(`conversation ${label} limit is invalid`);
+      }
+    }
+    const readSizedWindow = ({ kinds, maximumItems, maximumBytes, minimumId = null }) => {
+      const candidateLimit = maximumItems + 1;
+      const minimumClause = minimumId === null ? "" : "AND id >= ?";
+      const perKindSql = kinds.map(() => `
+        SELECT id, kind, payload_json, created_at FROM (
+          SELECT id, kind, payload_json, created_at
+          FROM work_events
+          WHERE work_item_id = ? AND kind = ? ${minimumClause}
+          ORDER BY id DESC LIMIT ?
+        )
+      `).join(" UNION ALL ");
+      const candidateArguments = kinds.flatMap((kind) => (
+        minimumId === null
+          ? [primaryConversationId, kind, candidateLimit]
+          : [primaryConversationId, kind, minimumId, candidateLimit]
+      ));
+      const candidateCount = Number(this.database.prepare(`
+        SELECT COUNT(*) AS count FROM (
+          SELECT id FROM (${perKindSql})
+          ORDER BY id DESC LIMIT ?
+        )
+      `).get(...candidateArguments, candidateLimit)?.count ?? 0);
+      const rows = this.database.prepare(`
+        WITH candidates AS (
+          SELECT id, kind, payload_json, created_at FROM (${perKindSql})
+          ORDER BY id DESC LIMIT ?
+        ), sized AS (
+          SELECT id, kind, payload_json, created_at,
+            ROW_NUMBER() OVER (ORDER BY id DESC) AS row_number,
+            SUM(length(CAST(payload_json AS BLOB)) + 64) OVER (
+              ORDER BY id DESC ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+            ) AS cumulative_bytes
+          FROM candidates
+        )
+        SELECT id, kind, payload_json, created_at
+        FROM sized
+        WHERE row_number <= ? AND cumulative_bytes <= ?
+        ORDER BY id ASC
+      `).all(
+        ...candidateArguments,
+        candidateLimit,
+        maximumItems,
+        maximumBytes,
+      );
+      return {
+        rows,
+        truncated: candidateCount > rows.length,
+      };
+    };
+    const messageWindow = readSizedWindow({
+      kinds: ["conversation_message_claimed", "conversation_assistant_message"],
+      maximumItems: maximumMessages,
+      maximumBytes: maximumMessageBytes,
+    });
+    const visibleClientMessageIds = messageWindow.rows
+      .filter(({ kind }) => kind === "conversation_message_claimed")
+      .map(({ payload_json: payloadJson }) => JSON.parse(payloadJson).clientMessageId);
+    const supportRows = [];
+    const supportIncompleteClientMessageIds = new Set();
+    const supportStatement = this.database.prepare(`
+      SELECT id, kind,
+        CASE WHEN length(CAST(payload_json AS BLOB)) <= 16384 THEN payload_json ELSE NULL END
+          AS payload_json,
+        created_at,
+        length(CAST(payload_json AS BLOB)) AS payload_bytes
+      FROM work_events
+      WHERE work_item_id = ? AND kind = ?
+        AND json_extract(payload_json, '$.clientMessageId') = ?
+      ORDER BY id DESC LIMIT 1
+    `);
+    for (const clientMessageId of visibleClientMessageIds) {
+      for (const kind of ["conversation_message_accepted", "conversation_message_failed"]) {
+        const row = supportStatement.get(primaryConversationId, kind, clientMessageId);
+        if (!row) continue;
+        if (row.payload_json === null) supportIncompleteClientMessageIds.add(clientMessageId);
+        else {
+          delete row.payload_bytes;
+          supportRows.push(row);
+        }
+      }
+    }
+    const handoffWindow = readSizedWindow({
+      kinds: ["conversation_thread_handoff"],
+      maximumItems: maximumHandoffs,
+      maximumBytes: maximumHandoffBytes,
+    });
+    const rows = [...messageWindow.rows, ...supportRows, ...handoffWindow.rows]
+      .sort((left, right) => left.id - right.id);
+    return {
+      events: rows.map((event) => ({
+        id: event.id,
+        kind: event.kind,
+        payload: JSON.parse(event.payload_json),
+        created_at: event.created_at,
+      })),
+      messages_truncated: messageWindow.truncated || supportIncompleteClientMessageIds.size > 0,
+      handoffs_truncated: handoffWindow.truncated,
+      support_incomplete_client_message_ids: [...supportIncompleteClientMessageIds],
+    };
   }
 }

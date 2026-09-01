@@ -47,7 +47,7 @@ test("Control schema v4 migrates work-core tables without losing work items or e
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 7);
     assert.equal(store.getWorkItem(item.id).title, "Preserve me");
     assert.deepEqual(store.listEvents(item.id).map(({ kind }) => kind), ["created"]);
     assert.deepEqual(
@@ -64,7 +64,7 @@ test("Control schema v4 migrates work-core tables without losing work items or e
   }
 });
 
-test("Control schema v2 migrates directly to v6 and preserves existing work", async () => {
+test("Control schema v2 migrates directly to v7 and preserves existing work", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-work-core-v2-"));
   const databasePath = path.join(directory, "control.db");
   let store;
@@ -91,7 +91,7 @@ test("Control schema v2 migrates directly to v6 and preserves existing work", as
     legacy.close();
 
     store = new LatticeStore(databasePath);
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 7);
     assert.equal(store.getWorkItem(item.id).objective, "Survive the direct migration.");
     assert.deepEqual(store.listEvents(item.id).map(({ kind }) => kind), ["created"]);
   } finally {

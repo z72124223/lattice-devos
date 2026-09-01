@@ -45,7 +45,7 @@ test("Control schema v5 migrates durable decisions without losing existing produ
     store = new LatticeStore(databasePath);
     const service = new ControlDecisionService({ store });
     const current = service.current({ scope: "project:migration", limit: 10 });
-    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 6);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 7);
     assert.equal(store.getWorkItem(item.id).objective, "Survive the decision schema migration.");
     assert.equal(current.revision, 0);
     assert.match(current.digest, /^[a-f0-9]{64}$/u);

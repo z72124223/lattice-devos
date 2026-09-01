@@ -15,6 +15,11 @@ const terminalTurnStatuses = new Set(["completed", "interrupted", "failed"]);
 const primaryConversationId = "primary";
 const primaryConversationLeaseTtlMs = 15_000;
 const primaryConversationDiscoveryPasses = 3;
+const fourCoreSurfaceSchemaVersion = "lattice.control.four-core-surface.v1";
+const maximumFourCoreConversationMessages = 64;
+const maximumFourCoreConversationBytes = 524_288;
+const maximumFourCoreConversationHandoffs = 32;
+const maximumFourCoreHandoffBytes = 65_536;
 
 function conversationError(code, message, status = 409) {
   const error = new Error(message);
@@ -76,6 +81,25 @@ function boundedText(value, limit) {
   return `${text.slice(0, limit - suffix.length)}${suffix}`;
 }
 
+function boundedUtf8Text(value, maximumBytes) {
+  if (value == null) return { value: null, truncated: false };
+  const source = String(value);
+  if (Buffer.byteLength(source, "utf8") <= maximumBytes) {
+    return { value: source, truncated: false };
+  }
+  const suffix = " [truncated]";
+  const contentBytes = maximumBytes - Buffer.byteLength(suffix, "utf8");
+  let bytes = 0;
+  let valuePrefix = "";
+  for (const character of source) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > contentBytes) break;
+    valuePrefix += character;
+    bytes += characterBytes;
+  }
+  return { value: `${valuePrefix}${suffix}`, truncated: true };
+}
+
 function continuationPrompt(packet) {
   return [
     "Continue this LATTICE work using the bounded continuation packet below.",
@@ -115,7 +139,7 @@ function conversationTurnPrompt(claim, previousMessages, handoffReason = null) {
 }
 
 function conversationStatusText(item, codexConnected = false) {
-  if (!item) return "選擇專案後即可開始對話。";
+  if (!item) return "確認主要專案後即可開始對話。";
   if (
     !codexConnected
     && ["starting", "running", "waiting_approval"].includes(item.status)
@@ -134,6 +158,70 @@ function conversationStatusText(item, codexConnected = false) {
   }
   if (item.status === "draft") return "對話已準備好。";
   return "這條對話目前無法送出新訊息。";
+}
+
+function publicDecision(decision) {
+  return {
+    id: decision.id,
+    scope: decision.scope,
+    subject: decision.subject,
+    content: decision.content,
+    source: { ...decision.source },
+    status: decision.status,
+    supersedes_decision_id: decision.supersedes_decision_id,
+    created_at: decision.created_at,
+  };
+}
+
+function publicDecisionPacket(packet) {
+  return {
+    schema_version: packet.schema_version,
+    source: { ...packet.source },
+    scope: packet.scope,
+    subject: packet.subject,
+    revision: packet.revision,
+    digest: packet.digest,
+    decisions: packet.decisions.map(publicDecision),
+    truncated: packet.truncated,
+  };
+}
+
+function boundedRecentEntries(entries, { maximumItems, maximumBytes }) {
+  const selected = [];
+  let selectedBytes = 2;
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (selected.length >= maximumItems) break;
+    const entry = entries[index];
+    const entryBytes = Buffer.byteLength(JSON.stringify(entry), "utf8") + 1;
+    if (selectedBytes + entryBytes > maximumBytes) break;
+    selected.unshift(entry);
+    selectedBytes += entryBytes;
+  }
+  return { entries: selected, truncated: selected.length < entries.length };
+}
+
+function boundedFourCoreConversation(conversation) {
+  const messages = boundedRecentEntries(conversation.messages, {
+    maximumItems: maximumFourCoreConversationMessages,
+    maximumBytes: maximumFourCoreConversationBytes,
+  });
+  const handoffs = boundedRecentEntries(conversation.handoffs, {
+    maximumItems: maximumFourCoreConversationHandoffs,
+    maximumBytes: maximumFourCoreHandoffBytes,
+  });
+  const messagesTruncated = Boolean(conversation.messages_truncated || messages.truncated);
+  const handoffsTruncated = Boolean(conversation.handoffs_truncated || handoffs.truncated);
+  return {
+    ...conversation,
+    messages: messages.entries,
+    messages_truncated: messagesTruncated,
+    handoffs: handoffs.entries,
+    handoffs_truncated: handoffsTruncated,
+    history_truncated: Boolean(
+      conversation.history_truncated || messagesTruncated || handoffsTruncated
+    ),
+    last_error: boundedText(conversation.last_error, 2_048),
+  };
 }
 
 export class LatticeControlService {
@@ -161,6 +249,8 @@ export class LatticeControlService {
     this.conversationLeaseLossPromise = null;
     this.requestOwners = new Map();
     this.operations = new Map();
+    this.primaryConversationCache = null;
+    this.fourCoreDecisionCache = null;
     this.onNotification = (message) => this.#onNotification(message);
     this.onServerRequest = (message) => this.#onServerRequest(message);
     this.onServerRequestSettled = (settlement) => this.#onServerRequestSettled(settlement);
@@ -280,7 +370,38 @@ export class LatticeControlService {
   }
 
   primaryConversation() {
-    const item = this.store.getWorkItem(primaryConversationId);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = this.store.conversationReadIdentity();
+      const item = this.store.getWorkItem(primaryConversationId);
+      const cacheKey = JSON.stringify([
+        before.connection_changes,
+        before.data_version,
+        Boolean(this.codex.connected),
+        item?.codex_thread_id ?? null,
+        item?.codex_turn_id ?? null,
+        Boolean(item && this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id)),
+      ]);
+      if (this.primaryConversationCache?.key === cacheKey) {
+        return this.primaryConversationCache.value;
+      }
+      const conversation = this.#primaryConversationFromItem(item);
+      const after = this.store.conversationReadIdentity();
+      if (
+        before.connection_changes === after.connection_changes
+        && before.data_version === after.data_version
+      ) {
+        this.primaryConversationCache = { key: cacheKey, value: conversation };
+        return conversation;
+      }
+    }
+    throw conversationError(
+      "CONVERSATION_READ_UNSTABLE",
+      "對話狀態正在變更，請稍後再試。",
+      503,
+    );
+  }
+
+  #primaryConversationFromItem(item) {
     if (!item) {
       return {
         schema_version: "lattice.control.primary-conversation.v1",
@@ -296,29 +417,36 @@ export class LatticeControlService {
         can_reconnect: false,
         messages: [],
         handoffs: [],
+        messages_truncated: false,
+        handoffs_truncated: false,
+        history_truncated: false,
         last_error: null,
       };
     }
-    const events = this.store.listEvents(primaryConversationId);
+    const window = this.store.primaryConversationWindow({
+      maximumMessages: maximumFourCoreConversationMessages,
+      maximumMessageBytes: maximumFourCoreConversationBytes,
+      maximumHandoffs: maximumFourCoreConversationHandoffs,
+      maximumHandoffBytes: maximumFourCoreHandoffBytes,
+    });
+    const events = window.events;
     const acceptedByMessage = new Map(events
       .filter(({ kind }) => kind === "conversation_message_accepted")
       .map((event) => [event.payload.clientMessageId, event]));
     const failedMessages = new Set(events
       .filter(({ kind }) => kind === "conversation_message_failed")
       .map(({ payload }) => payload.clientMessageId));
-    const unresolvedMessage = events.findLast(({ kind, payload }) => (
-      kind === "conversation_message_claimed"
-      && !acceptedByMessage.has(payload.clientMessageId)
-    )) ?? null;
-    const missingCurrentFinal = events.some(({ kind, payload }) => (
-      kind === "conversation_terminal_missing_reply"
-      && payload.threadId === item.codex_thread_id
-      && payload.turnId === item.codex_turn_id
-    )) && !events.some(({ kind, payload }) => (
-      kind === "conversation_assistant_message"
-      && payload.threadId === item.codex_thread_id
-      && payload.turnId === item.codex_turn_id
-    ));
+    const incompleteSupport = new Set(window.support_incomplete_client_message_ids);
+    let hasUnresolvedMessage = item.status === "starting"
+      && !(item.codex_thread_id && item.codex_turn_id);
+    let missingCurrentFinal = false;
+    if (item.status === "failed") {
+      hasUnresolvedMessage = this.store.hasUnresolvedPrimaryConversationMessage();
+      missingCurrentFinal = this.store.primaryConversationMissingFinal(
+        item.codex_thread_id,
+        item.codex_turn_id,
+      );
+    }
     const messages = [];
     for (const event of events) {
       if (event.kind === "conversation_message_claimed") {
@@ -332,7 +460,9 @@ export class LatticeControlService {
             ? "accepted"
             : failedMessages.has(event.payload.clientMessageId)
               ? "failed"
-              : "saved",
+              : incompleteSupport.has(event.payload.clientMessageId)
+                ? "unknown"
+                : "saved",
           created_at: event.created_at,
           turn_id: accepted?.payload.turnId ?? null,
         });
@@ -357,7 +487,7 @@ export class LatticeControlService {
         reason: event.payload.reason,
         created_at: event.created_at,
       }));
-    return {
+    const conversation = {
       schema_version: "lattice.control.primary-conversation.v1",
       id: item.id,
       project_id: item.project_id,
@@ -367,19 +497,164 @@ export class LatticeControlService {
       status_text: conversationStatusText(item, this.codex.connected),
       codex_connected: Boolean(this.codex.connected),
       can_send: ["draft", "codex_done", "failed"].includes(item.status)
-        && unresolvedMessage === null
+        && !hasUnresolvedMessage
         && !missingCurrentFinal,
       can_interrupt: ["running", "waiting_approval"].includes(item.status) && Boolean(
         this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id),
       ),
       can_reconnect: Boolean(
         ["starting", "running", "waiting_approval", "failed"].includes(item.status)
-        && ((item.codex_thread_id && item.codex_turn_id) || unresolvedMessage)
+        && ((item.codex_thread_id && item.codex_turn_id) || hasUnresolvedMessage)
       ),
       messages,
       handoffs,
+      messages_truncated: window.messages_truncated,
+      handoffs_truncated: window.handoffs_truncated,
+      history_truncated: window.messages_truncated || window.handoffs_truncated,
       last_error: item.failure_summary ?? null,
     };
+    return boundedFourCoreConversation(conversation);
+  }
+
+  fourCoreSurface() {
+    const conversation = this.primaryConversation();
+    const boundedConversation = boundedFourCoreConversation(conversation);
+    const context = this.#fourCoreProjectContext(conversation);
+    if (context.status !== "ready") {
+      return {
+        schema_version: fourCoreSurfaceSchemaVersion,
+        context,
+        conversation: boundedConversation,
+        work_snapshot: null,
+        decisions: null,
+      };
+    }
+    const workSnapshot = this.store.getWorkSnapshot({
+      projectId: context.project_id,
+      maxNodes: 256,
+      maxEdges: 1_024,
+    });
+    if (
+      workSnapshot.tree.revision !== workSnapshot.graph.revision
+      || workSnapshot.tree.digest !== workSnapshot.graph.digest
+    ) {
+      throw conversationError(
+        "FOUR_CORE_WORK_SNAPSHOT_MISMATCH",
+        "工作圖譜與工作樹不是同一次快照，已停止顯示。",
+      );
+    }
+    return {
+      schema_version: fourCoreSurfaceSchemaVersion,
+      context,
+      conversation: boundedConversation,
+      work_snapshot: workSnapshot,
+      decisions: this.#fourCoreDecisions(context.project_id),
+    };
+  }
+
+  #fourCoreDecisions(scope) {
+    const identity = this.store.decisionStateIdentity();
+    if (
+      this.fourCoreDecisionCache?.scope === scope
+      && this.fourCoreDecisionCache.revision === identity.revision
+      && this.fourCoreDecisionCache.digest === identity.digest
+    ) return this.fourCoreDecisionCache.packet;
+    const packet = publicDecisionPacket(this.store.getCurrentDecisionsPacket({ scope, limit: 32 }));
+    this.fourCoreDecisionCache = {
+      scope,
+      revision: packet.revision,
+      digest: packet.digest,
+      packet,
+    };
+    return packet;
+  }
+
+  fourCoreWorkNode({ workItemId, expectedRevision, expectedDigest }) {
+    const context = this.#requireFourCoreProjectContext();
+    return this.store.getWorkNode({
+      projectId: context.project_id,
+      workItemId,
+      expectedRevision,
+      expectedDigest,
+      maxNodes: 256,
+      maxEdges: 1_024,
+    });
+  }
+
+  fourCoreDecisionHistory({ decisionId, expectedRevision, expectedDigest }) {
+    const context = this.#requireFourCoreProjectContext();
+    const packet = this.store.readDecision({
+      decisionId,
+      maxDepth: 32,
+      expectedRevision,
+      expectedDigest,
+    });
+    if (packet.decision.scope !== context.project_id) {
+      throw conversationError(
+        "FOUR_CORE_DECISION_CONTEXT_MISMATCH",
+        "這項決策不屬於目前已確認的專案。",
+        404,
+      );
+    }
+    return {
+      schema_version: packet.schema_version,
+      source: { ...packet.source },
+      revision: packet.revision,
+      digest: packet.digest,
+      decision: publicDecision(packet.decision),
+      lineage: packet.lineage.map(publicDecision),
+      truncated_before: packet.truncated_before,
+      truncated_after: packet.truncated_after,
+    };
+  }
+
+  #fourCoreProjectContext(conversation = this.primaryConversation()) {
+    if (conversation.project_id) {
+      const project = this.store.getProject(conversation.project_id);
+      if (project) {
+        return {
+          status: "ready",
+          reason: null,
+          source: "primary_conversation",
+          project_id: project.id,
+          project_name: project.name,
+          status_text: `目前工作：${project.name}`,
+        };
+      }
+    }
+    const projects = this.store.projectContextCandidates();
+    if (projects.length === 1) {
+      return {
+        status: "ready",
+        reason: null,
+        source: "unique_control_project",
+        project_id: projects[0].id,
+        project_name: projects[0].name,
+        status_text: `已確認唯一主要專案：${projects[0].name}`,
+      };
+    }
+    const noProject = projects.length === 0;
+    return {
+      status: "not_ready",
+      reason: noProject ? "no_project_context" : "ambiguous_project_context",
+      source: null,
+      project_id: null,
+      project_name: null,
+      status_text: noProject
+        ? "尚未有可證實的主要專案；四核心會保持空白，不會自行猜測。"
+        : "目前有多個專案但長期對話尚未綁定；四核心不會偷偷選擇第一個專案。",
+    };
+  }
+
+  #requireFourCoreProjectContext() {
+    const context = this.#fourCoreProjectContext(this.primaryConversation());
+    if (context.status !== "ready") {
+      throw conversationError(
+        "FOUR_CORE_PROJECT_CONTEXT_NOT_READY",
+        context.status_text,
+      );
+    }
+    return context;
   }
 
   async sendPrimaryConversationMessage({ projectId, clientMessageId, text }) {
@@ -426,7 +701,7 @@ export class LatticeControlService {
             this.#appendEventOnce(primaryConversationId, "conversation_message_failed", {
               clientMessageId: claim.event.payload.clientMessageId,
               message: boundedText(error?.message ?? error, 2_048),
-              code: error?.code ?? null,
+              code: boundedText(error?.code, 128),
             }, fence);
           }
           throw error;
@@ -455,25 +730,15 @@ export class LatticeControlService {
   }
 
   #conversationBinding() {
-    return this.store.listEvents(primaryConversationId)
-      .filter(({ kind }) => kind === "conversation_thread_bound")
-      .at(-1) ?? null;
+    return this.store.latestPrimaryConversationBinding();
   }
 
   #conversationAcceptedEvent(clientMessageId) {
-    return this.store.listEvents(primaryConversationId).find(({ kind, payload }) => (
-      kind === "conversation_message_accepted"
-      && payload.clientMessageId === clientMessageId
-    )) ?? null;
+    return this.store.primaryConversationAcceptedEvent(clientMessageId);
   }
 
   #conversationTerminalEvent(threadId, turnId) {
-    return this.store.listEvents(primaryConversationId).find(({ kind, payload }) => (
-      kind === "turn_completed"
-      && payload.threadId === threadId
-      && payload.turnId === turnId
-      && terminalTurnStatuses.has(payload.status)
-    )) ?? null;
+    return this.store.primaryConversationTerminalEvent(threadId, turnId);
   }
 
   async #reconcilePrimaryConversationBeforeClaim(projectId, effectIdentity, fence) {
@@ -790,14 +1055,10 @@ export class LatticeControlService {
         "Codex returned an ambiguous saved-message turn",
       );
     }
-    const events = this.store.listEvents(primaryConversationId);
     const exactEmptyBinding = Boolean(
       thread.turns.length === 0
       && item.codex_turn_id == null
-      && !events.some(({ kind, payload }) => (
-        kind === "conversation_message_accepted"
-        && payload.threadId === item.codex_thread_id
-      )),
+      && !this.store.primaryConversationHasAcceptedThread(item.codex_thread_id),
     );
     const dispatchIntent = this.store.primaryConversationDispatchIntent(
       claim.event.payload.clientMessageId,
@@ -812,25 +1073,19 @@ export class LatticeControlService {
           "the saved turn dispatch intent does not match the bound conversation",
         );
       }
-      const dispatchNotSent = events.find(({ id, kind, payload }) => (
-        id > dispatchIntent.id
-        && kind === "conversation_turn_dispatch_not_sent"
-        && payload.clientMessageId === claim.event.payload.clientMessageId
-        && payload.threadId === item.codex_thread_id
-        && payload.promptDigest === claim.event.payload.promptDigest
-        && payload.originalIntentEventId === dispatchIntent.id
-        && payload.attempt === 1
-        && payload.errorCode === "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED"
-      ));
-      const retryIntent = events.find(({ id, kind, payload }) => (
-        id > (dispatchNotSent?.id ?? dispatchIntent.id)
-        && kind === "conversation_turn_dispatch_retry_intended"
-        && payload.clientMessageId === claim.event.payload.clientMessageId
-        && payload.threadId === item.codex_thread_id
-        && payload.promptDigest === claim.event.payload.promptDigest
-        && payload.originalIntentEventId === dispatchIntent.id
-        && payload.attempt === 2
-      ));
+      const dispatchNotSent = this.store.primaryConversationDispatchNotSent({
+        clientMessageId: claim.event.payload.clientMessageId,
+        threadId: item.codex_thread_id,
+        promptDigest: claim.event.payload.promptDigest,
+        originalIntentEventId: dispatchIntent.id,
+      });
+      const retryIntent = this.store.primaryConversationRetryIntent({
+        clientMessageId: claim.event.payload.clientMessageId,
+        threadId: item.codex_thread_id,
+        promptDigest: claim.event.payload.promptDigest,
+        originalIntentEventId: dispatchIntent.id,
+        afterEventId: dispatchNotSent?.id ?? dispatchIntent.id,
+      });
       const previousTurn = thread.turns.at(-1) ?? null;
       const previousTerminal = previousTurn
         ? this.#conversationTerminalEvent(item.codex_thread_id, previousTurn.id)
@@ -1053,14 +1308,7 @@ export class LatticeControlService {
     return this.#runExclusive(primaryConversationId, "conversation-reconnect", async () => {
       const fence = this.#acquirePrimaryConversationLease();
       try {
-        const events = this.store.listEvents(primaryConversationId);
-        const acceptedIds = new Set(events
-          .filter(({ kind }) => kind === "conversation_message_accepted")
-          .map(({ payload }) => payload.clientMessageId));
-        const unresolved = events.findLast(({ kind, payload }) => (
-          kind === "conversation_message_claimed"
-          && !acceptedIds.has(payload.clientMessageId)
-        ));
+        const unresolved = this.store.primaryConversationUnresolvedMessage();
         const effectIdentity = await this.#conversationEffectIdentity(fence);
         if (unresolved) {
           const claim = this.store.claimPrimaryConversationMessage({
@@ -1078,21 +1326,21 @@ export class LatticeControlService {
           return result;
         }
         const item = requireItem(this.store, primaryConversationId);
-        const accepted = events.findLast(({ kind, payload }) => (
-          kind === "conversation_message_accepted"
-          && payload.threadId === item.codex_thread_id
-          && payload.turnId === item.codex_turn_id
-        ));
+        const accepted = item.codex_thread_id && item.codex_turn_id
+          ? this.store.primaryConversationAcceptedForTurn(
+            item.codex_thread_id,
+            item.codex_turn_id,
+          )
+          : null;
         if (!accepted) {
           throw conversationError(
             "CONVERSATION_RECONCILIATION_REQUIRED",
             "the saved conversation has no exact accepted message binding",
           );
         }
-        const claimed = events.find(({ kind, payload }) => (
-          kind === "conversation_message_claimed"
-          && payload.clientMessageId === accepted.payload.clientMessageId
-        ));
+        const claimed = this.store.primaryConversationMessage(
+          accepted.payload.clientMessageId,
+        );
         if (!claimed) {
           throw conversationError(
             "CONVERSATION_RECONCILIATION_REQUIRED",
@@ -1308,9 +1556,9 @@ export class LatticeControlService {
     if (!["interrupted", "failed"].includes(turn.status)) {
       throw new Error(`Codex turn ${turn.id} is not in a retryable terminal state`);
     }
-    const retryClaims = this.store.listEvents(id)
-      .filter(({ kind }) => kind === "codex_retry_claimed");
-    if (retryClaims.length >= 1) throw new Error("the bounded Codex retry was already used");
+    if (this.store.hasEventKind(id, "codex_retry_claimed")) {
+      throw new Error("the bounded Codex retry was already used");
+    }
 
     const item = requireItem(this.store, id);
     if (!this.store.transitionWorkItem(id, ["failed"], {
@@ -1640,10 +1888,14 @@ export class LatticeControlService {
   }
 
   #appendEventOnce(id, kind, payload, fence = null) {
-    const encoded = JSON.stringify(payload);
-    const exists = this.store.listEvents(id)
-      .some((event) => event.kind === kind && JSON.stringify(event.payload) === encoded);
-    if (exists) return false;
+    const serialized = JSON.stringify(payload);
+    if (Buffer.byteLength(serialized, "utf8") > 16_384) {
+      throw conversationError(
+        "CONVERSATION_EVENT_PAYLOAD_LIMIT_EXCEEDED",
+        "conversation lifecycle event exceeds the persistence bound",
+      );
+    }
+    if (this.store.hasEventPayload(id, kind, payload)) return false;
     const conversationFence = id === primaryConversationId
       ? this.#assertPrimaryConversationFence(fence ?? this.conversationLeaseFence)
       : null;
@@ -1688,12 +1940,7 @@ export class LatticeControlService {
   }
 
   #hasConfirmedStart(id, threadId, turnId) {
-    return this.store.listEvents(id).some(({ kind, payload }) => (
-      kind === "codex_started"
-      && payload.threadId === threadId
-      && payload.turnId === turnId
-      && ["turn/started", "thread/resume", "marker-thread/read"].includes(payload.confirmedBy)
-    ));
+    return this.store.hasConfirmedStartEvent(id, threadId, turnId);
   }
 
   #markTurnStarted(id, threadId, turn, fence = null) {
@@ -1738,11 +1985,7 @@ export class LatticeControlService {
     ) return false;
 
     if (id === primaryConversationId && status === "completed") {
-      const hasFinalReply = this.store.listEvents(id).some(({ kind, payload }) => (
-        kind === "conversation_assistant_message"
-        && payload.threadId === threadId
-        && payload.turnId === turnId
-      ));
+      const hasFinalReply = this.store.hasConversationAssistantMessage(threadId, turnId);
       if (!hasFinalReply) {
         this.store.updateWorkItem(id, {
           status: "failed",
@@ -1759,11 +2002,7 @@ export class LatticeControlService {
       }
     }
 
-    const existingTerminal = this.store.listEvents(id).find(({ kind, payload }) => (
-      kind === "turn_completed"
-      && payload.threadId === threadId
-      && payload.turnId === turnId
-    ));
+    const existingTerminal = this.store.turnCompletedEvent(id, threadId, turnId);
     if (existingTerminal) {
       if (existingTerminal.payload.status !== status) {
         this.#appendEventOnce(id, "turn_terminal_conflict_ignored", {
@@ -1785,14 +2024,19 @@ export class LatticeControlService {
         progress: completed ? "Codex turn completed" : `Codex turn ${status}`,
         failure_summary: completed
           ? null
-          : turn.error?.message ?? `Codex turn ${status}`,
+          : boundedText(turn.error?.message ?? `Codex turn ${status}`, 2_048),
       }, id === primaryConversationId ? fence : null);
     }
     this.#appendEventOnce(id, "turn_completed", {
       threadId,
       turnId,
       status,
-      error: turn.error ?? null,
+      error: turn.error
+        ? {
+          code: boundedText(turn.error.code, 128),
+          message: boundedText(turn.error.message, 2_048),
+        }
+        : null,
     }, id === primaryConversationId ? fence : null);
     if (item.approval?.requestId != null) {
       if (id === primaryConversationId) {
@@ -1824,13 +2068,18 @@ export class LatticeControlService {
   }
 
   #mcpDiagnosticPayload(params = {}) {
-    return {
-      threadId: params.threadId ?? null,
-      name: params.name ?? null,
-      status: params.status ?? null,
-      error: params.error ?? null,
-      failureReason: params.failureReason ?? null,
+    const fields = {
+      threadId: boundedUtf8Text(params.threadId, 512),
+      name: boundedUtf8Text(params.name, 512),
+      status: boundedUtf8Text(params.status, 256),
+      error: boundedUtf8Text(params.error, 4_096),
+      failureReason: boundedUtf8Text(params.failureReason, 4_096),
     };
+    const payload = Object.fromEntries(Object.entries(fields).map(
+      ([key, result]) => [key, result.value],
+    ));
+    if (Object.values(fields).some(({ truncated }) => truncated)) payload.truncated = true;
+    return payload;
   }
 
   #persistMcpDiagnostic(id, params, fence = null) {
@@ -1940,12 +2189,12 @@ export class LatticeControlService {
         status: "failed",
         approval_json: null,
         progress: "Codex approval request failed",
-        failure_summary: response.error.message,
+        failure_summary: boundedText(response.error.message, 2_048),
       }, fence);
       this.store.appendEvent(owner, "approval_request_failed", {
         requestId: id,
         code: response.error.code ?? null,
-        message: response.error.message,
+        message: boundedText(response.error.message, 2_048),
       }, fence);
     }
     this.requestOwners.delete(id);

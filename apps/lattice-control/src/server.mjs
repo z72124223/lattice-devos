@@ -30,6 +30,21 @@ function sendJson(response, status, value) {
   response.end(body);
 }
 
+function publicErrorMessage(value) {
+  const text = String(value ?? "Control request failed");
+  const suffix = " [truncated]";
+  return text.length <= 2_048
+    ? text
+    : `${text.slice(0, 2_048 - suffix.length)}${suffix}`;
+}
+
+function publicErrorCode(error) {
+  if (error instanceof TypeError) return "INVALID_REQUEST";
+  return typeof error?.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/u.test(error.code)
+    ? error.code
+    : "CONTROL_REQUEST_FAILED";
+}
+
 async function readJson(request) {
   const chunks = [];
   let length = 0;
@@ -100,6 +115,11 @@ function projectRouteId(pathname, action = null) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+function fourCoreRouteId(pathname, resource) {
+  const match = pathname.match(new RegExp(`^/api/four-core/${resource}/([^/]+)$`, "u"));
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
 export function createLatticeServer({
   databasePath,
   codex = new CodexAppServer(),
@@ -133,13 +153,40 @@ export function createLatticeServer({
         sendJson(response, 200, service.primaryConversation());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/four-core") {
+        sendJson(response, 200, service.fourCoreSurface());
+        return;
+      }
+      const fourCoreWorkItemId = fourCoreRouteId(url.pathname, "work");
+      if (request.method === "GET" && fourCoreWorkItemId) {
+        sendJson(response, 200, service.fourCoreWorkNode({
+          workItemId: fourCoreWorkItemId,
+          expectedRevision: url.searchParams.get("revision"),
+          expectedDigest: url.searchParams.get("digest"),
+        }));
+        return;
+      }
+      const fourCoreDecisionId = fourCoreRouteId(url.pathname, "decisions");
+      if (request.method === "GET" && fourCoreDecisionId) {
+        const revision = url.searchParams.get("revision");
+        sendJson(response, 200, service.fourCoreDecisionHistory({
+          decisionId: fourCoreDecisionId,
+          expectedRevision: revision == null ? null : Number(revision),
+          expectedDigest: url.searchParams.get("digest"),
+        }));
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/conversation/messages") {
         const body = await readJson(request);
-        sendJson(response, 200, await service.sendPrimaryConversationMessage({
+        const conversation = await service.sendPrimaryConversationMessage({
           projectId: body.projectId,
           clientMessageId: body.clientMessageId,
           text: body.text,
-        }));
+        });
+        sendJson(response, 200, {
+          ...conversation,
+          acknowledged_client_message_id: body.clientMessageId,
+        });
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/conversation/reconnect") {
@@ -262,12 +309,8 @@ export function createLatticeServer({
       sendJson(response, 404, { error: "not found" });
     } catch (error) {
       sendJson(response, Number.isInteger(error?.status) ? error.status : 400, {
-        error: error.message,
-        code: typeof error.code === "string"
-          ? error.code
-          : error instanceof TypeError
-            ? "INVALID_REQUEST"
-            : "CONTROL_REQUEST_FAILED",
+        error: publicErrorMessage(error?.message),
+        code: publicErrorCode(error),
       });
     }
   });

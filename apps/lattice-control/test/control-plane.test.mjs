@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { createLatticeServer } from "../src/server.mjs";
 import { LatticeControlService } from "../src/service.mjs";
@@ -732,6 +734,44 @@ test("MCP startup status persists every diagnostic field", { timeout: 2_000 }, a
     for (const [key, value] of Object.entries(diagnostic)) {
       assert.deepEqual(event.payload[key], value);
     }
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("oversized MCP diagnostics stay bounded without failing the primary conversation", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Bounded MCP diagnostics", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "bounded-mcp-diagnostic-001",
+      text: "超大的 MCP 診斷不能讓主要對話失敗。",
+    });
+    codex.emit("notification", {
+      method: "mcpServer/startupStatus/updated",
+      params: {
+        threadId: sent.codex_thread_id,
+        name: "diagnostic-server",
+        status: "failed",
+        error: "錯".repeat(20_000),
+        failureReason: "reason".repeat(5_000),
+      },
+    });
+
+    assert.equal(service.primaryConversation().status, "running");
+    const events = store.listEvents("primary");
+    const diagnostic = events.filter(
+      ({ kind }) => kind === "mcp_server_startup_status_updated",
+    ).at(-1);
+    assert.ok(diagnostic);
+    assert.equal(diagnostic.payload.truncated, true);
+    assert.ok(Buffer.byteLength(JSON.stringify(diagnostic.payload), "utf8") <= 16_384);
+    assert.match(diagnostic.payload.error, /\[truncated\]$/u);
+    assert.equal(events.some(({ kind }) => kind === "conversation_notification_failed"), false);
   } finally {
     service.close();
     store.close();
@@ -2370,7 +2410,13 @@ test("the loopback conversation API serves one responsive chat entry and durable
 
     const pageHtml = await (await fetch(`${origin}/`)).text();
     assert.equal(pageHtml.match(/id="conversation-form"/gu)?.length, 1);
-    assert.doesNotMatch(pageHtml, /id="work-form"|id="items"/u);
+    assert.equal(pageHtml.match(/data-core-target=/gu)?.length, 4);
+    assert.match(pageHtml, /id="core-conversation"/u);
+    assert.match(pageHtml, /id="core-work-graph"/u);
+    assert.match(pageHtml, /id="core-work-tree"/u);
+    assert.match(pageHtml, /id="core-decisions"/u);
+    assert.doesNotMatch(pageHtml, /id="work-form"|id="items"|id="project-form"/u);
+    assert.doesNotMatch(pageHtml, /id="conversation-project"/u);
     assert.match(pageHtml, /@media\s*\(max-width:/u);
     assert.match(pageHtml, /localStorage/u);
     assert.match(pageHtml, /conversation\?\.can_send === true/u);
@@ -2379,8 +2425,11 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.match(pageHtml, /typeof parsed\.text === "string"/u);
     assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
     assert.match(pageHtml, /readyForFirstMessage/u);
-    assert.match(pageHtml, /const projectForm = event\.currentTarget/u);
-    assert.match(pageHtml, /projectForm\.reset\(\)/u);
+    assert.match(pageHtml, /assertSharedWorkSnapshot/u);
+    assert.match(pageHtml, /renderWorkGraph\(workSnapshot\.graph\)/u);
+    assert.match(pageHtml, /renderWorkTree\(workSnapshot\.tree\)/u);
+    assert.match(pageHtml, /if\(state\.pollPromise\)return state\.pollPromise/u);
+    assert.doesNotMatch(pageHtml, /api\("\/api\/work-snapshot"/u);
 
     const projectResponse = await fetch(`${origin}/api/projects`, {
       method: "POST",
@@ -2456,6 +2505,451 @@ test("the loopback conversation API serves one responsive chat entry and durable
   }
 });
 
+test("schema v6 upgrades transactionally to v7 conversation read indexes", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-control-v6-v7-"));
+  const databasePath = path.join(directory, "control.db");
+  let store = new LatticeStore(databasePath);
+  try {
+    const project = store.createProject({ name: "Migration proof", rootPath: directory });
+    const preservedWork = store.createWorkItem({
+      projectId: project.id,
+      title: "Preserved work",
+      objective: "Prove additive access paths preserve Control truth.",
+    });
+    const oversizedLegacyDiagnostic = {
+      threadId: "legacy-thread",
+      name: "legacy-mcp",
+      status: "failed",
+      error: "X".repeat(20_000),
+      failureReason: null,
+    };
+    store.close();
+    store = null;
+
+    const v6 = new DatabaseSync(databasePath);
+    try {
+      for (const indexName of [
+        "work_events_work_item_kind_id",
+        "work_events_client_message_lookup",
+        "work_events_thread_turn_lookup",
+        "work_events_message_lookup",
+        "work_events_idempotent_payload_lookup",
+      ]) v6.exec(`DROP INDEX ${indexName};`);
+      v6.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, 'mcp_server_startup_status_updated', ?, ?)
+      `).run(
+        preservedWork.id,
+        JSON.stringify(oversizedLegacyDiagnostic),
+        new Date().toISOString(),
+      );
+      v6.exec("PRAGMA user_version = 6;");
+    } finally {
+      v6.close();
+    }
+
+    store = new LatticeStore(databasePath);
+    assert.equal(store.database.prepare("PRAGMA user_version").get().user_version, 7);
+    assert.equal(store.listWorkItems().length, 1);
+    const indexes = new Set(store.database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND name LIKE 'work_events_%'
+    `).all().map(({ name }) => name));
+    for (const indexName of [
+      "work_events_work_item_kind_id",
+      "work_events_client_message_lookup",
+      "work_events_thread_turn_lookup",
+      "work_events_message_lookup",
+      "work_events_idempotent_payload_lookup",
+    ]) assert.ok(indexes.has(indexName));
+    const idempotentIndexSql = store.database.prepare(`
+      SELECT sql FROM sqlite_master WHERE name = 'work_events_idempotent_payload_lookup'
+    `).get().sql;
+    assert.match(idempotentIndexSql, /length\(CAST\(payload_json AS BLOB\)\) <= 16384/u);
+    assert.equal(store.hasEventPayload(
+      preservedWork.id,
+      "mcp_server_startup_status_updated",
+      oversizedLegacyDiagnostic,
+    ), false);
+  } finally {
+    store?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("the four-core product API resolves one proven context and shares work projection identity", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-four-core-http-"));
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex: new FakeCodex(),
+  });
+  try {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+
+    const originalFourCoreSurface = application.service.fourCoreSurface
+      .bind(application.service);
+    application.service.fourCoreSurface = () => {
+      const error = new Error("x".repeat(5_000));
+      error.code = "Y".repeat(5_000);
+      throw error;
+    };
+    const boundedErrorResponse = await fetch(`${origin}/api/four-core`);
+    assert.equal(boundedErrorResponse.status, 400);
+    const boundedError = await boundedErrorResponse.json();
+    assert.ok(boundedError.error.length <= 2_048);
+    assert.match(boundedError.error, /\[truncated\]$/u);
+    assert.equal(boundedError.code, "CONTROL_REQUEST_FAILED");
+    application.service.fourCoreSurface = originalFourCoreSurface;
+
+    const empty = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(empty.context.status, "not_ready");
+    assert.equal(empty.context.reason, "no_project_context");
+    assert.equal(empty.work_snapshot, null);
+    assert.equal(empty.decisions, null);
+
+    const project = application.service.createProject({ name: "Four core", rootPath: directory });
+    const unique = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(unique.context.status, "ready");
+    assert.equal(unique.context.source, "unique_control_project");
+    assert.equal(unique.context.project_id, project.id);
+    assert.equal("root_path" in unique.context, false);
+
+    application.service.createProject({ name: "Ambiguous", rootPath: directory });
+    const ambiguous = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(ambiguous.context.status, "not_ready");
+    assert.equal(ambiguous.context.reason, "ambiguous_project_context");
+    assert.equal(ambiguous.context.project_id, null);
+    assert.equal(ambiguous.work_snapshot, null);
+
+    application.store.ensurePrimaryConversation(project.id);
+    const goal = application.service.createWorkItem({
+      projectId: project.id,
+      title: "完成四核心介面",
+      objective: "把三項既有能力接到同一產品畫面。",
+      priority: "high",
+    });
+    const foundation = application.service.createWorkItem({
+      projectId: project.id,
+      title: "既有資料核心",
+      objective: "沿用同一 Control store。",
+      priority: "normal",
+    });
+    const interfaceWork = application.service.createWorkItem({
+      projectId: project.id,
+      title: "四核心 UI",
+      objective: "呈現對話、圖譜、樹與決策。",
+      priority: "urgent",
+    });
+    application.store.updateWorkItem(goal.id, { status: "running", progress: "正在整合 UI" });
+    let snapshot = application.store.getWorkSnapshot({ projectId: project.id });
+    snapshot = application.store.setWorkRelations({
+      projectId: project.id,
+      workItemId: foundation.id,
+      parentId: goal.id,
+      expectedRevision: snapshot.revision,
+      expectedDigest: snapshot.digest,
+    }).snapshot;
+    snapshot = application.store.setWorkRelations({
+      projectId: project.id,
+      workItemId: interfaceWork.id,
+      parentId: goal.id,
+      dependsOn: [foundation.id],
+      blocker: { status: "blocked", reason: "等待真實瀏覽器驗收" },
+      expectedRevision: snapshot.revision,
+      expectedDigest: snapshot.digest,
+    }).snapshot;
+
+    let decisionState = application.store.getCurrentDecisionsPacket({
+      scope: project.id,
+      limit: 32,
+    });
+    const firstDecision = application.store.recordDecision({
+      scope: project.id,
+      subject: "product.navigation",
+      content: "使用左側四核心導覽。",
+      rationale: "初始桌面方向。",
+      source: { kind: "approved_document", reference: "document:four-core-acceptance#initial" },
+      clientRequestId: "four-core-decision-001",
+      expectedRevision: decisionState.revision,
+      expectedDigest: decisionState.digest,
+    });
+    decisionState = application.store.getCurrentDecisionsPacket({ scope: project.id, limit: 32 });
+    application.store.recordDecision({
+      scope: project.id,
+      subject: "product.navigation",
+      content: "桌面使用四分頁，手機使用底部四分頁。",
+      rationale: "同一資訊架構適應兩種比例。",
+      source: { kind: "approved_document", reference: "document:four-core-acceptance#replacement" },
+      supersedesDecisionId: firstDecision.decision.id,
+      clientRequestId: "four-core-decision-002",
+      expectedRevision: decisionState.revision,
+      expectedDigest: decisionState.digest,
+    });
+
+    const response = await fetch(`${origin}/api/four-core`);
+    assert.equal(response.status, 200);
+    const surface = await response.json();
+    assert.equal(surface.context.status, "ready");
+    assert.equal(surface.context.source, "primary_conversation");
+    assert.equal(surface.context.project_id, project.id);
+    assert.equal(surface.work_snapshot.revision, surface.work_snapshot.tree.revision);
+    assert.equal(surface.work_snapshot.revision, surface.work_snapshot.graph.revision);
+    assert.equal(surface.work_snapshot.digest, surface.work_snapshot.tree.digest);
+    assert.equal(surface.work_snapshot.digest, surface.work_snapshot.graph.digest);
+    assert.deepEqual(
+      surface.work_snapshot.graph.nodes.find(({ id }) => id === foundation.id).reverse_dependents,
+      [interfaceWork.id],
+    );
+    assert.equal(
+      surface.work_snapshot.tree.nodes.find(({ id }) => id === interfaceWork.id).blocker.reasons[0].reason,
+      "等待真實瀏覽器驗收",
+    );
+    assert.equal(surface.decisions.decisions.length, 1);
+    assert.equal(surface.decisions.decisions[0].supersedes_decision_id, firstDecision.decision.id);
+    assert.equal("rationale" in surface.decisions.decisions[0], false);
+    assert.equal(surface.conversation.messages_truncated, false);
+    assert.equal(surface.conversation.handoffs_truncated, false);
+    assert.equal(surface.conversation.can_send, true);
+    let currentWorkSnapshot = surface.work_snapshot;
+
+    const queryPlan = (sql, ...args) => application.store.database
+      .prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args)
+      .map(({ detail }) => detail).join("\n");
+    assert.match(queryPlan(
+      "SELECT id FROM work_events WHERE work_item_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+      "primary",
+      "conversation_message_claimed",
+    ), /work_events_work_item_kind_id/u);
+    assert.match(queryPlan(
+      "SELECT id FROM work_events WHERE work_item_id = ? AND kind = ? "
+        + "AND json_extract(payload_json, '$.clientMessageId') = ? ORDER BY id DESC LIMIT 1",
+      "primary",
+      "conversation_message_claimed",
+      "indexed-message",
+    ), /work_events_client_message_lookup/u);
+    assert.match(queryPlan(
+      "SELECT id FROM work_events WHERE work_item_id = ? AND kind = ? "
+        + "AND json_extract(payload_json, '$.threadId') = ? "
+        + "AND json_extract(payload_json, '$.turnId') = ? ORDER BY id DESC LIMIT 1",
+      "primary",
+      "turn_completed",
+      "indexed-thread",
+      "indexed-turn",
+    ), /work_events_thread_turn_lookup/u);
+    assert.match(queryPlan(
+      "SELECT id FROM work_events WHERE work_item_id = ? AND kind = ? "
+        + "AND json_extract(payload_json, '$.messageId') = ? ORDER BY id DESC LIMIT 1",
+      "primary",
+      "conversation_assistant_message",
+      "indexed-reply",
+    ), /work_events_message_lookup/u);
+    const idempotentIndexSql = application.store.database.prepare(`
+      SELECT sql FROM sqlite_master WHERE name = 'work_events_idempotent_payload_lookup'
+    `).get().sql;
+    const idempotentPredicate = idempotentIndexSql.match(/\bWHERE\s+([\s\S]+)$/u)[1];
+    assert.match(queryPlan(
+      `SELECT id FROM work_events WHERE work_item_id = ? AND kind = ? AND payload_json = ?
+        AND (${idempotentPredicate}) LIMIT 1`,
+      "primary",
+      "turn_completed",
+      "{}",
+    ), /work_events_idempotent_payload_lookup/u);
+    const boundedMultiKindPlan = queryPlan(`
+      SELECT id FROM (
+        SELECT id FROM (
+          SELECT id FROM work_events WHERE work_item_id = ? AND kind = ?
+          ORDER BY id DESC LIMIT ?
+        )
+        UNION ALL
+        SELECT id FROM (
+          SELECT id FROM work_events WHERE work_item_id = ? AND kind = ?
+          ORDER BY id DESC LIMIT ?
+        )
+      ) ORDER BY id DESC LIMIT ?
+    `, "primary", "conversation_message_claimed", 65,
+    "primary", "conversation_assistant_message", 65, 65);
+    assert.equal((boundedMultiKindPlan.match(/work_events_work_item_kind_id/gu) ?? []).length, 2);
+
+    const originalListEvents = application.store.listEvents.bind(application.store);
+    const originalListProjects = application.store.listProjects.bind(application.store);
+    const originalCurrentDecisions = application.store.getCurrentDecisionsPacket
+      .bind(application.store);
+    const originalConversationWindow = application.store.primaryConversationWindow
+      .bind(application.store);
+    const observedConversationWindows = [];
+    let currentDecisionReads = 0;
+    application.store.listEvents = () => {
+      throw new Error("four-core polling must not materialize the complete event history");
+    };
+    application.store.listProjects = () => {
+      throw new Error("four-core polling must not materialize the complete project catalog");
+    };
+    application.store.getCurrentDecisionsPacket = (options) => {
+      currentDecisionReads += 1;
+      return originalCurrentDecisions(options);
+    };
+    application.store.primaryConversationWindow = (options) => {
+      observedConversationWindows.push(options);
+      return originalConversationWindow(options);
+    };
+    application.service.primaryConversationCache = null;
+    application.service.fourCoreDecisionCache = null;
+    try {
+      const recentSurface = application.service.fourCoreSurface();
+      assert.equal(recentSurface.conversation.history_truncated, false);
+      const unchangedSurface = application.service.fourCoreSurface();
+      assert.equal(unchangedSurface.decisions.digest, recentSurface.decisions.digest);
+      assert.equal(observedConversationWindows.length, 1);
+      assert.equal(currentDecisionReads, 1);
+      application.store.updateWorkItem(foundation.id, { progress: "unrelated work mutation" });
+      const workChangedSurface = application.service.fourCoreSurface();
+      currentWorkSnapshot = workChangedSurface.work_snapshot;
+      assert.equal(workChangedSurface.decisions.digest, recentSurface.decisions.digest);
+      assert.equal(currentDecisionReads, 1);
+      application.service.fourCoreWorkNode({
+        workItemId: foundation.id,
+        expectedRevision: currentWorkSnapshot.revision,
+        expectedDigest: currentWorkSnapshot.digest,
+      });
+      application.service.fourCoreDecisionHistory({
+        decisionId: surface.decisions.decisions[0].id,
+        expectedRevision: surface.decisions.revision,
+        expectedDigest: surface.decisions.digest,
+      });
+      assert.equal(observedConversationWindows.length, 2);
+      assert.equal(currentDecisionReads, 1);
+      assert.ok(observedConversationWindows.every((options) => (
+        options.maximumMessages === 64
+        && options.maximumMessageBytes === 524_288
+        && options.maximumHandoffs === 32
+        && options.maximumHandoffBytes === 65_536
+      )));
+    } finally {
+      application.store.listEvents = originalListEvents;
+      application.store.listProjects = originalListProjects;
+      application.store.getCurrentDecisionsPacket = originalCurrentDecisions;
+      application.store.primaryConversationWindow = originalConversationWindow;
+    }
+
+    const currentDecisionPlan = application.store.database.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT id FROM decisions
+      WHERE status = 'current' AND scope = ?
+      ORDER BY subject ASC, id ASC LIMIT ?
+    `).all(project.id, 33).map(({ detail }) => detail).join("\n");
+    assert.match(currentDecisionPlan, /decisions_current_scope_subject/u);
+
+    const insertEvent = application.store.database.prepare(`
+      INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+      VALUES ('primary', ?, ?, ?)
+    `);
+    application.store.database.exec("BEGIN IMMEDIATE;");
+    try {
+      for (let index = 0; index < 40; index += 1) {
+        const clientMessageId = `bounded-message-${index}`;
+        const turnId = `bounded-turn-${index}`;
+        const createdAt = new Date(Date.UTC(2026, 8, 1, 0, 0, index)).toISOString();
+        insertEvent.run("conversation_message_claimed", JSON.stringify({
+          clientMessageId,
+          projectId: project.id,
+          text: `message ${index}`,
+          promptDigest: createHash("sha256").update(`message ${index}`, "utf8").digest("hex"),
+        }), createdAt);
+        insertEvent.run("conversation_message_accepted", JSON.stringify({
+          clientMessageId,
+          threadId: "bounded-thread",
+          turnId,
+        }), createdAt);
+        insertEvent.run("conversation_assistant_message", JSON.stringify({
+          messageId: `bounded-reply-${index}`,
+          threadId: "bounded-thread",
+          turnId,
+          text: `reply ${index} ${"x".repeat(20_000)}`,
+        }), createdAt);
+        insertEvent.run("conversation_thread_handoff", JSON.stringify({
+          fromThreadId: `from-${index}`,
+          toThreadId: `to-${index}`,
+          reason: "bounded acceptance",
+        }), createdAt);
+      }
+      application.store.database.exec("COMMIT;");
+    } catch (error) {
+      application.store.database.exec("ROLLBACK;");
+      throw error;
+    }
+    const boundedSurface = application.service.fourCoreSurface();
+    assert.equal(boundedSurface.conversation.messages_truncated, true);
+    assert.ok(boundedSurface.conversation.messages.length <= 64);
+    assert.ok(Buffer.byteLength(JSON.stringify(boundedSurface.conversation), "utf8") < 600_000);
+    assert.equal(boundedSurface.conversation.handoffs_truncated, true);
+    assert.equal(boundedSurface.conversation.handoffs.length, 32);
+
+    const oldReplayResponse = await fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        clientMessageId: "bounded-message-0",
+        text: "message 0",
+      }),
+    });
+    assert.equal(oldReplayResponse.status, 200);
+    const oldReplay = await oldReplayResponse.json();
+    assert.equal(oldReplay.acknowledged_client_message_id, "bounded-message-0");
+    assert.equal(oldReplay.messages.some(({ id }) => id === "bounded-message-0"), false);
+    assert.equal(application.store.database.prepare(`
+      SELECT COUNT(*) AS count FROM work_events
+      WHERE work_item_id = 'primary' AND kind = 'conversation_message_claimed'
+        AND json_extract(payload_json, '$.clientMessageId') = 'bounded-message-0'
+    `).get().count, 1);
+
+    const mutationResponse = await fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: project.id,
+        clientMessageId: "bounded-live-mutation",
+        text: "確認長期對話仍可有界送出",
+      }),
+    });
+    assert.equal(mutationResponse.status, 200);
+    const mutationConversation = await mutationResponse.json();
+    assert.equal(mutationConversation.acknowledged_client_message_id, "bounded-live-mutation");
+    assert.equal(mutationConversation.messages_truncated, true);
+    assert.equal(
+      mutationConversation.messages.filter(({ id }) => id === "bounded-live-mutation").length,
+      1,
+    );
+    assert.ok(Buffer.byteLength(JSON.stringify(mutationConversation), "utf8") < 600_000);
+
+    const workDetailResponse = await fetch(
+      `${origin}/api/four-core/work/${encodeURIComponent(foundation.id)}`
+        + `?revision=${currentWorkSnapshot.revision}&digest=${currentWorkSnapshot.digest}`,
+    );
+    assert.equal(workDetailResponse.status, 200);
+    const workDetail = await workDetailResponse.json();
+    assert.deepEqual(workDetail.graph_node.reverse_dependents, [interfaceWork.id]);
+    assert.equal(workDetail.revision, currentWorkSnapshot.revision);
+    assert.equal(workDetail.digest, currentWorkSnapshot.digest);
+
+    const currentDecision = surface.decisions.decisions[0];
+    const decisionDetailResponse = await fetch(
+      `${origin}/api/four-core/decisions/${encodeURIComponent(currentDecision.id)}`
+        + `?revision=${surface.decisions.revision}&digest=${surface.decisions.digest}`,
+    );
+    assert.equal(decisionDetailResponse.status, 200);
+    const decisionDetail = await decisionDetailResponse.json();
+    assert.equal(decisionDetail.lineage.length, 2);
+    assert.deepEqual(decisionDetail.lineage.map(({ status }) => status), ["superseded", "current"]);
+    assert.equal(JSON.stringify(decisionDetail).includes("rationale"), false);
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the conversation HTTP API rejects a newer ID while an earlier durable claim is unresolved", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-conversation-order-http-"));
   const codex = new FakeCodex();
@@ -2517,12 +3011,13 @@ test("local HTTP API persists projects and work items without starting Codex", a
     assert.equal(page.status, 200);
     const pageHtml = await page.text();
     assert.match(pageHtml, /LATTICE Control/u);
-    assert.match(pageHtml, /安裝證據由 AI 自動管理，不需要手動輸入/u);
+    assert.match(pageHtml, /對話.*工作圖譜.*工作樹.*決策記憶/su);
     assert.doesNotMatch(pageHtml, /id="receipt-form"/u);
     assert.doesNotMatch(pageHtml, /\/api\/installation-receipts/u);
     assert.doesNotMatch(pageHtml, /來源 commit|安裝位置|產物 SHA-256|收據指紋/u);
     assert.match(pageHtml, /async function poll/u);
-    assert.match(pageHtml, /async function poll\(\) \{\s*try \{\s*await refresh\(\);/u);
+    assert.match(pageHtml, /if\(state\.pollPromise\)return state\.pollPromise/u);
+    assert.match(pageHtml, /state\.pollPromise=\(async\(\)=>\{try\{\s*await refresh\(\);/u);
     assert.equal(pageHtml.match(/await refresh\(\);/gu)?.length, 1);
 
     const projectResponse = await fetch(`${origin}/api/projects`, {
