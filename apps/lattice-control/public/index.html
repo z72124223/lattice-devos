@@ -361,10 +361,12 @@
     }catch(error){showError(error,"poll");}})();
     try{return await state.pollPromise;}finally{state.pollPromise=null;}
   }
-  async function deliver(payload){
+  async function deliver(payload,submittedValue=payload.text){
     state.surface.conversation=await api("/api/conversation/messages",{method:"POST",body:JSON.stringify(payload)});
-    if(state.surface.conversation.acknowledged_client_message_id===payload.clientMessageId){localStorage.removeItem(pendingKey);nodes.message.value="";}
+    const acknowledged=state.surface.conversation.acknowledged_client_message_id===payload.clientMessageId;
+    if(acknowledged)localStorage.removeItem(pendingKey);
     await poll();
+    if(acknowledged&&nodes.message.value===submittedValue)nodes.message.value="";
   }
   async function resumePending(){const pending=readPending();if(!pending)return;if(pending.projectId!==currentProjectId()){showError(new Error("未自動送出另一個工作脈絡的待續訊息。"));renderConversation();return;}try{await deliver(pending);}catch(error){showError(error);}}
   async function conversationAction(path){nodes.error.textContent="";try{state.surface.conversation=await api(path,{method:"POST",body:"{}"});await poll();}catch(error){showError(error);await poll();}}
@@ -397,9 +399,9 @@
   for(const closeButton of document.querySelectorAll("[data-close-dialog]"))closeButton.addEventListener("click",()=>document.querySelector("#"+closeButton.dataset.closeDialog).close());
   for(const dialog of document.querySelectorAll("dialog"))dialog.addEventListener("click",(event)=>{if(event.target===dialog)dialog.close();});
   nodes.form.addEventListener("submit",async(event)=>{
-    event.preventDefault();const projectId=currentProjectId(),text=nodes.message.value.trim();if(!conversationCanSend()||!text)return;
+    event.preventDefault();const projectId=currentProjectId(),submittedValue=nodes.message.value,text=submittedValue.trim();if(!conversationCanSend()||!text)return;
     const payload={projectId,clientMessageId:crypto.randomUUID(),text};localStorage.setItem(pendingKey,JSON.stringify(payload));nodes.error.textContent="";
-    try{nodes.send.disabled=true;await deliver(payload);}catch(error){showError(error);}finally{renderConversation();}
+    try{nodes.send.disabled=true;await deliver(payload,submittedValue);}catch(error){showError(error);}finally{renderConversation();}
   });
   nodes.interrupt.addEventListener("click",()=>void conversationAction("/api/conversation/interrupt"));
   nodes.reconnect.addEventListener("click",()=>void conversationAction("/api/conversation/reconnect"));
