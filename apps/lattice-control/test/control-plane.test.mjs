@@ -2420,7 +2420,8 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.match(pageHtml, /@media\s*\(max-width:/u);
     assert.match(pageHtml, /localStorage/u);
     assert.match(pageHtml, /conversation\?\.can_send === true/u);
-    assert.match(pageHtml, /readPending\(\) === null/u);
+    assert.match(pageHtml, /pendingForCurrentContext=pending\?\.projectId===currentProjectId\(\)/u);
+    assert.match(pageHtml, /!pendingForCurrentContext/u);
     assert.match(pageHtml, /typeof parsed\.projectId === "string"/u);
     assert.match(pageHtml, /typeof parsed\.text === "string"/u);
     assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
