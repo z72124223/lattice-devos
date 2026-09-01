@@ -362,14 +362,15 @@
     try{return await state.pollPromise;}finally{state.pollPromise=null;}
   }
   async function deliver(payload,submittedValue=payload.text){
-    state.surface.conversation=await api("/api/conversation/messages",{method:"POST",body:JSON.stringify(payload)});
-    const acknowledged=state.surface.conversation.acknowledged_client_message_id===payload.clientMessageId;
+    const conversation=await api("/api/conversation/messages",{method:"POST",body:JSON.stringify(payload)});
+    state.surface.conversation=conversation;
+    const acknowledged=conversation.acknowledged_client_message_id===payload.clientMessageId;
     if(acknowledged)localStorage.removeItem(pendingKey);
     await poll();
     if(acknowledged&&nodes.message.value===submittedValue)nodes.message.value="";
   }
   async function resumePending(){const pending=readPending();if(!pending)return;if(pending.projectId!==currentProjectId()){showError(new Error("未自動送出另一個工作脈絡的待續訊息。"));renderConversation();return;}try{await deliver(pending);}catch(error){showError(error);}}
-  async function conversationAction(path){nodes.error.textContent="";try{state.surface.conversation=await api(path,{method:"POST",body:"{}"});await poll();}catch(error){showError(error);await poll();}}
+  async function conversationAction(path){nodes.error.textContent="";try{const conversation=await api(path,{method:"POST",body:"{}"});state.surface.conversation=conversation;await poll();}catch(error){showError(error);await poll();}}
   async function openWorkDetail(workItemId){
     const snapshot=state.surface?.work_snapshot;if(!snapshot)return;
     try{
