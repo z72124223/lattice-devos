@@ -28,6 +28,12 @@ test("the desktop shell is a dedicated WebView2 window rather than an external b
   assert.match(windowCode, /AreDevToolsEnabled = false/u);
   assert.match(windowCode, /AreDefaultContextMenusEnabled = false/u);
   assert.match(windowCode, /NewWindowRequested/u);
+  assert.match(windowCode, /AddWebResourceRequestedFilter/u);
+  assert.match(windowCode, /Core_WebResourceRequested/u);
+  assert.match(windowCode, /CreateWebResourceResponse/u);
+  assert.match(windowCode, /HashSet<ulong>/u);
+  assert.match(windowCode, /e\.NavigationId/u);
+  assert.match(windowCode, /ControlView\.Source/u);
   assert.match(desktopPolicy, /target\.Port == controlUri\.Port/u);
   assert.doesNotMatch(windowCode, /msedge\.exe|Process\.Start\([^\n]*https?:/iu);
   assert.match(packageJson, /"desktop:build"/u);
@@ -80,6 +86,11 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(acceptanceScript, /\$monitorStartedAt\s*=\s*\[DateTimeOffset\]::UtcNow/u);
   assert.match(acceptanceScript, /\$monitorStartedAt\.AddSeconds\(\$MinimumLifetimeSeconds\)/u);
   assert.match(acceptanceScript, /DESKTOP_CANDIDATE_EXTERNAL_CAPTURE_OBSERVED/u);
+  assert.match(acceptanceScript, /Remove-TemporaryRootWithRetry/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_CLEANUP_FAILED_AFTER_PRIMARY/u);
+  assert.match(acceptanceScript, /Write-Warning[\s\S]{0,200}-WarningAction Continue/u);
+  assert.match(acceptanceScript, /if \(-not \$OwnedProcess\.WaitForExit\(10000\)\)/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_OWNED_PROCESS_STOP_TIMEOUT/u);
   assert.match(acceptanceScript, /LatticeConnectionStatus/u);
   assert.match(acceptanceScript, /candidate-manifest\.json/u);
   assert.match(acceptanceScript, /schema_version/u);

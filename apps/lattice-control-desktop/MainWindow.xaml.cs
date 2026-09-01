@@ -1,5 +1,6 @@
 using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Input;
@@ -12,7 +13,9 @@ public partial class MainWindow : Window
 {
     private readonly Uri _controlUri;
     private readonly DispatcherTimer _reconnectTimer;
+    private readonly HashSet<ulong> _blockedNavigationIds = new();
     private CoreWebView2Environment? _webViewEnvironment;
+    private ulong? _currentNavigationId;
     private bool _eventsConfigured;
     private bool _isConnecting;
     private bool _isClosing;
@@ -57,9 +60,12 @@ public partial class MainWindow : Window
                 core.NewWindowRequested += Core_NewWindowRequested;
                 core.NavigationStarting += Core_NavigationStarting;
                 core.NavigationCompleted += Core_NavigationCompleted;
+                core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.Document);
+                core.WebResourceRequested += Core_WebResourceRequested;
                 core.ProcessFailed += Core_ProcessFailed;
                 _eventsConfigured = true;
             }
+            _currentNavigationId = null;
             core.Navigate(_controlUri.AbsoluteUri);
         }
         catch (Exception error)
@@ -88,19 +94,56 @@ public partial class MainWindow : Window
         if (!Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target) || !IsApprovedControlNavigation(target))
         {
             e.Cancel = true;
-            ShowConnectionFailure(
-                "LATTICE 桌面程式只允許連線到這台電腦的控制核心。",
-                "external_navigation_blocked");
-            ScheduleReconnect();
+            BlockNavigation(e.NavigationId);
+            return;
         }
+
+        _blockedNavigationIds.Clear();
+        _currentNavigationId = e.NavigationId;
+    }
+
+    private void Core_WebResourceRequested(object? sender, CoreWebView2WebResourceRequestedEventArgs e)
+    {
+        if (Uri.TryCreate(e.Request.Uri, UriKind.Absolute, out Uri? target) &&
+            IsApprovedControlNavigation(target))
+        {
+            return;
+        }
+
+        if (sender is CoreWebView2 core)
+        {
+            e.Response = core.Environment.CreateWebResourceResponse(
+                Stream.Null,
+                403,
+                "Blocked",
+                "Content-Type: text/plain");
+        }
+        BlockNavigation(_currentNavigationId);
     }
 
     private void Core_NavigationCompleted(object? sender, CoreWebView2NavigationCompletedEventArgs e)
     {
+        bool wasBlocked = _blockedNavigationIds.Remove(e.NavigationId);
+        if (_currentNavigationId != e.NavigationId)
+        {
+            return;
+        }
+        if (wasBlocked)
+        {
+            ShowBlockedNavigation();
+            return;
+        }
+
         if (!e.IsSuccess)
         {
             ShowConnectionFailure($"Control 尚未就緒（{e.WebErrorStatus}）。");
             ScheduleReconnect();
+            return;
+        }
+
+        if (ControlView.Source is not Uri source || !IsApprovedControlNavigation(source))
+        {
+            BlockNavigation(e.NavigationId);
             return;
         }
 
@@ -126,6 +169,23 @@ public partial class MainWindow : Window
         ConnectionLabel.Text = "LATTICE 未連線";
         AutomationProperties.SetItemStatus(ConnectionLabel, itemStatus);
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(239, 95, 95));
+    }
+
+    private void BlockNavigation(ulong? navigationId)
+    {
+        if (navigationId.HasValue)
+        {
+            _blockedNavigationIds.Add(navigationId.Value);
+        }
+        ShowBlockedNavigation();
+    }
+
+    private void ShowBlockedNavigation()
+    {
+        ShowConnectionFailure(
+            "LATTICE 桌面程式只允許連線到這台電腦的控制核心。",
+            "external_navigation_blocked");
+        ScheduleReconnect();
     }
 
     private void ShowConnectingState()

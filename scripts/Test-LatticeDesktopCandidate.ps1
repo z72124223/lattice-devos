@@ -175,8 +175,54 @@ function Stop-OwnedProcess {
     if ($null -eq $OwnedProcess -or $OwnedProcess.HasExited) {
         return
     }
-    $OwnedProcess.Kill()
-    $OwnedProcess.WaitForExit(10000) | Out-Null
+    try {
+        $OwnedProcess.Kill()
+    }
+    catch {
+        $OwnedProcess.Refresh()
+        if ($OwnedProcess.HasExited) {
+            return
+        }
+        throw
+    }
+    if (-not $OwnedProcess.WaitForExit(10000)) {
+        throw "DESKTOP_CANDIDATE_OWNED_PROCESS_STOP_TIMEOUT:$($OwnedProcess.Id)"
+    }
+    $OwnedProcess.Refresh()
+    if (-not $OwnedProcess.HasExited) {
+        throw "DESKTOP_CANDIDATE_OWNED_PROCESS_STOP_TIMEOUT:$($OwnedProcess.Id)"
+    }
+}
+
+function Remove-TemporaryRootWithRetry {
+    param(
+        [string]$LiteralPath,
+        [ValidateRange(1, 120)]
+        [int]$TimeoutSeconds = 30
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastFailure = $null
+    do {
+        try {
+            if (-not (Test-Path -LiteralPath $LiteralPath)) {
+                return
+            }
+            Remove-Item -LiteralPath $LiteralPath -Recurse -Force -ErrorAction Stop
+            if (-not (Test-Path -LiteralPath $LiteralPath)) {
+                return
+            }
+        }
+        catch {
+            $lastFailure = $_
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    if ($null -ne $lastFailure) {
+        throw "DESKTOP_CANDIDATE_TEMPORARY_ROOT_CLEANUP_FAILED:$($lastFailure.Exception.Message)"
+    }
+    throw 'DESKTOP_CANDIDATE_TEMPORARY_ROOT_CLEANUP_FAILED:TIMEOUT'
 }
 
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -210,14 +256,17 @@ $externalNavigationMarker = Join-Path $temporaryRoot 'external-navigation-reques
 $captureReadyPath = Join-Path $temporaryRoot 'capture-port.txt'
 $captureMarkerPath = Join-Path $temporaryRoot 'external-navigation-capture.txt'
 $controlReadyPath = Join-Path $temporaryRoot 'control-port.txt'
-[IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
-[IO.File]::WriteAllText($gatewayModePath, "offline`n", [Text.UTF8Encoding]::new($false))
 
 $desktopProcess = $null
 $gatewayProcess = $null
 $controlProcess = $null
+$acceptanceResult = $null
+$primaryFailure = $null
+$cleanupFailure = $null
 
 try {
+    [IO.Directory]::CreateDirectory($temporaryRoot) | Out-Null
+    [IO.File]::WriteAllText($gatewayModePath, "offline`n", [Text.UTF8Encoding]::new($false))
     Expand-Archive -LiteralPath $candidateArchiveFull -DestinationPath $candidateDirectoryFull
 
     $candidateExecutable = Join-Path $candidateDirectoryFull 'LATTICE.exe'
@@ -452,7 +501,7 @@ try {
         throw 'DESKTOP_CANDIDATE_TOTAL_LIFETIME_TOO_SHORT'
     }
 
-    [ordered]@{
+    $acceptanceResult = [ordered]@{
         result = 'PASS'
         source_commit = $manifestSourceCommit
         artifact_type = $artifactType
@@ -478,26 +527,77 @@ try {
         webview_data_outside_candidate = $true
         desktop_process_alive = -not $desktopProcess.HasExited
         owned_endpoint_processes_alive = -not $gatewayProcess.HasExited -and -not $controlProcess.HasExited
-    } | ConvertTo-Json -Depth 4
+    }
+}
+catch {
+    $primaryFailure = $_
 }
 finally {
-    if ($null -ne $desktopProcess -and -not $desktopProcess.HasExited) {
-        $desktopProcess.CloseMainWindow() | Out-Null
-        if (-not $desktopProcess.WaitForExit(10000)) {
-            Stop-OwnedProcess $desktopProcess
+    try {
+        if ($null -ne $desktopProcess -and -not $desktopProcess.HasExited) {
+            try {
+                $desktopProcess.CloseMainWindow() | Out-Null
+                $desktopProcess.WaitForExit(10000) | Out-Null
+            }
+            catch {
+                # A validated kill fallback below still proves cleanup.
+            }
+            if (-not $desktopProcess.HasExited) {
+                Stop-OwnedProcess $desktopProcess
+            }
         }
     }
-    Stop-OwnedProcess $controlProcess
-    Stop-OwnedProcess $gatewayProcess
-
-    $temporaryRootFull = [IO.Path]::GetFullPath($temporaryRoot)
-    $temporaryPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-    if (-not $temporaryRootFull.StartsWith($temporaryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
-        -not [IO.Path]::GetFileName($temporaryRootFull).StartsWith(
-            'lattice-desktop-candidate-',
-            [StringComparison]::Ordinal)) {
-        throw 'DESKTOP_CANDIDATE_TEMPORARY_ROOT_INVALID'
+    catch {
+        $cleanupFailure = $_
     }
-    Remove-Item -LiteralPath $temporaryRootFull -Recurse -Force
+    try {
+        Stop-OwnedProcess $controlProcess
+    }
+    catch {
+        if ($null -eq $cleanupFailure) {
+            $cleanupFailure = $_
+        }
+    }
+    try {
+        Stop-OwnedProcess $gatewayProcess
+    }
+    catch {
+        if ($null -eq $cleanupFailure) {
+            $cleanupFailure = $_
+        }
+    }
+
+    try {
+        $temporaryRootFull = [IO.Path]::GetFullPath($temporaryRoot)
+        $temporaryPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+        if (-not $temporaryRootFull.StartsWith($temporaryPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            -not [IO.Path]::GetFileName($temporaryRootFull).StartsWith(
+                'lattice-desktop-candidate-',
+                [StringComparison]::Ordinal)) {
+            throw 'DESKTOP_CANDIDATE_TEMPORARY_ROOT_INVALID'
+        }
+        Remove-TemporaryRootWithRetry -LiteralPath $temporaryRootFull
+    }
+    catch {
+        if ($null -eq $cleanupFailure) {
+            $cleanupFailure = $_
+        }
+    }
 }
+
+if ($null -ne $primaryFailure) {
+    if ($null -ne $cleanupFailure) {
+        Write-Warning `
+            "DESKTOP_CANDIDATE_CLEANUP_FAILED_AFTER_PRIMARY:$($cleanupFailure.Exception.Message)" `
+            -WarningAction Continue
+    }
+    throw $primaryFailure
+}
+if ($null -ne $cleanupFailure) {
+    throw $cleanupFailure
+}
+if ($null -eq $acceptanceResult) {
+    throw 'DESKTOP_CANDIDATE_ACCEPTANCE_RESULT_MISSING'
+}
+$acceptanceResult | ConvertTo-Json -Depth 4
