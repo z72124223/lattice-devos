@@ -215,7 +215,7 @@ Require(interruptedControl.Detail.Contains("重連", StringComparison.Ordinal),
 ControlRuntimeIdentity expectedIdentity = ControlRuntimeContract.ExpectedIdentity;
 Require(expectedIdentity.SchemaVersion == "lattice.control.runtime-identity.v1", "runtime identity schema changed");
 Require(expectedIdentity.Product == "LATTICE_CONTROL", "runtime product identity changed");
-Require(expectedIdentity.Version == "1.0.0-rc.2", "runtime compatibility version changed");
+Require(expectedIdentity.Version == "1.0.0", "runtime compatibility version changed");
 
 string expectedDatabasePath = Path.GetFullPath(Path.Combine(
     Path.GetTempPath(),
@@ -243,7 +243,7 @@ string compatibleSurface = """
   "identity":{
     "schema_version":"lattice.control.runtime-identity.v1",
     "product":"LATTICE_CONTROL",
-    "version":"1.0.0-rc.2"
+    "version":"1.0.0"
   },
   "data_scope":{
     "schema_version":"lattice.control.data-scope.v1",
@@ -308,7 +308,7 @@ Require(unknownListener.Action == ControlRuntimeAction.FailClosed, "unknown list
 
 foreach (string incompatibleSurface in new[]
 {
-    compatibleSurface.Replace("1.0.0-rc.2", "0.9.0", StringComparison.Ordinal),
+    compatibleSurface.Replace("1.0.0", "0.9.0", StringComparison.Ordinal),
     compatibleSurface.Replace("LATTICE_CONTROL", "FOREIGN_CONTROL", StringComparison.Ordinal),
     compatibleSurface.Replace("lattice.control.runtime-surface.v2", "lattice.control.runtime-surface.v1", StringComparison.Ordinal),
     compatibleSurface.Replace(expectedScope.Digest, new string('0', 64), StringComparison.Ordinal),

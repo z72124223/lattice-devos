@@ -89,7 +89,7 @@ test("the runtime probe exposes one versioned, content-free capability surface",
     assert.deepEqual(surface.identity, {
       schema_version: "lattice.control.runtime-identity.v1",
       product: "LATTICE_CONTROL",
-      version: "1.0.0-rc.2",
+      version: "1.0.0",
     });
     assert.deepEqual(surface.data_scope, controlDataScopeDescriptor(databasePath));
     assert.equal(surface.reconciliation_required, false);
