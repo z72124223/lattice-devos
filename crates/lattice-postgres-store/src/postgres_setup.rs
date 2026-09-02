@@ -2172,6 +2172,7 @@ pub fn apply_migrations(
 /// # Errors
 ///
 /// Returns a bounded static failure for any mismatch or unavailable evidence.
+#[allow(clippy::too_many_lines)]
 pub fn verify_postgres_schema(
     client: &mut Client,
     target: &MigrationTarget,

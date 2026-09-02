@@ -6,7 +6,7 @@ mod task_runtime;
 pub use foreman::*;
 pub use task_runtime::*;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 
@@ -854,7 +854,10 @@ impl fmt::Debug for ExternalVerifiedResultAdoption {
             )
             .field("source_sha", &self.source_sha)
             .field("target_sha", &self.target_sha)
-            .field("receipt_refs", &"[DIGEST_BOUND]")
+            .field("push_merge_receipt_ref", &"[DIGEST_BOUND]")
+            .field("deployment_receipt_ref", &"[DIGEST_BOUND]")
+            .field("deployment_artifact_ref", &"[DIGEST_BOUND]")
+            .field("independent_acceptance_ref", &"[DIGEST_BOUND]")
             .field(
                 "approval_ref_count",
                 &self.protected_action_approval_refs.len(),
@@ -929,20 +932,20 @@ impl ExternalVerifiedResultAdoption {
                 field: "protected_action_approval_refs",
             });
         }
-        let mut normalized_approvals = BTreeMap::new();
+        let mut normalized_approvals = BTreeSet::new();
         for reference in protected_action_approval_refs {
             if !valid_evidence_reference(&reference) {
                 return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
                     field: "protected_action_approval_refs",
                 });
             }
-            if normalized_approvals.insert(reference.clone(), ()).is_some() {
+            if !normalized_approvals.insert(reference) {
                 return Err(LedgerError::InvalidExternalVerifiedResultAdoption {
                     field: "protected_action_approval_refs",
                 });
             }
         }
-        let protected_action_approval_refs = normalized_approvals.into_keys().collect::<Vec<_>>();
+        let protected_action_approval_refs = normalized_approvals.into_iter().collect::<Vec<_>>();
         let result_digest = hash_value_at_version(
             "lattice.task-ledger.external-verified-result-adoption",
             "1.0",
@@ -2345,6 +2348,12 @@ impl AppendCommand {
     /// The repository adapter must independently verify all referenced
     /// receipts before constructing this command; this pure boundary binds the
     /// already-verified bundle to the exact DRAFT Ledger head.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LedgerError::ExternalVerifiedResultAdoptionMismatch`] when the
+    /// adoption does not bind the exact create-only intake head or command, and
+    /// propagates typed field-construction errors from the canonical event.
     #[allow(clippy::too_many_arguments)]
     pub fn new_external_verified_result_adopted(
         expected_head: TaskLedgerStreamHead,

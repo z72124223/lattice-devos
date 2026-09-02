@@ -1149,10 +1149,16 @@ impl PostgresTaskLedger {
     /// Appends the one verified external-result terminal only after the
     /// transaction-owned resolver has rechecked its evidence and concurrency
     /// preconditions. The caller supplies no execution or Writer authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed store error when the retained submission, adoption,
+    /// authority head, canonical event, or atomic persistence proof is absent,
+    /// stale, malformed, or inconsistent.
     pub fn execute_external_verified_result_adoption(
         &mut self,
-        adoption: ExternalVerifiedResultAdoption,
-        expected_authority: StoreAuthorityHead,
+        adoption: &ExternalVerifiedResultAdoption,
+        expected_authority: &StoreAuthorityHead,
         occurred_at: &str,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         if self.sql_profile != TaskLedgerSqlProfile::V8 {
@@ -1184,18 +1190,18 @@ impl PostgresTaskLedger {
                 .map_err(|ledger| map_ledger_error(&ledger))?,
             occurred_at,
             ActorId::new(actor).map_err(|ledger| map_ledger_error(&ledger))?,
-            &adoption,
+            adoption,
         )
         .map_err(|ledger| map_ledger_error(&ledger))?;
         self.execute_with_writer_authority(
             &command,
-            &expected_authority,
+            expected_authority,
             None,
             None,
             None,
             None,
             None,
-            Some(&adoption),
+            Some(adoption),
         )
     }
 
@@ -3541,19 +3547,16 @@ fn run_execute_attempt(
             .find(|outbox| outbox.command_id().as_str() == command_id)
             .cloned();
         if let Some(resolved) = external_adoption_resolution.as_ref() {
-            let event = match loaded.stream.events().iter().find(|event| {
+            let Some(event) = loaded.stream.events().iter().find(|event| {
                 event.command_id().as_str() == command_id
                     && event.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
-            }) {
-                Some(event) => event,
-                None => {
-                    return rollback_attempt(
-                        transaction,
-                        AttemptFailure::Terminal(error(
-                            PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
-                        )),
-                    );
-                }
+            }) else {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(
+                        PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
+                    )),
+                );
             };
             if let Err(bind_error) = bind_external_verified_result_adoption(
                 &mut transaction,

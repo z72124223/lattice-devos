@@ -65,6 +65,14 @@ impl fmt::Debug for ExternalVerifiedResultEvidence {
 }
 
 impl ExternalVerifiedResultEvidence {
+    /// Validates and binds independently retained deployment evidence to one
+    /// typed external-result adoption.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error when the target commit, evidence digests,
+    /// verifier identity, non-force merge proof, or canonical descriptor is
+    /// malformed, secret-shaped, or inconsistent with the adoption.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         project_id: ProjectId,
@@ -163,6 +171,7 @@ impl ExternalVerifiedResultEvidence {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn digest(
     project_id: &ProjectId,
     project_snapshot_id: &ProjectSnapshotId,
