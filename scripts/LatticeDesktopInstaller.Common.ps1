@@ -1,5 +1,8 @@
 Set-StrictMode -Version Latest
 
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
 $script:LatticeInstallOwnerSchema = 'lattice.control.desktop-install-owner.v1'
 $script:LatticeInstallManifestSchema = 'lattice.control.desktop-per-user-installer.v1'
 $script:LatticeInstallReceiptSchema = 'lattice.control.desktop-install-receipt.v1'
@@ -303,12 +306,49 @@ function Expand-LatticePortablePayload {
             if (($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_REPARSE_POINT:$entryPath"
             }
+
+            $targetIoPath = if ($target.StartsWith('\\', [StringComparison]::Ordinal)) {
+                '\\?\UNC\' + $target.Substring(2)
+            }
+            else {
+                '\\?\' + $target
+            }
+
+            if ($entryPath.EndsWith('/', [StringComparison]::Ordinal)) {
+                [IO.Directory]::CreateDirectory($targetIoPath) | Out-Null
+                continue
+            }
+
+            $parent = [IO.Path]::GetDirectoryName($target)
+            $parentIoPath = if ($parent.StartsWith('\\', [StringComparison]::Ordinal)) {
+                '\\?\UNC\' + $parent.Substring(2)
+            }
+            else {
+                '\\?\' + $parent
+            }
+            [IO.Directory]::CreateDirectory($parentIoPath) | Out-Null
+            $input = $entry.Open()
+            try {
+                $output = [IO.File]::Open(
+                    $targetIoPath,
+                    [IO.FileMode]::CreateNew,
+                    [IO.FileAccess]::Write,
+                    [IO.FileShare]::None)
+                try {
+                    $input.CopyTo($output)
+                }
+                finally {
+                    $output.Dispose()
+                }
+            }
+            finally {
+                $input.Dispose()
+            }
         }
     }
     finally {
         $archive.Dispose()
     }
-    Expand-Archive -LiteralPath $ArchivePath -DestinationPath $destinationFull
     return Get-LatticePortablePayload -PayloadRoot $destinationFull -ExpectedSourceCommit $ExpectedSourceCommit
 }
 
@@ -1031,7 +1071,8 @@ function Invoke-LatticeDesktopInstall {
             }
             else {
                 $stageRoot = Join-Path ([string]$paths.StagingRoot) (
-                    ([string]$bundle.SourceCommit) + '-' + [guid]::NewGuid().ToString('N'))
+                    ([string]$bundle.SourceCommit).Substring(0, 12) + '-' +
+                    [guid]::NewGuid().ToString('N').Substring(0, 8))
                 try {
                     [IO.Directory]::CreateDirectory($stageRoot) | Out-Null
                     Write-LatticeStageOwner `

@@ -43,6 +43,30 @@ function New-TestTextFile {
     [IO.File]::WriteAllText($Path, $Value, [Text.UTF8Encoding]::new($false))
 }
 
+function New-TestZipFromDirectory {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$ArchivePath
+    )
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in @(Get-ChildItem -LiteralPath $SourceRoot -File -Recurse | Sort-Object FullName)) {
+            $entryName = $file.FullName.Substring($SourceRoot.Length + 1).Replace('\', '/')
+            [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $archive,
+                $file.FullName,
+                $entryName,
+                [IO.Compression.CompressionLevel]::Optimal) | Out-Null
+        }
+    }
+    finally {
+        $archive.Dispose()
+    }
+}
+
 function New-TestInstallerBundle {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -57,6 +81,9 @@ function New-TestInstallerBundle {
     New-TestTextFile -Path (Join-Path $payloadRoot 'LATTICE.exe') -Value "fake-executable-$PayloadMarker"
     New-TestTextFile -Path (Join-Path $payloadRoot 'LATTICE.dll') -Value "fake-assembly-$PayloadMarker"
     New-TestTextFile -Path (Join-Path $payloadRoot 'PORTABLE_RELEASE_CANDIDATE.txt') -Value "fixture-$PayloadMarker"
+    New-TestTextFile `
+        -Path (Join-Path $payloadRoot 'control-runtime\apps\lattice-control\src\wsl2-provider-subtree-reconcile.mjs') `
+        -Value "realistic-deep-payload-$PayloadMarker"
     $payloadFiles = @(Get-ChildItem -LiteralPath $payloadRoot -File -Recurse |
         Sort-Object FullName |
         ForEach-Object {
@@ -79,7 +106,7 @@ function New-TestInstallerBundle {
         files = $payloadFiles
     }
     Write-LatticeJsonAtomic -LiteralPath (Join-Path $payloadRoot 'candidate-manifest.json') -Value $payloadManifest
-    Compress-Archive -Path (Join-Path $payloadRoot '*') -DestinationPath (Join-Path $bundleRoot 'payload.zip')
+    New-TestZipFromDirectory -SourceRoot $payloadRoot -ArchivePath (Join-Path $bundleRoot 'payload.zip')
     foreach ($name in $productFiles) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination (Join-Path $bundleRoot $name)
     }
@@ -411,6 +438,7 @@ try {
     $result = [ordered]@{
         result = 'PASS'
         staging_hash_activation = $true
+        realistic_payload_path_staged = $true
         start_menu_shortcut = $true
         hkcu_uninstall_registration = $true
         reentry = 'REUSED'

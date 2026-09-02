@@ -211,6 +211,10 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(uninstallerScript, /Invoke-LatticeDesktopUninstall/u);
   assert.match(installerCommon, /lattice\.control\.desktop-install-owner\.v1/u);
   assert.match(installerCommon, /Get-LatticeInstallerBundle/u);
+  assert.match(installerCommon, /\[IO\.Compression\.ZipFile\]::OpenRead/u);
+  assert.match(installerCommon, /\[IO\.FileMode\]::CreateNew/u);
+  assert.match(installerCommon, /\$input\.CopyTo\(\$output\)/u);
+  assert.doesNotMatch(installerCommon, /Expand-Archive/u);
   assert.match(installerCommon, /LocalApplicationData[\s\S]*Programs[\\/]LATTICE/u);
   assert.match(installerCommon, /versions/u);
   assert.match(installerCommon, /\.staging/u);
