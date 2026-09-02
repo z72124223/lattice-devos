@@ -216,7 +216,7 @@
     .user .bubble { background:#0c7591; color:#edfbff; }
     .assistant .bubble { border-color:#29404d; background:#0f202d; }
     .scroll-body { min-height:0; max-height:none; height:calc(100% - 78px); overflow:auto; padding:20px 24px; }
-    .graph-panel .scroll-body { padding:0; }
+    .graph-panel .scroll-body { padding:0; overflow:hidden; }
     .graph-viewport { position:relative; height:100%; min-height:430px; overflow:auto; background-image:radial-gradient(circle,rgba(72,105,122,.19) 1px,transparent 1px); background-size:24px 24px; }
     #graph-edge-layer { position:absolute; inset:0; width:100%; height:100%; min-width:860px; min-height:520px; overflow:visible; pointer-events:none; }
     .graph-edge { fill:none; stroke:#758795; stroke-width:1.6; marker-end:url(#graph-arrow); opacity:.82; }
@@ -278,18 +278,19 @@
       .system-pill { padding:6px 9px; font-size:.7rem; }
       .context-banner { align-items:flex-start; flex-direction:column; padding:8px 14px; }
       .runtime-capabilities { padding:6px 10px; }
-      .workspace-canvas { display:block; min-height:0; }
+      .workspace-canvas { display:block; min-height:0; overflow:visible; }
       .inspector { display:none; }
-      .core-stage { min-height:520px; }
+      .core-stage { min-height:520px; overflow:visible; }
+      .core-panel,.panel { height:auto; min-height:520px; }
       .panel-heading { min-height:68px; padding:12px 14px; }
       .panel-heading h2 { font-size:1.05rem; }
       .identity { max-width:40%; font-size:.57rem; }
       .conversation-toolbar { grid-template-columns:1fr; gap:7px; padding:10px 14px; }
       .conversation-state { text-align:left; }
-      .conversation { height:calc(100dvh - 300px); min-height:500px; }
-      .transcript { padding:13px; overscroll-behavior-y:auto; }
-      .scroll-body { height:calc(100dvh - 280px); padding:12px; }
-      .graph-viewport { min-height:500px; overscroll-behavior-x:contain; overscroll-behavior-y:auto; }
+      .conversation { height:auto; min-height:500px; }
+      .transcript { padding:13px; overflow:visible; overscroll-behavior-y:auto; }
+      .scroll-body { height:auto; overflow:visible; padding:12px; }
+      .graph-viewport { height:500px; min-height:500px; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; }
       .graph-list,#graph-edge-layer { min-width:720px; min-height:500px; }
       .graph-node { width:180px; }
       .command-dock { position:sticky; bottom:75px; z-index:20; grid-template-columns:1fr auto; margin:7px 9px; padding:7px; }

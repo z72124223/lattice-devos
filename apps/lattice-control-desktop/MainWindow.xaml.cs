@@ -14,6 +14,15 @@ namespace Lattice.Control.Desktop;
 
 public partial class MainWindow : Window
 {
+    private const int GwlStyle = -16;
+    private const long WsThickFrame = 0x00040000L;
+    private const long WsMinimizeBox = 0x00020000L;
+    private const long WsMaximizeBox = 0x00010000L;
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoZOrder = 0x0004;
+    private const uint SwpNoActivate = 0x0010;
+    private const uint SwpFrameChanged = 0x0020;
     private readonly Uri _controlUri;
     private readonly ControlRuntimeManager? _controlRuntime;
     private readonly CancellationTokenSource _lifetimeCancellation = new();
@@ -32,8 +41,6 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
-        // Register first so this hit-test hook precedes WindowChrome's source hook.
-        SourceInitialized += MainWindow_SourceInitialized;
         InitializeComponent();
         ControlEndpointSelection controlTarget = DesktopPolicy.ResolveControlTarget(
             Environment.GetCommandLineArgs(),
@@ -50,11 +57,40 @@ public partial class MainWindow : Window
         Loaded += MainWindow_Loaded;
     }
 
-    private void MainWindow_SourceInitialized(object? sender, EventArgs e)
+    protected override void OnSourceInitialized(EventArgs e)
     {
+        base.OnSourceInitialized(e);
         nint handle = new WindowInteropHelper(this).Handle;
+        EnableNativeResizeFrame(handle);
         _windowSource = HwndSource.FromHwnd(handle);
         _windowSource?.AddHook(WindowProc);
+    }
+
+    private static void EnableNativeResizeFrame(nint windowHandle)
+    {
+        Marshal.SetLastPInvokeError(0);
+        nint currentStyle = GetWindowLongPtr(windowHandle, GwlStyle);
+        if (currentStyle == nint.Zero && Marshal.GetLastPInvokeError() != 0) return;
+
+        long requiredStyle = WsThickFrame | WsMinimizeBox | WsMaximizeBox;
+        long nativeStyle = currentStyle.ToInt64();
+        if ((nativeStyle & requiredStyle) != requiredStyle)
+        {
+            Marshal.SetLastPInvokeError(0);
+            nint previousStyle = SetWindowLongPtr(
+                windowHandle,
+                GwlStyle,
+                new nint(nativeStyle | requiredStyle));
+            if (previousStyle == nint.Zero && Marshal.GetLastPInvokeError() != 0) return;
+        }
+        _ = SetWindowPos(
+            windowHandle,
+            nint.Zero,
+            0,
+            0,
+            0,
+            0,
+            SwpNoSize | SwpNoMove | SwpNoZOrder | SwpNoActivate | SwpFrameChanged);
     }
 
     private nint WindowProc(
@@ -97,7 +133,6 @@ public partial class MainWindow : Window
 
     protected override void OnClosed(EventArgs e)
     {
-        SourceInitialized -= MainWindow_SourceInitialized;
         _windowSource?.RemoveHook(WindowProc);
         _windowSource = null;
         base.OnClosed(e);
@@ -106,6 +141,23 @@ public partial class MainWindow : Window
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetWindowRect(nint windowHandle, out NativeRect windowRect);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
+    private static extern nint GetWindowLongPtr(nint windowHandle, int index);
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
+    private static extern nint SetWindowLongPtr(nint windowHandle, int index, nint newLong);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetWindowPos(
+        nint windowHandle,
+        nint windowInsertAfter,
+        int x,
+        int y,
+        int width,
+        int height,
+        uint flags);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct NativeRect

@@ -5,15 +5,15 @@
         Title="LATTICE"
         Width="1600"
         Height="900"
-        MinWidth="640"
-        MinHeight="480"
+        MinWidth="360"
+        MinHeight="320"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         ResizeMode="CanResize"
         Background="{StaticResource LatticeBackground}">
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="42"
-                      ResizeBorderThickness="7"
+                      ResizeBorderThickness="12"
                       CornerRadius="0"
                       GlassFrameThickness="0" />
     </WindowChrome.WindowChrome>
