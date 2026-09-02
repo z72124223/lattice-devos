@@ -19,7 +19,8 @@ test("the desktop shell is a dedicated WebView2 window rather than an external b
     repositoryFile("package.json"),
   ]);
 
-  assert.match(project, /<TargetFramework>net8\.0-windows<\/TargetFramework>/u);
+  assert.match(project, /<TargetFramework>net8\.0-windows10\.0\.22000\.0<\/TargetFramework>/u);
+  assert.match(project, /<SupportedOSPlatformVersion>10\.0\.17763\.0<\/SupportedOSPlatformVersion>/u);
   assert.match(project, /<UseWPF>true<\/UseWPF>/u);
   assert.match(project, /Microsoft\.Web\.WebView2" Version="1\.0\.4191\.47"/u);
   assert.match(windowMarkup, /WindowStyle="None"/u);
@@ -93,6 +94,10 @@ test("the resizable desktop can reach compact scrolling without desktop or mobil
   assert.ok(minimumWidth <= 360 && minimumHeight <= 320);
   assert.match(windowMarkup, /WindowStyle="None"[\s\S]*ResizeMode="CanResize"/u);
   assert.match(windowMarkup, /<WindowChrome CaptionHeight="42"[\s\S]*ResizeBorderThickness="12"/u);
+  assert.match(windowMarkup, /<Setter Property="Margin" Value="6,0,6,6" \/>[\s\S]*Value="Maximized">[\s\S]*<Setter Property="Margin" Value="0" \/>/u);
+  assert.match(windowMarkup, /<wv2:WebView2CompositionControl x:Name="ControlView"/u);
+  assert.doesNotMatch(windowMarkup, /<wv2:WebView2 x:Name="ControlView"/u);
+  assert.doesNotMatch(windowCode, /BrowserHost_SizeChanged|SyncWebViewBounds|ControlView\.UpdateLayout\(\)/u);
   assert.match(windowMarkup, /MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"/u);
   assert.match(windowMarkup, /Click="Minimize_Click"/u);
   assert.match(windowMarkup, /Click="MaximizeRestore_Click"/u);
@@ -116,7 +121,9 @@ test("the resizable desktop can reach compact scrolling without desktop or mobil
   assert.match(resizePolicy, /enum WindowResizeHit[\s\S]*TopLeft = 13[\s\S]*BottomRight = 17/u);
   assert.match(resizePolicy, /EvaluatePhysical\(/u);
   assert.match(wideCss, /body \{ overflow:hidden;/u);
-  assert.match(wideCss, /\.app \{ display:grid; grid-template-columns:248px minmax\(0,1fr\); width:100vw; height:100dvh;/u);
+  assert.match(controlMarkup, /body \{ min-height:100%; background:/u);
+  assert.match(wideCss, /\.app \{ display:grid; grid-template-columns:248px minmax\(0,1fr\); width:100vw; height:100%;/u);
+  assert.doesNotMatch(wideCss, /\.app \{[^}]*height:100dvh;/u);
   assert.match(wideCss, /\.graph-panel \.scroll-body \{ padding:0; overflow:hidden; \}/u);
   assert.match(compactCss, /body \{ overflow-x:hidden; overflow-y:auto; \}/u);
   assert.equal((compactCss.match(/overflow-y:auto/gu) ?? []).length, 1);

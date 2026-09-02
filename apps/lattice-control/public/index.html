@@ -8,7 +8,7 @@
     :root { color-scheme:dark; font-family:Inter,"Noto Sans TC",system-ui,sans-serif; background:#060914; color:#edf3ff; --panel:rgba(14,22,40,.92); --soft:rgba(20,31,55,.74); --line:rgba(111,139,197,.29); --muted:#98a8c5; --accent:#8fb3ff; --mint:#62dcb7; }
     * { box-sizing:border-box; min-width:0; }
     html,body { margin:0; min-height:100%; overflow-x:hidden; }
-    body { min-height:100dvh; background:radial-gradient(circle at 8% 0%,rgba(80,117,232,.24),transparent 34rem),radial-gradient(circle at 94% 100%,rgba(57,204,168,.13),transparent 32rem),#060914; }
+    body { min-height:100%; background:radial-gradient(circle at 8% 0%,rgba(80,117,232,.24),transparent 34rem),radial-gradient(circle at 94% 100%,rgba(57,204,168,.13),transparent 32rem),#060914; }
     button,textarea { font:inherit; }
     button { min-height:44px; border:0; cursor:pointer; }
     button:focus-visible,textarea:focus-visible { outline:2px solid #a9c5ff; outline-offset:2px; }
@@ -170,7 +170,7 @@
     :root { --cyan:#16d5f3; --cyan-soft:rgba(22,213,243,.16); --amber:#ffb51b; --green:#66df7d; --purple:#ad78ff; --surface:#09131d; --surface-2:#0d1a26; --rail:#0a1722; --stroke:#243746; }
     html,body { height:100%; }
     body { overflow:hidden; background:#07111a; }
-    .app { display:grid; grid-template-columns:248px minmax(0,1fr); width:100vw; height:100dvh; margin:0; padding:0; background:radial-gradient(circle at 58% 44%,rgba(12,117,143,.12),transparent 36rem),#07111a; }
+    .app { display:grid; grid-template-columns:248px minmax(0,1fr); width:100vw; height:100%; margin:0; padding:0; background:radial-gradient(circle at 58% 44%,rgba(12,117,143,.12),transparent 36rem),#07111a; }
     .side-rail { display:flex; flex-direction:column; min-width:0; padding:18px 12px 14px; border-right:1px solid var(--stroke); background:linear-gradient(180deg,#0b1924,#07121b); }
     .brand { display:flex; align-items:center; gap:12px; padding:4px 14px 23px; color:#fff; font-size:1.28rem; font-weight:820; letter-spacing:.12em; }
     .brand-mark { display:grid; place-items:center; width:35px; height:40px; color:var(--cyan); font-size:1.9rem; filter:drop-shadow(0 0 12px rgba(22,213,243,.35)); }
