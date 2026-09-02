@@ -170,6 +170,67 @@ function Invoke-InstallerWrapper {
     return (($output -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
+function Invoke-InstallerHardKill {
+    param(
+        [Parameter(Mandatory)][string]$CommonPath,
+        [Parameter(Mandatory)][string]$BundleRoot,
+        [Parameter(Mandatory)][string]$SandboxRoot,
+        [Parameter(Mandatory)][string]$RegistryId,
+        [Parameter(Mandatory)][string]$HookName,
+        [ValidateSet('INSTALL', 'UNINSTALL')][string]$Operation = 'INSTALL'
+    )
+
+    $workerPath = Join-Path $SandboxRoot ('hard-kill-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    $workerSource = @'
+param(
+    [Parameter(Mandatory)][string]$CommonPath,
+    [Parameter(Mandatory)][string]$BundleRoot,
+    [Parameter(Mandatory)][string]$SandboxRoot,
+    [Parameter(Mandatory)][string]$RegistryId,
+    [Parameter(Mandatory)][string]$HookName,
+    [Parameter(Mandatory)][string]$Operation
+)
+$ErrorActionPreference = 'Stop'
+. $CommonPath
+function Invoke-LatticeInstallerHook {
+    param([Parameter(Mandatory)][string]$Name)
+    if ($Name -ceq $HookName) {
+        Stop-Process -Id $PID -Force
+    }
+}
+if ($Operation -ceq 'INSTALL') {
+    Invoke-LatticeDesktopInstall `
+        -BundleRoot $BundleRoot `
+        -TestSandboxRoot $SandboxRoot `
+        -TestRegistryId $RegistryId | Out-Null
+}
+else {
+    Invoke-LatticeDesktopUninstall `
+        -TestSandboxRoot $SandboxRoot `
+        -TestRegistryId $RegistryId | Out-Null
+}
+throw 'DESKTOP_INSTALLER_HARD_KILL_HOOK_NOT_REACHED'
+'@
+    [IO.File]::WriteAllText($workerPath, $workerSource, [Text.UTF8Encoding]::new($false))
+    try {
+        & (Get-LatticePowerShellPath) `
+            -NoLogo -NoProfile -ExecutionPolicy Bypass `
+            -File $workerPath `
+            -CommonPath $CommonPath `
+            -BundleRoot $BundleRoot `
+            -SandboxRoot $SandboxRoot `
+            -RegistryId $RegistryId `
+            -HookName $HookName `
+            -Operation $Operation
+        Assert-InstallerTest ($LASTEXITCODE -ne 0) 'DESKTOP_INSTALLER_HARD_KILL_PROCESS_SURVIVED'
+    }
+    finally {
+        if (Test-Path -LiteralPath $workerPath) {
+            Remove-Item -LiteralPath $workerPath -Force
+        }
+    }
+}
+
 $latticeRegistryParent = 'HKCU:\Software\LATTICE'
 $installerTestsRegistryParent = 'HKCU:\Software\LATTICE\InstallerTests'
 $latticeRegistryParentExisted = Test-Path -LiteralPath $latticeRegistryParent
@@ -183,6 +244,12 @@ $foreignSandbox = ''
 $junctionContext = $null
 $junctionSandbox = ''
 $junctionPath = ''
+$ancestorJunctionPath = ''
+$ancestorJunctionParent = ''
+$crashContext = $null
+$crashSandbox = ''
+$orphanContext = $null
+$orphanSandbox = ''
 $primaryFailure = $null
 $cleanupFailure = $null
 $result = $null
@@ -219,6 +286,50 @@ try {
     $bundle1 = New-TestInstallerBundle -Root $bundleRoot -SourceCommit $commit1 -PayloadMarker 'v1'
     $bundle2 = New-TestInstallerBundle -Root $bundleRoot -SourceCommit $commit2 -PayloadMarker 'v2'
     $bundle3 = New-TestInstallerBundle -Root $bundleRoot -SourceCommit $commit3 -PayloadMarker 'v3'
+
+    $crashSandbox = Join-Path ([IO.Path]::GetTempPath()) ('lattice-desktop-installer-c-' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+    [IO.Directory]::CreateDirectory($crashSandbox) | Out-Null
+    $crashRegistryId = [guid]::NewGuid().ToString('N')
+    $crashContext = Resolve-LatticeInstallContext -TestSandboxRoot $crashSandbox -TestRegistryId $crashRegistryId
+    $crashPaths = Get-LatticeInstallPaths -Context $crashContext
+    Invoke-InstallerHardKill `
+        -CommonPath (Join-Path $bundle1 'LatticeDesktopInstaller.Common.ps1') `
+        -BundleRoot $bundle1 `
+        -SandboxRoot $crashSandbox `
+        -RegistryId $crashRegistryId `
+        -HookName 'AfterRegistryCoreValuesWritten'
+    $partialRegistry = Get-ItemProperty -LiteralPath ([string]$crashPaths.RegistryPath)
+    Assert-InstallerTest ($null -eq $partialRegistry.PSObject.Properties['LatticeInstallId']) 'DESKTOP_INSTALLER_HARD_KILL_DID_NOT_LEAVE_PARTIAL_REGISTRY'
+    $crashRecovered = Invoke-InstallerWrapper -BundleRoot $bundle1 -SandboxRoot $crashSandbox -RegistryId $crashRegistryId
+    Assert-InstallerTest ($crashRecovered.result -ceq 'PASS') 'DESKTOP_INSTALLER_FRESH_PROCESS_ACTIVATION_NOT_RECOVERED'
+    Assert-InstallerTest ((Get-ActiveCommit -Paths $crashPaths) -ceq $commit1) 'DESKTOP_INSTALLER_FRESH_PROCESS_ACTIVE_COMMIT_MISMATCH'
+    Invoke-LatticeDesktopUninstall -TestSandboxRoot $crashSandbox -TestRegistryId $crashRegistryId | Out-Null
+
+    Invoke-InstallerWrapper -BundleRoot $bundle1 -SandboxRoot $crashSandbox -RegistryId $crashRegistryId | Out-Null
+    Invoke-InstallerWrapper -BundleRoot $bundle2 -SandboxRoot $crashSandbox -RegistryId $crashRegistryId | Out-Null
+    Invoke-InstallerHardKill `
+        -CommonPath (Join-Path $bundle2 'LatticeDesktopInstaller.Common.ps1') `
+        -BundleRoot $bundle2 `
+        -SandboxRoot $crashSandbox `
+        -RegistryId $crashRegistryId `
+        -HookName 'AfterVersionsTombstoned' `
+        -Operation 'UNINSTALL'
+    $uninstallRecovered = Invoke-LatticeDesktopUninstall -TestSandboxRoot $crashSandbox -TestRegistryId $crashRegistryId
+    Assert-InstallerTest ($uninstallRecovered.result -ceq 'PASS' -and $uninstallRecovered.action -ceq 'UNINSTALLED') 'DESKTOP_INSTALLER_INTERRUPTED_UNINSTALL_NOT_RECOVERED'
+    Assert-InstallerTest (-not (Test-Path -LiteralPath ([string]$crashPaths.InstallRoot))) 'DESKTOP_INSTALLER_INTERRUPTED_UNINSTALL_ROOT_REMAINS'
+    Invoke-InstallerHardKill `
+        -CommonPath (Join-Path $bundle1 'LatticeDesktopInstaller.Common.ps1') `
+        -BundleRoot $bundle1 `
+        -SandboxRoot $crashSandbox `
+        -RegistryId $crashRegistryId `
+        -HookName 'AfterOwnerMarkerPrepared'
+    $pendingOwnerPath = Join-Path ([IO.Path]::GetDirectoryName([string]$crashPaths.InstallRoot)) '.LATTICE.install-owner.pending.json'
+    Assert-InstallerTest (Test-Path -LiteralPath $pendingOwnerPath -PathType Leaf) 'DESKTOP_INSTALLER_OWNER_PENDING_MARKER_MISSING_AFTER_KILL'
+    Assert-InstallerTest (@(Get-ChildItem -LiteralPath ([string]$crashPaths.InstallRoot) -Force).Count -eq 0) 'DESKTOP_INSTALLER_OWNER_KILL_LEFT_UNOWNED_ROOT_CONTENT'
+    $ownerRecovered = Invoke-InstallerWrapper -BundleRoot $bundle1 -SandboxRoot $crashSandbox -RegistryId $crashRegistryId
+    Assert-InstallerTest ($ownerRecovered.result -ceq 'PASS') 'DESKTOP_INSTALLER_OWNER_BOOTSTRAP_NOT_RECOVERED'
+    Assert-InstallerTest (-not (Test-Path -LiteralPath $pendingOwnerPath)) 'DESKTOP_INSTALLER_OWNER_PENDING_MARKER_REMAINS'
+    Invoke-LatticeDesktopUninstall -TestSandboxRoot $crashSandbox -TestRegistryId $crashRegistryId | Out-Null
 
     $first = Invoke-InstallerWrapper -BundleRoot $bundle1 -SandboxRoot $temporaryRoot -RegistryId $registryId
     Assert-InstallerTest ($first.result -ceq 'PASS' -and $first.action -ceq 'INSTALLED') 'DESKTOP_INSTALLER_FRESH_INSTALL_FAILED'
@@ -337,6 +448,46 @@ try {
     }
 
     $activeCommitBeforeUninstall = Get-ActiveCommit -Paths $paths
+    $activeAppRoot = Join-Path ([string]$paths.VersionsRoot) "$activeCommitBeforeUninstall\app"
+    $foreignEmptyDirectory = Join-Path $activeAppRoot 'foreign-empty-directory'
+    [IO.Directory]::CreateDirectory($foreignEmptyDirectory) | Out-Null
+    $emptyDirectoryRejected = $false
+    try {
+        Invoke-LatticeDesktopUninstall -TestSandboxRoot $temporaryRoot -TestRegistryId $registryId | Out-Null
+    }
+    catch {
+        $emptyDirectoryRejected = $_.Exception.Message -ceq 'LATTICE_INSTALL_PAYLOAD_DIRECTORY_SET_MISMATCH'
+    }
+    Assert-InstallerTest $emptyDirectoryRejected 'DESKTOP_INSTALLER_EMPTY_DIRECTORY_NOT_REJECTED'
+    Assert-InstallerTest (Test-Path -LiteralPath $foreignEmptyDirectory -PathType Container) 'DESKTOP_INSTALLER_EMPTY_DIRECTORY_DELETED'
+    [IO.Directory]::Delete($foreignEmptyDirectory)
+
+    $alternateStreamFile = Join-Path $activeAppRoot 'LATTICE.dll'
+    Set-Content -LiteralPath ($alternateStreamFile + ':foreign-state') -Value 'must-not-be-deleted'
+    $alternateStreamRejected = $false
+    try {
+        Invoke-LatticeDesktopUninstall -TestSandboxRoot $temporaryRoot -TestRegistryId $registryId | Out-Null
+    }
+    catch {
+        $alternateStreamRejected = $_.Exception.Message -like 'LATTICE_INSTALL_PAYLOAD_ALTERNATE_DATA_STREAM_REJECTED:*'
+    }
+    Assert-InstallerTest $alternateStreamRejected 'DESKTOP_INSTALLER_ALTERNATE_DATA_STREAM_NOT_REJECTED'
+    Assert-InstallerTest (@(Get-Item -LiteralPath $alternateStreamFile -Stream 'foreign-state').Count -eq 1) 'DESKTOP_INSTALLER_ALTERNATE_DATA_STREAM_DELETED'
+    Remove-Item -LiteralPath ($alternateStreamFile + ':foreign-state') -Force
+
+    $unknownRegistrySubkey = Join-Path ([string]$paths.RegistryPath) 'ForeignState'
+    New-Item -Path $unknownRegistrySubkey -Force | Out-Null
+    $unknownRegistryRejected = $false
+    try {
+        Invoke-LatticeDesktopUninstall -TestSandboxRoot $temporaryRoot -TestRegistryId $registryId | Out-Null
+    }
+    catch {
+        $unknownRegistryRejected = $_.Exception.Message -ceq 'LATTICE_INSTALL_REGISTRY_UNKNOWN_SUBKEY'
+    }
+    Assert-InstallerTest $unknownRegistryRejected 'DESKTOP_INSTALLER_UNKNOWN_REGISTRY_SUBKEY_NOT_REJECTED'
+    Assert-InstallerTest (Test-Path -LiteralPath $unknownRegistrySubkey) 'DESKTOP_INSTALLER_UNKNOWN_REGISTRY_SUBKEY_DELETED'
+    Remove-Item -LiteralPath $unknownRegistrySubkey -Force
+
     $unknownVersionFile = Join-Path ([string]$paths.VersionsRoot) 'foreign-owned.txt'
     New-TestTextFile -Path $unknownVersionFile -Value 'must-not-be-deleted'
     $unknownVersionRejected = $false
@@ -410,6 +561,20 @@ try {
         [string]$foreignRegistry.DisplayName -ceq 'Foreign Product' -and
         $null -eq $foreignRegistry.PSObject.Properties['LatticeProduct']) 'DESKTOP_INSTALLER_FOREIGN_REGISTRY_CHANGED'
 
+    $orphanSandbox = Join-Path ([IO.Path]::GetTempPath()) ('lattice-desktop-installer-o-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $orphanRegistryId = [guid]::NewGuid().ToString('N')
+    $orphanContext = Resolve-LatticeInstallContext -TestSandboxRoot $orphanSandbox -TestRegistryId $orphanRegistryId
+    Set-LatticeRegistryValue -Path ([string]$orphanContext.RegistryPath) -Name 'DisplayName' -Value 'Orphan Surface' -Kind String
+    $orphanRejected = $false
+    try {
+        Invoke-LatticeDesktopUninstall -TestSandboxRoot $orphanSandbox -TestRegistryId $orphanRegistryId | Out-Null
+    }
+    catch {
+        $orphanRejected = $_.Exception.Message -ceq 'LATTICE_UNINSTALL_ORPHANED_SURFACE'
+    }
+    Assert-InstallerTest $orphanRejected 'DESKTOP_INSTALLER_ORPHANED_SURFACE_NOT_REJECTED'
+    Assert-InstallerTest (Test-Path -LiteralPath ([string]$orphanContext.RegistryPath)) 'DESKTOP_INSTALLER_ORPHANED_SURFACE_DELETED'
+
     $junctionSandbox = Join-Path ([IO.Path]::GetTempPath()) ('lattice-desktop-installer-j-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     $junctionRegistryId = [guid]::NewGuid().ToString('N')
     $junctionContext = Resolve-LatticeInstallContext -TestSandboxRoot $junctionSandbox -TestRegistryId $junctionRegistryId
@@ -435,6 +600,30 @@ try {
     $junctionPath = ''
     Assert-InstallerTest (Test-Path -LiteralPath $junctionSentinel -PathType Leaf) 'DESKTOP_INSTALLER_JUNCTION_TARGET_DELETED'
 
+    $ancestorJunctionParent = Join-Path ([IO.Path]::GetTempPath()) ('lattice-installer-parent-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    [IO.Directory]::CreateDirectory($ancestorJunctionParent) | Out-Null
+    $ancestorJunctionTarget = Join-Path $temporaryRoot 'ancestor-junction-target-must-survive'
+    $ancestorJunctionSentinel = Join-Path $ancestorJunctionTarget 'sentinel.txt'
+    New-TestTextFile -Path $ancestorJunctionSentinel -Value 'ancestor-junction-target-must-survive'
+    $ancestorJunctionPath = Join-Path $ancestorJunctionParent 'link'
+    New-Item -ItemType Junction -Path $ancestorJunctionPath -Target $ancestorJunctionTarget | Out-Null
+    $sandboxThroughJunction = Join-Path $ancestorJunctionPath ('lattice-desktop-installer-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $ancestorJunctionRejected = $false
+    try {
+        Resolve-LatticeInstallContext `
+            -TestSandboxRoot $sandboxThroughJunction `
+            -TestRegistryId ([guid]::NewGuid().ToString('N')) | Out-Null
+    }
+    catch {
+        $ancestorJunctionRejected = $_.Exception.Message -like 'LATTICE_INSTALL_TEST_SANDBOX_REPARSE_POINT:*'
+    }
+    Assert-InstallerTest $ancestorJunctionRejected 'DESKTOP_INSTALLER_ANCESTOR_JUNCTION_NOT_REJECTED'
+    Assert-InstallerTest ((Get-LatticeSha256Hex -LiteralPath $ancestorJunctionSentinel) -ceq (Get-LatticeStringSha256Hex -Value 'ancestor-junction-target-must-survive')) 'DESKTOP_INSTALLER_ANCESTOR_JUNCTION_TARGET_CHANGED'
+    [IO.Directory]::Delete($ancestorJunctionPath)
+    $ancestorJunctionPath = ''
+    [IO.Directory]::Delete($ancestorJunctionParent)
+    $ancestorJunctionParent = ''
+
     $result = [ordered]@{
         result = 'PASS'
         staging_hash_activation = $true
@@ -447,6 +636,9 @@ try {
         tampered_receipt_failed_closed = $true
         corrupt_bundle_failed_closed = $true
         failure_preserved_previous_activation = $true
+        fresh_process_activation_recovered = $true
+        owner_bootstrap_recovered = $true
+        interrupted_uninstall_recovered = $true
         stale_owned_stage_reconciled = $true
         unknown_version_file_preserved = $true
         locked_payload_preserved_install_surfaces = $true
@@ -456,7 +648,12 @@ try {
         webview_data_preserved = $true
         foreign_sibling_preserved = $true
         foreign_registry_preserved = $true
+        unknown_registry_state_preserved = $true
+        empty_directory_state_preserved = $true
+        alternate_data_stream_preserved = $true
+        orphaned_surface_failed_closed = $true
         junction_root_failed_closed = $true
+        ancestor_junction_failed_closed = $true
         exact_candidate = $exactCandidate
         install_scope = 'DISPOSABLE_TEST_SANDBOX'
         registry_scope = [string]$context.RegistryPath
@@ -475,6 +672,12 @@ finally {
         }
         if (($null -ne $junctionContext) -and (Test-Path -LiteralPath ([string]$junctionContext.RegistryTestRoot))) {
             Remove-Item -LiteralPath ([string]$junctionContext.RegistryTestRoot) -Recurse -Force
+        }
+        if (($null -ne $crashContext) -and (Test-Path -LiteralPath ([string]$crashContext.RegistryTestRoot))) {
+            Remove-Item -LiteralPath ([string]$crashContext.RegistryTestRoot) -Recurse -Force
+        }
+        if (($null -ne $orphanContext) -and (Test-Path -LiteralPath ([string]$orphanContext.RegistryTestRoot))) {
+            Remove-Item -LiteralPath ([string]$orphanContext.RegistryTestRoot) -Recurse -Force
         }
         foreach ($parentState in @(
             [PSCustomObject]@{ Path = $installerTestsRegistryParent; Existed = $installerTestsRegistryParentExisted },
@@ -495,7 +698,15 @@ finally {
             [IO.Directory]::Delete($junctionPath)
             $junctionPath = ''
         }
-        foreach ($sandbox in @($foreignSandbox, $junctionSandbox)) {
+        if (-not [string]::IsNullOrWhiteSpace($ancestorJunctionPath) -and (Test-Path -LiteralPath $ancestorJunctionPath)) {
+            [IO.Directory]::Delete($ancestorJunctionPath)
+            $ancestorJunctionPath = ''
+        }
+        if (-not [string]::IsNullOrWhiteSpace($ancestorJunctionParent) -and (Test-Path -LiteralPath $ancestorJunctionParent)) {
+            [IO.Directory]::Delete($ancestorJunctionParent)
+            $ancestorJunctionParent = ''
+        }
+        foreach ($sandbox in @($foreignSandbox, $junctionSandbox, $crashSandbox, $orphanSandbox)) {
             if (-not [string]::IsNullOrWhiteSpace($sandbox) -and (Test-Path -LiteralPath $sandbox)) {
                 $sandboxFull = [IO.Path]::GetFullPath($sandbox)
                 $temporaryPrefix = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(

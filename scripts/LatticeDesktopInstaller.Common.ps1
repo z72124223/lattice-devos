@@ -8,7 +8,24 @@ $script:LatticeInstallManifestSchema = 'lattice.control.desktop-per-user-install
 $script:LatticeInstallReceiptSchema = 'lattice.control.desktop-install-receipt.v1'
 $script:LatticeActiveInstallSchema = 'lattice.control.desktop-active-install.v1'
 $script:LatticeStageOwnerSchema = 'lattice.control.desktop-stage-owner.v1'
+$script:LatticeActivationJournalSchema = 'lattice.control.desktop-activation-journal.v1'
+$script:LatticeUninstallJournalSchema = 'lattice.control.desktop-uninstall-journal.v1'
 $script:LatticeProduct = 'LATTICE_CONTROL_DESKTOP'
+$script:LatticeRegistryValueNames = @(
+    'DisplayName',
+    'DisplayVersion',
+    'Publisher',
+    'InstallLocation',
+    'DisplayIcon',
+    'UninstallString',
+    'QuietUninstallString',
+    'NoModify',
+    'NoRepair',
+    'EstimatedSize',
+    'InstallDate',
+    'LatticeProduct',
+    'LatticeInstallId',
+    'LatticeSourceCommit')
 
 function Get-LatticeSha256Hex {
     param([Parameter(Mandatory)][string]$LiteralPath)
@@ -88,6 +105,26 @@ function Assert-LatticeNotReparsePoint {
     }
 }
 
+function Assert-LatticePathAncestorsHaveNoReparsePoints {
+    param(
+        [Parameter(Mandatory)][string]$LiteralPath,
+        [string]$ErrorCode = 'LATTICE_INSTALL_REPARSE_POINT_REJECTED'
+    )
+
+    $fullPath = [IO.Path]::GetFullPath($LiteralPath)
+    $volumeRoot = [IO.Path]::GetPathRoot($fullPath)
+    $current = $volumeRoot.TrimEnd([IO.Path]::DirectorySeparatorChar)
+    foreach ($segment in $fullPath.Substring($volumeRoot.Length).Split(
+        [IO.Path]::DirectorySeparatorChar,
+        [StringSplitOptions]::RemoveEmptyEntries)) {
+        $current = Join-Path $current $segment
+        if (-not (Test-Path -LiteralPath $current)) {
+            break
+        }
+        Assert-LatticeNotReparsePoint -LiteralPath $current -ErrorCode $ErrorCode
+    }
+}
+
 function Assert-LatticeTreeHasNoReparsePoints {
     param(
         [Parameter(Mandatory)][string]$Root,
@@ -105,6 +142,21 @@ function Assert-LatticeTreeHasNoReparsePoints {
             }
             if ($item.PSIsContainer) {
                 $pending.Enqueue($item.FullName)
+            }
+        }
+    }
+}
+
+function Assert-LatticeTreeHasNoAlternateDataStreams {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string]$ErrorCode = 'LATTICE_INSTALL_ALTERNATE_DATA_STREAM_REJECTED'
+    )
+
+    foreach ($file in @(Get-ChildItem -LiteralPath $Root -Force -File -Recurse)) {
+        foreach ($stream in @(Get-Item -LiteralPath $file.FullName -Stream *)) {
+            if ([string]$stream.Stream -cne ':$DATA') {
+                throw "${ErrorCode}:$($file.FullName):$($stream.Stream)"
             }
         }
     }
@@ -275,15 +327,17 @@ function Expand-LatticePortablePayload {
     param(
         [Parameter(Mandatory)][string]$ArchivePath,
         [Parameter(Mandatory)][string]$DestinationPath,
-        [Parameter(Mandatory)][string]$ExpectedSourceCommit
+        [Parameter(Mandatory)][string]$ExpectedSourceCommit,
+        [Parameter(Mandatory)][string]$FinalPayloadPath
     )
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $destinationFull = [IO.Path]::GetFullPath($DestinationPath)
-    [IO.Directory]::CreateDirectory($destinationFull) | Out-Null
+    $finalPayloadFull = [IO.Path]::GetFullPath($FinalPayloadPath)
     $archive = [IO.Compression.ZipFile]::OpenRead([IO.Path]::GetFullPath($ArchivePath))
     try {
         $seen = @{}
+        $extractionPlan = @()
         foreach ($entry in $archive.Entries) {
             $entryPath = [string]$entry.FullName
             if ([string]::IsNullOrWhiteSpace($entryPath)) {
@@ -306,44 +360,44 @@ function Expand-LatticePortablePayload {
             if (($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_REPARSE_POINT:$entryPath"
             }
-
-            $targetIoPath = if ($target.StartsWith('\\', [StringComparison]::Ordinal)) {
-                '\\?\UNC\' + $target.Substring(2)
+            $isDirectory = $entryPath.EndsWith('/', [StringComparison]::Ordinal)
+            $finalTarget = [IO.Path]::GetFullPath((Join-Path $finalPayloadFull $normalized.Replace('/', '\')))
+            if (-not (Test-LatticePathWithinRoot -Path $finalTarget -Root $finalPayloadFull)) {
+                throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_ESCAPED_FINAL_ROOT:$entryPath"
             }
-            else {
-                '\\?\' + $target
+            foreach ($candidate in @($target, $finalTarget)) {
+                $candidateDirectory = if ($isDirectory) { $candidate } else { [IO.Path]::GetDirectoryName($candidate) }
+                if ($candidate.Length -ge 260 -or $candidateDirectory.Length -ge 248) {
+                    throw "LATTICE_INSTALL_PAYLOAD_PATH_BUDGET_EXCEEDED:$entryPath"
+                }
             }
+            $extractionPlan += [PSCustomObject]@{
+                Entry = $entry
+                Target = $target
+                IsDirectory = $isDirectory
+            }
+        }
 
-            if ($entryPath.EndsWith('/', [StringComparison]::Ordinal)) {
-                [IO.Directory]::CreateDirectory($targetIoPath) | Out-Null
+        [IO.Directory]::CreateDirectory($destinationFull) | Out-Null
+        foreach ($planned in $extractionPlan) {
+            if ([bool]$planned.IsDirectory) {
+                [IO.Directory]::CreateDirectory([string]$planned.Target) | Out-Null
                 continue
             }
-
-            $parent = [IO.Path]::GetDirectoryName($target)
-            $parentIoPath = if ($parent.StartsWith('\\', [StringComparison]::Ordinal)) {
-                '\\?\UNC\' + $parent.Substring(2)
-            }
-            else {
-                '\\?\' + $parent
-            }
-            [IO.Directory]::CreateDirectory($parentIoPath) | Out-Null
-            $input = $entry.Open()
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName([string]$planned.Target)) | Out-Null
+            $input = ([IO.Compression.ZipArchiveEntry]$planned.Entry).Open()
             try {
                 $output = [IO.File]::Open(
-                    $targetIoPath,
+                    [string]$planned.Target,
                     [IO.FileMode]::CreateNew,
                     [IO.FileAccess]::Write,
                     [IO.FileShare]::None)
                 try {
                     $input.CopyTo($output)
                 }
-                finally {
-                    $output.Dispose()
-                }
+                finally { $output.Dispose() }
             }
-            finally {
-                $input.Dispose()
-            }
+            finally { $input.Dispose() }
         }
     }
     finally {
@@ -360,6 +414,7 @@ function Get-LatticePortablePayload {
 
     $payloadRootFull = [IO.Path]::GetFullPath($PayloadRoot)
     Assert-LatticeTreeHasNoReparsePoints -Root $payloadRootFull -ErrorCode 'LATTICE_INSTALL_PAYLOAD_REPARSE_POINT_REJECTED'
+    Assert-LatticeTreeHasNoAlternateDataStreams -Root $payloadRootFull -ErrorCode 'LATTICE_INSTALL_PAYLOAD_ALTERNATE_DATA_STREAM_REJECTED'
     $manifestPath = Join-Path $payloadRootFull 'candidate-manifest.json'
     try {
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
@@ -398,6 +453,24 @@ function Get-LatticePortablePayload {
     foreach ($requiredPath in @('LATTICE.exe', 'LATTICE.dll', 'PORTABLE_RELEASE_CANDIDATE.txt')) {
         if (-not $expected.ContainsKey($requiredPath)) {
             throw "LATTICE_INSTALL_PAYLOAD_REQUIRED_FILE_MISSING:$requiredPath"
+        }
+    }
+    $expectedDirectories = @{}
+    foreach ($relativePath in $expected.Keys) {
+        $directory = [IO.Path]::GetDirectoryName($relativePath.Replace('/', '\'))
+        while (-not [string]::IsNullOrWhiteSpace($directory)) {
+            $expectedDirectories[$directory.Replace('\', '/')] = $true
+            $directory = [IO.Path]::GetDirectoryName($directory)
+        }
+    }
+    $actualDirectories = @(Get-ChildItem -LiteralPath $payloadRootFull -Force -Directory -Recurse)
+    if ($actualDirectories.Count -ne $expectedDirectories.Count) {
+        throw 'LATTICE_INSTALL_PAYLOAD_DIRECTORY_SET_MISMATCH'
+    }
+    foreach ($actualDirectory in $actualDirectories) {
+        $relativeDirectory = $actualDirectory.FullName.Substring($payloadRootFull.Length + 1).Replace('\', '/')
+        if (-not $expectedDirectories.ContainsKey($relativeDirectory)) {
+            throw "LATTICE_INSTALL_PAYLOAD_UNDECLARED_DIRECTORY:$relativeDirectory"
         }
     }
     $reparsePoints = @(Get-ChildItem -LiteralPath $payloadRootFull -Force -Recurse |
@@ -467,6 +540,9 @@ function Resolve-LatticeInstallContext {
         -not [IO.Path]::GetFileName($sandboxFull).StartsWith('lattice-desktop-installer-', [StringComparison]::Ordinal)) {
         throw 'LATTICE_INSTALL_TEST_SANDBOX_INVALID'
     }
+    Assert-LatticePathAncestorsHaveNoReparsePoints `
+        -LiteralPath $sandboxFull `
+        -ErrorCode 'LATTICE_INSTALL_TEST_SANDBOX_REPARSE_POINT'
     $registryTestRoot = "HKCU:\Software\LATTICE\InstallerTests\$TestRegistryId"
     return [PSCustomObject]@{
         TestMode = $true
@@ -502,6 +578,7 @@ function Initialize-LatticeOwnedInstallRoot {
 
     $root = [string]$Paths.InstallRoot
     $markerPath = [string]$Paths.OwnerMarker
+    $pendingMarkerPath = Join-Path ([IO.Path]::GetDirectoryName($root)) '.LATTICE.install-owner.pending.json'
     if (Test-Path -LiteralPath $root -PathType Container) {
         Assert-LatticeNotReparsePoint -LiteralPath $root
         if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
@@ -515,15 +592,36 @@ function Initialize-LatticeOwnedInstallRoot {
         [IO.Directory]::CreateDirectory($root) | Out-Null
     }
     if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
-        $ownerSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-        $marker = [ordered]@{
-            schema_version = $script:LatticeInstallOwnerSchema
-            product = $script:LatticeProduct
-            install_id = [guid]::NewGuid().ToString('N')
-            owner_sid = $ownerSid
-            install_root = $root
+        if (Test-Path -LiteralPath $pendingMarkerPath -PathType Leaf) {
+            try {
+                $marker = Get-Content -LiteralPath $pendingMarkerPath -Raw | ConvertFrom-Json
+            }
+            catch {
+                throw 'LATTICE_INSTALL_OWNER_PENDING_INVALID_JSON'
+            }
         }
-        Write-LatticeJsonAtomic -LiteralPath $markerPath -Value $marker
+        else {
+            $marker = [ordered]@{
+                schema_version = $script:LatticeInstallOwnerSchema
+                product = $script:LatticeProduct
+                install_id = [guid]::NewGuid().ToString('N')
+                owner_sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                install_root = $root
+            }
+            Write-LatticeJsonAtomic -LiteralPath $pendingMarkerPath -Value $marker
+        }
+        if ([string]$marker.schema_version -cne $script:LatticeInstallOwnerSchema -or
+            [string]$marker.product -cne $script:LatticeProduct -or
+            [string]$marker.install_id -cnotmatch '^[0-9a-f]{32}$' -or
+            -not [string]::Equals([string]$marker.install_root, $root, [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$marker.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {
+            throw 'LATTICE_INSTALL_OWNER_PENDING_MISMATCH'
+        }
+        Invoke-LatticeInstallerHook -Name 'AfterOwnerMarkerPrepared'
+        [IO.File]::Move($pendingMarkerPath, $markerPath)
+    }
+    elseif (Test-Path -LiteralPath $pendingMarkerPath) {
+        throw 'LATTICE_INSTALL_OWNER_PENDING_CONFLICT'
     }
     Assert-LatticeNotReparsePoint -LiteralPath $markerPath
     try {
@@ -539,11 +637,16 @@ function Initialize-LatticeOwnedInstallRoot {
         [string]$existing.owner_sid -cne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value) {
         throw 'LATTICE_INSTALL_OWNER_MARKER_MISMATCH'
     }
+    return $existing
+}
+
+function Initialize-LatticeInstallDirectories {
+    param([Parameter(Mandatory)][object]$Paths)
+
     [IO.Directory]::CreateDirectory([string]$Paths.VersionsRoot) | Out-Null
     [IO.Directory]::CreateDirectory([string]$Paths.StagingRoot) | Out-Null
     Assert-LatticeNotReparsePoint -LiteralPath ([string]$Paths.VersionsRoot)
     Assert-LatticeNotReparsePoint -LiteralPath ([string]$Paths.StagingRoot)
-    return $existing
 }
 
 function Write-LatticeStageOwner {
@@ -570,6 +673,9 @@ function Clear-LatticeOwnedStaging {
         [Parameter(Mandatory)][object]$Owner
     )
 
+    if (-not (Test-Path -LiteralPath ([string]$Paths.StagingRoot) -PathType Container)) {
+        return $false
+    }
     Assert-LatticeNotReparsePoint -LiteralPath ([string]$Paths.StagingRoot)
     foreach ($entry in @(Get-ChildItem -LiteralPath ([string]$Paths.StagingRoot) -Force)) {
         if (-not $entry.PSIsContainer -or
@@ -592,8 +698,24 @@ function Clear-LatticeOwnedStaging {
         Assert-LatticeTreeHasNoReparsePoints `
             -Root $entry.FullName `
             -ErrorCode 'LATTICE_INSTALL_STAGING_REPARSE_POINT_REJECTED'
+        if ([string]$marker.purpose -ceq 'ACTIVATION_BACKUP') {
+            Restore-LatticeActivationBackup `
+                -Paths $Paths `
+                -Owner $Owner `
+                -BackupRoot $entry.FullName `
+                -StageMarker $marker
+        }
+        elseif ([string]$marker.purpose -ceq 'UNINSTALL_BACKUP') {
+            Complete-LatticeInterruptedUninstall `
+                -Paths $Paths `
+                -Owner $Owner `
+                -BackupRoot $entry.FullName `
+                -StageMarker $marker
+            return $true
+        }
         Remove-Item -LiteralPath $entry.FullName -Recurse -Force
     }
+    return $false
 }
 
 function Get-LatticeRegistrySnapshot {
@@ -603,8 +725,15 @@ function Get-LatticeRegistrySnapshot {
         return [PSCustomObject]@{ Exists = $false; Values = @() }
     }
     $key = Get-Item -LiteralPath $Path
+    if (@($key.GetSubKeyNames()).Count -ne 0) {
+        throw 'LATTICE_INSTALL_REGISTRY_UNKNOWN_SUBKEY'
+    }
+    $unknownValueNames = @($key.GetValueNames() | Where-Object { $script:LatticeRegistryValueNames -cnotcontains $_ })
+    if ($unknownValueNames.Count -ne 0) {
+        throw "LATTICE_INSTALL_REGISTRY_UNKNOWN_VALUE:$($unknownValueNames[0])"
+    }
     $values = @()
-    foreach ($name in $key.GetValueNames()) {
+    foreach ($name in @($key.GetValueNames() | Sort-Object)) {
         $values += [PSCustomObject]@{
             Name = $name
             Value = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
@@ -621,7 +750,15 @@ function Restore-LatticeRegistrySnapshot {
     )
 
     if (Test-Path -LiteralPath $Path) {
-        Remove-Item -LiteralPath $Path -Recurse -Force
+        $current = Get-Item -LiteralPath $Path
+        if (@($current.GetSubKeyNames()).Count -ne 0) {
+            throw 'LATTICE_INSTALL_REGISTRY_UNKNOWN_SUBKEY'
+        }
+        $unknownValueNames = @($current.GetValueNames() | Where-Object { $script:LatticeRegistryValueNames -cnotcontains $_ })
+        if ($unknownValueNames.Count -ne 0) {
+            throw "LATTICE_INSTALL_REGISTRY_UNKNOWN_VALUE:$($unknownValueNames[0])"
+        }
+        Remove-Item -LiteralPath $Path -Force
     }
     if (-not [bool]$Snapshot.Exists) {
         return
@@ -634,6 +771,229 @@ function Restore-LatticeRegistrySnapshot {
             -Value $value.Value `
             -PropertyType ([string]$value.Kind) `
             -Force | Out-Null
+    }
+}
+
+function Set-LatticeActivationJournalPhase {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][object]$Journal,
+        [Parameter(Mandatory)][ValidateSet(
+            'PREPARED',
+            'SHORTCUT_ACTIVATED',
+            'REGISTRY_ACTIVATED',
+            'ACTIVE_RECEIPT_WRITTEN',
+            'COMMITTED',
+            'ROLLED_BACK')][string]$Phase
+    )
+
+    $Journal.phase = $Phase
+    Write-LatticeJsonAtomic -LiteralPath (Join-Path $BackupRoot 'activation-journal.json') -Value $Journal
+}
+
+function Restore-LatticeActivationBackup {
+    param(
+        [Parameter(Mandatory)][object]$Paths,
+        [Parameter(Mandatory)][object]$Owner,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][object]$StageMarker
+    )
+
+    $journalPath = Join-Path $BackupRoot 'activation-journal.json'
+    $registrySnapshotPath = Join-Path $BackupRoot 'registry-snapshot.json'
+    try {
+        $journal = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
+        $registrySnapshot = Get-Content -LiteralPath $registrySnapshotPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+    }
+    if ([string]$journal.schema_version -cne $script:LatticeActivationJournalSchema -or
+        [string]$journal.product -cne $script:LatticeProduct -or
+        [string]$journal.install_id -cne [string]$Owner.install_id -or
+        [string]$journal.operation_id -cnotmatch '^[0-9a-f]{32}$' -or
+        [string]$journal.after_source_commit -cne [string]$StageMarker.source_commit -or
+        [string]$journal.after_source_commit -cnotmatch '^[0-9a-f]{40}$' -or
+        ([string]$journal.before_source_commit -ne '' -and [string]$journal.before_source_commit -cnotmatch '^[0-9a-f]{40}$') -or
+        [string]$journal.shortcut_path -cne [string]$Paths.ShortcutPath -or
+        [string]$journal.registry_path -cne [string]$Paths.RegistryPath -or
+        [string]$journal.active_install_path -cne [string]$Paths.ActiveInstall -or
+        -not [string]::Equals(
+            [string]$journal.after_version_root,
+            [IO.Path]::GetFullPath((Join-Path ([string]$Paths.VersionsRoot) ([string]$journal.after_source_commit))),
+            [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$journal.registry_snapshot_sha256 -cne (Get-LatticeSha256Hex -LiteralPath $registrySnapshotPath) -or
+        [string]$journal.phase -cnotmatch '^(PREPARED|SHORTCUT_ACTIVATED|REGISTRY_ACTIVATED|ACTIVE_RECEIPT_WRITTEN|COMMITTED|ROLLED_BACK)$') {
+        throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+    }
+
+    $shortcutBackup = Join-Path $BackupRoot 'shortcut.lnk'
+    $activeBackup = Join-Path $BackupRoot 'active-install.json'
+    if ([bool]$journal.shortcut_existed) {
+        if (-not (Test-Path -LiteralPath $shortcutBackup -PathType Leaf) -or
+            [string]$journal.shortcut_backup_sha256 -cne (Get-LatticeSha256Hex -LiteralPath $shortcutBackup)) {
+            throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+        }
+    }
+    elseif (Test-Path -LiteralPath $shortcutBackup) {
+        throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+    }
+    if ([bool]$journal.active_existed) {
+        if (-not (Test-Path -LiteralPath $activeBackup -PathType Leaf) -or
+            [string]$journal.active_backup_sha256 -cne (Get-LatticeSha256Hex -LiteralPath $activeBackup)) {
+            throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+        }
+    }
+    elseif (Test-Path -LiteralPath $activeBackup) {
+        throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+    }
+
+    if ([string]$journal.phase -ceq 'COMMITTED') {
+        $active = Get-Content -LiteralPath ([string]$Paths.ActiveInstall) -Raw | ConvertFrom-Json
+        $registry = Get-ItemProperty -LiteralPath ([string]$Paths.RegistryPath)
+        $shortcutTarget = Get-LatticeShortcutTarget -ShortcutPath ([string]$Paths.ShortcutPath)
+        if ([string]$active.install_id -cne [string]$Owner.install_id -or
+            [string]$active.source_commit -cne [string]$journal.after_source_commit -or
+            [string]$registry.LatticeInstallId -cne [string]$Owner.install_id -or
+            [string]$registry.LatticeSourceCommit -cne [string]$journal.after_source_commit -or
+            -not [string]::Equals(
+                $shortcutTarget,
+                (Join-Path ([string]$journal.after_version_root) 'app\LATTICE.exe'),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'LATTICE_INSTALL_ACTIVATION_RECONCILIATION_REQUIRED'
+        }
+        return
+    }
+
+    Restore-LatticeRegistrySnapshot -Path ([string]$Paths.RegistryPath) -Snapshot $registrySnapshot
+    if (Test-Path -LiteralPath ([string]$Paths.ShortcutPath)) {
+        Remove-Item -LiteralPath ([string]$Paths.ShortcutPath) -Force
+    }
+    if ([bool]$journal.shortcut_existed) {
+        [IO.Directory]::CreateDirectory([string]$Paths.ShortcutDirectory) | Out-Null
+        Copy-Item -LiteralPath $shortcutBackup -Destination ([string]$Paths.ShortcutPath)
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.ActiveInstall)) {
+        Remove-Item -LiteralPath ([string]$Paths.ActiveInstall) -Force
+    }
+    if ([bool]$journal.active_existed) {
+        Copy-Item -LiteralPath $activeBackup -Destination ([string]$Paths.ActiveInstall)
+    }
+    Set-LatticeActivationJournalPhase -BackupRoot $BackupRoot -Journal $journal -Phase 'ROLLED_BACK'
+}
+
+function Set-LatticeUninstallJournalPhase {
+    param(
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][object]$Journal,
+        [Parameter(Mandatory)][ValidateSet('PREPARED', 'REMOVAL_STARTED')][string]$Phase
+    )
+
+    $Journal.phase = $Phase
+    Write-LatticeJsonAtomic -LiteralPath (Join-Path $BackupRoot 'uninstall-journal.json') -Value $Journal
+}
+
+function Complete-LatticeInterruptedUninstall {
+    param(
+        [Parameter(Mandatory)][object]$Paths,
+        [Parameter(Mandatory)][object]$Owner,
+        [Parameter(Mandatory)][string]$BackupRoot,
+        [Parameter(Mandatory)][object]$StageMarker
+    )
+
+    $journalPath = Join-Path $BackupRoot 'uninstall-journal.json'
+    $registrySnapshotPath = Join-Path $BackupRoot 'registry-snapshot.json'
+    try {
+        $journal = Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json
+    }
+    catch {
+        throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+    }
+    $expectedTombstone = Join-Path ([string]$Paths.InstallRoot) ('.r-' + [string]$journal.operation_id)
+    if ([string]$journal.schema_version -cne $script:LatticeUninstallJournalSchema -or
+        [string]$journal.product -cne $script:LatticeProduct -or
+        [string]$journal.install_id -cne [string]$Owner.install_id -or
+        [string]$journal.operation_id -cnotmatch '^[0-9a-f]{12}$' -or
+        [string]$journal.phase -cnotmatch '^(PREPARED|REMOVAL_STARTED)$' -or
+        [string]$journal.registry_path -cne [string]$Paths.RegistryPath -or
+        [string]$journal.shortcut_path -cne [string]$Paths.ShortcutPath -or
+        [string]$journal.active_install_path -cne [string]$Paths.ActiveInstall -or
+        -not [string]::Equals([string]$journal.tombstone_path, $expectedTombstone, [StringComparison]::OrdinalIgnoreCase) -or
+        [string]$journal.registry_snapshot_sha256 -cne (Get-LatticeSha256Hex -LiteralPath $registrySnapshotPath) -or
+        [string]$StageMarker.source_commit -cne [string]$journal.active_source_commit) {
+        throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+    }
+    foreach ($backup in @(
+        [PSCustomObject]@{ Exists = [bool]$journal.shortcut_existed; Path = (Join-Path $BackupRoot 'shortcut.lnk'); Hash = [string]$journal.shortcut_backup_sha256 },
+        [PSCustomObject]@{ Exists = [bool]$journal.active_existed; Path = (Join-Path $BackupRoot 'active-install.json'); Hash = [string]$journal.active_backup_sha256 })) {
+        if ([bool]$backup.Exists) {
+            if (-not (Test-Path -LiteralPath ([string]$backup.Path) -PathType Leaf) -or
+                [string]$backup.Hash -cne (Get-LatticeSha256Hex -LiteralPath ([string]$backup.Path))) {
+                throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+            }
+        }
+        elseif (Test-Path -LiteralPath ([string]$backup.Path)) {
+            throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+        }
+    }
+
+    $stagingEntries = @(Get-ChildItem -LiteralPath ([string]$Paths.StagingRoot) -Force)
+    if ($stagingEntries.Count -ne 1 -or
+        -not [string]::Equals($stagingEntries[0].FullName, $BackupRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+    }
+    if ([string]$journal.phase -ceq 'PREPARED') {
+        Set-LatticeUninstallJournalPhase -BackupRoot $BackupRoot -Journal $journal -Phase 'REMOVAL_STARTED'
+    }
+
+    $tombstonePath = [string]$journal.tombstone_path
+    $versionsExist = Test-Path -LiteralPath ([string]$Paths.VersionsRoot) -PathType Container
+    $tombstoneExists = Test-Path -LiteralPath $tombstonePath -PathType Container
+    if ($versionsExist -and $tombstoneExists) {
+        throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+    }
+    if ($versionsExist) {
+        [IO.Directory]::Move([string]$Paths.VersionsRoot, $tombstonePath)
+        $tombstoneExists = $true
+    }
+    Invoke-LatticeInstallerHook -Name 'AfterVersionsTombstoned'
+
+    if (Test-Path -LiteralPath ([string]$Paths.ShortcutPath)) {
+        Remove-Item -LiteralPath ([string]$Paths.ShortcutPath) -Force
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.RegistryPath)) {
+        Get-LatticeRegistrySnapshot -Path ([string]$Paths.RegistryPath) | Out-Null
+        Remove-Item -LiteralPath ([string]$Paths.RegistryPath) -Force
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.ActiveInstall)) {
+        Remove-Item -LiteralPath ([string]$Paths.ActiveInstall) -Force
+    }
+    if ($tombstoneExists -and (Test-Path -LiteralPath $tombstonePath)) {
+        Assert-LatticeTreeHasNoReparsePoints -Root $tombstonePath -ErrorCode 'LATTICE_UNINSTALL_TOMBSTONE_REPARSE_POINT_REJECTED'
+        $tombstoneIoPath = if ($tombstonePath.StartsWith('\\', [StringComparison]::Ordinal)) {
+            '\\?\UNC\' + $tombstonePath.Substring(2)
+        }
+        else {
+            '\\?\' + $tombstonePath
+        }
+        [IO.Directory]::Delete($tombstoneIoPath, $true)
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.OwnerMarker)) {
+        Remove-Item -LiteralPath ([string]$Paths.OwnerMarker) -Force
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.StagingRoot)) {
+        Remove-Item -LiteralPath ([string]$Paths.StagingRoot) -Recurse -Force
+    }
+    if (Test-Path -LiteralPath ([string]$Paths.InstallRoot)) {
+        $remaining = @(Get-ChildItem -LiteralPath ([string]$Paths.InstallRoot) -Force)
+        if ($remaining.Count -ne 0) {
+            throw 'LATTICE_UNINSTALL_RECONCILIATION_REQUIRED'
+        }
+        Remove-Item -LiteralPath ([string]$Paths.InstallRoot) -Force
+    }
+    if ((Test-Path -LiteralPath ([string]$Paths.ShortcutDirectory) -PathType Container) -and
+        @(Get-ChildItem -LiteralPath ([string]$Paths.ShortcutDirectory) -Force).Count -eq 0) {
+        Remove-Item -LiteralPath ([string]$Paths.ShortcutDirectory) -Force
     }
 }
 
@@ -921,6 +1281,7 @@ function Set-LatticeUninstallRegistration {
     $uninstallCommand = $arguments -join ' '
     $registryPath = [string]$Paths.RegistryPath
     if (Test-Path -LiteralPath $registryPath) {
+        Get-LatticeRegistrySnapshot -Path $registryPath | Out-Null
         $existing = Get-ItemProperty -LiteralPath $registryPath
         if ($null -eq $existing.PSObject.Properties['LatticeProduct'] -or
             $null -eq $existing.PSObject.Properties['LatticeInstallId'] -or
@@ -948,6 +1309,7 @@ function Set-LatticeUninstallRegistration {
     Set-LatticeRegistryValue -Path $registryPath -Name 'NoRepair' -Value 1 -Kind DWord
     Set-LatticeRegistryValue -Path $registryPath -Name 'EstimatedSize' -Value $estimatedSize -Kind DWord
     Set-LatticeRegistryValue -Path $registryPath -Name 'InstallDate' -Value ([DateTime]::UtcNow.ToString('yyyyMMdd')) -Kind String
+    Invoke-LatticeInstallerHook -Name 'AfterRegistryCoreValuesWritten'
     Set-LatticeRegistryValue -Path $registryPath -Name 'LatticeProduct' -Value $script:LatticeProduct -Kind String
     Set-LatticeRegistryValue -Path $registryPath -Name 'LatticeInstallId' -Value ([string]$Owner.install_id) -Kind String
     Set-LatticeRegistryValue -Path $registryPath -Name 'LatticeSourceCommit' -Value ([string]$Version.SourceCommit) -Kind String
@@ -961,9 +1323,10 @@ function Invoke-LatticeActivation {
         [Parameter(Mandatory)][object]$Version
     )
 
-    $backupRoot = Join-Path ([string]$Paths.StagingRoot) ('activation-' + [guid]::NewGuid().ToString('N'))
+    $operationId = [guid]::NewGuid().ToString('N')
+    $backupRoot = Join-Path ([string]$Paths.StagingRoot) ('activation-' + $operationId)
     [IO.Directory]::CreateDirectory($backupRoot) | Out-Null
-    Write-LatticeStageOwner -StageRoot $backupRoot -Owner $Owner -Purpose 'ACTIVATION_BACKUP' -SourceCommit ([string]$Version.SourceCommit)
+    Write-LatticeStageOwner -StageRoot $backupRoot -Owner $Owner -Purpose 'INSTALL' -SourceCommit ([string]$Version.SourceCommit)
     $shortcutExisted = Test-Path -LiteralPath ([string]$Paths.ShortcutPath) -PathType Leaf
     $activeExisted = Test-Path -LiteralPath ([string]$Paths.ActiveInstall) -PathType Leaf
     if ($shortcutExisted) {
@@ -973,6 +1336,45 @@ function Invoke-LatticeActivation {
         Copy-Item -LiteralPath ([string]$Paths.ActiveInstall) -Destination (Join-Path $backupRoot 'active-install.json')
     }
     $registrySnapshot = Get-LatticeRegistrySnapshot -Path ([string]$Paths.RegistryPath)
+    $registrySnapshotPath = Join-Path $backupRoot 'registry-snapshot.json'
+    Write-LatticeJsonAtomic -LiteralPath $registrySnapshotPath -Value $registrySnapshot
+    $beforeSourceCommit = ''
+    if ($activeExisted) {
+        try {
+            $beforeActive = Get-Content -LiteralPath ([string]$Paths.ActiveInstall) -Raw | ConvertFrom-Json
+        }
+        catch {
+            throw 'LATTICE_INSTALL_ACTIVE_RECEIPT_INVALID_JSON'
+        }
+        if ([string]$beforeActive.schema_version -cne $script:LatticeActiveInstallSchema -or
+            [string]$beforeActive.product -cne $script:LatticeProduct -or
+            [string]$beforeActive.install_id -cne [string]$Owner.install_id -or
+            [string]$beforeActive.source_commit -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'LATTICE_INSTALL_ACTIVE_RECEIPT_MISMATCH'
+        }
+        $beforeSourceCommit = [string]$beforeActive.source_commit
+    }
+    $journal = [PSCustomObject][ordered]@{
+        schema_version = $script:LatticeActivationJournalSchema
+        product = $script:LatticeProduct
+        install_id = [string]$Owner.install_id
+        operation_id = $operationId
+        phase = 'PREPARED'
+        before_source_commit = $beforeSourceCommit
+        after_source_commit = [string]$Version.SourceCommit
+        after_version_root = [string]$Version.Root
+        shortcut_path = [string]$Paths.ShortcutPath
+        registry_path = [string]$Paths.RegistryPath
+        active_install_path = [string]$Paths.ActiveInstall
+        shortcut_existed = $shortcutExisted
+        shortcut_backup_sha256 = if ($shortcutExisted) { Get-LatticeSha256Hex -LiteralPath (Join-Path $backupRoot 'shortcut.lnk') } else { '' }
+        active_existed = $activeExisted
+        active_backup_sha256 = if ($activeExisted) { Get-LatticeSha256Hex -LiteralPath (Join-Path $backupRoot 'active-install.json') } else { '' }
+        registry_snapshot_sha256 = Get-LatticeSha256Hex -LiteralPath $registrySnapshotPath
+    }
+    Set-LatticeActivationJournalPhase -BackupRoot $backupRoot -Journal $journal -Phase 'PREPARED'
+    Write-LatticeStageOwner -StageRoot $backupRoot -Owner $Owner -Purpose 'ACTIVATION_BACKUP' -SourceCommit ([string]$Version.SourceCommit)
+    $cleanupBackup = $false
     try {
         if ($shortcutExisted) {
             $existingTarget = Get-LatticeShortcutTarget -ShortcutPath ([string]$Paths.ShortcutPath)
@@ -984,8 +1386,10 @@ function Invoke-LatticeActivation {
             -ShortcutPath ([string]$Paths.ShortcutPath) `
             -TargetPath ([string]$Version.ExecutablePath) `
             -WorkingDirectory ([IO.Path]::GetDirectoryName([string]$Version.ExecutablePath))
+        Set-LatticeActivationJournalPhase -BackupRoot $backupRoot -Journal $journal -Phase 'SHORTCUT_ACTIVATED'
         Invoke-LatticeInstallerHook -Name 'AfterShortcutActivated'
         Set-LatticeUninstallRegistration -Context $Context -Paths $Paths -Owner $Owner -Version $Version
+        Set-LatticeActivationJournalPhase -BackupRoot $backupRoot -Journal $journal -Phase 'REGISTRY_ACTIVATED'
         Invoke-LatticeInstallerHook -Name 'AfterRegistryActivated'
         $active = [ordered]@{
             schema_version = $script:LatticeActiveInstallSchema
@@ -998,27 +1402,19 @@ function Invoke-LatticeActivation {
             activated_at_utc = [DateTimeOffset]::UtcNow.ToString('o')
         }
         Write-LatticeJsonAtomic -LiteralPath ([string]$Paths.ActiveInstall) -Value $active
+        Set-LatticeActivationJournalPhase -BackupRoot $backupRoot -Journal $journal -Phase 'ACTIVE_RECEIPT_WRITTEN'
         Invoke-LatticeInstallerHook -Name 'AfterActiveReceiptWritten'
+        Set-LatticeActivationJournalPhase -BackupRoot $backupRoot -Journal $journal -Phase 'COMMITTED'
+        $cleanupBackup = $true
     }
     catch {
-        Restore-LatticeRegistrySnapshot -Path ([string]$Paths.RegistryPath) -Snapshot $registrySnapshot
-        if (Test-Path -LiteralPath ([string]$Paths.ShortcutPath)) {
-            Remove-Item -LiteralPath ([string]$Paths.ShortcutPath) -Force
-        }
-        if ($shortcutExisted) {
-            [IO.Directory]::CreateDirectory([string]$Paths.ShortcutDirectory) | Out-Null
-            Copy-Item -LiteralPath (Join-Path $backupRoot 'shortcut.lnk') -Destination ([string]$Paths.ShortcutPath)
-        }
-        if (Test-Path -LiteralPath ([string]$Paths.ActiveInstall)) {
-            Remove-Item -LiteralPath ([string]$Paths.ActiveInstall) -Force
-        }
-        if ($activeExisted) {
-            Copy-Item -LiteralPath (Join-Path $backupRoot 'active-install.json') -Destination ([string]$Paths.ActiveInstall)
-        }
+        $marker = Get-Content -LiteralPath (Join-Path $backupRoot '.lattice-stage-owner.json') -Raw | ConvertFrom-Json
+        Restore-LatticeActivationBackup -Paths $Paths -Owner $Owner -BackupRoot $backupRoot -StageMarker $marker
+        $cleanupBackup = $true
         throw
     }
     finally {
-        if (Test-Path -LiteralPath $backupRoot) {
+        if ($cleanupBackup -and (Test-Path -LiteralPath $backupRoot)) {
             Remove-Item -LiteralPath $backupRoot -Recurse -Force
         }
     }
@@ -1037,7 +1433,11 @@ function Invoke-LatticeDesktopInstall {
     $mutex = Enter-LatticeInstallerMutex -InstallRoot ([string]$paths.InstallRoot)
     try {
         $owner = Initialize-LatticeOwnedInstallRoot -Paths $paths
-        Clear-LatticeOwnedStaging -Paths $paths -Owner $owner
+        $recoveredUninstall = Clear-LatticeOwnedStaging -Paths $paths -Owner $owner
+        if ($recoveredUninstall) {
+            $owner = Initialize-LatticeOwnedInstallRoot -Paths $paths
+        }
+        Initialize-LatticeInstallDirectories -Paths $paths
         $action = 'INSTALLED'
         if (-not [string]::IsNullOrWhiteSpace($RollbackToCommit)) {
             if ($RollbackToCommit -cnotmatch '^[0-9a-f]{40}$') {
@@ -1084,7 +1484,8 @@ function Invoke-LatticeDesktopInstall {
                     $payload = Expand-LatticePortablePayload `
                         -ArchivePath ([string]$bundle.PayloadPath) `
                         -DestinationPath $appRoot `
-                        -ExpectedSourceCommit ([string]$bundle.SourceCommit)
+                        -ExpectedSourceCommit ([string]$bundle.SourceCommit) `
+                        -FinalPayloadPath (Join-Path $versionRoot 'app')
                     $installerRoot = Join-Path $stageRoot 'installer'
                     [IO.Directory]::CreateDirectory($installerRoot) | Out-Null
                     foreach ($name in @(
@@ -1162,6 +1563,7 @@ function Assert-LatticeOwnedUninstallSurface {
         }
     }
     if (Test-Path -LiteralPath ([string]$Paths.RegistryPath)) {
+        Get-LatticeRegistrySnapshot -Path ([string]$Paths.RegistryPath) | Out-Null
         $registry = Get-ItemProperty -LiteralPath ([string]$Paths.RegistryPath)
         if ([string]$registry.LatticeProduct -cne $script:LatticeProduct -or
             [string]$registry.LatticeInstallId -cne [string]$Owner.install_id -or
@@ -1181,12 +1583,27 @@ function Invoke-LatticeDesktopUninstall {
     $context = Resolve-LatticeInstallContext -TestSandboxRoot $TestSandboxRoot -TestRegistryId $TestRegistryId
     $paths = Get-LatticeInstallPaths -Context $context
     if (-not (Test-Path -LiteralPath ([string]$paths.InstallRoot) -PathType Container)) {
+        if ((Test-Path -LiteralPath ([string]$paths.ShortcutPath)) -or
+            (Test-Path -LiteralPath ([string]$paths.RegistryPath))) {
+            throw 'LATTICE_UNINSTALL_ORPHANED_SURFACE'
+        }
         return [ordered]@{ result = 'PASS'; action = 'ALREADY_ABSENT'; install_root = [string]$paths.InstallRoot }
     }
     $mutex = Enter-LatticeInstallerMutex -InstallRoot ([string]$paths.InstallRoot)
     try {
         $owner = Initialize-LatticeOwnedInstallRoot -Paths $paths
-        Clear-LatticeOwnedStaging -Paths $paths -Owner $owner
+        $recoveredUninstall = Clear-LatticeOwnedStaging -Paths $paths -Owner $owner
+        if ($recoveredUninstall) {
+            return [ordered]@{
+                result = 'PASS'
+                action = 'UNINSTALLED'
+                install_root = [string]$paths.InstallRoot
+                preserved_user_data = @(
+                    '%LOCALAPPDATA%\LATTICE\control\lattice-control.db',
+                    '%LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2')
+            }
+        }
+        Initialize-LatticeInstallDirectories -Paths $paths
         Assert-LatticeOwnedUninstallSurface -Paths $paths -Owner $owner
         $rootItems = @(Get-ChildItem -LiteralPath ([string]$paths.InstallRoot) -Force)
         $allowedRootEntries = @('.staging', 'active-install.json', 'install-owner.json', 'versions')
@@ -1237,55 +1654,49 @@ function Invoke-LatticeDesktopUninstall {
             }
         }
         Assert-LatticeVersionFilesDeletable -VersionDirectories $versionDirectories
-        $uninstallBackupRoot = Join-Path ([string]$paths.StagingRoot) ('uninstall-' + [guid]::NewGuid().ToString('N'))
+        $operationId = [guid]::NewGuid().ToString('N').Substring(0, 12)
+        $uninstallBackupRoot = Join-Path ([string]$paths.StagingRoot) ('uninstall-' + $operationId)
+        $tombstonePath = Join-Path ([string]$paths.InstallRoot) ('.r-' + $operationId)
         [IO.Directory]::CreateDirectory($uninstallBackupRoot) | Out-Null
-        Write-LatticeStageOwner -StageRoot $uninstallBackupRoot -Owner $owner -Purpose 'UNINSTALL_BACKUP'
+        Write-LatticeStageOwner -StageRoot $uninstallBackupRoot -Owner $owner -Purpose 'INSTALL'
         $shortcutExisted = Test-Path -LiteralPath ([string]$paths.ShortcutPath) -PathType Leaf
+        $activeExisted = Test-Path -LiteralPath ([string]$paths.ActiveInstall) -PathType Leaf
         if ($shortcutExisted) {
             Copy-Item -LiteralPath ([string]$paths.ShortcutPath) -Destination (Join-Path $uninstallBackupRoot 'shortcut.lnk')
         }
+        if ($activeExisted) {
+            Copy-Item -LiteralPath ([string]$paths.ActiveInstall) -Destination (Join-Path $uninstallBackupRoot 'active-install.json')
+        }
         $registrySnapshot = Get-LatticeRegistrySnapshot -Path ([string]$paths.RegistryPath)
-        try {
-            if (Test-Path -LiteralPath ([string]$paths.ShortcutPath)) {
-                Remove-Item -LiteralPath ([string]$paths.ShortcutPath) -Force
-            }
-            if (Test-Path -LiteralPath ([string]$paths.RegistryPath)) {
-                Remove-Item -LiteralPath ([string]$paths.RegistryPath) -Recurse -Force
-            }
-            foreach ($directory in $versionDirectories) {
-                Remove-Item -LiteralPath $directory.FullName -Recurse -Force
-            }
-            if (Test-Path -LiteralPath ([string]$paths.ActiveInstall)) {
-                Remove-Item -LiteralPath ([string]$paths.ActiveInstall) -Force
-            }
-            Remove-Item -LiteralPath ([string]$paths.OwnerMarker) -Force
-            Remove-Item -LiteralPath $uninstallBackupRoot -Recurse -Force
-            Remove-Item -LiteralPath ([string]$paths.StagingRoot) -Force
-            Remove-Item -LiteralPath ([string]$paths.VersionsRoot) -Force
-            Remove-Item -LiteralPath ([string]$paths.InstallRoot) -Force
+        $registrySnapshotPath = Join-Path $uninstallBackupRoot 'registry-snapshot.json'
+        Write-LatticeJsonAtomic -LiteralPath $registrySnapshotPath -Value $registrySnapshot
+        $activeSourceCommit = if ($null -ne (Get-Variable active -ErrorAction SilentlyContinue)) { [string]$active.source_commit } else { '' }
+        $journal = [PSCustomObject][ordered]@{
+            schema_version = $script:LatticeUninstallJournalSchema
+            product = $script:LatticeProduct
+            install_id = [string]$owner.install_id
+            operation_id = $operationId
+            phase = 'PREPARED'
+            active_source_commit = $activeSourceCommit
+            version_count = $versionDirectories.Count
+            tombstone_path = $tombstonePath
+            shortcut_path = [string]$paths.ShortcutPath
+            registry_path = [string]$paths.RegistryPath
+            active_install_path = [string]$paths.ActiveInstall
+            shortcut_existed = $shortcutExisted
+            shortcut_backup_sha256 = if ($shortcutExisted) { Get-LatticeSha256Hex -LiteralPath (Join-Path $uninstallBackupRoot 'shortcut.lnk') } else { '' }
+            active_existed = $activeExisted
+            active_backup_sha256 = if ($activeExisted) { Get-LatticeSha256Hex -LiteralPath (Join-Path $uninstallBackupRoot 'active-install.json') } else { '' }
+            registry_snapshot_sha256 = Get-LatticeSha256Hex -LiteralPath $registrySnapshotPath
         }
-        catch {
-            if (Test-Path -LiteralPath ([string]$paths.InstallRoot) -PathType Container) {
-                Restore-LatticeRegistrySnapshot -Path ([string]$paths.RegistryPath) -Snapshot $registrySnapshot
-                if (Test-Path -LiteralPath ([string]$paths.ShortcutPath)) {
-                    Remove-Item -LiteralPath ([string]$paths.ShortcutPath) -Force
-                }
-                if ($shortcutExisted -and (Test-Path -LiteralPath (Join-Path $uninstallBackupRoot 'shortcut.lnk'))) {
-                    [IO.Directory]::CreateDirectory([string]$paths.ShortcutDirectory) | Out-Null
-                    Copy-Item -LiteralPath (Join-Path $uninstallBackupRoot 'shortcut.lnk') -Destination ([string]$paths.ShortcutPath)
-                }
-            }
-            throw
-        }
-        finally {
-            if (Test-Path -LiteralPath $uninstallBackupRoot) {
-                Remove-Item -LiteralPath $uninstallBackupRoot -Recurse -Force
-            }
-        }
-        if ((Test-Path -LiteralPath ([string]$paths.ShortcutDirectory) -PathType Container) -and
-            @(Get-ChildItem -LiteralPath ([string]$paths.ShortcutDirectory) -Force).Count -eq 0) {
-            Remove-Item -LiteralPath ([string]$paths.ShortcutDirectory) -Force
-        }
+        Set-LatticeUninstallJournalPhase -BackupRoot $uninstallBackupRoot -Journal $journal -Phase 'PREPARED'
+        Write-LatticeStageOwner -StageRoot $uninstallBackupRoot -Owner $owner -Purpose 'UNINSTALL_BACKUP' -SourceCommit $activeSourceCommit
+        $stageMarker = Get-Content -LiteralPath (Join-Path $uninstallBackupRoot '.lattice-stage-owner.json') -Raw | ConvertFrom-Json
+        Complete-LatticeInterruptedUninstall `
+            -Paths $paths `
+            -Owner $owner `
+            -BackupRoot $uninstallBackupRoot `
+            -StageMarker $stageMarker
         return [ordered]@{
             result = 'PASS'
             action = 'UNINSTALLED'
