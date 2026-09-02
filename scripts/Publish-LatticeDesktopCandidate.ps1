@@ -33,6 +33,19 @@ $projectPath = Join-Path $repositoryRoot 'apps\lattice-control-desktop\Lattice.C
 $controlSourceRoot = Join-Path $repositoryRoot 'apps\lattice-control'
 $runtimeIdentityPath = Join-Path $repositoryRoot 'apps\lattice-control\runtime-identity.json'
 $dataScopeContractPath = Join-Path $repositoryRoot 'apps\lattice-control\data-scope-contract.json'
+$installerScriptPath = Join-Path $repositoryRoot 'scripts\Install-LATTICE.ps1'
+$uninstallerScriptPath = Join-Path $repositoryRoot 'scripts\Uninstall-LATTICE.ps1'
+$installerCommonPath = Join-Path $repositoryRoot 'scripts\LatticeDesktopInstaller.Common.ps1'
+$installerNoticePath = Join-Path $repositoryRoot 'scripts\INSTALL-LATTICE.txt'
+foreach ($installerSourcePath in @(
+    $installerScriptPath,
+    $uninstallerScriptPath,
+    $installerCommonPath,
+    $installerNoticePath)) {
+    if (-not (Test-Path -LiteralPath $installerSourcePath -PathType Leaf)) {
+        throw "DESKTOP_INSTALLER_SOURCE_MISSING:$installerSourcePath"
+    }
+}
 $nodePath = [IO.Path]::GetFullPath(
     (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source)
 $nodeVersion = ([string](& $nodePath --version)).Trim()
@@ -101,8 +114,12 @@ $outputRootFull = [IO.Path]::GetFullPath($OutputRoot)
 $candidateName = 'lattice-control-desktop-win-x64-' + $headSha.Substring(0, 12)
 $candidateDirectory = [IO.Path]::GetFullPath((Join-Path $outputRootFull $candidateName))
 $zipPath = [IO.Path]::GetFullPath((Join-Path $outputRootFull ($candidateName + '.zip')))
+$installerName = $candidateName + '-per-user-installer'
+$installerDirectory = [IO.Path]::GetFullPath((Join-Path $outputRootFull $installerName))
+$installerZipPath = [IO.Path]::GetFullPath((Join-Path $outputRootFull ($installerName + '.zip')))
 $outputPrefix = $outputRootFull.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
-if (-not $candidateDirectory.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+if (-not $candidateDirectory.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    -not $installerDirectory.StartsWith($outputPrefix, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'DESKTOP_CANDIDATE_OUTPUT_ESCAPED_ROOT'
 }
 
@@ -112,6 +129,12 @@ if (Test-Path -LiteralPath $candidateDirectory) {
 }
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
+}
+if (Test-Path -LiteralPath $installerDirectory) {
+    Remove-Item -LiteralPath $installerDirectory -Recurse -Force
+}
+if (Test-Path -LiteralPath $installerZipPath) {
+    Remove-Item -LiteralPath $installerZipPath -Force
 }
 
 $publishArguments = @(
@@ -210,6 +233,63 @@ $manifestPath = Join-Path $candidateDirectory 'candidate-manifest.json'
 Compress-Archive -Path (Join-Path $candidateDirectory '*') -DestinationPath $zipPath -CompressionLevel Optimal
 $archiveSha256 = Get-Sha256Hex -LiteralPath $zipPath
 
+[IO.Directory]::CreateDirectory($installerDirectory) | Out-Null
+$payloadArchivePath = Join-Path $installerDirectory 'payload.zip'
+Copy-Item -LiteralPath $zipPath -Destination $payloadArchivePath
+Copy-Item -LiteralPath $installerScriptPath -Destination (Join-Path $installerDirectory 'Install-LATTICE.ps1')
+Copy-Item -LiteralPath $uninstallerScriptPath -Destination (Join-Path $installerDirectory 'Uninstall-LATTICE.ps1')
+Copy-Item -LiteralPath $installerCommonPath -Destination (Join-Path $installerDirectory 'LatticeDesktopInstaller.Common.ps1')
+Copy-Item -LiteralPath $installerNoticePath -Destination (Join-Path $installerDirectory 'INSTALL-LATTICE.txt')
+
+$installerFiles = @(Get-ChildItem -LiteralPath $installerDirectory -File -Recurse |
+    Sort-Object -Property FullName |
+    ForEach-Object {
+        [ordered]@{
+            path = $_.FullName.Substring($installerDirectory.Length + 1).Replace('\', '/')
+            length = [long]$_.Length
+            sha256 = Get-Sha256Hex -LiteralPath $_.FullName
+        }
+    })
+$payloadEntry = @($installerFiles | Where-Object { $_.path -ceq 'payload.zip' })
+if ($installerFiles.Count -ne 5 -or $payloadEntry.Count -ne 1) {
+    throw 'DESKTOP_INSTALLER_FILE_SET_INVALID'
+}
+$installerManifest = [ordered]@{
+    schema_version = 'lattice.control.desktop-per-user-installer.v1'
+    artifact_type = 'WINDOWS_PER_USER_INSTALLER'
+    source_commit = $headSha
+    runtime_identifier = 'win-x64'
+    payload = [ordered]@{
+        path = 'payload.zip'
+        length = [long]$payloadEntry[0].length
+        sha256 = [string]$payloadEntry[0].sha256
+        manifest_schema = 'lattice.control.desktop-portable-candidate.v2'
+    }
+    install = [ordered]@{
+        scope = 'CURRENT_USER'
+        requires_elevation = $false
+        root = '%LOCALAPPDATA%\Programs\LATTICE'
+        versions = 'versions\<source-commit>'
+        start_menu_shortcut = '%APPDATA%\Microsoft\Windows\Start Menu\Programs\LATTICE\LATTICE.lnk'
+        uninstall_registry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\LATTICE'
+        uninstaller = 'Uninstall-LATTICE.ps1'
+        preserves = @(
+            '%LOCALAPPDATA%\LATTICE\control\lattice-control.db',
+            '%LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2')
+    }
+    files = $installerFiles
+}
+$installerManifestPath = Join-Path $installerDirectory 'install-manifest.json'
+[IO.File]::WriteAllText(
+    $installerManifestPath,
+    (($installerManifest | ConvertTo-Json -Depth 7) + [Environment]::NewLine),
+    [Text.UTF8Encoding]::new($false))
+Compress-Archive `
+    -Path (Join-Path $installerDirectory '*') `
+    -DestinationPath $installerZipPath `
+    -CompressionLevel Optimal
+$installerArchiveSha256 = Get-Sha256Hex -LiteralPath $installerZipPath
+
 [ordered]@{
     result = 'PASS'
     artifact_type = 'PORTABLE_RELEASE_CANDIDATE'
@@ -221,4 +301,16 @@ $archiveSha256 = Get-Sha256Hex -LiteralPath $zipPath
     executable = $executablePath
     executable_sha256 = $manifest.executable_sha256
     control_runtime = $manifest.control_runtime
+    installer = [ordered]@{
+        artifact_type = 'WINDOWS_PER_USER_INSTALLER'
+        schema_version = 'lattice.control.desktop-per-user-installer.v1'
+        directory = $installerDirectory
+        archive = $installerZipPath
+        archive_sha256 = $installerArchiveSha256
+        manifest = $installerManifestPath
+        manifest_sha256 = Get-Sha256Hex -LiteralPath $installerManifestPath
+        payload_archive_sha256 = $archiveSha256
+        install_scope = 'CURRENT_USER'
+        requires_elevation = $false
+    }
 } | ConvertTo-Json -Depth 4

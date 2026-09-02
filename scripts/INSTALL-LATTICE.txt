@@ -1,0 +1,22 @@
+LATTICE CONTROL - WINDOWS PER-USER INSTALLER
+
+This bundle installs LATTICE for the current Windows user. It does not require
+administrator rights and is not an MSI or MSIX package.
+
+Install from an extracted candidate bundle:
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File .\Install-LATTICE.ps1
+
+Installed versions are immutable and kept under:
+%LOCALAPPDATA%\Programs\LATTICE\versions\<source-commit>
+
+The installer verifies the bundle and portable payload hashes before changing
+the active Start Menu shortcut or the current-user Add/Remove Programs entry.
+Running the same bundle again is safe. A previously installed commit can be
+reactivated with -RollbackToCommit <40-character-commit>.
+
+Uninstall is available through Windows Settings or the versioned
+Uninstall-LATTICE.ps1. It removes only installer-owned program files and keeps:
+%LOCALAPPDATA%\LATTICE\control\lattice-control.db
+%LOCALAPPDATA%\LATTICE\ControlDesktop\WebView2
+
+The Microsoft Edge WebView2 Runtime must already be present.

@@ -167,9 +167,13 @@ test("the desktop probes and owns only its compatible default Control before nav
   assert.match(project, /LogicalName="Lattice\.Control\.DataScopeContract\.json"/u);
 });
 
-test("the Windows candidate is a repeatable self-contained portable package, not an installer", async () => {
-  const [publishScript, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, policyTestIgnore, packageJson] = await Promise.all([
+test("the Windows candidate is a repeatable self-contained per-user installable package", async () => {
+  const [publishScript, installerScript, uninstallerScript, installerCommon, installerTest, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, policyTestIgnore, packageJson] = await Promise.all([
     repositoryFile("scripts/Publish-LatticeDesktopCandidate.ps1"),
+    repositoryFile("scripts/Install-LATTICE.ps1"),
+    repositoryFile("scripts/Uninstall-LATTICE.ps1"),
+    repositoryFile("scripts/LatticeDesktopInstaller.Common.ps1"),
+    repositoryFile("scripts/Test-LatticeDesktopInstaller.ps1"),
     repositoryFile("scripts/Test-LatticeDesktopCandidate.ps1"),
     repositoryFile("scripts/Test-LatticeDesktopManagedControl.ps1"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-external-redirect.mjs"),
@@ -180,6 +184,7 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   ]);
 
   assert.match(publishScript, /PORTABLE_RELEASE_CANDIDATE/u);
+  assert.match(publishScript, /WINDOWS_PER_USER_INSTALLER/u);
   assert.match(publishScript, /--self-contained[\s\S]*true/u);
   assert.match(publishScript, /win-x64/u);
   assert.match(publishScript, /Compress-Archive/u);
@@ -189,6 +194,7 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(publishScript, /git -C \$repositoryRoot diff --cached --name-only/u);
   assert.match(publishScript, /files\s*=\s*\$artifactFiles/u);
   assert.match(publishScript, /lattice\.control\.desktop-portable-candidate\.v2/u);
+  assert.match(publishScript, /lattice\.control\.desktop-per-user-installer\.v1/u);
   assert.match(publishScript, /control-runtime[\\/]node\.exe/iu);
   assert.match(publishScript, /apps[\\/]lattice-control[\\/]runtime-identity\.json/iu);
   assert.match(publishScript, /apps[\\/]lattice-control[\\/]data-scope-contract\.json/iu);
@@ -197,7 +203,23 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(publishScript, /node_version/u);
   assert.match(publishScript, /node_sha256/u);
   assert.match(publishScript, /control_runtime/u);
-  assert.doesNotMatch(publishScript, /msi|wix|nsis|installer/iu);
+  assert.match(publishScript, /Install-LATTICE\.ps1/u);
+  assert.match(publishScript, /Uninstall-LATTICE\.ps1/u);
+  assert.doesNotMatch(publishScript, /msi|wix|nsis/iu);
+  assert.match(installerScript, /RollbackToCommit/u);
+  assert.match(installerScript, /Invoke-LatticeDesktopInstall/u);
+  assert.match(uninstallerScript, /Invoke-LatticeDesktopUninstall/u);
+  assert.match(installerCommon, /lattice\.control\.desktop-install-owner\.v1/u);
+  assert.match(installerCommon, /Get-LatticeInstallerBundle/u);
+  assert.match(installerCommon, /LocalApplicationData[\s\S]*Programs[\\/]LATTICE/u);
+  assert.match(installerCommon, /versions/u);
+  assert.match(installerCommon, /\.staging/u);
+  assert.match(installerCommon, /Start Menu/u);
+  assert.match(installerCommon, /CurrentVersion[\\/]Uninstall[\\/]LATTICE/u);
+  assert.match(installerCommon, /LATTICE_CONTROL_DESKTOP/u);
+  assert.match(installerTest, /failure_preserved_previous_activation/u);
+  assert.match(installerTest, /control_data_preserved/u);
+  assert.match(installerTest, /webview_data_preserved/u);
   assert.match(acceptanceScript, /MinimumLifetimeSeconds/u);
   assert.match(acceptanceScript, /\$monitorStartedAt\s*=\s*\[DateTimeOffset\]::UtcNow/u);
   assert.match(acceptanceScript, /\$monitorStartedAt\.AddSeconds\(\$MinimumLifetimeSeconds\)/u);
@@ -244,6 +266,7 @@ test("the Windows candidate is a repeatable self-contained portable package, not
   assert.match(policyTestIgnore, /^bin\/$/mu);
   assert.match(policyTestIgnore, /^obj\/$/mu);
   assert.match(packageJson, /"desktop:policy-test"/u);
+  assert.match(packageJson, /"desktop:installer-test"/u);
   assert.match(packageJson, /"desktop:publish"/u);
   assert.match(packageJson, /"desktop:candidate-test"/u);
   assert.match(packageJson, /"desktop:managed-control-test"/u);
