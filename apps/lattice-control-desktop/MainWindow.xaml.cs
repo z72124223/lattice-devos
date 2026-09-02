@@ -1,10 +1,13 @@
 using Microsoft.Web.WebView2.Core;
 using System.ComponentModel;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Shell;
 using System.Windows.Threading;
 
 namespace Lattice.Control.Desktop;
@@ -18,6 +21,7 @@ public partial class MainWindow : Window
     private readonly DispatcherTimer _healthTimer;
     private readonly HashSet<ulong> _blockedNavigationIds = new();
     private CoreWebView2Environment? _webViewEnvironment;
+    private HwndSource? _windowSource;
     private ulong? _currentNavigationId;
     private long _navigationGeneration;
     private bool _eventsConfigured;
@@ -28,6 +32,8 @@ public partial class MainWindow : Window
 
     public MainWindow()
     {
+        // Register first so this hit-test hook precedes WindowChrome's source hook.
+        SourceInitialized += MainWindow_SourceInitialized;
         InitializeComponent();
         ControlEndpointSelection controlTarget = DesktopPolicy.ResolveControlTarget(
             Environment.GetCommandLineArgs(),
@@ -42,6 +48,72 @@ public partial class MainWindow : Window
         _healthTimer = new DispatcherTimer { Interval = DesktopPolicy.RuntimeHealthInterval };
         _healthTimer.Tick += HealthTimer_Tick;
         Loaded += MainWindow_Loaded;
+    }
+
+    private void MainWindow_SourceInitialized(object? sender, EventArgs e)
+    {
+        nint handle = new WindowInteropHelper(this).Handle;
+        _windowSource = HwndSource.FromHwnd(handle);
+        _windowSource?.AddHook(WindowProc);
+    }
+
+    private nint WindowProc(
+        nint windowHandle,
+        int message,
+        nint wordParameter,
+        nint longParameter,
+        ref bool handled)
+    {
+        if (
+            message != WindowResizeHitTestPolicy.WmNcHitTest
+            || ResizeMode is not (ResizeMode.CanResize or ResizeMode.CanResizeWithGrip)
+            || !GetWindowRect(windowHandle, out NativeRect windowRect))
+        {
+            return nint.Zero;
+        }
+
+        long packedPoint = longParameter.ToInt64();
+        int screenX = unchecked((short)(packedPoint & 0xffff));
+        int screenY = unchecked((short)((packedPoint >> 16) & 0xffff));
+        DpiScale dpi = VisualTreeHelper.GetDpi(this);
+        Thickness border = WindowChrome.GetWindowChrome(this)?.ResizeBorderThickness
+            ?? new Thickness(7);
+        WindowResizeHit hit = WindowResizeHitTestPolicy.EvaluatePhysical(
+            screenX,
+            screenY,
+            windowRect.Left,
+            windowRect.Top,
+            windowRect.Right,
+            windowRect.Bottom,
+            dpi.DpiScaleX,
+            dpi.DpiScaleY,
+            new WindowResizeInsets(border.Left, border.Top, border.Right, border.Bottom),
+            WindowState == WindowState.Maximized);
+        if (hit == WindowResizeHit.Client) return nint.Zero;
+
+        handled = true;
+        return (nint)(int)hit;
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        SourceInitialized -= MainWindow_SourceInitialized;
+        _windowSource?.RemoveHook(WindowProc);
+        _windowSource = null;
+        base.OnClosed(e);
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(nint windowHandle, out NativeRect windowRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)

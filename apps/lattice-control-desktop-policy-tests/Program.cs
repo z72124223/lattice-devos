@@ -5,6 +5,14 @@ static void Require(bool condition, string message)
     if (!condition) throw new InvalidOperationException(message);
 }
 
+static void RequireResizeHit(
+    WindowResizeHit actual,
+    WindowResizeHit expected,
+    string message)
+{
+    Require(actual == expected, $"{message}: expected {expected}, got {actual}");
+}
+
 ControlEndpointSelection defaultSelection = DesktopPolicy.ResolveControlTarget(["LATTICE.exe"], null);
 Uri defaultUri = defaultSelection.Uri;
 Require(defaultUri == new Uri("http://127.0.0.1:4317/"), "default Control origin changed");
@@ -95,6 +103,92 @@ Require(
     DesktopPolicy.ReconnectInterval >= TimeSpan.FromSeconds(1)
         && DesktopPolicy.ReconnectInterval <= TimeSpan.FromSeconds(10),
     "desktop reconnect interval is not bounded");
+
+WindowResizeInsets resizeInsets = new(7, 7, 7, 7);
+const int resizeLeft = 100;
+const int resizeTop = 200;
+const int resizeRight = 740;
+const int resizeBottom = 680;
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        101, 201, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.TopLeft,
+    "top-left resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        420, 201, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Top,
+    "top resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        739, 201, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.TopRight,
+    "top-right resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        101, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Left,
+    "left resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        739, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Right,
+    "right resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        101, 679, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.BottomLeft,
+    "bottom-left resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        420, 679, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Bottom,
+    "bottom resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        739, 679, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.BottomRight,
+    "bottom-right resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        420, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Client,
+    "window center was mistaken for a resize hit");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        101, 201, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, true),
+    WindowResizeHit.Client,
+    "maximized window retained a resize hit");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        109, 209, resizeLeft, resizeTop, 1_060, 920, 1.5, 1.5, resizeInsets, false),
+    WindowResizeHit.TopLeft,
+    "DPI-scaled top-left resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        111, 560, resizeLeft, resizeTop, 1_060, 920, 1.5, 1.5, resizeInsets, false),
+    WindowResizeHit.Client,
+    "DPI-scaled point beyond the resize boundary was not client content");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        107, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Client,
+    "point exactly on the resize boundary was not client content");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        -959, 440, -960, resizeTop, -320, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Left,
+    "negative-monitor left resize hit was not recognized");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        resizeRight, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+    WindowResizeHit.Client,
+    "point outside the right window bound was accepted");
+RequireResizeHit(
+    WindowResizeHitTestPolicy.EvaluatePhysical(
+        101, 201, resizeLeft, resizeTop, resizeRight, resizeBottom, 0, 1, resizeInsets, false),
+    WindowResizeHit.Client,
+    "invalid DPI scale did not fail closed");
 
 ControlRuntimeFailurePresentation missingFiles = DesktopPolicy.DescribeRuntimeFailure(new(
     ControlRuntimeHealth.STOPPED,

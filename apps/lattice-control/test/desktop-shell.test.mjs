@@ -68,9 +68,10 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
 });
 
 test("the resizable desktop can reach compact scrolling without desktop or mobile regressions", async () => {
-  const [windowMarkup, windowCode, controlMarkup] = await Promise.all([
+  const [windowMarkup, windowCode, resizePolicy, controlMarkup] = await Promise.all([
     repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
     repositoryFile("apps/lattice-control-desktop/MainWindow.xaml.cs"),
+    repositoryFile("apps/lattice-control-desktop/WindowResizeHitTestPolicy.cs"),
     repositoryFile("apps/lattice-control/public/index.html"),
   ]);
   const minimumWidth = Number(windowMarkup.match(/MinWidth="(\d+)"/u)?.[1]);
@@ -99,6 +100,13 @@ test("the resizable desktop can reach compact scrolling without desktop or mobil
   assert.match(windowCode, /Minimize_Click[\s\S]{0,120}WindowState = WindowState\.Minimized/u);
   assert.match(windowCode, /MaximizeRestore_Click[\s\S]{0,120}ToggleMaximize\(\)/u);
   assert.match(windowCode, /ToggleMaximize\(\)[\s\S]{0,180}WindowState == WindowState\.Maximized \? WindowState\.Normal : WindowState\.Maximized/u);
+  assert.match(windowCode, /SourceInitialized \+= MainWindow_SourceInitialized/u);
+  assert.match(windowCode, /AddHook\(WindowProc\)/u);
+  assert.match(windowCode, /RemoveHook\(WindowProc\)/u);
+  assert.match(windowCode, /message != WindowResizeHitTestPolicy\.WmNcHitTest/u);
+  assert.match(windowCode, /WindowState == WindowState\.Maximized/u);
+  assert.match(resizePolicy, /enum WindowResizeHit[\s\S]*TopLeft = 13[\s\S]*BottomRight = 17/u);
+  assert.match(resizePolicy, /EvaluatePhysical\(/u);
   assert.match(wideCss, /body \{ overflow:hidden;/u);
   assert.match(wideCss, /\.app \{ display:grid; grid-template-columns:248px minmax\(0,1fr\); width:100vw; height:100dvh;/u);
   assert.match(compactCss, /body \{ overflow-x:hidden; overflow-y:auto; \}/u);
