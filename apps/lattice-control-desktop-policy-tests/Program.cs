@@ -104,7 +104,7 @@ Require(
         && DesktopPolicy.ReconnectInterval <= TimeSpan.FromSeconds(10),
     "desktop reconnect interval is not bounded");
 
-WindowResizeInsets resizeInsets = new(7, 7, 7, 7);
+WindowResizeInsets resizeInsets = new(12, 12, 12, 12);
 const int resizeLeft = 100;
 const int resizeTop = 200;
 const int resizeRight = 740;
@@ -166,12 +166,12 @@ RequireResizeHit(
     "DPI-scaled top-left resize hit was not recognized");
 RequireResizeHit(
     WindowResizeHitTestPolicy.EvaluatePhysical(
-        111, 560, resizeLeft, resizeTop, 1_060, 920, 1.5, 1.5, resizeInsets, false),
+        118, 560, resizeLeft, resizeTop, 1_060, 920, 1.5, 1.5, resizeInsets, false),
     WindowResizeHit.Client,
     "DPI-scaled point beyond the resize boundary was not client content");
 RequireResizeHit(
     WindowResizeHitTestPolicy.EvaluatePhysical(
-        107, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
+        112, 440, resizeLeft, resizeTop, resizeRight, resizeBottom, 1, 1, resizeInsets, false),
     WindowResizeHit.Client,
     "point exactly on the resize boundary was not client content");
 RequireResizeHit(

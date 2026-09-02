@@ -5,15 +5,15 @@
         Title="LATTICE"
         Width="1600"
         Height="900"
-        MinWidth="640"
-        MinHeight="480"
+        MinWidth="360"
+        MinHeight="320"
         WindowStartupLocation="CenterScreen"
         WindowStyle="None"
         ResizeMode="CanResize"
         Background="{StaticResource LatticeBackground}">
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="42"
-                      ResizeBorderThickness="7"
+                      ResizeBorderThickness="12"
                       CornerRadius="0"
                       GlassFrameThickness="0" />
     </WindowChrome.WindowChrome>
@@ -54,6 +54,16 @@
     </Window.Resources>
 
     <Grid>
+        <Grid.Style>
+            <Style TargetType="Grid">
+                <Setter Property="Margin" Value="6,0,6,6" />
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding WindowState, RelativeSource={RelativeSource AncestorType=Window}}" Value="Maximized">
+                        <Setter Property="Margin" Value="0" />
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Grid.Style>
         <Grid.RowDefinitions>
             <RowDefinition Height="42" />
             <RowDefinition Height="*" />
@@ -97,8 +107,10 @@
             </Grid>
         </Border>
 
-        <Grid Grid.Row="1" Background="{StaticResource LatticeBackground}">
-            <wv2:WebView2 x:Name="ControlView" DefaultBackgroundColor="#050A10" />
+        <Grid x:Name="BrowserHost"
+              Grid.Row="1"
+              Background="{StaticResource LatticeBackground}">
+            <wv2:WebView2CompositionControl x:Name="ControlView" DefaultBackgroundColor="#050A10" />
             <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Visible">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
                     <TextBlock Text="LATTICE 控制核心尚未連線" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="18" TextAlignment="Center" />
