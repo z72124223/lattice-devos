@@ -259,7 +259,7 @@
     .inspector-action { width:100%; min-height:46px; border:1px solid var(--amber); border-radius:7px; background:rgba(88,57,0,.24); color:var(--amber); font-weight:820; }
     .command-dock { display:grid; grid-template-columns:auto minmax(120px,1fr) auto; align-items:center; gap:10px; margin:10px 16px 14px; padding:9px 10px; border:1px solid #334955; border-radius:8px; background:#0c1b26; box-shadow:0 18px 50px rgba(0,0,0,.32); }
     .command-dock label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
-    .command-dock textarea { min-height:48px; max-height:92px; resize:none; border:0; background:transparent; padding:12px 8px; font-size:.92rem; }
+    .command-dock textarea { min-height:96px; max-height:min(34dvh,280px); resize:vertical; border:0; background:transparent; padding:12px 8px; font-size:.92rem; }
     .composer-actions { align-items:center; justify-content:flex-end; }
     .composer-actions>div { flex-wrap:nowrap; }
     .action { min-height:44px; border-radius:6px; background:var(--cyan); color:#021319; }
@@ -301,7 +301,7 @@
       .graph-node { width:180px; }
       .command-dock { position:sticky; bottom:75px; z-index:20; grid-template-columns:1fr auto; margin:7px 9px; padding:7px; }
       .command-dock .composer-actions>div { display:none; }
-      .command-dock textarea { min-height:48px; }
+      .command-dock textarea { min-height:76px; max-height:min(30dvh,200px); }
       #send { min-width:82px; }
       .error { position:static; margin:0 10px 6px; }
     }
@@ -362,7 +362,7 @@
     </div>
     <form id="conversation-form" class="composer command-dock">
       <label for="message">告訴 LATTICE 你想完成什麼</label>
-      <textarea id="message" name="text" placeholder="告訴 LATTICE 你想完成什麼…" required></textarea>
+      <textarea id="message" name="text" rows="4" enterkeyhint="send" placeholder="告訴 LATTICE 你想完成什麼…" required></textarea>
       <div class="composer-actions"><div><button id="interrupt" type="button" class="action danger" title="停止本次回覆">■</button><button id="reconnect" type="button" class="action secondary" title="重新連線">↻</button></div><button id="send" type="submit" class="action">送出 ➤</button></div>
     </form>
     <p id="error" class="error" role="alert"></p>
@@ -651,6 +651,10 @@
     event.preventDefault();const projectId=currentProjectId(),submittedValue=nodes.message.value,text=submittedValue.trim();if(!conversationCanSend()||!text)return;
     const payload={projectId,clientMessageId:crypto.randomUUID(),text};localStorage.setItem(pendingKey,JSON.stringify(payload));nodes.error.textContent="";
     try{nodes.send.disabled=true;await deliver(payload,submittedValue);}catch(error){showError(error);}finally{renderConversation();}
+  });
+  nodes.message.addEventListener("keydown",(event)=>{
+    if(event.key!=="Enter"||event.shiftKey||event.isComposing||event.keyCode===229)return;
+    event.preventDefault();if(event.repeat||!conversationCanSend()||!nodes.message.value.trim())return;nodes.form.requestSubmit();
   });
   nodes.interrupt.addEventListener("click",()=>void conversationAction("/api/conversation/interrupt"));
   nodes.reconnect.addEventListener("click",()=>void conversationAction("/api/conversation/reconnect"));

@@ -3214,6 +3214,10 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.match(pageHtml, /typeof parsed\.projectId === "string"/u);
     assert.match(pageHtml, /typeof parsed\.text === "string"/u);
     assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
+    assert.match(pageHtml, /<textarea id="message"[^>]*rows="4"[^>]*enterkeyhint="send"/u);
+    assert.match(pageHtml, /\.command-dock textarea \{[^}]*min-height:96px;[^}]*max-height:min\(34dvh,280px\);[^}]*resize:vertical;/u);
+    assert.match(pageHtml, /event\.key!=="Enter"\|\|event\.shiftKey\|\|event\.isComposing\|\|event\.keyCode===229/u);
+    assert.match(pageHtml, /nodes\.form\.requestSubmit\(\)/u);
     assert.match(pageHtml, /conversation\?\.can_send === true/u);
     assert.doesNotMatch(pageHtml, /conversation\?\.status==="not_started"\|\|/u);
     assert.doesNotMatch(pageHtml, /readyForFirstMessage/u);
