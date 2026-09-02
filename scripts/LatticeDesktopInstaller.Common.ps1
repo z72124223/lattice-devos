@@ -343,12 +343,16 @@ function Expand-LatticePortablePayload {
             if ([string]::IsNullOrWhiteSpace($entryPath)) {
                 continue
             }
-            if ($entryPath.Contains('\') -or $entryPath.Contains(':') -or
-                $entryPath.StartsWith('/', [StringComparison]::Ordinal) -or
-                $entryPath -match '(^|/)\.\.?(/|$)') {
+            $canonicalEntryPath = $entryPath.Replace('\', '/')
+            if ($canonicalEntryPath.Contains(':') -or
+                $canonicalEntryPath.StartsWith('/', [StringComparison]::Ordinal) -or
+                $canonicalEntryPath -match '(^|/)\.\.?(/|$)') {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_PATH_INVALID:$entryPath"
             }
-            $normalized = $entryPath.TrimEnd('/')
+            $normalized = $canonicalEntryPath.TrimEnd('/')
+            if ([string]::IsNullOrWhiteSpace($normalized)) {
+                throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_PATH_INVALID:$entryPath"
+            }
             if ($seen.ContainsKey($normalized)) {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_DUPLICATE:$normalized"
             }
@@ -360,7 +364,7 @@ function Expand-LatticePortablePayload {
             if (($entry.ExternalAttributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_REPARSE_POINT:$entryPath"
             }
-            $isDirectory = $entryPath.EndsWith('/', [StringComparison]::Ordinal)
+            $isDirectory = $canonicalEntryPath.EndsWith('/', [StringComparison]::Ordinal)
             $finalTarget = [IO.Path]::GetFullPath((Join-Path $finalPayloadFull $normalized.Replace('/', '\')))
             if (-not (Test-LatticePathWithinRoot -Path $finalTarget -Root $finalPayloadFull)) {
                 throw "LATTICE_INSTALL_PAYLOAD_ARCHIVE_ESCAPED_FINAL_ROOT:$entryPath"

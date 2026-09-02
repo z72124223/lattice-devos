@@ -53,6 +53,10 @@ function New-TestZipFromDirectory {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $archive = [IO.Compression.ZipFile]::Open($ArchivePath, [IO.Compression.ZipArchiveMode]::Create)
     try {
+        foreach ($directory in @(Get-ChildItem -LiteralPath $SourceRoot -Directory -Recurse | Sort-Object FullName)) {
+            $entryName = $directory.FullName.Substring($SourceRoot.Length + 1) + '\'
+            $archive.CreateEntry($entryName) | Out-Null
+        }
         foreach ($file in @(Get-ChildItem -LiteralPath $SourceRoot -File -Recurse | Sort-Object FullName)) {
             $entryName = $file.FullName.Substring($SourceRoot.Length + 1).Replace('\', '/')
             [IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
@@ -628,6 +632,7 @@ try {
         result = 'PASS'
         staging_hash_activation = $true
         realistic_payload_path_staged = $true
+        windows_directory_entries_supported = $true
         start_menu_shortcut = $true
         hkcu_uninstall_registration = $true
         reentry = 'REUSED'
