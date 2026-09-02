@@ -174,6 +174,19 @@ function Invoke-InstallerWrapper {
     return (($output -join [Environment]::NewLine) | ConvertFrom-Json)
 }
 
+function Invoke-InstallerDefaultBundleRoot {
+    param(
+        [Parameter(Mandatory)][string]$BundleRoot,
+        [Parameter(Mandatory)][string]$SandboxRoot,
+        [Parameter(Mandatory)][string]$RegistryId
+    )
+
+    $output = & (Join-Path $BundleRoot 'Install-LATTICE.ps1') `
+        -TestSandboxRoot $SandboxRoot `
+        -TestRegistryId $RegistryId
+    return (($output -join [Environment]::NewLine) | ConvertFrom-Json)
+}
+
 function Invoke-InstallerHardKill {
     param(
         [Parameter(Mandatory)][string]$CommonPath,
@@ -335,7 +348,7 @@ try {
     Assert-InstallerTest (-not (Test-Path -LiteralPath $pendingOwnerPath)) 'DESKTOP_INSTALLER_OWNER_PENDING_MARKER_REMAINS'
     Invoke-LatticeDesktopUninstall -TestSandboxRoot $crashSandbox -TestRegistryId $crashRegistryId | Out-Null
 
-    $first = Invoke-InstallerWrapper -BundleRoot $bundle1 -SandboxRoot $temporaryRoot -RegistryId $registryId
+    $first = Invoke-InstallerDefaultBundleRoot -BundleRoot $bundle1 -SandboxRoot $temporaryRoot -RegistryId $registryId
     Assert-InstallerTest ($first.result -ceq 'PASS' -and $first.action -ceq 'INSTALLED') 'DESKTOP_INSTALLER_FRESH_INSTALL_FAILED'
     Assert-InstallerTest ((Get-ActiveCommit -Paths $paths) -ceq $commit1) 'DESKTOP_INSTALLER_FRESH_ACTIVE_COMMIT_MISMATCH'
     Assert-InstallerTest (Test-Path -LiteralPath ([string]$paths.ShortcutPath) -PathType Leaf) 'DESKTOP_INSTALLER_SHORTCUT_MISSING'
@@ -631,6 +644,7 @@ try {
     $result = [ordered]@{
         result = 'PASS'
         staging_hash_activation = $true
+        default_bundle_root_entrypoint = $true
         realistic_payload_path_staged = $true
         windows_directory_entries_supported = $true
         start_menu_shortcut = $true
