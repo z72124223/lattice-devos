@@ -256,6 +256,13 @@ export function createLatticeServer({
         sendJson(response, 200, service.primaryConversation());
         return;
       }
+      if (request.method === "POST" && url.pathname === "/api/conversation") {
+        const body = await readMutationJson(request, url);
+        sendJson(response, 200, await service.startPrimaryConversation({
+          projectId: body.projectId,
+        }));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/four-core") {
         sendJson(response, 200, service.fourCoreSurface());
         return;

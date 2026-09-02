@@ -119,6 +119,12 @@
     .dialog-head h2 { margin:0; font-size:1rem; }
     .dialog-close { width:44px; border-radius:10px; background:#24324d; color:#e8effc; font-size:1.1rem; }
     .dialog-body { display:grid; gap:13px; min-height:0; padding:16px; overflow:auto; overscroll-behavior:contain; }
+    .project-choice-list { display:grid; gap:10px; }
+    .project-choice { display:grid; gap:5px; width:100%; padding:13px 14px; border:1px solid #2c4660; border-radius:11px; background:#102332; color:#edf7ff; text-align:left; }
+    .project-choice:hover { border-color:#18cae8; background:#123044; }
+    .project-choice strong { font-size:.94rem; }
+    .project-choice small { color:#8299aa; }
+    .new-work-status { margin:0; min-height:24px; color:#9eb1bf; line-height:1.5; }
     .detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
     .detail-cell { padding:11px; border:1px solid #293b5c; border-radius:12px; background:#111c31; }
     .detail-cell small { display:block; margin-bottom:5px; color:#7487a7; }
@@ -363,6 +369,7 @@
     <p class="local-note">目前只在這台電腦的 127.0.0.1 提供服務；未啟用實體手機網路、登入、多租戶或部署。</p>
   </section>
 </main>
+<dialog id="new-work-dialog" aria-labelledby="new-work-title"><div class="dialog-head"><h2 id="new-work-title">開始新工作</h2><button class="dialog-close" type="button" data-close-dialog="new-work-dialog" aria-label="關閉">×</button></div><div class="dialog-body"><p>選擇這次工作的專案。LATTICE 只會使用你明確選定的專案。</p><div id="new-work-projects" class="project-choice-list"></div><p id="new-work-status" class="new-work-status" aria-live="polite"></p></div></dialog>
 <dialog id="work-detail-dialog" aria-labelledby="work-detail-title"><div class="dialog-head"><h2 id="work-detail-title">工作詳情</h2><button class="dialog-close" type="button" data-close-dialog="work-detail-dialog" aria-label="關閉">×</button></div><div id="work-detail-body" class="dialog-body"></div></dialog>
 <dialog id="decision-detail-dialog" aria-labelledby="decision-detail-title"><div class="dialog-head"><h2 id="decision-detail-title">決策歷史</h2><button class="dialog-close" type="button" data-close-dialog="decision-detail-dialog" aria-label="關閉">×</button></div><div id="decision-detail-body" class="dialog-body"></div></dialog>
 <script type="module">
@@ -391,6 +398,7 @@
     inspectorStatus:document.querySelector("#inspector-status"), inspectorProblem:document.querySelector("#inspector-problem"),
     inspectorDependencies:document.querySelector("#inspector-dependencies"), inspectorReverse:document.querySelector("#inspector-reverse"),
     inspectorOpen:document.querySelector("#inspector-open-detail"), newWork:document.querySelector("#new-work"), recentList:document.querySelector("#recent-work-list"),
+    newWorkDialog:document.querySelector("#new-work-dialog"), newWorkProjects:document.querySelector("#new-work-projects"), newWorkStatus:document.querySelector("#new-work-status"),
     runtimeCapabilities:document.querySelector("#runtime-capabilities"), error:document.querySelector("#error"),
   };
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
@@ -422,7 +430,7 @@
   function conversationCanSend(){
     const conversation=state.surface?.conversation;
     const pending=readPending(),pendingForCurrentContext=pending?.projectId===currentProjectId();
-    return state.runtime?.reconciliation_required!==true && Boolean(currentProjectId()) && !pendingForCurrentContext && (conversation?.status==="not_started"||conversation?.can_send === true);
+    return state.runtime?.reconciliation_required!==true && Boolean(currentProjectId()) && !pendingForCurrentContext && conversation?.can_send === true;
   }
   function activateCore(core){
     state.activeCore=core;
@@ -454,8 +462,7 @@
     const conversation=state.surface.conversation;
     nodes.connection.textContent=conversation.codex_connected?"Codex App Server：已連線":"Codex App Server：待命";
     nodes.connection.classList.toggle("connected",conversation.codex_connected);
-    const readyForFirstMessage=conversation.status==="not_started"&&Boolean(currentProjectId());
-    nodes.status.textContent=readyForFirstMessage?"主要專案已確認，可以送出第一則訊息。":conversation.status_text;
+    nodes.status.textContent=conversation.status_text;
     if(state.runtime?.reconciliation_required===true)nodes.status.textContent="先核對上次執行的精確終態，暫不接受新訊息。";
     nodes.binding.textContent=conversation.codex_thread_id?("對話 "+conversation.id+" · Codex "+conversation.codex_thread_id):"固定對話身份：primary";
     const nearBottom=nodes.transcript.scrollHeight-nodes.transcript.scrollTop-nodes.transcript.clientHeight<80;
@@ -593,6 +600,25 @@
   }
   async function resumePending(){const pending=readPending();if(!pending)return;if(pending.projectId!==currentProjectId()){showError(new Error("未自動送出另一個工作脈絡的待續訊息。"));renderConversation();return;}try{await deliver(pending);}catch(error){showError(error);}}
   async function conversationAction(path){nodes.error.textContent="";try{const conversation=await api(path,{method:"POST",body:"{}"});state.surface.conversation=conversation;await poll();}catch(error){showError(error);await poll();}}
+  async function startNewWork(project){
+    nodes.newWorkStatus.textContent="正在準備「"+project.name+"」…";
+    for(const button of nodes.newWorkProjects.querySelectorAll("button"))button.disabled=true;
+    try{
+      const conversation=await api("/api/conversation",{method:"POST",body:JSON.stringify({projectId:project.id})});
+      state.surface.conversation=conversation;
+      await poll();nodes.newWorkDialog.close();nodes.newWorkStatus.textContent="";activateCore("conversation");nodes.message.focus();
+    }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;for(const button of nodes.newWorkProjects.querySelectorAll("button"))button.disabled=false;await poll();}
+  }
+  async function openNewWork(){
+    activateCore("conversation");nodes.error.textContent="";nodes.newWorkProjects.replaceChildren();nodes.newWorkStatus.textContent="正在讀取可用專案…";nodes.newWorkDialog.showModal();
+    try{
+      const controlState=await api("/api/state"),projects=Array.isArray(controlState.projects)?controlState.projects:[];
+      if(projects.length===0){nodes.newWorkStatus.textContent="目前沒有可用專案；請先在 Control 登錄專案。";return;}
+      if(projects.length===1){await startNewWork(projects[0]);return;}
+      nodes.newWorkStatus.textContent="請選擇一個專案。";
+      nodes.newWorkProjects.replaceChildren(...projects.map((project)=>{const button=element("button",undefined,"project-choice");button.type="button";button.append(element("strong",project.name),element("small","由 Control 驗證的本機專案"));button.addEventListener("click",()=>void startNewWork(project));return button;}));
+    }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}
+  }
   async function openWorkDetail(workItemId){
     const snapshot=state.surface?.work_snapshot;if(!snapshot)return;
     try{
@@ -629,7 +655,7 @@
   nodes.interrupt.addEventListener("click",()=>void conversationAction("/api/conversation/interrupt"));
   nodes.reconnect.addEventListener("click",()=>void conversationAction("/api/conversation/reconnect"));
   nodes.inspectorOpen.addEventListener("click",()=>{if(nodes.inspectorOpen.dataset.workItemId)void openWorkDetail(nodes.inspectorOpen.dataset.workItemId);});
-  nodes.newWork.addEventListener("click",()=>{activateCore("conversation");nodes.message.focus();});
+  nodes.newWork.addEventListener("click",()=>void openNewWork());
   addEventListener("resize",()=>{const graph=state.surface?.work_snapshot?.graph;if(graph)requestAnimationFrame(()=>renderGraphEdges(graph));});
   activateCore("work-graph");await poll();await resumePending();setInterval(()=>void poll(),2_000);
 </script>

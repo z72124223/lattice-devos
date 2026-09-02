@@ -3168,8 +3168,9 @@ export class LatticeStore {
     ).changes === 1;
   }
 
-  ensurePrimaryConversation(projectId) {
+  ensurePrimaryConversation(projectId, { provisional = false } = {}) {
     const normalizedProjectId = requireText(projectId, "project ID");
+    if (typeof provisional !== "boolean") throw new TypeError("provisional must be boolean");
     if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
     this.database.exec("BEGIN IMMEDIATE;");
     try {
@@ -3187,7 +3188,7 @@ export class LatticeStore {
           "主對話",
           "Stable LATTICE Control user conversation binding.",
           "normal",
-          "draft",
+          provisional ? "selection_pending" : "draft",
           timestamp,
           timestamp,
         );
@@ -3206,6 +3207,71 @@ export class LatticeStore {
       assertPrimaryConversationIdentity(this.database, item);
       this.database.exec("COMMIT;");
       return decodeItem(item);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  selectPrimaryConversationProject({ projectId, fence }) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      if (["starting", "running", "waiting_approval"].includes(item.status)) {
+        const error = new Error("目前的對話仍在執行，請先等待完成或中斷");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      if (this.primaryConversationUnresolvedMessage()) {
+        const error = new Error("已有保存但尚未確認的訊息，請先重新連線");
+        error.code = "CONVERSATION_RECONCILIATION_REQUIRED";
+        error.status = 409;
+        throw error;
+      }
+      if (this.primaryConversationHasUnresolvedTurn()) {
+        const error = new Error("目前的對話尚未留下可驗證的結尾，請先重新連線");
+        error.code = "CONVERSATION_RECONCILIATION_REQUIRED";
+        error.status = 409;
+        throw error;
+      }
+      if (item.project_id === normalizedProjectId && item.status !== "selection_pending") {
+        this.database.exec("COMMIT;");
+        return decodeItem(item);
+      }
+      const timestamp = now();
+      const targetStatus = item.status === "selection_pending" ? "draft" : item.status;
+      this.database.prepare(`
+        UPDATE work_items
+        SET project_id = ?, status = ?, progress = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        normalizedProjectId,
+        targetStatus,
+        "已選定工作專案；準備連接 Codex",
+        timestamp,
+        primaryConversationId,
+      );
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, 'conversation_project_selected', ?, ?)
+      `).run(
+        primaryConversationId,
+        JSON.stringify({
+          projectId: normalizedProjectId,
+          previousProjectId: item.project_id,
+        }),
+        timestamp,
+      );
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return decodeItem(updated);
     } catch (error) {
       this.database.exec("ROLLBACK;");
       throw error;
@@ -3244,6 +3310,21 @@ export class LatticeStore {
 
   hasUnresolvedPrimaryConversationMessage() {
     return this.primaryConversationUnresolvedMessage() !== null;
+  }
+
+  primaryConversationHasUnresolvedTurn() {
+    const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+      .get(primaryConversationId);
+    if (!item) return false;
+    if (Boolean(item.codex_thread_id) !== Boolean(item.codex_turn_id)) return true;
+    if (!item.codex_thread_id || !item.codex_turn_id) return false;
+    const accepted = this.primaryConversationAcceptedForTurn(
+      item.codex_thread_id,
+      item.codex_turn_id,
+    );
+    if (!accepted) return false;
+    return !this.primaryConversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+      || this.primaryConversationMissingFinal(item.codex_thread_id, item.codex_turn_id);
   }
 
   latestPrimaryConversationBinding() {

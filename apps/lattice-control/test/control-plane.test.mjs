@@ -3214,7 +3214,9 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.match(pageHtml, /typeof parsed\.projectId === "string"/u);
     assert.match(pageHtml, /typeof parsed\.text === "string"/u);
     assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
-    assert.match(pageHtml, /readyForFirstMessage/u);
+    assert.match(pageHtml, /conversation\?\.can_send === true/u);
+    assert.doesNotMatch(pageHtml, /conversation\?\.status==="not_started"\|\|/u);
+    assert.doesNotMatch(pageHtml, /readyForFirstMessage/u);
     assert.match(pageHtml, /assertSharedWorkSnapshot/u);
     assert.match(pageHtml, /renderWorkGraph\(workSnapshot\.graph\)/u);
     assert.match(pageHtml, /renderWorkTree\(workSnapshot\.tree\)/u);
@@ -3289,6 +3291,306 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.equal(legacyVerify.status, 409);
     assert.equal((await legacyVerify.json()).code, "PRIMARY_CONVERSATION_ROUTE_REQUIRED");
     assert.equal((await (await fetch(`${origin}/api/conversation`)).json()).status, "codex_done");
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("new work selects a proven project, readies Codex, and enables the primary conversation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-new-work-http-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    const firstProject = application.service.createProject({
+      name: "First project",
+      rootPath: directory,
+    });
+    const selectedProject = application.service.createProject({
+      name: "Selected project",
+      rootPath: directory,
+    });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+
+    const ambiguous = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(ambiguous.context.reason, "ambiguous_project_context");
+    assert.equal(ambiguous.conversation.can_send, false);
+
+    const pageHtml = await (await fetch(`${origin}/`)).text();
+    assert.match(pageHtml, /id="new-work-dialog"/u);
+    assert.match(pageHtml, /api\("\/api\/conversation",\{method:"POST"/u);
+
+    const response = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: selectedProject.id }),
+    });
+    assert.equal(response.status, 200);
+    const conversation = await response.json();
+    assert.equal(conversation.id, "primary");
+    assert.equal(conversation.project_id, selectedProject.id);
+    assert.equal(conversation.status, "draft");
+    assert.equal(conversation.codex_connected, true);
+    assert.equal(conversation.can_send, true);
+    assert.equal(codex.threadStarts.length, 0, "choosing a project must not send a message");
+
+    const selectedSurface = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(selectedSurface.context.status, "ready");
+    assert.equal(selectedSurface.context.source, "primary_conversation");
+    assert.equal(selectedSurface.context.project_id, selectedProject.id);
+    assert.notEqual(selectedSurface.context.project_id, firstProject.id);
+
+    const unknownResponse = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: "missing-project" }),
+    });
+    assert.equal(unknownResponse.status, 400);
+    assert.equal(
+      (await (await fetch(`${origin}/api/conversation`)).json()).project_id,
+      selectedProject.id,
+    );
+
+    const sendResponse = await fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: selectedProject.id,
+        clientMessageId: "new-work-message-001",
+        text: "開始這個新工作。",
+      }),
+    });
+    assert.equal(sendResponse.status, 200);
+    assert.equal((await sendResponse.json()).status, "running");
+
+    const busySwitch = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: firstProject.id }),
+    });
+    assert.equal(busySwitch.status, 409);
+    assert.equal((await busySwitch.json()).code, "CONVERSATION_BUSY");
+    assert.equal(
+      (await (await fetch(`${origin}/api/conversation`)).json()).project_id,
+      selectedProject.id,
+    );
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("concurrent first new-work starts perform readiness only under the SQLite writer lease", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-new-work-first-lease-"));
+  const databasePath = path.join(directory, "control.db");
+  const firstStore = new LatticeStore(databasePath);
+  const secondStore = new LatticeStore(databasePath);
+  const firstCodex = new FakeCodex();
+  const secondCodex = new FakeCodex();
+  let firstReadinessCalls = 0;
+  let secondReadinessCalls = 0;
+  const firstReadiness = firstCodex.readAuthReadiness.bind(firstCodex);
+  const secondReadiness = secondCodex.readAuthReadiness.bind(secondCodex);
+  firstCodex.readAuthReadiness = async () => {
+    firstReadinessCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return firstReadiness();
+  };
+  secondCodex.readAuthReadiness = async () => {
+    secondReadinessCalls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return secondReadiness();
+  };
+  const firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+  const secondService = new LatticeControlService({ store: secondStore, codex: secondCodex });
+  try {
+    const firstProject = firstService.createProject({ name: "First project", rootPath: directory });
+    const secondProject = firstService.createProject({ name: "Second project", rootPath: directory });
+    const results = await Promise.allSettled([
+      firstService.startPrimaryConversation({ projectId: firstProject.id }),
+      secondService.startPrimaryConversation({ projectId: secondProject.id }),
+    ]);
+    assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
+    assert.equal(results.filter(({ status }) => status === "rejected").length, 1);
+    assert.equal(results.find(({ status }) => status === "rejected").reason.code,
+      "CONVERSATION_WRITER_BUSY");
+    assert.equal(firstReadinessCalls + secondReadinessCalls, 1);
+    const winnerIsFirst = results[0].status === "fulfilled";
+    assert.equal(
+      (winnerIsFirst ? firstService : secondService).primaryConversation().can_send,
+      true,
+    );
+    assert.equal(
+      (winnerIsFirst ? secondService : firstService).primaryConversation().can_send,
+      false,
+    );
+  } finally {
+    firstService.close();
+    secondService.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("new work keeps ambiguous context disabled when Codex readiness fails", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-new-work-auth-failure-"));
+  const codex = new FakeCodex();
+  codex.readAuthReadiness = async () => ({
+    ready: false,
+    authMode: null,
+    appServerGeneration: null,
+    appServerSessionId: null,
+  });
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    application.service.createProject({ name: "First project", rootPath: directory });
+    const selectedProject = application.service.createProject({
+      name: "Selected project",
+      rootPath: directory,
+    });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+
+    const response = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: selectedProject.id }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).code, "CONVERSATION_CODEX_AUTH_REQUIRED");
+
+    const conversation = await (await fetch(`${origin}/api/conversation`)).json();
+    assert.equal(conversation.project_id, null);
+    assert.equal(conversation.can_send, false);
+    const surface = await (await fetch(`${origin}/api/four-core`)).json();
+    assert.equal(surface.context.status, "not_ready");
+    assert.equal(surface.context.reason, "ambiguous_project_context");
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("new work cannot switch away from an accepted turn without a verified terminal reply", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-new-work-unresolved-turn-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    const firstProject = application.service.createProject({
+      name: "First project",
+      rootPath: directory,
+    });
+    const secondProject = application.service.createProject({
+      name: "Second project",
+      rootPath: directory,
+    });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+
+    const selected = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: firstProject.id }),
+    });
+    assert.equal(selected.status, 200);
+    const sent = await fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: firstProject.id,
+        clientMessageId: "new-work-unresolved-message-001",
+        text: "這個 turn 尚未留下可驗證的結尾。",
+      }),
+    });
+    assert.equal(sent.status, 200);
+    const running = await sent.json();
+    codex.activeTurns.delete(running.codex_thread_id);
+    codex.emit("disconnect", { code: 1, signal: null });
+
+    const switchResponse = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: secondProject.id }),
+    });
+    assert.equal(switchResponse.status, 409);
+    assert.equal((await switchResponse.json()).code, "CONVERSATION_RECONCILIATION_REQUIRED");
+    const after = await (await fetch(`${origin}/api/conversation`)).json();
+    assert.equal(after.project_id, firstProject.id);
+    assert.equal(after.can_send, false);
+    assert.equal(after.can_reconnect, true);
+  } finally {
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("new work cannot switch after a completed turn whose final reply is missing", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-new-work-missing-final-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+  });
+  try {
+    const firstProject = application.service.createProject({
+      name: "First project",
+      rootPath: directory,
+    });
+    const secondProject = application.service.createProject({
+      name: "Second project",
+      rootPath: directory,
+    });
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const origin = `http://127.0.0.1:${port}`;
+
+    assert.equal((await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: firstProject.id }),
+    })).status, 200);
+    const sent = await (await fetch(`${origin}/api/conversation/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        projectId: firstProject.id,
+        clientMessageId: "new-work-missing-final-message-001",
+        text: "完成事件不能取代最終回覆。",
+      }),
+    })).json();
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+
+    const switchResponse = await fetch(`${origin}/api/conversation`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ projectId: secondProject.id }),
+    });
+    assert.equal(switchResponse.status, 409);
+    assert.equal((await switchResponse.json()).code, "CONVERSATION_RECONCILIATION_REQUIRED");
+    const after = await (await fetch(`${origin}/api/conversation`)).json();
+    assert.equal(after.project_id, firstProject.id);
+    assert.equal(after.can_send, false);
+    assert.equal(after.can_reconnect, true);
   } finally {
     await new Promise((resolve) => application.server.close(resolve));
     await rm(directory, { recursive: true, force: true });
@@ -3405,6 +3707,7 @@ test("the four-core product API resolves one proven context and shares work proj
     assert.equal(unique.context.source, "unique_control_project");
     assert.equal(unique.context.project_id, project.id);
     assert.equal("root_path" in unique.context, false);
+    assert.equal(unique.conversation.can_send, false, "a unique project is not sendable before App Server readiness is proven");
 
     application.service.createProject({ name: "Ambiguous", rootPath: directory });
     const ambiguous = await (await fetch(`${origin}/api/four-core`)).json();
@@ -3501,7 +3804,11 @@ test("the four-core product API resolves one proven context and shares work proj
     assert.equal("rationale" in surface.decisions.decisions[0], false);
     assert.equal(surface.conversation.messages_truncated, false);
     assert.equal(surface.conversation.handoffs_truncated, false);
-    assert.equal(surface.conversation.can_send, true);
+    assert.equal(
+      surface.conversation.can_send,
+      false,
+      "direct store setup must not claim Codex readiness before the new-work handshake",
+    );
     let currentWorkSnapshot = surface.work_snapshot;
 
     const queryPlan = (sql, ...args) => application.store.database

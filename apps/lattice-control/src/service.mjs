@@ -182,6 +182,7 @@ function conversationStatusText(item, codexConnected = false) {
     }
     return "本次回覆未完成；訊息已保存，不會自動重送。請重新連線檢查狀態。";
   }
+  if (item.status === "selection_pending") return "正在確認 Codex 是否可用…";
   if (item.status === "draft") return "對話已準備好。";
   return "這條對話目前無法送出新訊息。";
 }
@@ -284,12 +285,15 @@ export class LatticeControlService {
         .map((item) => item.id),
     );
     this.closed = false;
+    this.primaryConversationReady = false;
     this.primaryConversationCache = null;
     this.fourCoreDecisionCache = null;
     this.onNotification = (message) => this.#onNotification(message);
     this.onServerRequest = (message) => this.#onServerRequest(message);
     this.onServerRequestSettled = (settlement) => this.#onServerRequestSettled(settlement);
     this.onDisconnect = ({ code, signal }) => {
+      this.primaryConversationReady = false;
+      this.primaryConversationCache = null;
       const reason = `Codex App Server disconnected (${code ?? signal ?? "unknown"})`;
       const preserveActive = this.shutdownInProgress || this.reconciliationRequired();
       try {
@@ -521,6 +525,7 @@ export class LatticeControlService {
         before.connection_changes,
         before.data_version,
         Boolean(this.codex.connected),
+        this.primaryConversationReady,
         item?.codex_thread_id ?? null,
         item?.codex_turn_id ?? null,
         Boolean(item && this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id)),
@@ -583,6 +588,7 @@ export class LatticeControlService {
     const incompleteSupport = new Set(window.support_incomplete_client_message_ids);
     let hasUnresolvedMessage = item.status === "starting"
       && !(item.codex_thread_id && item.codex_turn_id);
+    const hasUnresolvedTurn = this.store.primaryConversationHasUnresolvedTurn();
     let missingCurrentFinal = false;
     if (item.status === "failed") {
       hasUnresolvedMessage = this.store.hasUnresolvedPrimaryConversationMessage();
@@ -631,17 +637,20 @@ export class LatticeControlService {
         reason: event.payload.reason,
         created_at: event.created_at,
       }));
+    const selectionPending = item.status === "selection_pending";
     const conversation = {
       schema_version: "lattice.control.primary-conversation.v1",
       id: item.id,
-      project_id: item.project_id,
+      project_id: selectionPending ? null : item.project_id,
       codex_thread_id: item.codex_thread_id ?? null,
       codex_turn_id: item.codex_turn_id ?? null,
-      status: item.status,
+      status: selectionPending ? "not_started" : item.status,
       status_text: conversationStatusText(item, this.codex.connected),
       codex_connected: Boolean(this.codex.connected),
       can_send: ["draft", "codex_done", "failed"].includes(item.status)
+        && this.primaryConversationReady
         && !hasUnresolvedMessage
+        && !hasUnresolvedTurn
         && !missingCurrentFinal,
       can_interrupt: ["running", "waiting_approval"].includes(item.status) && Boolean(
         this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id),
@@ -805,6 +814,23 @@ export class LatticeControlService {
     return context;
   }
 
+  async startPrimaryConversation({ projectId }) {
+    this.store.ensurePrimaryConversation(projectId, { provisional: true });
+    return this.#runExclusive(
+      primaryConversationId,
+      `conversation-start:${projectId}`,
+      async () => {
+        const fence = this.#acquirePrimaryConversationLease();
+        this.#assertPrimaryConversationProjectSelectionSafe();
+        await this.#conversationEffectIdentity(fence);
+        this.#assertPrimaryConversationProjectSelectionSafe();
+        this.store.selectPrimaryConversationProject({ projectId, fence });
+        this.primaryConversationCache = null;
+        return this.primaryConversation();
+      },
+    );
+  }
+
   async sendPrimaryConversationMessage({ projectId, clientMessageId, text }) {
     this.store.ensurePrimaryConversation(projectId);
     return this.#runExclusive(
@@ -859,11 +885,25 @@ export class LatticeControlService {
   }
 
   async #conversationEffectIdentity(fence) {
-    if (typeof this.codex.readAuthReadiness !== "function") return null;
-    const readiness = await this.#fencedConversationEffect(
-      fence,
-      () => this.codex.readAuthReadiness(),
-    );
+    try {
+      if (typeof this.codex.readAuthReadiness !== "function") {
+        this.#markPrimaryConversationReady();
+        return null;
+      }
+      const readiness = await this.#fencedConversationEffect(
+        fence,
+        () => this.codex.readAuthReadiness(),
+      );
+      const effectIdentity = this.#conversationEffectIdentityFromReadiness(readiness);
+      this.#markPrimaryConversationReady();
+      return effectIdentity;
+    } catch (error) {
+      this.#markPrimaryConversationNotReady();
+      throw error;
+    }
+  }
+
+  #conversationEffectIdentityFromReadiness(readiness) {
     if (readiness?.ready !== true || readiness.authMode !== "chatgpt") {
       throw conversationError(
         "CONVERSATION_CODEX_AUTH_REQUIRED",
@@ -871,10 +911,41 @@ export class LatticeControlService {
         503,
       );
     }
-    return {
+    return Object.freeze({
       expectedGeneration: readiness.appServerGeneration,
       expectedSessionId: readiness.appServerSessionId,
-    };
+    });
+  }
+
+  #markPrimaryConversationReady() {
+    this.primaryConversationReady = true;
+    this.primaryConversationCache = null;
+  }
+
+  #markPrimaryConversationNotReady() {
+    this.primaryConversationReady = false;
+    this.primaryConversationCache = null;
+  }
+
+  #assertPrimaryConversationProjectSelectionSafe() {
+    const item = this.store.getWorkItem(primaryConversationId);
+    if (!item) return;
+    if (this.reconciliationItemIds.has(primaryConversationId)) {
+      throw conversationError(
+        "CONVERSATION_RECONCILIATION_REQUIRED",
+        "目前的對話尚未完成重新連線，不能切換工作專案",
+      );
+    }
+    if (
+      item.codex_thread_id
+      && item.codex_turn_id
+      && this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id)
+    ) {
+      throw conversationError(
+        "CONVERSATION_BUSY",
+        "Codex 仍在處理目前的對話，不能切換工作專案",
+      );
+    }
   }
 
   #conversationBinding() {
