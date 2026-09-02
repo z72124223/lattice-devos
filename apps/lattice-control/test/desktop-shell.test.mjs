@@ -67,6 +67,50 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
   assert.match(controlMarkup, /grid-template-rows:\s*auto auto auto minmax\(520px,1fr\) auto/u);
 });
 
+test("the resizable desktop can reach compact scrolling without desktop or mobile regressions", async () => {
+  const [windowMarkup, windowCode, controlMarkup] = await Promise.all([
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml.cs"),
+    repositoryFile("apps/lattice-control/public/index.html"),
+  ]);
+  const minimumWidth = Number(windowMarkup.match(/MinWidth="(\d+)"/u)?.[1]);
+  const minimumHeight = Number(windowMarkup.match(/MinHeight="(\d+)"/u)?.[1]);
+  const referenceShell = controlMarkup.match(
+    /<style id="lattice-reference-shell">([\s\S]*?)<\/style>/u,
+  )?.[1] ?? "";
+  const compactStart = referenceShell.indexOf("@media (max-width:");
+  const wideCss = referenceShell.slice(0, compactStart);
+  const compactCss = referenceShell.slice(compactStart);
+  const compactBreakpoint = Number(compactCss.match(/@media \(max-width:(\d+)px\)/u)?.[1]);
+
+  assert.ok(
+    minimumWidth <= compactBreakpoint,
+    `desktop minimum ${minimumWidth}px must reach compact breakpoint ${compactBreakpoint}px`,
+  );
+  assert.equal(minimumWidth, 640);
+  assert.equal(minimumHeight, 480);
+  assert.ok(minimumWidth <= 720 && minimumHeight <= 520);
+  assert.match(windowMarkup, /WindowStyle="None"[\s\S]*ResizeMode="CanResize"/u);
+  assert.match(windowMarkup, /<WindowChrome CaptionHeight="42"[\s\S]*ResizeBorderThickness="7"/u);
+  assert.match(windowMarkup, /MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"/u);
+  assert.match(windowMarkup, /Click="Minimize_Click"/u);
+  assert.match(windowMarkup, /Click="MaximizeRestore_Click"/u);
+  assert.match(windowCode, /TitleBar_MouseLeftButtonDown[\s\S]*e\.ClickCount == 2[\s\S]*ToggleMaximize\(\)[\s\S]*DragMove\(\)/u);
+  assert.match(windowCode, /Minimize_Click[\s\S]{0,120}WindowState = WindowState\.Minimized/u);
+  assert.match(windowCode, /MaximizeRestore_Click[\s\S]{0,120}ToggleMaximize\(\)/u);
+  assert.match(windowCode, /ToggleMaximize\(\)[\s\S]{0,180}WindowState == WindowState\.Maximized \? WindowState\.Normal : WindowState\.Maximized/u);
+  assert.match(wideCss, /body \{ overflow:hidden;/u);
+  assert.match(wideCss, /\.app \{ display:grid; grid-template-columns:248px minmax\(0,1fr\); width:100vw; height:100dvh;/u);
+  assert.match(compactCss, /body \{ overflow-x:hidden; overflow-y:auto; \}/u);
+  assert.match(compactCss, /\.app \{ display:block; min-height:100dvh; height:auto; \}/u);
+  assert.match(compactCss, /\.workspace \{ display:grid; grid-template-rows:auto auto auto minmax\(520px,1fr\) auto; min-height:100dvh;/u);
+  assert.match(compactCss, /\.graph-viewport \{ min-height:500px; overscroll-behavior-x:contain; overscroll-behavior-y:auto; \}/u);
+  assert.match(compactCss, /\.transcript \{ padding:13px; overscroll-behavior-y:auto; \}/u);
+  assert.match(compactCss, /\.command-dock \{ position:sticky; bottom:75px;/u);
+  assert.match(compactCss, /\.graph-list,#graph-edge-layer \{ min-width:720px; min-height:500px; \}/u);
+  assert.equal((controlMarkup.match(/data-core-target="/gu) ?? []).length, 4);
+});
+
 test("the desktop probes and owns only its compatible default Control before navigation", async () => {
   const [windowMarkup, windowCode, desktopPolicy, runtimeCode, project] = await Promise.all([
     repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
