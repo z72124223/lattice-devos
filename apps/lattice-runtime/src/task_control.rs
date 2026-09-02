@@ -28,11 +28,10 @@ use lattice_task_ledger::{
     AutonomyModel as LedgerAutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
     AutonomyRiskClass as LedgerAutonomyRiskClass, AutonomyTaskKind,
     AutonomyVerification as LedgerAutonomyVerification, CommandId, CommandOutcome, CorrelationId,
-    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile,
-    TaskIngressClaim, TaskIngressRequestKind, TaskSubmissionEnvelope,
-    VerifiedAutonomyReceipt, VerifiedAutonomyReceiptState, VerifiedStream,
-    classify_task_created_profile, plan_autonomy_receipt_append,
-    verify_exact_autonomy_receipt_retry,
+    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile, TaskIngressClaim,
+    TaskIngressRequestKind, TaskSubmissionEnvelope, VerifiedAutonomyReceipt,
+    VerifiedAutonomyReceiptState, VerifiedStream, classify_task_created_profile,
+    plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};

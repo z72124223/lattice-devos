@@ -2977,7 +2977,11 @@ fn run_focused_dual_process_race(config: &LiveConfig) {
         .expect("TASK105_FOCUSED_WRITER_CURRENT")
         .expect("TASK105_FOCUSED_WRITER_AUTHORITY_MISSING");
     assert_eq!(
-        current.independent_head().identity().holder_process_id().get(),
+        current
+            .independent_head()
+            .identity()
+            .holder_process_id()
+            .get(),
         u64::from(process_a.pid())
     );
     let mut authority_cleanup = RaceAuthorityCleanup::new(
@@ -3039,7 +3043,10 @@ fn run_focused_dual_process_race(config: &LiveConfig) {
         'b',
     ));
     assert_eq!(replayed["result"]["isError"], false);
-    assert_eq!(replayed["result"]["structuredContent"]["status"], "REPLAYED");
+    assert_eq!(
+        replayed["result"]["structuredContent"]["status"],
+        "REPLAYED"
+    );
     assert_eq!(
         replayed["result"]["structuredContent"]["ledger_digest"],
         first["ledger_digest"]

@@ -235,10 +235,10 @@ fn unmapped_changed_paths_remain_bound_to_the_exact_analysis() {
     let analysis_a = normalize_analysis(&request_a, &snapshot_a, &raw_a).expect("analysis a");
     let analysis_b = normalize_analysis(&request_b, &snapshot_b, &raw_b).expect("analysis b");
 
-    let unmapped_a = map_changed_paths_to_nodes(&analysis_a, ["src/unmapped.rs"])
-        .expect("unmapped input a");
-    let unmapped_b = map_changed_paths_to_nodes(&analysis_b, ["src/unmapped.rs"])
-        .expect("unmapped input b");
+    let unmapped_a =
+        map_changed_paths_to_nodes(&analysis_a, ["src/unmapped.rs"]).expect("unmapped input a");
+    let unmapped_b =
+        map_changed_paths_to_nodes(&analysis_b, ["src/unmapped.rs"]).expect("unmapped input b");
 
     assert!(unmapped_a.nodes().is_empty());
     assert!(unmapped_b.nodes().is_empty());
@@ -283,7 +283,12 @@ fn changed_path_mapping_rejects_non_canonical_git_paths() {
         map_changed_paths_to_nodes(&analysis, [r"src\lib.rs"]),
         Err(CodebaseMemoryError::InvalidChangedPath)
     );
-    for invalid in ["src:lib.rs", " src/lib.rs", "src/lib.rs ", "src/\u{0007}lib.rs"] {
+    for invalid in [
+        "src:lib.rs",
+        " src/lib.rs",
+        "src/lib.rs ",
+        "src/\u{0007}lib.rs",
+    ] {
         assert_eq!(
             map_changed_paths_to_nodes(&analysis, [invalid]),
             Err(CodebaseMemoryError::InvalidChangedPath),
