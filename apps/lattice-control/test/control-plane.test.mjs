@@ -30,6 +30,7 @@ class FakeCodex extends EventEmitter {
   listResult = null;
   listCalls = 0;
   closeCalls = 0;
+  readinessCalls = 0;
   freshReadCalls = [];
   freshReadResult = null;
   disconnectOnInterruptTimeout = false;
@@ -99,6 +100,7 @@ class FakeCodex extends EventEmitter {
   }
 
   async readAuthReadiness() {
+    this.readinessCalls += 1;
     this.connected = true;
     return {
       ready: true,
@@ -201,6 +203,12 @@ class FakeCodex extends EventEmitter {
     return this.activeTurns.get(threadId) === turnId;
   }
 
+  hasActiveTurnOtherThan(threadId, turnId) {
+    return [...this.activeTurns].some(
+      ([activeThreadId, activeTurnId]) => activeThreadId !== threadId || activeTurnId !== turnId,
+    );
+  }
+
   interruptTurn(threadId, turnId, { timeoutMs = 250 } = {}) {
     if (!this.isTurnActive(threadId, turnId)) {
       return Promise.reject(new Error(`Codex turn ${threadId}/${turnId} is not active`));
@@ -240,6 +248,7 @@ class FakeCodex extends EventEmitter {
   async close() {
     this.closeCalls += 1;
     this.connected = false;
+    this.activeTurns.clear();
   }
 }
 
@@ -2199,7 +2208,7 @@ test("a fresh read repairs a missed terminal notification without resending the 
   const service = new LatticeControlService({
     store,
     codex,
-    conversationObservationIntervalMs: 1,
+    conversationObservationIntervalMs: 10,
   });
   try {
     const project = service.createProject({ name: "Fresh terminal", rootPath: process.cwd() });
@@ -2218,19 +2227,97 @@ test("a fresh read repairs a missed terminal notification without resending the 
         items: [],
       }],
     };
+    const immediate = await service.refreshPrimaryConversationObservation();
+    assert.equal(immediate.status, "running");
+    assert.deepEqual(codex.freshReadCalls, [], "a new turn must receive a grace period before probing");
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const reconciled = await service.refreshPrimaryConversationObservation();
 
     assert.equal(reconciled.status, "failed");
     assert.match(reconciled.last_error, /interrupted/u);
     assert.deepEqual(codex.freshReadCalls, [sent.codex_thread_id]);
     assert.equal(codex.turnStarts.length, 1, "fresh observation must not replay the user message");
+    assert.equal(codex.closeCalls, 1, "a proven terminal must discard the stale active adapter");
+    assert.equal(codex.connected, true, "the replacement adapter must be ready for the next message");
     assert.equal(
       store.listEvents("primary").filter(({ kind }) => kind === "turn_completed").length,
       1,
     );
+
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const continued = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "fresh-terminal-message-002",
+      text: "已確認終態後必須能開始下一則。",
+    });
+    assert.equal(continued.status, "running");
+    assert.equal(continued.codex_turn_id, "turn-2");
+    assert.equal(codex.turnStarts.length, 2);
+    assert.deepEqual(codex.resumed, [sent.codex_thread_id], "the replacement adapter must resume the saved thread");
   } finally {
     service.close();
     store.close();
+  }
+});
+
+test("reconnect repairs an active projection when its exact terminal event already exists", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-terminal-projection-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Terminal projection", rootPath: directory });
+    const sent = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "terminal-projection-message-001",
+      text: "終態投影必須可重建。",
+    });
+    firstCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "interrupted", items: [] },
+      },
+    });
+    assert.equal(firstService.primaryConversation().status, "failed");
+    firstService.close();
+    firstService = null;
+    firstStore.database.prepare(`
+      UPDATE work_items SET status = 'running', progress = 'stale projection'
+      WHERE id = 'primary'
+    `).run();
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    restartedService = new LatticeControlService({
+      store: restartedStore,
+      codex: restartedCodex,
+    });
+
+    const reconciled = await restartedService.reconnectPrimaryConversation();
+    assert.equal(reconciled.status, "failed");
+    assert.match(reconciled.last_error, /interrupted/u);
+    assert.equal(restartedCodex.turnStarts.length, 0);
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -2240,7 +2327,7 @@ test("a fresh read leaves a genuinely active turn running and is throttled", asy
   const service = new LatticeControlService({
     store,
     codex,
-    conversationObservationIntervalMs: 60_000,
+    conversationObservationIntervalMs: 10,
   });
   try {
     const project = service.createProject({ name: "Fresh active", rootPath: process.cwd() });
@@ -2254,6 +2341,10 @@ test("a fresh read leaves a genuinely active turn running and is throttled", asy
       turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
     };
 
+    const immediate = await service.refreshPrimaryConversationObservation();
+    assert.equal(immediate.status, "running");
+    assert.deepEqual(codex.freshReadCalls, [], "a new turn must not be probed immediately");
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const first = await service.refreshPrimaryConversationObservation();
     const second = await service.refreshPrimaryConversationObservation();
 

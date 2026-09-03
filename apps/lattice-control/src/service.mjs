@@ -612,6 +612,18 @@ export class LatticeControlService {
             method: "turn/completed",
             params: { threadId: item.codex_thread_id, turn },
           }, fence);
+          const staleExactTurn = this.codex.isTurnActive?.(
+            item.codex_thread_id,
+            item.codex_turn_id,
+          );
+          const activePeer = this.codex.hasActiveTurnOtherThan?.(
+            item.codex_thread_id,
+            item.codex_turn_id,
+          );
+          if (staleExactTurn && !activePeer) {
+            await this.#fencedConversationEffect(fence, () => this.codex.close());
+            await this.#conversationEffectIdentity(fence);
+          }
         }
         return this.primaryConversation();
       },
@@ -2294,6 +2306,7 @@ export class LatticeControlService {
       || item.codex_turn_id !== turnId
       || turn?.status !== "inProgress"
     ) return false;
+    const firstConfirmation = !this.#hasConfirmedStart(id, threadId, turnId);
     if (item.status === "starting") {
       this.store.transitionWorkItem(id, ["starting"], {
         status: "running",
@@ -2309,6 +2322,9 @@ export class LatticeControlService {
       status: "inProgress",
       confirmedBy: "turn/started",
     }, id === primaryConversationId ? fence : null);
+    if (id === primaryConversationId && firstConfirmation) {
+      this.nextConversationObservationAt = Date.now() + this.conversationObservationIntervalMs;
+    }
     return true;
   }
 
@@ -2344,6 +2360,17 @@ export class LatticeControlService {
       }
     }
 
+    const completed = status === "completed";
+    const targetStatus = completed ? "codex_done" : "failed";
+    const targetProjection = {
+      status: targetStatus,
+      approval_json: null,
+      progress: completed ? "Codex turn completed" : `Codex turn ${status}`,
+      failure_summary: completed
+        ? null
+        : boundedText(turn.error?.message ?? `Codex turn ${status}`, 2_048),
+    };
+
     const existingTerminal = this.store.turnCompletedEvent(id, threadId, turnId);
     if (existingTerminal) {
       if (existingTerminal.payload.status !== status) {
@@ -2355,21 +2382,25 @@ export class LatticeControlService {
         }, fence);
       }
       const matches = existingTerminal.payload.status === status;
-      if (matches) this.reconciliationItemIds.delete(id);
+      if (matches) {
+        if (!["verified", "archived"].includes(item.status) && item.status !== targetStatus) {
+          this.store.updateWorkItem(
+            id,
+            targetProjection,
+            id === primaryConversationId ? fence : null,
+          );
+        }
+        this.reconciliationItemIds.delete(id);
+      }
       return matches;
     }
 
-    const completed = status === "completed";
-    const targetStatus = completed ? "codex_done" : "failed";
     if (!["verified", "archived"].includes(item.status) && item.status !== targetStatus) {
-      this.store.updateWorkItem(id, {
-        status: targetStatus,
-        approval_json: null,
-        progress: completed ? "Codex turn completed" : `Codex turn ${status}`,
-        failure_summary: completed
-          ? null
-          : boundedText(turn.error?.message ?? `Codex turn ${status}`, 2_048),
-      }, id === primaryConversationId ? fence : null);
+      this.store.updateWorkItem(
+        id,
+        targetProjection,
+        id === primaryConversationId ? fence : null,
+      );
     }
     this.#appendEventOnce(id, "turn_completed", {
       threadId,

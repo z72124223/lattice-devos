@@ -1180,6 +1180,12 @@ export class CodexAppServer extends EventEmitter {
     return this.activeTurns.get(threadId) === turnId;
   }
 
+  hasActiveTurnOtherThan(threadId, turnId) {
+    return [...this.activeTurns].some(
+      ([activeThreadId, activeTurnId]) => activeThreadId !== threadId || activeTurnId !== turnId,
+    );
+  }
+
   async interruptTurn(
     threadId,
     turnId,
