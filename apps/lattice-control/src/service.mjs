@@ -568,7 +568,7 @@ export class LatticeControlService {
       && item.codex_thread_id
       && item.codex_turn_id
       && !this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
-      && typeof this.codex.readThreadFresh === "function";
+      && typeof this.codex.readThread === "function";
     if (!observable || Date.now() < this.nextConversationObservationAt) {
       return Promise.resolve(this.primaryConversation());
     }
@@ -576,8 +576,9 @@ export class LatticeControlService {
       return Promise.resolve(this.primaryConversation());
     }
     this.nextConversationObservationAt = Date.now() + this.conversationObservationIntervalMs;
-    // Observation is advisory recovery: a probe failure must not turn a real
-    // active response into a failure or break the product's polling route.
+    // Observation stays on the already-connected adapter. Starting a second
+    // App Server while this turn is active can expose a premature persisted
+    // interruption even though the owning adapter is still receiving output.
     const observation = this.#runExclusive(
       primaryConversationId,
       "conversation-observation",
@@ -592,7 +593,7 @@ export class LatticeControlService {
         ) return this.primaryConversation();
         const thread = await this.#fencedConversationEffect(
           fence,
-          () => this.codex.readThreadFresh(item.codex_thread_id, {
+          () => this.codex.readThread(item.codex_thread_id, {
             includeTurns: true,
             allowEmpty: false,
           }),

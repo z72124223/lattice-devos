@@ -27,6 +27,7 @@ class FakeCodex extends EventEmitter {
   resumed = [];
   emptyResumed = [];
   readResults = new Map();
+  readCalls = [];
   listResult = null;
   listCalls = 0;
   closeCalls = 0;
@@ -132,6 +133,7 @@ class FakeCodex extends EventEmitter {
   }
 
   async readThread(threadId) {
+    this.readCalls.push(threadId);
     const result = this.readResults.get(threadId);
     if (!result) {
       const error = new Error(`Codex thread ${threadId} is not recoverable`);
@@ -2202,7 +2204,7 @@ test("reconnect restores an active primary conversation without resending its me
   }
 });
 
-test("a fresh read repairs a missed terminal notification without resending the message", async () => {
+test("the owning adapter repairs a missed terminal notification without resending the message", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
   const service = new LatticeControlService({
@@ -2219,23 +2221,24 @@ test("a fresh read repairs a missed terminal notification without resending the 
     });
     assert.equal(service.primaryConversation().status, "running");
 
-    codex.freshReadResult = {
+    codex.readResults.set(sent.codex_thread_id, {
       id: sent.codex_thread_id,
       turns: [{
         id: sent.codex_turn_id,
         status: "interrupted",
         items: [],
       }],
-    };
+    });
     const immediate = await service.refreshPrimaryConversationObservation();
     assert.equal(immediate.status, "running");
-    assert.deepEqual(codex.freshReadCalls, [], "a new turn must receive a grace period before probing");
+    assert.deepEqual(codex.readCalls, [], "a new turn must receive a grace period before probing");
     await new Promise((resolve) => setTimeout(resolve, 20));
     const reconciled = await service.refreshPrimaryConversationObservation();
 
     assert.equal(reconciled.status, "failed");
     assert.match(reconciled.last_error, /interrupted/u);
-    assert.deepEqual(codex.freshReadCalls, [sent.codex_thread_id]);
+    assert.deepEqual(codex.readCalls, [sent.codex_thread_id]);
+    assert.deepEqual(codex.freshReadCalls, [], "an active turn must never launch a second App Server probe");
     assert.equal(codex.turnStarts.length, 1, "fresh observation must not replay the user message");
     assert.equal(codex.closeCalls, 1, "a proven terminal must discard the stale active adapter");
     assert.equal(codex.connected, true, "the replacement adapter must be ready for the next message");
@@ -2387,7 +2390,7 @@ test("a late completed terminal with a saved final reply supersedes a premature 
   }
 });
 
-test("a fresh read leaves a genuinely active turn running and is throttled", async () => {
+test("an owning-adapter read leaves a genuinely active turn running and is throttled", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
   const service = new LatticeControlService({
@@ -2402,10 +2405,10 @@ test("a fresh read leaves a genuinely active turn running and is throttled", asy
       clientMessageId: "fresh-active-message-001",
       text: "真正仍在執行的回覆不可被檢查中斷。",
     });
-    codex.freshReadResult = {
+    codex.readResults.set(sent.codex_thread_id, {
       id: sent.codex_thread_id,
       turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
-    };
+    });
 
     const immediate = await service.refreshPrimaryConversationObservation();
     assert.equal(immediate.status, "running");
@@ -2416,7 +2419,8 @@ test("a fresh read leaves a genuinely active turn running and is throttled", asy
 
     assert.equal(first.status, "running");
     assert.equal(second.status, "running");
-    assert.deepEqual(codex.freshReadCalls, [sent.codex_thread_id]);
+    assert.deepEqual(codex.readCalls, [sent.codex_thread_id]);
+    assert.deepEqual(codex.freshReadCalls, []);
     assert.equal(codex.turnStarts.length, 1);
     assert.equal(codex.closeCalls, 0, "a passive observation must not close the active adapter");
   } finally {
