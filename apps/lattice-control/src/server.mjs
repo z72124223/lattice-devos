@@ -253,6 +253,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/conversation") {
+        void service.refreshPrimaryConversationObservation();
         sendJson(response, 200, service.primaryConversation());
         return;
       }
@@ -264,6 +265,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/four-core") {
+        void service.refreshPrimaryConversationObservation();
         sendJson(response, 200, service.fourCoreSurface());
         return;
       }

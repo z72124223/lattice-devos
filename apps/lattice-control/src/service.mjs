@@ -16,6 +16,7 @@ const activeWorkStatuses = new Set(["starting", "running", "waiting_approval"]);
 const primaryConversationId = "primary";
 const primaryConversationLeaseTtlMs = 15_000;
 const primaryConversationDiscoveryPasses = 3;
+const primaryConversationObservationIntervalMs = 15_000;
 const fourCoreSurfaceSchemaVersion = "lattice.control.four-core-surface.v1";
 const maximumFourCoreConversationMessages = 64;
 const maximumFourCoreConversationBytes = 524_288;
@@ -261,6 +262,7 @@ export class LatticeControlService {
     approvalTimeoutMs = 300_000,
     projectInspector = inspectProject,
     conversationLeaseTtlMs = primaryConversationLeaseTtlMs,
+    conversationObservationIntervalMs = primaryConversationObservationIntervalMs,
   }) {
     this.store = store;
     this.codex = codex;
@@ -270,6 +272,14 @@ export class LatticeControlService {
     this.approvalTimeoutMs = approvalTimeoutMs;
     this.projectInspector = projectInspector;
     this.conversationLeaseTtlMs = conversationLeaseTtlMs;
+    if (
+      !Number.isInteger(conversationObservationIntervalMs)
+      || conversationObservationIntervalMs < 1
+      || conversationObservationIntervalMs > 300_000
+    ) throw new TypeError("conversation observation interval must be between 1 and 300000ms");
+    this.conversationObservationIntervalMs = conversationObservationIntervalMs;
+    this.nextConversationObservationAt = 0;
+    this.conversationObservationPromise = null;
     this.conversationOwnerId = `control:${randomUUID()}`;
     this.conversationLeaseTimer = null;
     this.conversationLeaseFence = null;
@@ -548,6 +558,72 @@ export class LatticeControlService {
       "對話狀態正在變更，請稍後再試。",
       503,
     );
+  }
+
+  refreshPrimaryConversationObservation() {
+    if (this.conversationObservationPromise) return this.conversationObservationPromise;
+    const item = this.store.getWorkItem(primaryConversationId);
+    const observable = item
+      && ["running", "waiting_approval"].includes(item.status)
+      && item.codex_thread_id
+      && item.codex_turn_id
+      && !this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+      && typeof this.codex.readThreadFresh === "function";
+    if (!observable || Date.now() < this.nextConversationObservationAt) {
+      return Promise.resolve(this.primaryConversation());
+    }
+    if (this.operations.has(primaryConversationId)) {
+      return Promise.resolve(this.primaryConversation());
+    }
+    this.nextConversationObservationAt = Date.now() + this.conversationObservationIntervalMs;
+    // Observation is advisory recovery: a probe failure must not turn a real
+    // active response into a failure or break the product's polling route.
+    const observation = this.#runExclusive(
+      primaryConversationId,
+      "conversation-observation",
+      async () => {
+        const fence = this.#acquirePrimaryConversationLease();
+        const retained = requireItem(this.store, primaryConversationId);
+        if (
+          !["running", "waiting_approval"].includes(retained.status)
+          || retained.codex_thread_id !== item.codex_thread_id
+          || retained.codex_turn_id !== item.codex_turn_id
+          || this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+        ) return this.primaryConversation();
+        const thread = await this.#fencedConversationEffect(
+          fence,
+          () => this.codex.readThreadFresh(item.codex_thread_id, {
+            includeTurns: true,
+            allowEmpty: false,
+          }),
+        );
+        const turn = thread?.turns?.at(-1);
+        if (thread?.id !== item.codex_thread_id || turn?.id !== item.codex_turn_id) {
+          return this.primaryConversation();
+        }
+        this.#persistConversationRepliesFromTurn(
+          primaryConversationId,
+          item.codex_thread_id,
+          turn,
+          fence,
+        );
+        if (terminalTurnStatuses.has(turn.status)) {
+          this.#applyTerminal(primaryConversationId, {
+            method: "turn/completed",
+            params: { threadId: item.codex_thread_id, turn },
+          }, fence);
+        }
+        return this.primaryConversation();
+      },
+    ).catch(() => this.closed ? null : this.primaryConversation());
+    let tracked;
+    tracked = observation.finally(() => {
+      if (this.conversationObservationPromise === tracked) {
+        this.conversationObservationPromise = null;
+      }
+    });
+    this.conversationObservationPromise = tracked;
+    return tracked;
   }
 
   #primaryConversationFromItem(item) {

@@ -30,6 +30,8 @@ class FakeCodex extends EventEmitter {
   listResult = null;
   listCalls = 0;
   closeCalls = 0;
+  freshReadCalls = [];
+  freshReadResult = null;
   disconnectOnInterruptTimeout = false;
 
   constructor({ autoThreadStarted = true, autoTurnStarted = true } = {}) {
@@ -154,6 +156,13 @@ class FakeCodex extends EventEmitter {
       id: threadId,
       turns: [{ id: "turn-1", status: "completed" }],
     };
+  }
+
+  async readThreadFresh(threadId) {
+    this.freshReadCalls.push(threadId);
+    if (this.freshReadError) throw this.freshReadError;
+    if (this.freshReadResult) return structuredClone(this.freshReadResult);
+    return this.readThread(threadId);
   }
 
   async startTurn(threadId, text) {
@@ -2178,6 +2187,81 @@ test("reconnect restores an active primary conversation without resending its me
     assert.match(reconnected.status_text, /正在回覆/u);
     assert.equal(codex.turnStarts.length, 1, "reconnect must not replay the user message");
     assert.deepEqual(codex.resumed, [sent.codex_thread_id]);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a fresh read repairs a missed terminal notification without resending the message", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 1,
+  });
+  try {
+    const project = service.createProject({ name: "Fresh terminal", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "fresh-terminal-message-001",
+      text: "這一則只能送出一次，遺漏終態時要自行核對。",
+    });
+    assert.equal(service.primaryConversation().status, "running");
+
+    codex.freshReadResult = {
+      id: sent.codex_thread_id,
+      turns: [{
+        id: sent.codex_turn_id,
+        status: "interrupted",
+        items: [],
+      }],
+    };
+    const reconciled = await service.refreshPrimaryConversationObservation();
+
+    assert.equal(reconciled.status, "failed");
+    assert.match(reconciled.last_error, /interrupted/u);
+    assert.deepEqual(codex.freshReadCalls, [sent.codex_thread_id]);
+    assert.equal(codex.turnStarts.length, 1, "fresh observation must not replay the user message");
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "turn_completed").length,
+      1,
+    );
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a fresh read leaves a genuinely active turn running and is throttled", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 60_000,
+  });
+  try {
+    const project = service.createProject({ name: "Fresh active", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "fresh-active-message-001",
+      text: "真正仍在執行的回覆不可被檢查中斷。",
+    });
+    codex.freshReadResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+
+    const first = await service.refreshPrimaryConversationObservation();
+    const second = await service.refreshPrimaryConversationObservation();
+
+    assert.equal(first.status, "running");
+    assert.equal(second.status, "running");
+    assert.deepEqual(codex.freshReadCalls, [sent.codex_thread_id]);
+    assert.equal(codex.turnStarts.length, 1);
+    assert.equal(codex.closeCalls, 0, "a passive observation must not close the active adapter");
   } finally {
     service.close();
     store.close();

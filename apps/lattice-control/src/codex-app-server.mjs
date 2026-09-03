@@ -1034,6 +1034,34 @@ export class CodexAppServer extends EventEmitter {
     return thread;
   }
 
+  async readThreadFresh(
+    threadId,
+    { includeTurns = true, allowEmpty = false } = {},
+  ) {
+    if (this.launchSpec?.processFence) {
+      const error = new Error("a process-fenced App Server launch cannot be reused for a fresh probe");
+      error.code = "CODEX_APP_SERVER_FRESH_READ_UNAVAILABLE";
+      throw error;
+    }
+    // The active App Server can retain an in-memory inProgress view after a
+    // terminal notification is lost. A separate read-only process consults
+    // persisted Codex state without closing or interrupting the active adapter.
+    const probe = new CodexAppServer({
+      codexBin: this.codexBin,
+      launchSpec: this.launchSpec,
+      spawnProcess: this.spawnProcess,
+      requestTimeoutMs: this.requestTimeoutMs,
+      lifecycleTimeoutMs: this.lifecycleTimeoutMs,
+      sessionIdentityFactory: this.sessionIdentityFactory,
+      runPostExitProbe: this.runPostExitProbe,
+    });
+    try {
+      return await probe.readThread(threadId, { includeTurns, allowEmpty });
+    } finally {
+      await probe.close();
+    }
+  }
+
   /** Loads one exact persisted thread that is proven to have no turns yet. */
   async resumeEmptyThread(threadId, { effectIdentity = null } = {}) {
     await this.connect();
