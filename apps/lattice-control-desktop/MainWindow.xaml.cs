@@ -343,8 +343,9 @@ public partial class MainWindow : Window
         }
 
         _reconnectTimer.Stop();
+        ControlView.IsEnabled = true;
+        ControlView.IsHitTestVisible = true;
         ConnectionOverlay.Visibility = Visibility.Collapsed;
-        ControlView.Visibility = Visibility.Visible;
         ConnectionLabel.Text = "本機 LATTICE 已連線";
         AutomationProperties.SetItemStatus(ConnectionLabel, "connected");
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(64, 224, 164));
@@ -432,9 +433,11 @@ public partial class MainWindow : Window
         string itemStatus = "offline")
     {
         _healthTimer.Stop();
-        ControlView.Visibility = Visibility.Collapsed;
+        ControlView.IsEnabled = false;
+        ControlView.IsHitTestVisible = false;
         ConnectionDetail.Text = detail;
         ConnectionOverlay.Visibility = Visibility.Visible;
+        ReconnectButton.Focus();
         ConnectionLabel.Text = "LATTICE 未連線";
         AutomationProperties.SetItemStatus(ConnectionLabel, itemStatus);
         ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(239, 95, 95));
@@ -463,8 +466,10 @@ public partial class MainWindow : Window
 
     private void ShowConnectingState()
     {
-        ControlView.Visibility = Visibility.Collapsed;
+        ControlView.IsEnabled = false;
+        ControlView.IsHitTestVisible = false;
         ConnectionOverlay.Visibility = Visibility.Visible;
+        ReconnectButton.Focus();
         ConnectionDetail.Text = "正在嘗試連線到本機 Control；視窗會保持開啟並自動重試。";
         ConnectionLabel.Text = "正在連線本機 LATTICE";
         AutomationProperties.SetItemStatus(ConnectionLabel, "connecting");

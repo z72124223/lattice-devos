@@ -110,8 +110,15 @@
         <Grid x:Name="BrowserHost"
               Grid.Row="1"
               Background="{StaticResource LatticeBackground}">
-            <wv2:WebView2CompositionControl x:Name="ControlView" DefaultBackgroundColor="#050A10" />
-            <Border x:Name="ConnectionOverlay" Background="#F2050A10" Visibility="Visible">
+            <wv2:WebView2CompositionControl x:Name="ControlView"
+                                            Visibility="Visible"
+                                            IsEnabled="False"
+                                            IsHitTestVisible="False"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
+                                            AutomationProperties.AutomationId="LatticeWebViewSurface"
+                                            DefaultBackgroundColor="#050A10" />
+            <Border x:Name="ConnectionOverlay" Background="#050A10" Visibility="Visible">
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="460">
                     <TextBlock Text="LATTICE 控制核心尚未連線" Foreground="{StaticResource LatticeText}" FontWeight="SemiBold" FontSize="18" TextAlignment="Center" />
                     <Border Margin="0,14,0,0" Padding="10,5" CornerRadius="10" BorderBrush="#40586C" BorderThickness="1" HorizontalAlignment="Center">

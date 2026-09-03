@@ -68,6 +68,35 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
   assert.match(controlMarkup, /grid-template-rows:\s*auto auto auto minmax\(520px,1fr\) auto/u);
 });
 
+test("the composition WebView stays visible through its first layout and uses overlay-only connection states", async () => {
+  const [windowMarkup, windowCode] = await Promise.all([
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml.cs"),
+  ]);
+
+  assert.match(
+    windowMarkup,
+    /<wv2:WebView2CompositionControl\s+[\s\S]*?x:Name="ControlView"[\s\S]*?Visibility="Visible"[\s\S]*?IsEnabled="False"[\s\S]*?IsHitTestVisible="False"[\s\S]*?HorizontalAlignment="Stretch"[\s\S]*?VerticalAlignment="Stretch"[\s\S]*?AutomationProperties\.AutomationId="LatticeWebViewSurface"/u,
+  );
+  assert.doesNotMatch(
+    windowCode,
+    /ControlView\.Visibility\s*=\s*Visibility\.(?:Collapsed|Hidden|Visible)/u,
+    "changing composition-control visibility after initialization can strand its first capture surface until WM_SIZE",
+  );
+  assert.match(
+    windowCode,
+    /ShowConnectingState\(\)[\s\S]{0,360}ControlView\.IsEnabled = false;[\s\S]{0,120}ControlView\.IsHitTestVisible = false;[\s\S]{0,180}ReconnectButton\.Focus\(\);/u,
+  );
+  assert.match(
+    windowCode,
+    /ShowConnectionFailure\([\s\S]{0,560}ControlView\.IsEnabled = false;[\s\S]{0,120}ControlView\.IsHitTestVisible = false;[\s\S]{0,180}ReconnectButton\.Focus\(\);/u,
+  );
+  assert.match(
+    windowCode,
+    /Core_NavigationCompleted[\s\S]{0,1800}ControlView\.IsEnabled = true;[\s\S]{0,120}ControlView\.IsHitTestVisible = true;[\s\S]{0,120}ConnectionOverlay\.Visibility = Visibility\.Collapsed;/u,
+  );
+});
+
 test("the resizable desktop can reach compact scrolling without desktop or mobile regressions", async () => {
   const [windowMarkup, windowCode, resizePolicy, controlMarkup] = await Promise.all([
     repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
@@ -95,8 +124,8 @@ test("the resizable desktop can reach compact scrolling without desktop or mobil
   assert.match(windowMarkup, /WindowStyle="None"[\s\S]*ResizeMode="CanResize"/u);
   assert.match(windowMarkup, /<WindowChrome CaptionHeight="42"[\s\S]*ResizeBorderThickness="12"/u);
   assert.match(windowMarkup, /<Setter Property="Margin" Value="6,0,6,6" \/>[\s\S]*Value="Maximized">[\s\S]*<Setter Property="Margin" Value="0" \/>/u);
-  assert.match(windowMarkup, /<wv2:WebView2CompositionControl x:Name="ControlView"/u);
-  assert.doesNotMatch(windowMarkup, /<wv2:WebView2 x:Name="ControlView"/u);
+  assert.match(windowMarkup, /<wv2:WebView2CompositionControl\s+[\s\S]*?x:Name="ControlView"/u);
+  assert.doesNotMatch(windowMarkup, /<wv2:WebView2\s+[\s\S]*?x:Name="ControlView"/u);
   assert.doesNotMatch(windowCode, /BrowserHost_SizeChanged|SyncWebViewBounds|ControlView\.UpdateLayout\(\)/u);
   assert.match(windowMarkup, /MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"/u);
   assert.match(windowMarkup, /Click="Minimize_Click"/u);
@@ -256,6 +285,13 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(acceptanceScript, /if \(-not \$OwnedProcess\.WaitForExit\(10000\)\)/u);
   assert.match(acceptanceScript, /DESKTOP_CANDIDATE_OWNED_PROCESS_STOP_TIMEOUT/u);
   assert.match(acceptanceScript, /LatticeConnectionStatus/u);
+  assert.match(acceptanceScript, /function Wait-DesktopFirstPaint/u);
+  assert.match(acceptanceScript, /GetClientRect/u);
+  assert.match(acceptanceScript, /GetForegroundWindow/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_FIRST_PAINT_TIMEOUT/u);
+  assert.match(acceptanceScript, /LATTICE[\\/]candidate-evidence/u);
+  assert.match(acceptanceScript, /screenshot_path/u);
+  assert.match(acceptanceScript, /first_paint/u);
   assert.match(acceptanceScript, /candidate-manifest\.json/u);
   assert.match(acceptanceScript, /schema_version/u);
   assert.match(acceptanceScript, /source_commit/u);
