@@ -2345,6 +2345,295 @@ test("primary conversation safely interrupts an exact turn that produces no acti
   }
 });
 
+test("a queue deadline waits for reconnect and interrupts its retained exact turn once", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  let releaseResume;
+  const resumeEntered = new Promise((resolve) => {
+    codex.beforeResumeResult = async () => {
+      resolve();
+      await new Promise((resume) => { releaseResume = resume; });
+    };
+  });
+  try {
+    const project = service.createProject({ name: "Timeout waits for reconnect", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-reconnect-overlap-001",
+      text: "deadline 不能在 reconnect 期間遺失。",
+    });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+
+    const reconnect = service.reconnectPrimaryConversation();
+    await bounded(resumeEntered, "reconnect resume gate", 250);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    releaseResume();
+    const reconnected = await reconnect;
+    const interruptedTurn = await bounded(interrupted, "deferred queue timeout", 250);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(reconnected.status, "running");
+    assert.deepEqual(interruptedTurn, {
+      threadId: sent.codex_thread_id,
+      turnId: sent.codex_turn_id,
+    });
+    assert.equal(codex.interruptCalls.length, 1);
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "conversation_start_timeout").length,
+      1,
+    );
+  } finally {
+    releaseResume?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("a queue deadline waiting behind reconnect no-ops after the retained turn is terminal", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  let releaseResume;
+  const resumeEntered = new Promise((resolve) => {
+    codex.beforeResumeResult = async () => {
+      resolve();
+      await new Promise((resume) => { releaseResume = resume; });
+    };
+  });
+  try {
+    const project = service.createProject({ name: "Timeout no-op after terminal", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-terminal-overlap-001",
+      text: "已終態的 retained turn 不得再被 deadline 中斷。",
+    });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const reconnect = service.reconnectPrimaryConversation();
+    await bounded(resumeEntered, "terminal reconnect gate", 250);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "interrupted", items: [] },
+      },
+    });
+    releaseResume();
+    await reconnect;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(codex.interruptCalls.length, 0);
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "conversation_start_timeout").length,
+      0,
+    );
+    assert.equal(service.primaryConversation().status, "failed");
+  } finally {
+    releaseResume?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("a queue deadline waits for a conflicting send without creating another claim or turn", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  let releaseResume;
+  const resumeEntered = new Promise((resolve) => {
+    codex.beforeResumeResult = async () => {
+      resolve();
+      await new Promise((resume) => { releaseResume = resume; });
+    };
+  });
+  try {
+    const project = service.createProject({ name: "Timeout waits for send", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-send-overlap-001",
+      text: "第一個 unresolved claim 必須留在原 thread/turn。",
+    });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+    const laterSend = service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-send-overlap-002",
+      text: "不得繞過第一個尚未終態的 claim。",
+    });
+    await bounded(resumeEntered, "conflicting send resume gate", 250);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    releaseResume();
+    await assert.rejects(laterSend, { code: "CONVERSATION_BUSY" });
+    const interruptedTurn = await bounded(interrupted, "timeout after conflicting send", 250);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(interruptedTurn, {
+      threadId: sent.codex_thread_id,
+      turnId: sent.codex_turn_id,
+    });
+    assert.equal(codex.turnStarts.length, 1);
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "conversation_message_claimed").length,
+      1,
+    );
+  } finally {
+    releaseResume?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("a queue deadline waiting behind reconnect does not interrupt after admission closes", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  let releaseResume;
+  const resumeEntered = new Promise((resolve) => {
+    codex.beforeResumeResult = async () => {
+      resolve();
+      await new Promise((resume) => { releaseResume = resume; });
+    };
+  });
+  try {
+    const project = service.createProject({ name: "Timeout respects shutdown", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-shutdown-overlap-001",
+      text: "shutdown 後不得由延後 deadline 產生 effect。",
+    });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const reconnect = service.reconnectPrimaryConversation();
+    await bounded(resumeEntered, "shutdown reconnect gate", 250);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    service.stopAcceptingEffects();
+    releaseResume();
+    const reconnected = await reconnect;
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(reconnected.status, "running");
+    assert.equal(codex.interruptCalls.length, 0);
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "conversation_start_timeout").length,
+      0,
+    );
+  } finally {
+    releaseResume?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("a queue deadline waiting behind reconnect does not interrupt after writer takeover", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-timeout-takeover-"));
+  const firstStore = new LatticeStore(path.join(directory, "control.db"));
+  const secondStore = new LatticeStore(path.join(directory, "control.db"));
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store: firstStore,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  let releaseResume;
+  let takeoverFence;
+  const resumeEntered = new Promise((resolve) => {
+    codex.beforeResumeResult = async () => {
+      resolve();
+      await new Promise((resume) => { releaseResume = resume; });
+    };
+  });
+  try {
+    const project = service.createProject({ name: "Timeout respects takeover", rootPath: directory });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-takeover-overlap-001",
+      text: "writer takeover 後延後 deadline 不得碰舊 turn。",
+    });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const reconnect = service.reconnectPrimaryConversation();
+    await bounded(resumeEntered, "takeover reconnect gate", 250);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const firstLease = firstStore.database.prepare(`
+      SELECT owner_id, generation FROM conversation_writer_leases WHERE conversation_id = 'primary'
+    `).get();
+    assert.equal(firstStore.releasePrimaryConversationLease({
+      ownerId: firstLease.owner_id,
+      generation: firstLease.generation,
+    }), true);
+    const takeover = secondStore.acquirePrimaryConversationLease({
+      ownerId: "timeout-takeover",
+      ownerPid: process.pid,
+      ttlMs: 15_000,
+    });
+    takeoverFence = { ownerId: takeover.owner_id, generation: takeover.generation };
+    releaseResume();
+    await assert.rejects(reconnect, { code: "CONVERSATION_WRITER_LOST" });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    assert.equal(codex.interruptCalls.length, 0);
+    assert.equal(
+      firstStore.listEvents("primary").filter(({ kind }) => kind === "conversation_start_timeout").length,
+      0,
+    );
+  } finally {
+    releaseResume?.();
+    if (takeoverFence) secondStore.releasePrimaryConversationLease(takeoverFence);
+    service.close();
+    firstStore.close();
+    secondStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a natural reply that wins the queue-timeout race remains completed", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();

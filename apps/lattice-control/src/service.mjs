@@ -2276,6 +2276,25 @@ export class LatticeControlService {
     }
   }
 
+  async #runPrimaryConversationDeadline(kind, operation) {
+    const deadline = Date.now() + this.lifecycleTimeoutMs;
+    while (this.acceptingEffects) {
+      const existing = this.operations.get(primaryConversationId);
+      if (existing) {
+        if (existing.kind === kind) return existing.promise;
+        const settled = await settleWithin(existing.promise, deadline);
+        if (!settled.settled) return false;
+        continue;
+      }
+      try {
+        return this.#runExclusive(primaryConversationId, kind, operation);
+      } catch (error) {
+        if (error?.code !== "CONVERSATION_MESSAGE_CONFLICT") throw error;
+      }
+    }
+    return false;
+  }
+
   async #shutdownActiveItem(item, timeoutMs) {
     const threadId = requireProtocolId(item.codex_thread_id, "shutdown thread ID");
     const turnId = requireProtocolId(item.codex_turn_id, "shutdown turn ID");
@@ -2376,7 +2395,7 @@ export class LatticeControlService {
   }
 
   #interruptQueuedConversation(threadId, turnId) {
-    return this.#runPrimaryConversationMutation(
+    return this.#runPrimaryConversationDeadline(
       `conversation-start-timeout:${threadId}:${turnId}`,
       async () => {
         const fence = this.#acquirePrimaryConversationLease();
