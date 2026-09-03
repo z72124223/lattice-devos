@@ -165,7 +165,9 @@ function conversationTurnPrompt(claim, previousMessages, handoffReason = null) {
   ].join("\n\n");
 }
 
-function conversationStatusText(item, codexConnected = false) {
+const conversationStartWarningMs = 30_000;
+
+function conversationStatusText(item, codexConnected = false, now = Date.now()) {
   if (!item) return "確認主要專案後即可開始對話。";
   if (
     !codexConnected
@@ -174,7 +176,16 @@ function conversationStatusText(item, codexConnected = false) {
     return "Control 已恢復，但 Codex 尚未重新連線；同一則訊息不會重送。請按「重新連線」。";
   }
   if (item.status === "starting") return "訊息已保存，正在連接 Codex…";
-  if (item.status === "running") return "Codex 正在回覆…";
+  if (item.status === "running") {
+    const visibleActivityStarted = /^(?:Running|Completed)\s/u.test(item.progress ?? "");
+    if (visibleActivityStarted) return "Codex 正在回覆…";
+
+    const queuedAt = Date.parse(item.updated_at ?? "");
+    if (Number.isFinite(queuedAt) && now - queuedAt >= conversationStartWarningMs) {
+      return "Codex 尚未開始執行，已等待超過 30 秒；你可以停止後再試一次，Control 不會自動重送。";
+    }
+    return "已交給 Codex，正在等待開始…";
+  }
   if (item.status === "waiting_approval") return "Codex 正等待你的核准。";
   if (item.status === "codex_done") return "已收到 Codex 回覆，可以繼續對話。";
   if (item.status === "failed") {

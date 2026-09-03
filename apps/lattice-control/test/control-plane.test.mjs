@@ -2195,9 +2195,52 @@ test("reconnect restores an active primary conversation without resending its me
     const reconnected = await service.reconnectPrimaryConversation();
     assert.equal(reconnected.id, sent.id);
     assert.equal(reconnected.status, "running");
-    assert.match(reconnected.status_text, /正在回覆/u);
+    assert.match(reconnected.status_text, /等待開始/u);
     assert.equal(codex.turnStarts.length, 1, "reconnect must not replay the user message");
     assert.deepEqual(codex.resumed, [sent.codex_thread_id]);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary conversation distinguishes queued work from visible reply generation", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Queue status", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queue-status-message-001",
+      text: "排隊時不可假裝正在產生回覆。",
+    });
+
+    const queued = service.primaryConversation();
+    assert.equal(queued.status, "running");
+    assert.equal(queued.can_interrupt, true);
+    assert.match(queued.status_text, /等待開始/u);
+    assert.doesNotMatch(queued.status_text, /正在回覆/u);
+
+    store.database.prepare(`
+      UPDATE work_items
+      SET updated_at = ?
+      WHERE id = ?
+    `).run(new Date(Date.now() - 31_000).toISOString(), sent.id);
+    const delayed = service.primaryConversation();
+    assert.equal(delayed.can_interrupt, true);
+    assert.match(delayed.status_text, /尚未開始執行/u);
+    assert.match(delayed.status_text, /30 秒/u);
+
+    codex.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        item: { id: "queue-status-item-001", type: "userMessage" },
+      },
+    });
+    assert.match(service.primaryConversation().status_text, /正在回覆/u);
   } finally {
     service.close();
     store.close();
