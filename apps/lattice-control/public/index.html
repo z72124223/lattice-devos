@@ -1,11 +1,20 @@
 <!doctype html>
-<html lang="zh-Hant">
+<html lang="zh-Hant" data-text-size="comfortable">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <title>LATTICE Control</title>
+  <script>
+    try {
+      const savedTextSize=localStorage.getItem("lattice.control.text-size.v1");
+      if(["standard","comfortable","large"].includes(savedTextSize))document.documentElement.dataset.textSize=savedTextSize;
+    } catch {}
+  </script>
   <style>
     :root { color-scheme:dark; font-family:Inter,"Noto Sans TC",system-ui,sans-serif; background:#060914; color:#edf3ff; --panel:rgba(14,22,40,.92); --soft:rgba(20,31,55,.74); --line:rgba(111,139,197,.29); --muted:#98a8c5; --accent:#8fb3ff; --mint:#62dcb7; }
+    html[data-text-size="standard"] { font-size:16px; }
+    html[data-text-size="comfortable"] { font-size:18px; }
+    html[data-text-size="large"] { font-size:20px; }
     * { box-sizing:border-box; min-width:0; }
     html,body { margin:0; min-height:100%; overflow-x:hidden; }
     body { min-height:100%; background:radial-gradient(circle at 8% 0%,rgba(80,117,232,.24),transparent 34rem),radial-gradient(circle at 94% 100%,rgba(57,204,168,.13),transparent 32rem),#060914; }
@@ -201,7 +210,10 @@
     .workspace-title { display:flex; align-items:center; gap:12px; min-width:0; }
     .workspace-title span { color:#758997; }
     .workspace-title strong { overflow:hidden; color:#edf7fb; text-overflow:ellipsis; white-space:nowrap; }
-    .top-status { display:flex; align-items:center; gap:14px; }
+    .top-status { display:flex; align-items:center; justify-content:flex-end; gap:10px; }
+    .text-size-control { display:flex; align-items:center; gap:7px; min-height:36px; padding:5px 8px 5px 11px; border:1px solid #2a3d4b; border-radius:999px; background:#0d1a25; color:#aebfc8; font-size:.76rem; font-weight:760; white-space:nowrap; }
+    .text-size-control select { min-height:28px; border:0; border-radius:999px; background:#152735; color:#eef8fc; padding:3px 25px 3px 9px; font:inherit; cursor:pointer; }
+    .text-size-control select:focus-visible { outline:2px solid var(--cyan); outline-offset:2px; }
     .system-pill { display:flex; align-items:center; gap:9px; min-height:36px; padding:7px 14px; border:1px solid #2a3d4b; border-radius:999px; background:#0d1a25; color:#d6e1e7; font-size:.78rem; }
     .connection { color:#8fa0aa; }
     .connection.connected { color:#8de5aa; }
@@ -257,9 +269,9 @@
     .inspector-card.problem { border-color:#6d5114; background:rgba(78,54,7,.22); }
     .inspector-card.problem h3 { color:var(--amber); }
     .inspector-action { width:100%; min-height:46px; border:1px solid var(--amber); border-radius:7px; background:rgba(88,57,0,.24); color:var(--amber); font-weight:820; }
-    .command-dock { display:grid; grid-template-columns:auto minmax(120px,1fr) auto; align-items:center; gap:10px; margin:10px 16px 14px; padding:9px 10px; border:1px solid #334955; border-radius:8px; background:#0c1b26; box-shadow:0 18px 50px rgba(0,0,0,.32); }
+    .command-dock { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; margin:10px 16px 14px; padding:11px 12px; border:1px solid #334955; border-radius:18px; background:#0c1b26; box-shadow:0 18px 50px rgba(0,0,0,.32); }
     .command-dock label { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
-    .command-dock textarea { min-height:96px; max-height:min(34dvh,280px); resize:vertical; border:0; background:transparent; padding:12px 8px; font-size:.92rem; }
+    .command-dock textarea { min-height:132px; max-height:min(42dvh,420px); resize:vertical; overflow-y:hidden; border:0; background:transparent; padding:14px 10px; font-size:1rem; line-height:1.55; }
     .composer-actions { align-items:center; justify-content:flex-end; }
     .composer-actions>div { flex-wrap:nowrap; }
     .action { min-height:44px; border-radius:6px; background:var(--cyan); color:#021319; }
@@ -279,8 +291,10 @@
       .core-tab { min-height:56px; justify-content:center; flex-direction:column; gap:2px; padding:5px 2px; border-left:0; font-size:.7rem; }
       .core-tab .nav-icon { width:auto; font-size:1rem; }
       .workspace { display:grid; grid-template-rows:auto auto auto minmax(520px,1fr) auto; min-height:100dvh; padding-bottom:76px; }
-      .topbar { align-items:flex-start; padding:13px 14px; }
+      .topbar { align-items:flex-start; flex-direction:column; gap:8px; padding:13px 14px; }
       .workspace-title { display:grid; gap:3px; font-size:.78rem; }
+      .top-status { width:100%; justify-content:space-between; }
+      .text-size-control { font-size:.7rem; }
       .system-pill { padding:6px 9px; font-size:.7rem; }
       .context-banner { align-items:flex-start; flex-direction:column; padding:8px 14px; }
       .runtime-capabilities { padding:6px 10px; }
@@ -299,9 +313,9 @@
       .graph-viewport { height:500px; min-height:500px; overflow-x:auto; overflow-y:hidden; overscroll-behavior-x:contain; }
       .graph-list,#graph-edge-layer { min-width:720px; min-height:500px; }
       .graph-node { width:180px; }
-      .command-dock { position:sticky; bottom:75px; z-index:20; grid-template-columns:1fr auto; margin:7px 9px; padding:7px; }
+      .command-dock { position:sticky; bottom:75px; z-index:20; grid-template-columns:minmax(0,1fr) auto; margin:7px 9px; padding:9px; }
       .command-dock .composer-actions>div { display:none; }
-      .command-dock textarea { min-height:76px; max-height:min(30dvh,200px); }
+      .command-dock textarea { min-height:112px; max-height:min(36dvh,280px); }
       #send { min-width:82px; }
       .error { position:static; margin:0 10px 6px; }
     }
@@ -328,7 +342,7 @@
   <section class="workspace">
     <header class="topbar">
       <div class="workspace-title"><span>目前脈絡</span><strong id="header-context">正在確認主要專案…</strong></div>
-      <div class="top-status"><div class="system-pill"><p id="connection" class="connection">Codex App Server：待命</p></div></div>
+      <div class="top-status"><label class="text-size-control"><span aria-hidden="true">Aa</span><select id="text-size" aria-label="文字大小"><option value="standard">標準</option><option value="comfortable" selected>Codex（預設）</option><option value="large">大</option></select></label><div class="system-pill"><p id="connection" class="connection">Codex App Server：待命</p></div></div>
     </header>
     <div class="context-banner" aria-live="polite"><strong id="context-status">正在讀取四核心狀態…</strong><span id="context-source" class="mono"></span></div>
     <div id="runtime-capabilities" class="runtime-capabilities" aria-label="本機能力健康狀態" aria-live="polite"><span class="muted">正在讀取本機能力…</span></div>
@@ -362,7 +376,7 @@
     </div>
     <form id="conversation-form" class="composer command-dock">
       <label for="message">告訴 LATTICE 你想完成什麼</label>
-      <textarea id="message" name="text" rows="4" enterkeyhint="send" placeholder="告訴 LATTICE 你想完成什麼…" required></textarea>
+      <textarea id="message" name="text" rows="5" enterkeyhint="send" placeholder="告訴 LATTICE 你想完成什麼…" required></textarea>
       <div class="composer-actions"><div><button id="interrupt" type="button" class="action danger" title="停止本次回覆">■</button><button id="reconnect" type="button" class="action secondary" title="重新連線">↻</button></div><button id="send" type="submit" class="action">送出 ➤</button></div>
     </form>
     <p id="error" class="error" role="alert"></p>
@@ -374,6 +388,8 @@
 <dialog id="decision-detail-dialog" aria-labelledby="decision-detail-title"><div class="dialog-head"><h2 id="decision-detail-title">決策歷史</h2><button class="dialog-close" type="button" data-close-dialog="decision-detail-dialog" aria-label="關閉">×</button></div><div id="decision-detail-body" class="dialog-body"></div></dialog>
 <script type="module">
   const pendingKey = "lattice.control.pending-message.v1";
+  const textSizeKey = "lattice.control.text-size.v1";
+  const textSizes = new Set(["standard","comfortable","large"]);
   const safeMessageId = /^[A-Za-z0-9._:-]{1,128}$/u;
   const safeProjectId = /^[A-Za-z0-9._:-]{1,256}$/u;
   const unsafeControls = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u;
@@ -400,6 +416,7 @@
     inspectorOpen:document.querySelector("#inspector-open-detail"), newWork:document.querySelector("#new-work"), recentList:document.querySelector("#recent-work-list"),
     newWorkDialog:document.querySelector("#new-work-dialog"), newWorkProjects:document.querySelector("#new-work-projects"), newWorkStatus:document.querySelector("#new-work-status"),
     runtimeCapabilities:document.querySelector("#runtime-capabilities"), error:document.querySelector("#error"),
+    textSize:document.querySelector("#text-size"),
   };
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
   function showError(error,source="action") { nodes.error.textContent=error.message; nodes.error.dataset.source=source; }
@@ -596,7 +613,19 @@
     const acknowledged=conversation.acknowledged_client_message_id===payload.clientMessageId;
     if(acknowledged)localStorage.removeItem(pendingKey);
     await poll();
-    if(acknowledged&&nodes.message.value===submittedValue)nodes.message.value="";
+    if(acknowledged&&nodes.message.value===submittedValue){nodes.message.value="";resizeMessageInput();}
+  }
+  function resizeMessageInput(){
+    nodes.message.style.height="auto";
+    const minimum=Number.parseFloat(getComputedStyle(nodes.message).minHeight)||0;
+    nodes.message.style.height=Math.max(minimum,nodes.message.scrollHeight)+"px";
+    nodes.message.style.overflowY=nodes.message.scrollHeight>nodes.message.clientHeight+1?"auto":"hidden";
+  }
+  function applyTextSize(value,{persist=true}={}){
+    const textSize=textSizes.has(value)?value:"comfortable";
+    document.documentElement.dataset.textSize=textSize;nodes.textSize.value=textSize;
+    if(persist)try{localStorage.setItem(textSizeKey,textSize);}catch{}
+    requestAnimationFrame(()=>{resizeMessageInput();const graph=state.surface?.work_snapshot?.graph;if(graph)renderGraphEdges(graph);});
   }
   async function resumePending(){const pending=readPending();if(!pending)return;if(pending.projectId!==currentProjectId()){showError(new Error("未自動送出另一個工作脈絡的待續訊息。"));renderConversation();return;}try{await deliver(pending);}catch(error){showError(error);}}
   async function conversationAction(path){nodes.error.textContent="";try{const conversation=await api(path,{method:"POST",body:"{}"});state.surface.conversation=conversation;await poll();}catch(error){showError(error);await poll();}}
@@ -656,12 +685,14 @@
     if(event.key!=="Enter"||event.shiftKey||event.isComposing||event.keyCode===229)return;
     event.preventDefault();if(event.repeat||!conversationCanSend()||!nodes.message.value.trim())return;nodes.form.requestSubmit();
   });
+  nodes.message.addEventListener("input",resizeMessageInput);
+  nodes.textSize.addEventListener("change",()=>applyTextSize(nodes.textSize.value));
   nodes.interrupt.addEventListener("click",()=>void conversationAction("/api/conversation/interrupt"));
   nodes.reconnect.addEventListener("click",()=>void conversationAction("/api/conversation/reconnect"));
   nodes.inspectorOpen.addEventListener("click",()=>{if(nodes.inspectorOpen.dataset.workItemId)void openWorkDetail(nodes.inspectorOpen.dataset.workItemId);});
   nodes.newWork.addEventListener("click",()=>void openNewWork());
   addEventListener("resize",()=>{const graph=state.surface?.work_snapshot?.graph;if(graph)requestAnimationFrame(()=>renderGraphEdges(graph));});
-  activateCore("work-graph");await poll();await resumePending();setInterval(()=>void poll(),2_000);
+  applyTextSize(document.documentElement.dataset.textSize,{persist:false});resizeMessageInput();activateCore("work-graph");await poll();await resumePending();setInterval(()=>void poll(),2_000);
 </script>
 </body>
 </html>
