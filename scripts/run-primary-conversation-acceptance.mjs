@@ -240,7 +240,7 @@ async function runAcceptance() {
   const port = await freeLoopbackPort();
   const origin = `http://127.0.0.1:${port}`;
   const evidence = {
-    schema_version: "lattice.control.primary-conversation-acceptance.v3",
+    schema_version: "lattice.control.primary-conversation-acceptance.v4",
     run_id: runId,
     started_at: new Date().toISOString(),
     status: "FAIL",
@@ -254,6 +254,7 @@ async function runAcceptance() {
     second_turn: null,
     duplicate_replay: null,
     concurrent_writer_gate: null,
+    observer_mutation_overlap: null,
     active_restart: null,
     direct_interrupt: null,
     third_control: null,
@@ -413,6 +414,31 @@ async function runAcceptance() {
       method: "POST",
       body: {},
     });
+    evidence.observer_mutation_overlap = {
+      stage: "active_restart_recovery",
+      observer: {
+        kind: "conversation-observation",
+        endpoint: "GET /api/conversation",
+        response_status: 200,
+        snapshot: {
+          conversation_id: disconnectedActive.id,
+          thread_id: disconnectedActive.codex_thread_id,
+          turn_id: disconnectedActive.codex_turn_id,
+          conversation_status: disconnectedActive.status,
+        },
+      },
+      mutation: {
+        kind: "conversation-reconnect",
+        endpoint: "POST /api/conversation/reconnect",
+        response_status: 200,
+        snapshot: {
+          conversation_id: reconnectedActive.id,
+          thread_id: reconnectedActive.codex_thread_id,
+          turn_id: reconnectedActive.codex_turn_id,
+          conversation_status: reconnectedActive.status,
+        },
+      },
+    };
     if (
       evidence.third_control.pid === evidence.second_control.pid
       || disconnectedActive.id !== activeIdentity.conversation_id

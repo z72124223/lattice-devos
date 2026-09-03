@@ -965,11 +965,10 @@ export class LatticeControlService {
   }
 
   async sendPrimaryConversationMessage({ projectId, clientMessageId, text }) {
-    this.store.ensurePrimaryConversation(projectId);
-    return this.#runExclusive(
-      primaryConversationId,
+    return this.#runPrimaryConversationMutation(
       conversationOperationKey({ projectId, clientMessageId, text }),
       async () => {
+        this.store.ensurePrimaryConversation(projectId);
         const fence = this.#acquirePrimaryConversationLease();
         let claim = null;
         try {
@@ -1660,7 +1659,7 @@ export class LatticeControlService {
   }
 
   reconnectPrimaryConversation() {
-    return this.#runExclusive(primaryConversationId, "conversation-reconnect", async () => {
+    return this.#runPrimaryConversationMutation("conversation-reconnect", async () => {
       const fence = this.#acquirePrimaryConversationLease();
       const inheritedReconciliationStatus = this.reconciliationItemIds.has(primaryConversationId)
         ? this.store.getWorkItem(primaryConversationId)?.status ?? null
@@ -1745,7 +1744,7 @@ export class LatticeControlService {
   }
 
   async interruptPrimaryConversation() {
-    return this.#runExclusive(primaryConversationId, "conversation-interrupt", async () => {
+    return this.#runPrimaryConversationMutation("conversation-interrupt", async () => {
       const fence = this.#acquirePrimaryConversationLease();
       const item = requireItem(this.store, primaryConversationId);
       if (!["running", "waiting_approval"].includes(item.status)) {
@@ -2259,6 +2258,24 @@ export class LatticeControlService {
     return promise;
   }
 
+  async #runPrimaryConversationMutation(kind, operation) {
+    while (true) {
+      if (!this.acceptingEffects) {
+        const error = new Error("Control is shutting down and is not accepting new effects");
+        error.code = "CONTROL_SHUTTING_DOWN";
+        throw error;
+      }
+      const existing = this.operations.get(primaryConversationId);
+      if (!existing || existing.kind !== "conversation-observation") {
+        return this.#runExclusive(primaryConversationId, kind, operation);
+      }
+      await existing.promise.catch(() => {});
+      // The observer may have persisted a terminal state while the mutation
+      // waited. Re-read the SQLite identity before acquiring a fresh lease.
+      this.primaryConversation();
+    }
+  }
+
   async #shutdownActiveItem(item, timeoutMs) {
     const threadId = requireProtocolId(item.codex_thread_id, "shutdown thread ID");
     const turnId = requireProtocolId(item.codex_turn_id, "shutdown turn ID");
@@ -2359,8 +2376,7 @@ export class LatticeControlService {
   }
 
   #interruptQueuedConversation(threadId, turnId) {
-    return this.#runExclusive(
-      primaryConversationId,
+    return this.#runPrimaryConversationMutation(
       `conversation-start-timeout:${threadId}:${turnId}`,
       async () => {
         const fence = this.#acquirePrimaryConversationLease();

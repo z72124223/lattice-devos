@@ -2619,6 +2619,260 @@ test("an owning-adapter read leaves a genuinely active turn running and is throt
   }
 });
 
+test("a reconnect waits for an in-flight passive conversation observation", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 1,
+  });
+  let markReadEntered;
+  let releaseRead;
+  const readEntered = new Promise((resolve) => { markReadEntered = resolve; });
+  const readRelease = new Promise((resolve) => { releaseRead = resolve; });
+  try {
+    const project = service.createProject({ name: "Observer reconnect", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "observer-reconnect-message-001",
+      text: "被動讀取期間的重新連線必須等待而非衝突。",
+    });
+    const activeThread = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    codex.readThread = async (threadId) => {
+      codex.readCalls.push(threadId);
+      markReadEntered();
+      await readRelease;
+      return structuredClone(activeThread);
+    };
+    codex.resumeResult = structuredClone(activeThread);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const observation = service.refreshPrimaryConversationObservation();
+    await readEntered;
+    const reconnect = service.reconnectPrimaryConversation();
+    releaseRead();
+    const reconnected = await reconnect;
+    await observation;
+
+    assert.equal(reconnected.status, "running");
+    assert.equal(reconnected.codex_thread_id, sent.codex_thread_id);
+    assert.equal(reconnected.codex_turn_id, sent.codex_turn_id);
+    assert.equal(codex.turnStarts.length, 1);
+    assert.deepEqual(codex.readCalls, [sent.codex_thread_id]);
+    assert.deepEqual(codex.resumed, [sent.codex_thread_id]);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("different explicit conversation mutations still conflict", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex({ autoThreadStarted: false });
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Explicit mutation conflict", rootPath: process.cwd() });
+    const threadAccepted = new Promise((resolve) => codex.once("threadStartAccepted", resolve));
+    const send = service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "explicit-mutation-conflict-001",
+      text: "不同顯式 mutation 不得彼此繞過鎖。",
+    });
+    const thread = await threadAccepted;
+    await assert.rejects(
+      service.reconnectPrimaryConversation(),
+      { code: "CONVERSATION_MESSAGE_CONFLICT" },
+    );
+    codex.emit("notification", { method: "thread/started", params: { thread } });
+    await send;
+    assert.equal(codex.turnStarts.length, 1);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a terminal observer releases one idempotent next message without replaying it", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 1,
+  });
+  let markReadEntered;
+  let releaseRead;
+  const readEntered = new Promise((resolve) => { markReadEntered = resolve; });
+  const readRelease = new Promise((resolve) => { releaseRead = resolve; });
+  try {
+    const project = service.createProject({ name: "Observer terminal send", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "observer-terminal-message-001",
+      text: "終態 observer 不得阻擋下一則。",
+    });
+    const terminalThread = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    codex.readThread = async (threadId) => {
+      codex.readCalls.push(threadId);
+      markReadEntered();
+      await readRelease;
+      return structuredClone(terminalThread);
+    };
+    codex.resumeResult = structuredClone(terminalThread);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const observation = service.refreshPrimaryConversationObservation();
+    await readEntered;
+    const nextInput = {
+      projectId: project.id,
+      clientMessageId: "observer-terminal-message-002",
+      text: "同一則訊息只能建立一個 claim 與 turn。",
+    };
+    const first = service.sendPrimaryConversationMessage(nextInput);
+    const duplicate = service.sendPrimaryConversationMessage(nextInput);
+    releaseRead();
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+    await observation;
+
+    assert.equal(firstResult.status, "running");
+    assert.equal(duplicateResult.codex_turn_id, firstResult.codex_turn_id);
+    assert.equal(codex.turnStarts.length, 2);
+    assert.equal(
+      store.listEvents("primary").filter(({ kind }) => kind === "conversation_message_claimed").length,
+      2,
+    );
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("an active observer defers an exact interrupt", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 1,
+    conversationStartTimeoutMs: 10_000,
+  });
+  let markReadEntered;
+  let releaseRead;
+  const readEntered = new Promise((resolve) => { markReadEntered = resolve; });
+  const readRelease = new Promise((resolve) => { releaseRead = resolve; });
+  try {
+    const project = service.createProject({ name: "Observer interrupt", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "observer-interrupt-message-001",
+      text: "observer 與 interrupt 不得發生同步衝突。",
+    });
+    const activeThread = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    codex.readThread = async (threadId) => {
+      codex.readCalls.push(threadId);
+      markReadEntered();
+      await readRelease;
+      return structuredClone(activeThread);
+    };
+    const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const observation = service.refreshPrimaryConversationObservation();
+    await readEntered;
+    const directInterrupt = service.interruptPrimaryConversation();
+    releaseRead();
+    const [interruptedTurn] = await Promise.all([
+      bounded(interrupted, "observer interrupt", 250),
+      directInterrupt,
+      observation,
+    ]);
+
+    assert.equal(interruptedTurn.threadId, sent.codex_thread_id);
+    assert.equal(interruptedTurn.turnId, sent.codex_turn_id);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(codex.interruptCalls.length, 1);
+    assert.equal(service.primaryConversation().status, "failed");
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("the queue timeout waits for an active observer instead of throwing synchronously", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationObservationIntervalMs: 1,
+    conversationStartTimeoutMs: 15,
+  });
+  let markReadEntered;
+  let releaseRead;
+  const readEntered = new Promise((resolve) => { markReadEntered = resolve; });
+  const readRelease = new Promise((resolve) => { releaseRead = resolve; });
+  try {
+    const project = service.createProject({ name: "Observer queue timer", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "observer-timer-message-001",
+      text: "queue timer 必須等待被動 observer。",
+    });
+    const activeThread = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    codex.readThread = async (threadId) => {
+      codex.readCalls.push(threadId);
+      markReadEntered();
+      await readRelease;
+      return structuredClone(activeThread);
+    };
+    const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const observation = service.refreshPrimaryConversationObservation();
+    await readEntered;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseRead();
+    const [interruptedTurn] = await Promise.all([
+      bounded(interrupted, "observer queue timer", 250),
+      observation,
+    ]);
+
+    assert.equal(interruptedTurn.threadId, sent.codex_thread_id);
+    assert.equal(interruptedTurn.turnId, sent.codex_turn_id);
+    assert.equal(codex.interruptCalls.length, 1);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(service.primaryConversation().status, "failed");
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
 test("an active primary conversation survives a Control restart and resumes the exact turn", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-active-restart-"));
   const databasePath = path.join(directory, "control.db");
