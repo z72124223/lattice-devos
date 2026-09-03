@@ -262,6 +262,14 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(acceptanceScript, /runtime_identifier/u);
   assert.match(acceptanceScript, /self_contained/u);
   assert.match(acceptanceScript, /executable_sha256/u);
+  assert.match(acceptanceScript, /function Assert-CandidateProcessIdentity/u);
+  assert.match(acceptanceScript, /MainModule\.FileName/u);
+  assert.match(acceptanceScript, /FileVersionInfo\]::GetVersionInfo/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_PATH_MISMATCH/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_HASH_MISMATCH/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH/u);
+  assert.match(acceptanceScript, /desktop_process_identity/u);
+  assert.match(acceptanceScript, /wrong_revision_rejected/u);
   assert.match(publishScript, /function Get-Sha256Hex/u);
   assert.match(acceptanceScript, /function Get-Sha256Hex/u);
   assert.doesNotMatch(publishScript, /Get-FileHash/u);
@@ -278,6 +286,11 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(managedControlScript, /compatible_control_reused/u);
   assert.match(managedControlScript, /incompatible_status/u);
   assert.match(managedControlScript, /Get-CimInstance Win32_Process -Filter "ParentProcessId/u);
+  assert.match(managedControlScript, /function Assert-CandidateProcessIdentity/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_PATH_MISMATCH/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_HASH_MISMATCH/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_REVISION_MISMATCH/u);
+  assert.match(managedControlScript, /wrong_revision_rejected/u);
   assert.doesNotMatch(managedControlScript, /Get-NetTCPConnection|Stop-Process\s+-Name|taskkill|\.ArgumentList|\.Kill\(\$true\)/iu);
   assert.match(externalNavigationFixture, /writeHead\(302/u);
   assert.match(externalNavigationFixture, /\/outside/u);

@@ -38,6 +38,67 @@ function Get-Sha256Hex {
     }
 }
 
+function Assert-CandidateProcessIdentity {
+    param(
+        [Diagnostics.Process]$DesktopProcess,
+        [string]$ExpectedExecutablePath,
+        [string]$ExpectedExecutableSha256,
+        [string]$ExpectedSourceCommit
+    )
+
+    $identityDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while ($true) {
+        try {
+            $DesktopProcess.Refresh()
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_CANDIDATE_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            $observedPath = [IO.Path]::GetFullPath($DesktopProcess.MainModule.FileName)
+            break
+        }
+        catch {
+            if ($_.Exception.Message -clike 'DESKTOP_CANDIDATE_PROCESS_EXITED:*') {
+                throw
+            }
+            try { $DesktopProcess.Refresh() } catch { }
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_CANDIDATE_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            if ([DateTimeOffset]::UtcNow -ge $identityDeadline) {
+                throw 'DESKTOP_CANDIDATE_PROCESS_IDENTITY_UNAVAILABLE'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    $expectedPath = [IO.Path]::GetFullPath($ExpectedExecutablePath)
+    if (-not [string]::Equals(
+        $observedPath,
+        $expectedPath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_PATH_MISMATCH'
+    }
+    $observedSha256 = Get-Sha256Hex -LiteralPath $observedPath
+    if ($observedSha256 -cne $ExpectedExecutableSha256) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_HASH_MISMATCH'
+    }
+    $productVersion = [string]([Diagnostics.FileVersionInfo]::GetVersionInfo(
+        $observedPath).ProductVersion)
+    if (-not $productVersion.EndsWith(
+        '+' + $ExpectedSourceCommit,
+        [StringComparison]::Ordinal)) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH'
+    }
+
+    return [PSCustomObject][ordered]@{
+        pid = $DesktopProcess.Id
+        executable_path = $observedPath
+        executable_sha256 = $observedSha256
+        source_revision = $ExpectedSourceCommit
+        product_version = $productVersion
+    }
+}
+
 function Get-RequiredPropertyValue {
     param(
         [object]$InputObject,
@@ -258,6 +319,8 @@ $captureMarkerPath = Join-Path $temporaryRoot 'external-navigation-capture.txt'
 $controlReadyPath = Join-Path $temporaryRoot 'control-port.txt'
 
 $desktopProcess = $null
+$desktopProcessIdentity = $null
+$wrongRevisionRejected = $false
 $gatewayProcess = $null
 $controlProcess = $null
 $acceptanceResult = $null
@@ -434,6 +497,27 @@ try {
     if ($null -eq $desktopProcess) {
         throw 'DESKTOP_CANDIDATE_PROCESS_START_FAILED'
     }
+    $desktopProcessIdentity = Assert-CandidateProcessIdentity `
+        -DesktopProcess $desktopProcess `
+        -ExpectedExecutablePath $candidateExecutable `
+        -ExpectedExecutableSha256 $manifestExecutableSha256 `
+        -ExpectedSourceCommit $manifestSourceCommit
+    try {
+        [void](Assert-CandidateProcessIdentity `
+            -DesktopProcess $desktopProcess `
+            -ExpectedExecutablePath $candidateExecutable `
+            -ExpectedExecutableSha256 $manifestExecutableSha256 `
+            -ExpectedSourceCommit ('0' * 40))
+    }
+    catch {
+        if ($_.Exception.Message -cne 'DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH') {
+            throw
+        }
+        $wrongRevisionRejected = $true
+    }
+    if (-not $wrongRevisionRejected) {
+        throw 'DESKTOP_CANDIDATE_WRONG_REVISION_ACCEPTED'
+    }
     $startedAt = [DateTimeOffset]::UtcNow
 
     $offlineStatus = Wait-ConnectionStatus $desktopProcess $offlineConnectionStatus $ReconnectTimeoutSeconds
@@ -557,6 +641,8 @@ try {
         webview_user_data_override = 'WEBVIEW2_USER_DATA_FOLDER'
         webview_data_outside_candidate = $true
         desktop_process_alive = -not $desktopProcess.HasExited
+        desktop_process_identity = $desktopProcessIdentity
+        wrong_revision_rejected = $wrongRevisionRejected
         owned_endpoint_processes_alive = -not $gatewayProcess.HasExited -and -not $controlProcess.HasExited
     }
 }

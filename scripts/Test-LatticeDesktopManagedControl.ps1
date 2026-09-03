@@ -10,6 +10,85 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
 
+function Get-Sha256Hex {
+    param([string]$LiteralPath)
+
+    $stream = [IO.File]::Open(
+        [IO.Path]::GetFullPath($LiteralPath),
+        [IO.FileMode]::Open,
+        [IO.FileAccess]::Read,
+        [IO.FileShare]::Read)
+    try {
+        $algorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        }
+        finally { $algorithm.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Assert-CandidateProcessIdentity {
+    param(
+        [Diagnostics.Process]$DesktopProcess,
+        [string]$ExpectedExecutablePath,
+        [string]$ExpectedExecutableSha256,
+        [string]$ExpectedSourceCommit
+    )
+
+    $identityDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while ($true) {
+        try {
+            $DesktopProcess.Refresh()
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_MANAGED_CONTROL_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            $observedPath = [IO.Path]::GetFullPath($DesktopProcess.MainModule.FileName)
+            break
+        }
+        catch {
+            if ($_.Exception.Message -clike 'DESKTOP_MANAGED_CONTROL_PROCESS_EXITED:*') {
+                throw
+            }
+            try { $DesktopProcess.Refresh() } catch { }
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_MANAGED_CONTROL_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            if ([DateTimeOffset]::UtcNow -ge $identityDeadline) {
+                throw 'DESKTOP_MANAGED_CONTROL_PROCESS_IDENTITY_UNAVAILABLE'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    $expectedPath = [IO.Path]::GetFullPath($ExpectedExecutablePath)
+    if (-not [string]::Equals(
+        $observedPath,
+        $expectedPath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DESKTOP_MANAGED_CONTROL_PROCESS_PATH_MISMATCH'
+    }
+    $observedSha256 = Get-Sha256Hex -LiteralPath $observedPath
+    if ($observedSha256 -cne $ExpectedExecutableSha256) {
+        throw 'DESKTOP_MANAGED_CONTROL_PROCESS_HASH_MISMATCH'
+    }
+    $productVersion = [string]([Diagnostics.FileVersionInfo]::GetVersionInfo(
+        $observedPath).ProductVersion)
+    if (-not $productVersion.EndsWith(
+        '+' + $ExpectedSourceCommit,
+        [StringComparison]::Ordinal)) {
+        throw 'DESKTOP_MANAGED_CONTROL_PROCESS_REVISION_MISMATCH'
+    }
+
+    return [PSCustomObject][ordered]@{
+        pid = $DesktopProcess.Id
+        executable_path = $observedPath
+        executable_sha256 = $observedSha256
+        source_revision = $ExpectedSourceCommit
+        product_version = $productVersion
+    }
+}
+
 function Test-ProcessAlive {
     param([AllowNull()][Diagnostics.Process]$Process)
     if ($null -eq $Process) { return $false }
@@ -144,7 +223,13 @@ function Wait-AutomationItemStatus {
 }
 
 function Start-TestDesktop {
-    param([string]$Executable, [string]$WorkingDirectory, [string]$LocalData)
+    param(
+        [string]$Executable,
+        [string]$WorkingDirectory,
+        [string]$LocalData,
+        [string]$ExpectedExecutableSha256,
+        [string]$ExpectedSourceCommit
+    )
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $Executable
     $start.WorkingDirectory = $WorkingDirectory
@@ -153,6 +238,17 @@ function Start-TestDesktop {
     $start.EnvironmentVariables['WEBVIEW2_USER_DATA_FOLDER'] = Join-Path $LocalData 'webview2'
     $process = [Diagnostics.Process]::Start($start)
     if ($null -eq $process) { throw 'DESKTOP_MANAGED_CONTROL_DESKTOP_START_FAILED' }
+    try {
+        [void](Assert-CandidateProcessIdentity `
+            -DesktopProcess $process `
+            -ExpectedExecutablePath $Executable `
+            -ExpectedExecutableSha256 $ExpectedExecutableSha256 `
+            -ExpectedSourceCommit $ExpectedSourceCommit)
+    }
+    catch {
+        try { Stop-TestOwnedProcess $process } catch { }
+        throw
+    }
     return $process
 }
 
@@ -254,6 +350,8 @@ $crossScopeControl = $null
 $foreignControl = $null
 $unknownControl = $null
 $result = $null
+$initialDesktopProcessIdentity = $null
+$wrongRevisionRejected = $false
 $primaryFailure = $null
 $cleanupFailure = $null
 
@@ -267,6 +365,10 @@ try {
         throw 'DESKTOP_MANAGED_CONTROL_MANIFEST_MISMATCH'
     }
     $expectedVersion = [string]$manifest.control_runtime.version
+    $candidateExecutableSha256 = [string]$manifest.executable_sha256
+    if ($candidateExecutableSha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'DESKTOP_MANAGED_CONTROL_EXECUTABLE_HASH_INVALID'
+    }
     $candidateExecutable = Join-Path $candidateDirectory 'LATTICE.exe'
     $runtimeRoot = Join-Path $candidateDirectory 'control-runtime'
     $runtimeNode = Join-Path $runtimeRoot 'node.exe'
@@ -281,7 +383,33 @@ try {
     Add-Type -AssemblyName UIAutomationTypes
 
     # No listener: LATTICE must start one owned, compatible Control.
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $managedData
+    $desktop = Start-TestDesktop `
+        $candidateExecutable `
+        $candidateDirectory `
+        $managedData `
+        $candidateExecutableSha256 `
+        $headSha
+    $initialDesktopProcessIdentity = Assert-CandidateProcessIdentity `
+        -DesktopProcess $desktop `
+        -ExpectedExecutablePath $candidateExecutable `
+        -ExpectedExecutableSha256 $candidateExecutableSha256 `
+        -ExpectedSourceCommit $headSha
+    try {
+        [void](Assert-CandidateProcessIdentity `
+            -DesktopProcess $desktop `
+            -ExpectedExecutablePath $candidateExecutable `
+            -ExpectedExecutableSha256 $candidateExecutableSha256 `
+            -ExpectedSourceCommit ('0' * 40))
+    }
+    catch {
+        if ($_.Exception.Message -cne 'DESKTOP_MANAGED_CONTROL_PROCESS_REVISION_MISMATCH') {
+            throw
+        }
+        $wrongRevisionRejected = $true
+    }
+    if (-not $wrongRevisionRejected) {
+        throw 'DESKTOP_MANAGED_CONTROL_WRONG_REVISION_ACCEPTED'
+    }
     Wait-CompatibleRuntime $expectedVersion $TimeoutSeconds | Out-Null
     Wait-AutomationItemStatus $desktop 'LatticeConnectionStatus' 'connected' $TimeoutSeconds | Out-Null
     $managedControl = Get-DesktopControlChild $desktop $runtimeNode $TimeoutSeconds
@@ -315,7 +443,7 @@ try {
     }
     $reuseSurface = Wait-CompatibleRuntime $expectedVersion $TimeoutSeconds
     $reuseScopeDigest = [string]$reuseSurface.data_scope.digest
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData $candidateExecutableSha256 $headSha
     Wait-AutomationItemStatus $desktop 'LatticeConnectionStatus' 'connected' $TimeoutSeconds | Out-Null
     if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
         throw 'DESKTOP_MANAGED_CONTROL_REUSE_STARTED_CHILD'
@@ -344,7 +472,7 @@ try {
     if ($crossScopeDigest -ceq $reuseScopeDigest) {
         throw 'DESKTOP_MANAGED_CONTROL_CROSS_SCOPE_DIGEST_COLLISION'
     }
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData $candidateExecutableSha256 $headSha
     Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
     if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
         throw 'DESKTOP_MANAGED_CONTROL_CROSS_SCOPE_STARTED_CHILD'
@@ -387,7 +515,7 @@ try {
         [string]$unknownSurface.Content -cne 'not-a-lattice-runtime') {
         throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_SURFACE_NOT_MALFORMED'
     }
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $unknownData
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $unknownData $candidateExecutableSha256 $headSha
     Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
     if (Test-Path -LiteralPath $unknownStoreDirectory) {
         throw 'DESKTOP_MANAGED_CONTROL_UNKNOWN_BUNDLED_STORE_CREATED'
@@ -425,7 +553,7 @@ try {
     if ((Wait-TextFile $foreignReady $foreignControl $TimeoutSeconds) -cne '4317') {
         throw 'DESKTOP_MANAGED_CONTROL_FOREIGN_PORT_INVALID'
     }
-    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData
+    $desktop = Start-TestDesktop $candidateExecutable $candidateDirectory $reuseData $candidateExecutableSha256 $headSha
     Wait-AutomationItemStatus $desktop 'LatticeRuntimeHealth' 'INCOMPATIBLE' $TimeoutSeconds | Out-Null
     if ($null -ne (Get-DesktopControlChild $desktop $runtimeNode 2)) {
         throw 'DESKTOP_MANAGED_CONTROL_INCOMPATIBLE_STARTED_CHILD'
@@ -444,6 +572,8 @@ try {
         result = 'PASS'
         source_commit = $headSha
         candidate_archive = $candidateArchiveFull
+        desktop_process_identity = $initialDesktopProcessIdentity
+        wrong_revision_rejected = $wrongRevisionRejected
         production_control_port = 4317
         no_listener_started_owned_control = $true
         initial_owned_pid = $initialOwnedPid
