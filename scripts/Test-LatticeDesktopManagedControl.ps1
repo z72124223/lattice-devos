@@ -212,6 +212,7 @@ function Remove-TestRoot {
             'lattice-managed-control-', [StringComparison]::Ordinal)) {
         throw 'DESKTOP_MANAGED_CONTROL_TEMP_ROOT_INVALID'
     }
+
     if (Test-Path -LiteralPath $full) {
         Remove-Item -LiteralPath $full -Recurse -Force
     }
@@ -307,7 +308,7 @@ try {
 
     # Compatible listener: reuse it, launch no child, and leave it alive on close.
     $reuseDatabase = Join-Path $reuseData 'LATTICE\control\lattice-control.db'
-    $externalControl = Start-ControlProcess $runtimeNode $runtimeServer $runtimeRoot @{
+    $externalControl = Start-ControlProcess $runtimeNode $runtimeServer $repositoryRoot @{
         'LATTICE_CONTROL_PORT' = '4317'
         'LOCALAPPDATA' = $reuseData
         'LATTICE_CONTROL_DATABASE_PATH' = $reuseDatabase
@@ -333,7 +334,7 @@ try {
     # Same version but a different SQLite scope on fixed 4317: fail closed,
     # launch no child, and leave the different-scope listener alive.
     $crossScopeDatabase = Join-Path $externalData 'LATTICE\control\lattice-control.db'
-    $crossScopeControl = Start-ControlProcess $runtimeNode $runtimeServer $runtimeRoot @{
+    $crossScopeControl = Start-ControlProcess $runtimeNode $runtimeServer $repositoryRoot @{
         'LATTICE_CONTROL_PORT' = '4317'
         'LOCALAPPDATA' = $externalData
         'LATTICE_CONTROL_DATABASE_PATH' = $crossScopeDatabase

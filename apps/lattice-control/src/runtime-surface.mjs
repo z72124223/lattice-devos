@@ -47,7 +47,7 @@ function capability(id, label, status, hasData = null) {
   return { id, label, status, has_data: hasData };
 }
 
-export function createRuntimeSurface(service, { databasePath, mcpHealth }) {
+export function createRuntimeSurface(service, { databasePath, mcpHealth, runtimeHealth }) {
   const state = service.state();
   const dataPresence = service.runtimeDataPresence();
 
@@ -71,7 +71,7 @@ export function createRuntimeSurface(service, { databasePath, mcpHealth }) {
         mcpHealth.decision_mcp,
         dataPresence.decisions,
       ),
-      capability("postgresql", "正式 PostgreSQL", "NOT_IMPLEMENTED"),
+      capability("postgresql", "正式 PostgreSQL", runtimeHealth.postgresql),
     ],
   };
 }

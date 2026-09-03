@@ -9,6 +9,7 @@ import {
   defaultControlDatabasePath,
 } from "./database-path.mjs";
 import { ControlMcpHealthMonitor } from "./mcp-health.mjs";
+import { LatticeRuntimeHealthMonitor } from "./lattice-runtime-health.mjs";
 import { createRuntimeSurface } from "./runtime-surface.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
@@ -157,6 +158,7 @@ export function createLatticeServer({
   codex = new CodexAppServer(),
   projectInspector,
   mcpHealth,
+  runtimeHealth,
   prewarmCodex = false,
   conversationModel,
   conversationStartTimeoutMs,
@@ -180,6 +182,7 @@ export function createLatticeServer({
           decision_mcp: "UNREACHABLE",
         }),
       });
+  const resolvedRuntimeHealth = runtimeHealth ?? new LatticeRuntimeHealthMonitor();
   let acceptingEffects = true;
   let ownedShutdown = false;
   let ownedShutdownPromise = null;
@@ -254,9 +257,14 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/runtime") {
+        const [currentMcpHealth, currentRuntimeHealth] = await Promise.all([
+          resolvedMcpHealth.current(),
+          resolvedRuntimeHealth.current({ waitForProbe: false }),
+        ]);
         sendJson(response, 200, createRuntimeSurface(service, {
           databasePath,
-          mcpHealth: await resolvedMcpHealth.current(),
+          mcpHealth: currentMcpHealth,
+          runtimeHealth: currentRuntimeHealth,
         }));
         return;
       }
@@ -460,6 +468,7 @@ export function createLatticeServer({
 
   server.on("close", () => {
     if (ownedShutdown) return;
+    void resolvedRuntimeHealth.close?.();
     service.close();
     void codex.close();
     store.close();
@@ -480,6 +489,13 @@ export function createLatticeServer({
       application.stopAcceptingEffects();
       ownedShutdownPromise = (async () => {
         const deadline = Date.now() + timeoutMs;
+        const runtimeHealthResult = await settleWithin(
+          resolvedRuntimeHealth.close?.(),
+          deadline,
+        );
+        if (!runtimeHealthResult.settled || runtimeHealthResult.error) {
+          throw shutdownDrainTimeoutError();
+        }
         const outcome = await service.shutdown({
           timeoutMs: Math.max(1, deadline - Date.now()),
         });
