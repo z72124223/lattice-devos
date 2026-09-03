@@ -2370,10 +2370,36 @@ export class LatticeControlService {
         ? null
         : boundedText(turn.error?.message ?? `Codex turn ${status}`, 2_048),
     };
+    const terminalPayload = {
+      threadId,
+      turnId,
+      status,
+      error: turn.error
+        ? {
+          code: boundedText(turn.error.code, 128),
+          message: boundedText(turn.error.message, 2_048),
+        }
+        : null,
+    };
 
     const existingTerminal = this.store.turnCompletedEvent(id, threadId, turnId);
     if (existingTerminal) {
       if (existingTerminal.payload.status !== status) {
+        const completedWithReply = id === primaryConversationId
+          && status === "completed"
+          && this.store.hasConversationAssistantMessage(threadId, turnId);
+        if (completedWithReply) {
+          this.store.updateWorkItem(id, targetProjection, fence);
+          this.#appendEventOnce(id, "turn_terminal_superseded", {
+            threadId,
+            turnId,
+            previousStatus: existingTerminal.payload.status,
+            status,
+          }, fence);
+          this.#appendEventOnce(id, "turn_completed", terminalPayload, fence);
+          this.reconciliationItemIds.delete(id);
+          return true;
+        }
         this.#appendEventOnce(id, "turn_terminal_conflict_ignored", {
           threadId,
           turnId,
@@ -2402,17 +2428,12 @@ export class LatticeControlService {
         id === primaryConversationId ? fence : null,
       );
     }
-    this.#appendEventOnce(id, "turn_completed", {
-      threadId,
-      turnId,
-      status,
-      error: turn.error
-        ? {
-          code: boundedText(turn.error.code, 128),
-          message: boundedText(turn.error.message, 2_048),
-        }
-        : null,
-    }, id === primaryConversationId ? fence : null);
+    this.#appendEventOnce(
+      id,
+      "turn_completed",
+      terminalPayload,
+      id === primaryConversationId ? fence : null,
+    );
     if (item.approval?.requestId != null) {
       if (id === primaryConversationId) {
         this.#fencedConversationServerEffect(

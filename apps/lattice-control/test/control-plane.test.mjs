@@ -2321,6 +2321,72 @@ test("reconnect repairs an active projection when its exact terminal event alrea
   }
 });
 
+test("a late completed terminal with a saved final reply supersedes a premature interruption", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Late completion", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "late-completion-message-001",
+      text: "回覆完成後必須離開正在回覆狀態。",
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "interrupted", items: [] },
+      },
+    });
+    assert.equal(service.primaryConversation().status, "failed");
+
+    const finalReply = {
+      id: "late-completion-final-001",
+      type: "agentMessage",
+      phase: "final_answer",
+      text: "LATTICE_CHAT_OK",
+    };
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        item: finalReply,
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turn: {
+          id: sent.codex_turn_id,
+          status: "completed",
+          items: [finalReply],
+        },
+      },
+    });
+
+    const completed = service.primaryConversation();
+    assert.equal(completed.status, "codex_done");
+    assert.equal(completed.can_send, true);
+    assert.equal(completed.messages.at(-1).text, "LATTICE_CHAT_OK");
+    assert.equal(
+      store.primaryConversationTerminalEvent(sent.codex_thread_id, sent.codex_turn_id)
+        .payload.status,
+      "completed",
+    );
+    assert.equal(store.listEvents("primary").some(
+      ({ kind, payload }) => kind === "turn_terminal_superseded"
+        && payload.previousStatus === "interrupted"
+        && payload.status === "completed",
+    ), true);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
 test("a fresh read leaves a genuinely active turn running and is throttled", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
