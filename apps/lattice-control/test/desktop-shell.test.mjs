@@ -189,7 +189,7 @@ test("the desktop probes and owns only its compatible default Control before nav
 });
 
 test("the Windows candidate is a repeatable self-contained per-user installable package", async () => {
-  const [publishScript, installerScript, uninstallerScript, installerCommon, installerTest, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, policyTestIgnore, packageJson] = await Promise.all([
+  const [publishScript, installerScript, uninstallerScript, installerCommon, installerTest, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, mismatchedCandidateFixture, policyTestIgnore, packageJson] = await Promise.all([
     repositoryFile("scripts/Publish-LatticeDesktopCandidate.ps1"),
     repositoryFile("scripts/Install-LATTICE.ps1"),
     repositoryFile("scripts/Uninstall-LATTICE.ps1"),
@@ -200,6 +200,7 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
     repositoryFile("apps/lattice-control/test/fixtures/desktop-external-redirect.mjs"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-isolated-control.mjs"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-incompatible-control.mjs"),
+    repositoryFile("apps/lattice-control/test/fixtures/desktop-mismatched-candidate.mjs"),
     repositoryFile("apps/lattice-control-desktop-policy-tests/.gitignore"),
     repositoryFile("package.json"),
   ]);
@@ -291,6 +292,23 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_HASH_MISMATCH/u);
   assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_REVISION_MISMATCH/u);
   assert.match(managedControlScript, /wrong_revision_rejected/u);
+  assert.match(managedControlScript, /function Stop-TestOwnedProcessTree/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_IDENTITY_FAILURE_CLEANUP_FAILED/u);
+  assert.match(managedControlScript, /desktop-mismatched-candidate\.mjs/u);
+  assert.match(managedControlScript, /mismatch_desktop_stopped/u);
+  assert.match(managedControlScript, /mismatch_descendants_stopped/u);
+  assert.match(managedControlScript, /mismatch_port_released/u);
+  assert.match(managedControlScript, /mismatch_store_and_temp_removed/u);
+  assert.match(managedControlScript, /external_fixture_survived_identity_mismatch/u);
+  assert.match(managedControlScript, /function Get-TestBoundProcessIdentity/u);
+  assert.match(managedControlScript, /CreationDate/u);
+  assert.match(managedControlScript, /PROCESS_CIM_GENERATION_MISMATCH/u);
+  assert.match(managedControlScript, /ExpectedParentProcessId/u);
+  assert.match(managedControlScript, /root_started_at_utc_ticks/u);
+  assert.match(managedControlScript, /descendant_process_identities/u);
+  assert.match(managedControlScript, /function Test-ProcessIdentityAlive/u);
+  assert.doesNotMatch(managedControlScript, /\('0' \* 40\)/u);
+  assert.doesNotMatch(managedControlScript, /AddSeconds\(-1\)/u);
   assert.doesNotMatch(managedControlScript, /Get-NetTCPConnection|Stop-Process\s+-Name|taskkill|\.ArgumentList|\.Kill\(\$true\)/iu);
   assert.match(externalNavigationFixture, /writeHead\(302/u);
   assert.match(externalNavigationFixture, /\/outside/u);
@@ -301,6 +319,10 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(isolatedControlFixture, /listen\(0, "127\.0\.0\.1"/u);
   assert.match(incompatibleControlFixture, /0\.0\.0-foreign/u);
   assert.match(incompatibleControlFixture, /id: "postgresql"[\s\S]*status: "NOT_IMPLEMENTED"/u);
+  assert.match(mismatchedCandidateFixture, /spawn\(process\.execPath/u);
+  assert.match(mismatchedCandidateFixture, /LATTICE_DESKTOP_MISMATCH_ROLE/u);
+  assert.match(mismatchedCandidateFixture, /listen\(4317, "127\.0\.0\.1"/u);
+  assert.match(mismatchedCandidateFixture, /writeFileSync\(storePath/u);
   assert.match(policyTestIgnore, /^bin\/$/mu);
   assert.match(policyTestIgnore, /^obj\/$/mu);
   assert.match(packageJson, /"desktop:policy-test"/u);
