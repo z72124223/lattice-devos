@@ -157,13 +157,21 @@ export function createLatticeServer({
   codex = new CodexAppServer(),
   projectInspector,
   mcpHealth,
+  prewarmCodex = false,
+  conversationModel,
+  conversationStartTimeoutMs,
 }) {
   const store = new LatticeStore(databasePath);
   const service = new LatticeControlService({
     store,
     codex,
     ...(projectInspector ? { projectInspector } : {}),
+    ...(conversationModel ? { conversationModel } : {}),
+    ...(conversationStartTimeoutMs ? { conversationStartTimeoutMs } : {}),
   });
+  const codexPrewarm = prewarmCodex
+    ? service.prewarmCodex().catch((error) => ({ ready: false, error }))
+    : Promise.resolve({ ready: false, skipped: true });
   const resolvedMcpHealth = mcpHealth ?? (typeof databasePath === "string"
     ? new ControlMcpHealthMonitor({ databasePath })
     : {
@@ -461,6 +469,7 @@ export function createLatticeServer({
     service,
     store,
     codex,
+    codexPrewarm,
     stopAcceptingEffects() {
       acceptingEffects = false;
       service.stopAcceptingEffects();
@@ -566,6 +575,8 @@ export async function startDefaultServer() {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
+  application.codexPrewarm = application.service.prewarmCodex()
+    .catch((error) => ({ ready: false, error }));
   process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });

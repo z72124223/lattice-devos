@@ -1135,11 +1135,12 @@ export class CodexAppServer extends EventEmitter {
     return reconciled;
   }
 
-  async startTurn(threadId, text, { effectIdentity = null } = {}) {
+  async startTurn(threadId, text, { effectIdentity = null, model = null } = {}) {
     await this.connect();
     const result = await this.request("turn/start", {
       threadId,
       input: [{ type: "text", text }],
+      ...(model ? { model } : {}),
     }, effectIdentity ?? {});
     return result.turn;
   }

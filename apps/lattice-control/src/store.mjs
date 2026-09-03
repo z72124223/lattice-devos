@@ -3360,6 +3360,19 @@ export class LatticeStore {
     `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
   }
 
+  primaryConversationFirstActivity(threadId, turnId) {
+    const normalizedThreadId = requireText(threadId, "Codex thread ID");
+    const normalizedTurnId = requireText(turnId, "Codex turn ID");
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_first_activity'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id ASC LIMIT 1
+    `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
+  }
+
   primaryConversationHasAcceptedThread(threadId) {
     const normalizedThreadId = requireText(threadId, "Codex thread ID");
     return Boolean(this.database.prepare(`

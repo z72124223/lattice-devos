@@ -182,13 +182,16 @@ function conversationStatusText(item, codexConnected = false, now = Date.now()) 
 
     const queuedAt = Date.parse(item.updated_at ?? "");
     if (Number.isFinite(queuedAt) && now - queuedAt >= conversationStartWarningMs) {
-      return "Codex 尚未開始執行，已等待超過 30 秒；你可以停止後再試一次，Control 不會自動重送。";
+      return "Codex 尚未開始執行，已等待超過 30 秒；Control 正在安全停止這個回合，不會自動重送。";
     }
     return "已交給 Codex，正在等待開始…";
   }
   if (item.status === "waiting_approval") return "Codex 正等待你的核准。";
   if (item.status === "codex_done") return "已收到 Codex 回覆，可以繼續對話。";
   if (item.status === "failed") {
+    if (/queue timeout safely interrupted/iu.test(item.progress ?? "")) {
+      return "Codex 未及時開始，這個回合已安全停止；請再送一次。";
+    }
     if (/disconnect|連線中斷/iu.test(item.failure_summary ?? "")) {
       return "連線中斷；請重新連線。同一則訊息不會重複送出。";
     }
@@ -268,16 +271,19 @@ export class LatticeControlService {
     store,
     codex,
     model = "gpt-5.6-terra",
+    conversationModel = "gpt-5.6-luna",
     threadOptions = {},
     lifecycleTimeoutMs = 30_000,
     approvalTimeoutMs = 300_000,
     projectInspector = inspectProject,
     conversationLeaseTtlMs = primaryConversationLeaseTtlMs,
     conversationObservationIntervalMs = primaryConversationObservationIntervalMs,
+    conversationStartTimeoutMs = conversationStartWarningMs,
   }) {
     this.store = store;
     this.codex = codex;
     this.model = model;
+    this.conversationModel = conversationModel;
     this.threadOptions = { ...threadOptions };
     this.lifecycleTimeoutMs = lifecycleTimeoutMs;
     this.approvalTimeoutMs = approvalTimeoutMs;
@@ -289,12 +295,20 @@ export class LatticeControlService {
       || conversationObservationIntervalMs > 300_000
     ) throw new TypeError("conversation observation interval must be between 1 and 300000ms");
     this.conversationObservationIntervalMs = conversationObservationIntervalMs;
+    if (
+      !Number.isInteger(conversationStartTimeoutMs)
+      || conversationStartTimeoutMs < 1
+      || conversationStartTimeoutMs > 300_000
+    ) throw new TypeError("conversation start timeout must be between 1 and 300000ms");
+    this.conversationStartTimeoutMs = conversationStartTimeoutMs;
     this.nextConversationObservationAt = 0;
     this.conversationObservationPromise = null;
     this.conversationOwnerId = `control:${randomUUID()}`;
     this.conversationLeaseTimer = null;
     this.conversationLeaseFence = null;
     this.conversationLeaseLossPromise = null;
+    this.conversationStartTimer = null;
+    this.conversationStartTimerIdentity = null;
     this.requestOwners = new Map();
     this.operations = new Map();
     this.acceptingEffects = true;
@@ -313,6 +327,7 @@ export class LatticeControlService {
     this.onServerRequest = (message) => this.#onServerRequest(message);
     this.onServerRequestSettled = (settlement) => this.#onServerRequestSettled(settlement);
     this.onDisconnect = ({ code, signal }) => {
+      this.#clearConversationStartTimer();
       this.primaryConversationReady = false;
       this.primaryConversationCache = null;
       const reason = `Codex App Server disconnected (${code ?? signal ?? "unknown"})`;
@@ -375,6 +390,7 @@ export class LatticeControlService {
     this.codex.off("disconnect", this.onDisconnect);
     this.requestOwners.clear();
     this.operations.clear();
+    this.#clearConversationStartTimer();
     if (this.conversationLeaseTimer) clearInterval(this.conversationLeaseTimer);
     this.conversationLeaseTimer = null;
     const fence = this.conversationLeaseFence;
@@ -392,6 +408,23 @@ export class LatticeControlService {
     return itemId === null
       ? this.reconciliationItemIds.size > 0
       : this.reconciliationItemIds.has(itemId);
+  }
+
+  async prewarmCodex() {
+    if (this.closed) throw new Error("Control service is closed");
+    try {
+      if (typeof this.codex.readAuthReadiness !== "function") {
+        this.#markPrimaryConversationReady();
+        return { ready: true };
+      }
+      const readiness = await this.codex.readAuthReadiness();
+      this.#conversationEffectIdentityFromReadiness(readiness);
+      this.#markPrimaryConversationReady();
+      return { ready: true };
+    } catch (error) {
+      this.#markPrimaryConversationNotReady();
+      throw error;
+    }
   }
 
   stopAcceptingEffects() {
@@ -1174,7 +1207,7 @@ export class LatticeControlService {
       () => this.codex.startThread({
         ...this.threadOptions,
         cwd: project.root_path,
-        model: this.model,
+        model: this.conversationModel,
         sandbox: "read-only",
         approvalPolicy: "never",
         effectIdentity,
@@ -1246,7 +1279,10 @@ export class LatticeControlService {
     try {
       turn = await this.#fencedConversationEffect(
         fence,
-        () => this.codex.startTurn(threadId, prompt, { effectIdentity }),
+        () => this.codex.startTurn(threadId, prompt, {
+          effectIdentity,
+          model: this.conversationModel,
+        }),
       );
     } catch (error) {
       if (error?.code === "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED") {
@@ -2132,6 +2168,7 @@ export class LatticeControlService {
   }
 
   #handlePrimaryConversationLeaseLoss(fence) {
+    this.#clearConversationStartTimer();
     if (
       fence
       && this.conversationLeaseFence?.ownerId === fence.ownerId
@@ -2269,6 +2306,124 @@ export class LatticeControlService {
     return true;
   }
 
+  #clearConversationStartTimer(threadId = null, turnId = null) {
+    const identity = this.conversationStartTimerIdentity;
+    if (
+      identity
+      && threadId !== null
+      && (identity.threadId !== threadId || identity.turnId !== turnId)
+    ) return false;
+    if (this.conversationStartTimer) clearTimeout(this.conversationStartTimer);
+    this.conversationStartTimer = null;
+    this.conversationStartTimerIdentity = null;
+    return Boolean(identity);
+  }
+
+  #scheduleConversationStartDeadline(threadId, turnId) {
+    this.#clearConversationStartTimer();
+    const accepted = this.store.primaryConversationAcceptedForTurn(threadId, turnId);
+    if (
+      !accepted
+      || this.store.primaryConversationFirstActivity(threadId, turnId)
+      || this.store.primaryConversationTerminalEvent(threadId, turnId)
+    ) return;
+    const acceptedAt = Date.parse(accepted.created_at);
+    const remaining = Number.isFinite(acceptedAt)
+      ? Math.max(0, acceptedAt + this.conversationStartTimeoutMs - Date.now())
+      : this.conversationStartTimeoutMs;
+    this.conversationStartTimerIdentity = { threadId, turnId };
+    this.conversationStartTimer = setTimeout(() => {
+      this.conversationStartTimer = null;
+      this.conversationStartTimerIdentity = null;
+      void this.#interruptQueuedConversation(threadId, turnId).catch(() => {});
+    }, remaining);
+    this.conversationStartTimer.unref?.();
+  }
+
+  #recordConversationFirstActivity(threadId, turnId, type, fence) {
+    this.#clearConversationStartTimer(threadId, turnId);
+    const existing = this.store.primaryConversationFirstActivity(threadId, turnId);
+    if (existing) return existing;
+    const accepted = this.store.primaryConversationAcceptedForTurn(threadId, turnId);
+    const acceptedAt = Date.parse(accepted?.created_at ?? "");
+    const queueDurationMs = Number.isFinite(acceptedAt)
+      ? Math.max(0, Date.now() - acceptedAt)
+      : 0;
+    this.#appendEventOnce(primaryConversationId, "conversation_first_activity", {
+      threadId,
+      turnId,
+      type,
+      queueDurationMs,
+    }, fence);
+    return this.store.primaryConversationFirstActivity(threadId, turnId);
+  }
+
+  #interruptQueuedConversation(threadId, turnId) {
+    return this.#runExclusive(
+      primaryConversationId,
+      `conversation-start-timeout:${threadId}:${turnId}`,
+      async () => {
+        const fence = this.#acquirePrimaryConversationLease();
+        const item = this.store.getWorkItem(primaryConversationId);
+        if (
+          !item
+          || item.status !== "running"
+          || item.codex_thread_id !== threadId
+          || item.codex_turn_id !== turnId
+          || this.store.primaryConversationFirstActivity(threadId, turnId)
+          || this.store.primaryConversationTerminalEvent(threadId, turnId)
+          || !this.codex.isTurnActive?.(threadId, turnId)
+        ) return false;
+        try {
+          const effectIdentity = await this.#conversationEffectIdentity(fence);
+          const retained = this.store.getWorkItem(primaryConversationId);
+          if (
+            retained?.status !== "running"
+            || retained.codex_thread_id !== threadId
+            || retained.codex_turn_id !== turnId
+            || this.store.primaryConversationFirstActivity(threadId, turnId)
+            || this.store.primaryConversationTerminalEvent(threadId, turnId)
+            || !this.codex.isTurnActive?.(threadId, turnId)
+          ) return false;
+          this.reconciliationItemIds.add(primaryConversationId);
+          const terminal = await this.#fencedConversationEffect(
+            fence,
+            () => this.codex.interruptTurn(threadId, turnId, {
+              timeoutMs: this.lifecycleTimeoutMs,
+              effectIdentity,
+            }),
+          );
+          const applied = this.#applyTerminal(primaryConversationId, {
+            method: "turn/completed",
+            params: { threadId, turn: terminal },
+          }, fence);
+          if (
+            terminal.status === "completed"
+            || this.store.primaryConversationFirstActivity(threadId, turnId)
+          ) return applied;
+          this.store.updateWorkItem(primaryConversationId, {
+            status: "failed",
+            approval_json: null,
+            progress: "Codex queue timeout safely interrupted",
+            failure_summary: `Codex did not begin output within ${this.conversationStartTimeoutMs}ms`,
+          }, fence);
+          this.#appendEventOnce(primaryConversationId, "conversation_start_timeout", {
+            threadId,
+            turnId,
+            timeoutMs: this.conversationStartTimeoutMs,
+            terminalStatus: terminal.status,
+          }, fence);
+          return true;
+        } catch (error) {
+          if (this.#ownsPrimaryConversationLease(fence)) {
+            this.#failLifecycle(primaryConversationId, error, fence);
+          }
+          throw error;
+        }
+      },
+    );
+  }
+
   #persistConversationReply(id, threadId, turnId, entry, fence = null) {
     if (
       id !== primaryConversationId
@@ -2337,6 +2492,7 @@ export class LatticeControlService {
     if (id === primaryConversationId && firstConfirmation) {
       this.nextConversationObservationAt = Date.now() + this.conversationObservationIntervalMs;
     }
+    if (id === primaryConversationId) this.#scheduleConversationStartDeadline(threadId, turnId);
     return true;
   }
 
@@ -2346,6 +2502,7 @@ export class LatticeControlService {
     const turnId = turn?.id;
     const status = turn?.status;
     const item = this.store.getWorkItem(id);
+    if (id === primaryConversationId) this.#clearConversationStartTimer(threadId, turnId);
     if (
       !item
       || item.codex_thread_id !== threadId
@@ -2667,10 +2824,16 @@ export class LatticeControlService {
       && eventTurnId !== item.codex_turn_id) return;
     if (message.method === "item/started") {
       const type = message.params?.item?.type ?? "item";
+      if (item.id === primaryConversationId) {
+        this.#recordConversationFirstActivity(threadId, eventTurnId, type, fence);
+      }
       this.store.updateWorkItem(item.id, { progress: `Running ${type}` }, fence);
       this.store.appendEvent(item.id, "item_started", { type }, fence);
     } else if (message.method === "item/completed") {
       const type = message.params?.item?.type ?? "item";
+      if (item.id === primaryConversationId) {
+        this.#recordConversationFirstActivity(threadId, eventTurnId, type, fence);
+      }
       this.#persistConversationReply(
         item.id,
         threadId,

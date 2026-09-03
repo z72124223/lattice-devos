@@ -900,8 +900,11 @@ test("accepted starts correlate exact started notifications before or after the 
     const thread = await codex.startThread({ cwd: "C:\\workspace" });
     await codex.waitForThreadStarted(thread.id, { timeoutMs: 200 });
 
-    const turn = await codex.startTurn(thread.id, "Run the focused check.");
+    const turn = await codex.startTurn(thread.id, "Run the focused check.", {
+      model: "gpt-5.6-luna",
+    });
     assert.equal(turnRequest.params.threadId, thread.id);
+    assert.equal(turnRequest.params.model, "gpt-5.6-luna");
     let turnStartedSettled = false;
     const turnStarted = codex.waitForTurnStarted(thread.id, turn.id, { timeoutMs: 200 });
     turnStarted.then(

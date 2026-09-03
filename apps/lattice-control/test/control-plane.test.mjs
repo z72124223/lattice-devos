@@ -169,11 +169,11 @@ class FakeCodex extends EventEmitter {
     return this.readThread(threadId);
   }
 
-  async startTurn(threadId, text) {
+  async startTurn(threadId, text, { model = null } = {}) {
     await this.beforeTurnDispatch?.({ threadId, text });
     this.turns += 1;
     const turn = { id: `turn-${this.turns}`, items: [], status: "inProgress" };
-    this.lastTurn = { threadId, text, turnId: turn.id };
+    this.lastTurn = { threadId, text, turnId: turn.id, model };
     this.turnStarts.push(this.lastTurn);
     this.emit("turnStartAccepted", this.lastTurn);
     await this.beforeTurnResult?.({ threadId, text });
@@ -2011,6 +2011,8 @@ test("the primary conversation keeps one UI identity, persists real replies, and
     });
     assert.equal(firstCodex.threadStarts.length, 1);
     assert.equal(firstCodex.turnStarts.length, 1);
+    assert.equal(firstCodex.turnStarts[0].model, "gpt-5.6-luna");
+    assert.equal(firstCodex.threadStarts[0].model, "gpt-5.6-luna");
     assert.equal(firstCodex.threadStarts[0].sandbox, "read-only");
     assert.equal(firstCodex.threadStarts[0].approvalPolicy, "never");
     assert.deepEqual(firstCodex.threadStarts[0].effectIdentity, {
@@ -2241,6 +2243,151 @@ test("primary conversation distinguishes queued work from visible reply generati
       },
     });
     assert.match(service.primaryConversation().status_text, /正在回覆/u);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary conversation records first activity and cancels no longer queued work", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    conversationStartTimeoutMs: 25,
+  });
+  try {
+    const project = service.createProject({ name: "Fast start", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "fast-start-message-001",
+      text: "開始後應立即留下第一個活動時間。",
+    });
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: sent.codex_thread_id,
+        turnId: sent.codex_turn_id,
+        item: {
+          id: "fast-start-item-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "已開始回覆。",
+        },
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(codex.interruptCalls.length, 0);
+    const firstActivity = store.listEvents("primary")
+      .find(({ kind }) => kind === "conversation_first_activity");
+    assert.equal(firstActivity.payload.threadId, sent.codex_thread_id);
+    assert.equal(firstActivity.payload.turnId, sent.codex_turn_id);
+    assert.equal(firstActivity.payload.type, "agentMessage");
+    assert.ok(Number.isInteger(firstActivity.payload.queueDurationMs));
+    assert.ok(firstActivity.payload.queueDurationMs >= 0);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary conversation safely interrupts an exact turn that produces no activity before its SLA", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  try {
+    const project = service.createProject({ name: "Queue timeout", rootPath: process.cwd() });
+    const interruptAccepted = new Promise((resolve) => {
+      codex.once("interruptAccepted", ({ threadId, turnId }) => {
+        setImmediate(() => {
+          codex.emit("notification", {
+            method: "turn/completed",
+            params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+          });
+          resolve({ threadId, turnId });
+        });
+      });
+    });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queue-timeout-message-001",
+      text: "排隊太久時只中斷這一個回合。",
+    });
+
+    const interrupted = await bounded(interruptAccepted, "queue timeout interrupt", 500);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(interrupted, {
+      threadId: sent.codex_thread_id,
+      turnId: sent.codex_turn_id,
+    });
+    assert.deepEqual(codex.interruptCalls.map(({ threadId, turnId }) => ({ threadId, turnId })), [
+      { threadId: sent.codex_thread_id, turnId: sent.codex_turn_id },
+    ]);
+    const conversation = service.primaryConversation();
+    assert.equal(conversation.status, "failed");
+    assert.equal(conversation.can_send, true);
+    assert.match(conversation.status_text, /安全停止/u);
+    assert.equal(codex.turnStarts.length, 1, "the timed-out message must never be resent");
+    const timeout = store.listEvents("primary")
+      .find(({ kind }) => kind === "conversation_start_timeout");
+    assert.equal(timeout.payload.threadId, sent.codex_thread_id);
+    assert.equal(timeout.payload.turnId, sent.codex_turn_id);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a natural reply that wins the queue-timeout race remains completed", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  try {
+    const project = service.createProject({ name: "Timeout race", rootPath: process.cwd() });
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => {
+        const reply = {
+          id: "timeout-race-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "自然完成的回覆必須保留。",
+        };
+        codex.emit("notification", {
+          method: "item/completed",
+          params: { threadId, turnId, item: reply },
+        });
+        codex.emit("notification", {
+          method: "turn/completed",
+          params: { threadId, turn: { id: turnId, status: "completed", items: [reply] } },
+        });
+      });
+    });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-race-message-001",
+      text: "讓自然完成贏過逾時中斷。",
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    const conversation = service.primaryConversation();
+    assert.equal(conversation.status, "codex_done");
+    assert.equal(conversation.messages.at(-1).text, "自然完成的回覆必須保留。");
+    assert.equal(
+      store.listEvents("primary").some(({ kind }) => kind === "conversation_start_timeout"),
+      false,
+    );
   } finally {
     service.close();
     store.close();
@@ -3585,6 +3732,58 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.equal((await (await fetch(`${origin}/api/conversation`)).json()).status, "codex_done");
   } finally {
     await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Control can prewarm Codex without choosing a project or starting a thread", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-codex-prewarm-"));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+    prewarmCodex: true,
+  });
+  try {
+    const result = await application.codexPrewarm;
+    assert.equal(result.ready, true);
+    assert.equal(codex.readinessCalls, 1);
+    assert.equal(codex.threadStarts.length, 0);
+    assert.equal(application.service.primaryConversation().can_send, false);
+    assert.equal(application.service.primaryConversation().codex_connected, true);
+  } finally {
+    application.service.close();
+    await application.codex.close();
+    application.store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a failed Codex prewarm leaves Control alive and starts no provider work", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-codex-prewarm-failure-"));
+  const codex = new FakeCodex();
+  codex.readAuthReadiness = async () => {
+    throw new Error("prewarm unavailable");
+  };
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex,
+    prewarmCodex: true,
+  });
+  try {
+    const result = await application.codexPrewarm;
+    assert.equal(result.ready, false);
+    assert.match(result.error.message, /prewarm unavailable/u);
+    assert.equal(codex.threadStarts.length, 0);
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    const { port } = application.server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/conversation`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).codex_connected, false);
+  } finally {
+    if (application.server.listening) {
+      await new Promise((resolve) => application.server.close(resolve));
+    }
     await rm(directory, { recursive: true, force: true });
   }
 });
