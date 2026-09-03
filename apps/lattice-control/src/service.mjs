@@ -72,6 +72,21 @@ function conversationOperationKey({ projectId, clientMessageId, text }) {
   return `conversation-message:${clientMessageId}:${digest}`;
 }
 
+function queuedConversationTarget(event) {
+  const threadId = event?.payload?.queueAfterThreadId;
+  const turnId = event?.payload?.queueAfterTurnId;
+  return typeof threadId === "string" && threadId
+    && typeof turnId === "string" && turnId
+    ? { threadId, turnId }
+    : null;
+}
+
+function queuedPredecessorProjectionStatus(terminal) {
+  if (terminal?.payload?.status === "completed") return "codex_done";
+  if (["interrupted", "failed"].includes(terminal?.payload?.status)) return "failed";
+  return null;
+}
+
 function turnStartsWithConversationMarker(turn, marker) {
   return Array.isArray(turn?.items) && turn.items.some((item) => item?.type === "userMessage"
     && Array.isArray(item.content)
@@ -305,6 +320,7 @@ export class LatticeControlService {
     this.conversationObservationPromise = null;
     this.conversationOwnerId = `control:${randomUUID()}`;
     this.conversationLeaseTimer = null;
+    this.conversationStartupRecoveryTimer = null;
     this.conversationLeaseFence = null;
     this.conversationLeaseLossPromise = null;
     this.conversationStartTimer = null;
@@ -378,6 +394,13 @@ export class LatticeControlService {
     codex.on("serverRequest", this.onServerRequest);
     codex.on("serverRequestSettled", this.onServerRequestSettled);
     codex.on("disconnect", this.onDisconnect);
+    queueMicrotask(() => {
+      void Promise.resolve()
+        .then(() => this.closed
+          ? false
+          : this.#recoverRetainedPrimaryConversationQueue())
+        .catch(() => {});
+    });
   }
 
   close() {
@@ -391,6 +414,10 @@ export class LatticeControlService {
     this.requestOwners.clear();
     this.operations.clear();
     this.#clearConversationStartTimer();
+    if (this.conversationStartupRecoveryTimer) {
+      clearTimeout(this.conversationStartupRecoveryTimer);
+    }
+    this.conversationStartupRecoveryTimer = null;
     if (this.conversationLeaseTimer) clearInterval(this.conversationLeaseTimer);
     this.conversationLeaseTimer = null;
     const fence = this.conversationLeaseFence;
@@ -719,8 +746,15 @@ export class LatticeControlService {
       .filter(({ kind }) => kind === "conversation_message_failed")
       .map(({ payload }) => payload.clientMessageId));
     const incompleteSupport = new Set(window.support_incomplete_client_message_ids);
-    let hasUnresolvedMessage = item.status === "starting"
-      && !(item.codex_thread_id && item.codex_turn_id);
+    const unresolvedMessage = this.store.primaryConversationUnresolvedMessage();
+    const queuedMessageTarget = queuedConversationTarget(unresolvedMessage);
+    const queuedPredecessorTerminal = queuedMessageTarget
+      ? this.#conversationTerminalEvent(
+        queuedMessageTarget.threadId,
+        queuedMessageTarget.turnId,
+      )
+      : null;
+    let hasUnresolvedMessage = Boolean(unresolvedMessage);
     const hasUnresolvedTurn = this.store.primaryConversationHasUnresolvedTurn();
     let missingCurrentFinal = false;
     if (item.status === "failed") {
@@ -746,6 +780,7 @@ export class LatticeControlService {
               : incompleteSupport.has(event.payload.clientMessageId)
                 ? "unknown"
                 : "saved",
+          ...(queuedConversationTarget(event) && !accepted ? { queue_status: "queued" } : {}),
           created_at: event.created_at,
           turn_id: accepted?.payload.turnId ?? null,
         });
@@ -771,6 +806,10 @@ export class LatticeControlService {
         created_at: event.created_at,
       }));
     const selectionPending = item.status === "selection_pending";
+    const activeFollowUpSlot = ["running", "waiting_approval"].includes(item.status)
+      && Boolean(item.codex_thread_id && item.codex_turn_id)
+      && !this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+      && Boolean(this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id));
     const conversation = {
       schema_version: "lattice.control.primary-conversation.v1",
       id: item.id,
@@ -778,19 +817,30 @@ export class LatticeControlService {
       codex_thread_id: item.codex_thread_id ?? null,
       codex_turn_id: item.codex_turn_id ?? null,
       status: selectionPending ? "not_started" : item.status,
-      status_text: conversationStatusText(item, this.codex.connected),
+      status_text: queuedMessageTarget
+        ? (queuedPredecessorTerminal
+          ? "補充訊息仍安全保存；請重新連線核對後繼續，不會自動重送。"
+          : this.codex.connected
+            ? "補充訊息已排隊；Codex 結束本回合後會自動繼續。"
+            : "補充訊息已保存；重新連線後會先核對目前回合，再繼續處理。")
+        : conversationStatusText(item, this.codex.connected),
       codex_connected: Boolean(this.codex.connected),
-      can_send: ["draft", "codex_done", "failed"].includes(item.status)
-        && this.primaryConversationReady
+      can_send: this.primaryConversationReady
         && !hasUnresolvedMessage
-        && !hasUnresolvedTurn
-        && !missingCurrentFinal,
+        && !missingCurrentFinal
+        && (
+          activeFollowUpSlot
+          || (["draft", "codex_done", "failed"].includes(item.status) && !hasUnresolvedTurn)
+        ),
       can_interrupt: ["running", "waiting_approval"].includes(item.status) && Boolean(
         this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id),
       ),
       can_reconnect: Boolean(
-        ["starting", "running", "waiting_approval", "failed"].includes(item.status)
-        && ((item.codex_thread_id && item.codex_turn_id) || hasUnresolvedMessage)
+        queuedMessageTarget
+        || (
+          ["starting", "running", "waiting_approval", "failed"].includes(item.status)
+          && ((item.codex_thread_id && item.codex_turn_id) || hasUnresolvedMessage)
+        )
       ),
       messages,
       handoffs,
@@ -964,9 +1014,25 @@ export class LatticeControlService {
     );
   }
 
+  #activePrimaryConversationQueueTarget(projectId) {
+    const item = this.store.getWorkItem(primaryConversationId);
+    if (
+      !item
+      || item.project_id !== projectId
+      || !["running", "waiting_approval"].includes(item.status)
+      || !item.codex_thread_id
+      || !item.codex_turn_id
+      || this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+      || !this.#conversationAcceptedEventForTurn(item.codex_thread_id, item.codex_turn_id)
+      || !this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id)
+    ) return null;
+    return { threadId: item.codex_thread_id, turnId: item.codex_turn_id };
+  }
+
   async sendPrimaryConversationMessage({ projectId, clientMessageId, text }) {
+    const operationKind = conversationOperationKey({ projectId, clientMessageId, text });
     return this.#runPrimaryConversationMutation(
-      conversationOperationKey({ projectId, clientMessageId, text }),
+      operationKind,
       async () => {
         this.store.ensurePrimaryConversation(projectId);
         const fence = this.#acquirePrimaryConversationLease();
@@ -980,12 +1046,36 @@ export class LatticeControlService {
               text,
               fence,
             });
+            const queuedTarget = queuedConversationTarget(claim.event);
+            if (queuedTarget && !this.#conversationAcceptedEvent(clientMessageId)) {
+              if (!this.#conversationTerminalEvent(queuedTarget.threadId, queuedTarget.turnId)) {
+                return this.primaryConversation();
+              }
+              return await this.#dispatchQueuedPrimaryConversationClaim(
+                claim,
+                queuedTarget,
+                fence,
+              );
+            }
             const effectIdentity = await this.#conversationEffectIdentity(fence);
             return await this.#dispatchPrimaryConversationClaim(claim, {
               effectIdentity,
               fresh: false,
               fence,
             });
+          }
+
+          const queueTarget = this.#activePrimaryConversationQueueTarget(projectId);
+          if (queueTarget) {
+            claim = this.store.claimPrimaryConversationMessage({
+              projectId,
+              clientMessageId,
+              text,
+              fence,
+              queueAfterThreadId: queueTarget.threadId,
+              queueAfterTurnId: queueTarget.turnId,
+            });
+            return this.primaryConversation();
           }
 
           const effectIdentity = await this.#conversationEffectIdentity(fence);
@@ -1088,6 +1178,10 @@ export class LatticeControlService {
     return this.store.primaryConversationAcceptedEvent(clientMessageId);
   }
 
+  #conversationAcceptedEventForTurn(threadId, turnId) {
+    return this.store.primaryConversationAcceptedForTurn(threadId, turnId);
+  }
+
   #conversationTerminalEvent(threadId, turnId) {
     return this.store.primaryConversationTerminalEvent(threadId, turnId);
   }
@@ -1188,6 +1282,92 @@ export class LatticeControlService {
       threadId,
       handoffReason,
       effectIdentity,
+      fence,
+    });
+  }
+
+  async #dispatchQueuedPrimaryConversationClaim(claim, target, fence, effectIdentity = null) {
+    const unresolved = this.store.primaryConversationUnresolvedMessage();
+    const retainedTarget = queuedConversationTarget(unresolved);
+    const terminal = this.#conversationTerminalEvent(target.threadId, target.turnId);
+    const item = requireItem(this.store, primaryConversationId);
+    const predecessorProjectionStatus = queuedPredecessorProjectionStatus(terminal);
+    const dispatchIntent = this.store.primaryConversationDispatchIntent(
+      claim.event.payload.clientMessageId,
+    );
+    const recoveringDispatch = Boolean(dispatchIntent);
+    if (
+      dispatchIntent
+      && (
+        dispatchIntent.payload.threadId !== target.threadId
+        || dispatchIntent.payload.promptDigest !== claim.event.payload.promptDigest
+      )
+    ) {
+      throw conversationError(
+        "CONVERSATION_RECONCILIATION_REQUIRED",
+        "the queued follow-up dispatch intent changed identity",
+      );
+    }
+    if (
+      unresolved?.id !== claim.event.id
+      || retainedTarget?.threadId !== target.threadId
+      || retainedTarget?.turnId !== target.turnId
+      || item.codex_thread_id !== target.threadId
+      || item.codex_turn_id !== target.turnId
+      || !predecessorProjectionStatus
+      || (
+        item.status !== predecessorProjectionStatus
+        && !(recoveringDispatch && ["starting", "failed"].includes(item.status))
+      )
+    ) return this.primaryConversation();
+
+    const retainedEffectIdentity = effectIdentity ?? await this.#conversationEffectIdentity(fence);
+    if (!recoveringDispatch) {
+      const resumed = await this.#fencedConversationEffect(
+        fence,
+        () => this.codex.resumeThread(target.threadId, {
+          expectedTurnId: target.turnId,
+          effectIdentity: retainedEffectIdentity,
+        }),
+      );
+      const resumedTurn = resumed?.turns?.at(-1);
+      if (
+        resumed?.id !== target.threadId
+        || resumedTurn?.id !== target.turnId
+        || resumedTurn?.status !== terminal.payload.status
+        || this.codex.isTurnActive?.(target.threadId, target.turnId)
+        || this.codex.hasActiveTurnOtherThan?.(target.threadId, target.turnId)
+      ) {
+        throw conversationError(
+          "CONVERSATION_RECONCILIATION_REQUIRED",
+          "the queued follow-up predecessor changed before dispatch",
+        );
+      }
+      this.#persistConversationRepliesFromTurn(
+        primaryConversationId,
+        target.threadId,
+        resumedTurn,
+        fence,
+      );
+    }
+    const activated = this.store.activatePrimaryConversationQueuedMessage({
+      clientMessageId: claim.event.payload.clientMessageId,
+      queueAfterThreadId: target.threadId,
+      queueAfterTurnId: target.turnId,
+      fence,
+    });
+    if (!activated.activated) return this.primaryConversation();
+    if (recoveringDispatch) {
+      return this.#recoverUnacceptedConversationClaim(
+        activated,
+        retainedEffectIdentity,
+        fence,
+      );
+    }
+    return this.#startConversationClaimTurn({
+      claim: activated,
+      threadId: target.threadId,
+      effectIdentity: retainedEffectIdentity,
       fence,
     });
   }
@@ -1558,6 +1738,7 @@ export class LatticeControlService {
         status: "inProgress",
         confirmedBy: "thread/resume",
       }, fence);
+      this.#scheduleConversationStartDeadline(threadId, turn.id);
     } else if (terminalTurnStatuses.has(turn.status)) {
       this.#appendEventOnce(primaryConversationId, "codex_started", {
         threadId,
@@ -1624,6 +1805,7 @@ export class LatticeControlService {
         status: "inProgress",
         confirmedBy: "thread/resume",
       }, fence);
+      this.#scheduleConversationStartDeadline(threadId, turnId);
     } else if (terminalTurnStatuses.has(turn.status)) {
       if (!this.#hasConfirmedStart(primaryConversationId, threadId, turnId)) {
         const marker = conversationMarker(claim.event.payload);
@@ -1668,6 +1850,78 @@ export class LatticeControlService {
         const unresolved = this.store.primaryConversationUnresolvedMessage();
         const effectIdentity = await this.#conversationEffectIdentity(fence);
         if (unresolved) {
+          const queuedTarget = queuedConversationTarget(unresolved);
+          if (queuedTarget) {
+            const item = requireItem(this.store, primaryConversationId);
+            const predecessorAccepted = this.#conversationAcceptedEventForTurn(
+              queuedTarget.threadId,
+              queuedTarget.turnId,
+            );
+            const predecessorClaim = predecessorAccepted
+              ? this.store.primaryConversationMessage(
+                predecessorAccepted.payload.clientMessageId,
+              )
+              : null;
+            if (
+              item.codex_thread_id !== queuedTarget.threadId
+              || item.codex_turn_id !== queuedTarget.turnId
+              || !predecessorAccepted
+              || !predecessorClaim
+            ) {
+              throw conversationError(
+                "CONVERSATION_RECONCILIATION_REQUIRED",
+                "the queued follow-up predecessor binding is incomplete",
+              );
+            }
+            const queuedDispatchIntent = this.store.primaryConversationDispatchIntent(
+              unresolved.payload.clientMessageId,
+            );
+            let result;
+            if (queuedDispatchIntent) {
+              const queuedClaim = this.store.claimPrimaryConversationMessage({
+                projectId: unresolved.payload.projectId,
+                clientMessageId: unresolved.payload.clientMessageId,
+                text: unresolved.payload.text,
+                fence,
+              });
+              result = await this.#dispatchQueuedPrimaryConversationClaim(
+                queuedClaim,
+                queuedTarget,
+                fence,
+                effectIdentity,
+              );
+            } else {
+              result = await this.#reconcileAcceptedConversationClaim(
+                { claimed: false, event: predecessorClaim, item },
+                predecessorAccepted,
+                effectIdentity,
+                fence,
+              );
+              if (queuedPredecessorProjectionStatus(this.#conversationTerminalEvent(
+                queuedTarget.threadId,
+                queuedTarget.turnId,
+              ))) {
+                const queuedClaim = this.store.claimPrimaryConversationMessage({
+                  projectId: unresolved.payload.projectId,
+                  clientMessageId: unresolved.payload.clientMessageId,
+                  text: unresolved.payload.text,
+                  fence,
+                });
+                result = await this.#dispatchQueuedPrimaryConversationClaim(
+                  queuedClaim,
+                  queuedTarget,
+                  fence,
+                  effectIdentity,
+                );
+              }
+            }
+            this.#appendEventOnce(primaryConversationId, "conversation_reconnected", {
+              threadId: result.codex_thread_id,
+              turnId: result.codex_turn_id,
+              status: result.status,
+            }, fence);
+            return result;
+          }
           const claim = this.store.claimPrimaryConversationMessage({
             projectId: unresolved.payload.projectId,
             clientMessageId: unresolved.payload.clientMessageId,
@@ -2295,6 +2549,112 @@ export class LatticeControlService {
     return false;
   }
 
+  #scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId) {
+    const queued = this.store.primaryConversationUnresolvedMessage();
+    const target = queuedConversationTarget(queued);
+    if (
+      !queued
+      || target?.threadId !== threadId
+      || target?.turnId !== turnId
+      || !queuedPredecessorProjectionStatus(this.#conversationTerminalEvent(threadId, turnId))
+    ) return Promise.resolve(false);
+    const operation = this.#runPrimaryConversationDeadline(
+      conversationOperationKey(queued.payload),
+      async () => {
+        const fence = this.#acquirePrimaryConversationLease();
+        let claim = null;
+        try {
+          const retained = this.store.primaryConversationUnresolvedMessage();
+          const retainedTarget = queuedConversationTarget(retained);
+          if (
+            retained?.id !== queued.id
+            || retainedTarget?.threadId !== threadId
+            || retainedTarget?.turnId !== turnId
+            || !queuedPredecessorProjectionStatus(
+              this.#conversationTerminalEvent(threadId, turnId),
+            )
+          ) return false;
+          claim = this.store.claimPrimaryConversationMessage({
+            projectId: retained.payload.projectId,
+            clientMessageId: retained.payload.clientMessageId,
+            text: retained.payload.text,
+            fence,
+          });
+          return await this.#dispatchQueuedPrimaryConversationClaim(
+            claim,
+            retainedTarget,
+            fence,
+          );
+        } catch (error) {
+          const item = this.store.getWorkItem(primaryConversationId);
+          if (claim && activeWorkStatuses.has(item?.status) && this.#ownsPrimaryConversationLease(fence)) {
+            this.#failLifecycle(primaryConversationId, error, fence);
+            this.#appendEventOnce(primaryConversationId, "conversation_message_failed", {
+              clientMessageId: claim.event.payload.clientMessageId,
+              message: boundedText(error?.message ?? error, 2_048),
+              code: boundedText(error?.code, 128),
+            }, fence);
+          }
+          throw error;
+        }
+      },
+    );
+    operation.catch(() => {});
+    return operation;
+  }
+
+  #scheduleRetainedPrimaryConversationQueue() {
+    const queued = this.store.primaryConversationUnresolvedMessage();
+    const target = queuedConversationTarget(queued);
+    if (
+      !target
+      || !queuedPredecessorProjectionStatus(
+        this.#conversationTerminalEvent(target.threadId, target.turnId),
+      )
+    ) return Promise.resolve(false);
+    return this.#scheduleQueuedPrimaryConversationAfterTerminal(target.threadId, target.turnId);
+  }
+
+  async #recoverRetainedPrimaryConversationQueue() {
+    try {
+      return await this.#scheduleRetainedPrimaryConversationQueue();
+    } catch (error) {
+      if (error?.code !== "CONVERSATION_WRITER_BUSY") throw error;
+      return this.#scheduleRetainedPrimaryConversationQueueAfterLease(error.leaseExpiresAt);
+    }
+  }
+
+  #scheduleRetainedPrimaryConversationQueueAfterLease(leaseExpiresAt) {
+    if (this.closed || !this.acceptingEffects || this.conversationStartupRecoveryTimer) {
+      return false;
+    }
+    const expiresAt = Date.parse(leaseExpiresAt);
+    const delayMs = expiresAt - Date.now() + 25;
+    if (!Number.isFinite(expiresAt) || delayMs > 300_025) return false;
+    this.conversationStartupRecoveryTimer = setTimeout(() => {
+      this.conversationStartupRecoveryTimer = null;
+      void Promise.resolve()
+        .then(() => this.closed || !this.acceptingEffects
+          ? false
+          : this.#scheduleRetainedPrimaryConversationQueue())
+        .catch(() => {});
+    }, Math.max(1, delayMs));
+    this.conversationStartupRecoveryTimer.unref?.();
+    return true;
+  }
+
+  #queuedPrimaryConversationDispatchTargets(threadId, turnId) {
+    const queued = this.store.primaryConversationUnresolvedMessage();
+    const target = queuedConversationTarget(queued);
+    if (target?.threadId !== threadId || target?.turnId !== turnId) return false;
+    const intent = this.store.primaryConversationDispatchIntent(queued.payload.clientMessageId);
+    return Boolean(
+      intent
+      && intent.payload.threadId === threadId
+      && intent.payload.promptDigest === queued.payload.promptDigest
+    );
+  }
+
   async #shutdownActiveItem(item, timeoutMs) {
     const threadId = requireProtocolId(item.codex_thread_id, "shutdown thread ID");
     const turnId = requireProtocolId(item.codex_turn_id, "shutdown turn ID");
@@ -2588,12 +2948,16 @@ export class LatticeControlService {
 
     const existingTerminal = this.store.turnCompletedEvent(id, threadId, turnId);
     if (existingTerminal) {
+      const queuedSuccessorDispatch = id === primaryConversationId
+        && this.#queuedPrimaryConversationDispatchTargets(threadId, turnId);
       if (existingTerminal.payload.status !== status) {
         const completedWithReply = id === primaryConversationId
           && status === "completed"
           && this.store.hasConversationAssistantMessage(threadId, turnId);
         if (completedWithReply) {
-          this.store.updateWorkItem(id, targetProjection, fence);
+          if (!queuedSuccessorDispatch) {
+            this.store.updateWorkItem(id, targetProjection, fence);
+          }
           this.#appendEventOnce(id, "turn_terminal_superseded", {
             threadId,
             turnId,
@@ -2601,7 +2965,8 @@ export class LatticeControlService {
             status,
           }, fence);
           this.#appendEventOnce(id, "turn_completed", terminalPayload, fence);
-          this.reconciliationItemIds.delete(id);
+          if (!queuedSuccessorDispatch) this.reconciliationItemIds.delete(id);
+          void this.#scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId);
           return true;
         }
         this.#appendEventOnce(id, "turn_terminal_conflict_ignored", {
@@ -2613,6 +2978,15 @@ export class LatticeControlService {
       }
       const matches = existingTerminal.payload.status === status;
       if (matches) {
+        if (
+          queuedSuccessorDispatch
+        ) {
+          // The successor has a durable dispatch intent but is not accepted yet.
+          // A duplicate predecessor terminal must not restore the predecessor
+          // projection over that in-flight successor.
+          void this.#scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId);
+          return true;
+        }
         if (!["verified", "archived"].includes(item.status) && item.status !== targetStatus) {
           this.store.updateWorkItem(
             id,
@@ -2621,6 +2995,9 @@ export class LatticeControlService {
           );
         }
         this.reconciliationItemIds.delete(id);
+        if (id === primaryConversationId) {
+          void this.#scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId);
+        }
       }
       return matches;
     }
@@ -2655,6 +3032,9 @@ export class LatticeControlService {
       }
     }
     this.reconciliationItemIds.delete(id);
+    if (id === primaryConversationId) {
+      void this.#scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId);
+    }
     return true;
   }
 

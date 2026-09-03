@@ -2249,6 +2249,875 @@ test("primary conversation distinguishes queued work from visible reply generati
   }
 });
 
+test("an active primary conversation durably queues one follow-up and dispatches it after the exact terminal", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Queued follow-up", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-followup-message-001",
+      text: "先完成這一則。",
+    });
+    assert.equal(first.can_send, true, "one bounded follow-up can be admitted while the turn is active");
+
+    const secondInput = {
+      projectId: project.id,
+      clientMessageId: "queued-followup-message-002",
+      text: "這是執行中的補充，必須排在第一則後面。",
+    };
+    const queued = await service.sendPrimaryConversationMessage(secondInput);
+    assert.equal(queued.status, "running");
+    assert.equal(queued.codex_thread_id, first.codex_thread_id);
+    assert.equal(queued.codex_turn_id, first.codex_turn_id);
+    assert.equal(queued.can_send, false, "the one-slot durable follow-up queue is bounded");
+    const queuedMessage = queued.messages.find(({ id }) => id === secondInput.clientMessageId);
+    assert.equal(queuedMessage?.delivery_status, "saved");
+    assert.equal(queuedMessage?.queue_status, "queued");
+    assert.equal(codex.turnStarts.length, 1, "queue admission has zero provider effect");
+
+    const replay = await service.sendPrimaryConversationMessage(secondInput);
+    assert.equal(
+      replay.messages.filter(({ id }) => id === secondInput.clientMessageId).length,
+      1,
+    );
+    assert.equal(codex.turnStarts.length, 1, "the queued client message identity is idempotent");
+    await assert.rejects(
+      service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: "queued-followup-message-003",
+        text: "第二個待排訊息必須被有界拒絕。",
+      }),
+      { code: "CONVERSATION_BUSY", status: 409 },
+    );
+
+    const secondStarted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "queued-followup-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則完成。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const automaticStart = await bounded(secondStarted, "queued follow-up automatic dispatch");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.match(automaticStart.text, /這是執行中的補充/u);
+    const afterDispatch = service.primaryConversation();
+    assert.equal(afterDispatch.codex_turn_id, automaticStart.turnId);
+    assert.equal(
+      afterDispatch.messages.find(({ id }) => id === secondInput.clientMessageId)?.delivery_status,
+      "accepted",
+    );
+    const events = store.listEvents("primary");
+    assert.equal(events.filter(({ kind }) => kind === "conversation_message_claimed").length, 2);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_turn_dispatch_intended").length, 2);
+    assert.equal(events.filter(({ kind }) => kind === "conversation_message_accepted").length, 2);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a duplicate predecessor terminal cannot overwrite a queued successor while provider acceptance is pending", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  let releaseQueuedTurn;
+  try {
+    const project = service.createProject({ name: "Queued duplicate terminal", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-duplicate-terminal-message-001",
+      text: "第一則完成後，重播終態不得覆寫下一則。",
+    });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-duplicate-terminal-message-002",
+      text: "這一則在 provider acceptance 返回前保持 starting。",
+    });
+    const predecessor = {
+      id: first.codex_turn_id,
+      status: "completed",
+      items: [{
+        id: "queued-duplicate-terminal-reply-001",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "第一則完成。",
+      }],
+    };
+    codex.resumeResult = { id: first.codex_thread_id, turns: [predecessor] };
+    const queuedTurnGate = new Promise((resolve) => {
+      releaseQueuedTurn = resolve;
+    });
+    codex.beforeTurnResult = ({ text }) => text.includes("provider acceptance")
+      ? queuedTurnGate
+      : undefined;
+    const secondStarted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: predecessor.items[0],
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const providerAccepted = await bounded(secondStarted, "queued provider acceptance");
+    assert.notEqual(providerAccepted.turnId, first.codex_turn_id);
+    assert.equal(store.getWorkItem("primary").status, "starting");
+
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    assert.equal(
+      store.getWorkItem("primary").status,
+      "starting",
+      "a replayed predecessor terminal must not restore the predecessor projection",
+    );
+    releaseQueuedTurn();
+    releaseQueuedTurn = null;
+    await bounded((async () => {
+      while (store.getWorkItem("primary").status !== "running") {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })(), "queued acceptance after duplicate terminal");
+
+    assert.equal(store.getWorkItem("primary").codex_turn_id, providerAccepted.turnId);
+    assert.equal(codex.turnStarts.length, 2, "the queued message has exactly one provider start");
+    assert.equal(
+      store.listEvents("primary").filter(
+        ({ kind, payload }) => kind === "conversation_message_accepted"
+          && payload.clientMessageId === "queued-duplicate-terminal-message-002",
+      ).length,
+      1,
+    );
+  } finally {
+    releaseQueuedTurn?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("a late completed predecessor cannot overwrite a queued successor released by interruption", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  let releaseQueuedTurn;
+  try {
+    const project = service.createProject({ name: "Queued terminal supersession", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-terminal-supersession-message-001",
+      text: "第一則先被中斷。",
+    });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-terminal-supersession-message-002",
+      text: "遲到的 predecessor completed 不得覆寫這一則。",
+    });
+    codex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const queuedTurnGate = new Promise((resolve) => {
+      releaseQueuedTurn = resolve;
+    });
+    codex.beforeTurnResult = ({ text }) => text.includes("遲到的 predecessor")
+      ? queuedTurnGate
+      : undefined;
+    const secondStarted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "interrupted", items: [] },
+      },
+    });
+    const providerAccepted = await bounded(secondStarted, "queued start after interruption");
+    assert.equal(store.getWorkItem("primary").status, "starting");
+
+    codex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "queued-terminal-supersession-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則其實已完成。",
+        },
+      },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    assert.equal(
+      store.getWorkItem("primary").status,
+      "starting",
+      "terminal supersession may update evidence but not the in-flight successor projection",
+    );
+    releaseQueuedTurn();
+    releaseQueuedTurn = null;
+    await bounded((async () => {
+      while (store.getWorkItem("primary").status !== "running") {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })(), "queued acceptance after terminal supersession");
+    assert.equal(store.getWorkItem("primary").codex_turn_id, providerAccepted.turnId);
+    assert.equal(codex.turnStarts.length, 2);
+  } finally {
+    releaseQueuedTurn?.();
+    service.close();
+    store.close();
+  }
+});
+
+test("Control startup dispatches a durable queued follow-up after its predecessor terminal was already committed", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-terminal-restart-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Queued terminal restart", rootPath: directory });
+    const first = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-terminal-restart-message-001",
+      text: "第一則終態會先持久化。",
+    });
+    await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-terminal-restart-message-002",
+      text: "Control 重啟後應自行履行已承諾的排隊訊息。",
+    });
+    firstService.close();
+    firstService = null;
+
+    const terminalFence = acquirePrimaryConversationFence(firstStore, project.id);
+    firstStore.recordPrimaryConversationReply({
+      threadId: first.codex_thread_id,
+      turnId: first.codex_turn_id,
+      messageId: "queued-terminal-restart-reply-001",
+      text: "第一則已完成。",
+      fence: terminalFence,
+    });
+    firstStore.updateWorkItem("primary", {
+      status: "codex_done",
+      approval_json: null,
+      progress: "Codex turn completed",
+      failure_summary: null,
+    }, terminalFence);
+    firstStore.appendEvent("primary", "turn_completed", {
+      threadId: first.codex_thread_id,
+      turnId: first.codex_turn_id,
+      status: "completed",
+      error: null,
+    }, terminalFence);
+    firstStore.releasePrimaryConversationLease(terminalFence);
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{
+        id: first.codex_turn_id,
+        status: "completed",
+        items: [{
+          id: "queued-terminal-restart-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則已完成。",
+        }],
+      }],
+    };
+    const secondStarted = new Promise((resolve) => restartedCodex.once("turnStartAccepted", resolve));
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const automaticStart = await bounded(
+      secondStarted,
+      "startup-owned queued follow-up dispatch",
+      500,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.equal(restartedCodex.turnStarts.length, 1);
+    assert.equal(restartedCodex.resumed.length, 1);
+    assert.equal(
+      restartedStore.listEvents("primary").filter(
+        ({ kind, payload }) => kind === "conversation_message_accepted"
+          && payload.clientMessageId === "queued-terminal-restart-message-002",
+      ).length,
+      1,
+    );
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Control startup retries one durable queue recovery after a crashed writer lease expires", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-crash-lease-"));
+  const databasePath = path.join(directory, "control.db");
+  let crashedStore;
+  let crashedService;
+  let restartedStore;
+  let restartedService;
+  try {
+    crashedStore = new LatticeStore(databasePath);
+    const crashedCodex = new FakeCodex();
+    crashedService = new LatticeControlService({
+      store: crashedStore,
+      codex: crashedCodex,
+      conversationLeaseTtlMs: 3_000,
+    });
+    const project = crashedService.createProject({ name: "Queued crash lease", rootPath: directory });
+    const first = await crashedService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-crash-lease-message-001",
+      text: "第一則終態與未釋放 lease 一起留在 SQLite。",
+    });
+    await crashedService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-crash-lease-message-002",
+      text: "舊 lease 到期後應自動且只送一次。",
+    });
+    const predecessor = {
+      id: first.codex_turn_id,
+      status: "completed",
+      items: [{
+        id: "queued-crash-lease-reply-001",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "第一則完成。",
+      }],
+    };
+    crashedCodex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: predecessor.items[0],
+      },
+    });
+    crashedCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    crashedStore.close();
+    crashedStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = { id: first.codex_thread_id, turns: [predecessor] };
+    const secondStarted = new Promise((resolve) => restartedCodex.once("turnStartAccepted", resolve));
+    restartedService = new LatticeControlService({
+      store: restartedStore,
+      codex: restartedCodex,
+      conversationLeaseTtlMs: 3_000,
+    });
+    const automaticStart = await bounded(
+      secondStarted,
+      "startup queue retry after crashed lease expiry",
+      4_000,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.equal(restartedCodex.turnStarts.length, 1);
+    assert.equal(
+      restartedStore.listEvents("primary").filter(
+        ({ kind, payload }) => kind === "conversation_message_accepted"
+          && payload.clientMessageId === "queued-crash-lease-message-002",
+      ).length,
+      1,
+    );
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    crashedService?.close();
+    crashedStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an exact interrupted predecessor releases its durable queued follow-up once", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Interrupted queue", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "interrupted-queue-message-001",
+      text: "這一則會被明確中斷。",
+    });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "interrupted-queue-message-002",
+      text: "前一則終止後仍須接續這一則。",
+    });
+    codex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const secondStarted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+
+    const interrupted = await service.interruptPrimaryConversation();
+    const automaticStart = await bounded(secondStarted, "interrupted predecessor queue release");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(interrupted.status, "failed");
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.equal(codex.turnStarts.length, 2);
+    assert.equal(
+      service.primaryConversation().messages.find(
+        ({ id }) => id === "interrupted-queue-message-002",
+      )?.delivery_status,
+      "accepted",
+    );
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a start-timeout terminal releases its durable queued follow-up once", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  try {
+    const project = service.createProject({ name: "Timeout queue", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-queue-message-001",
+      text: "這一則不產生活動並到達 queue deadline。",
+    });
+    await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "timeout-queue-message-002",
+      text: "timeout 終態後仍須接續這一則。",
+    });
+    codex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "interrupted", items: [] }],
+    };
+    const secondStarted = new Promise((resolve) => codex.once("turnStartAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+
+    const automaticStart = await bounded(
+      secondStarted,
+      "queue release after start-timeout",
+      500,
+    );
+    codex.emit("notification", {
+      method: "item/started",
+      params: {
+        threadId: automaticStart.threadId,
+        turnId: automaticStart.turnId,
+        item: { id: "timeout-queue-second-activity", type: "userMessage" },
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.equal(codex.turnStarts.length, 2);
+    assert.equal(codex.interruptCalls.length, 1);
+    assert.equal(
+      store.listEvents("primary").filter(
+        ({ kind }) => kind === "conversation_start_timeout",
+      ).length,
+      1,
+    );
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("a queued follow-up survives Control restart and resumes behind the retained active turn", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-restart-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Queued restart", rootPath: directory });
+    const first = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-restart-message-001",
+      text: "第一則在重啟期間維持原 turn。",
+    });
+    await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-restart-message-002",
+      text: "第二則在 SQLite 中等待第一則終態。",
+    });
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const reconnected = await restartedService.reconnectPrimaryConversation();
+    assert.equal(reconnected.codex_thread_id, first.codex_thread_id);
+    assert.equal(reconnected.codex_turn_id, first.codex_turn_id);
+    assert.equal(reconnected.status, "running");
+    assert.equal(restartedCodex.turnStarts.length, 0, "reconnect does not bypass the active turn");
+
+    restartedCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{
+        id: first.codex_turn_id,
+        status: "completed",
+        items: [{
+          id: "queued-restart-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則已完成。",
+        }],
+      }],
+    };
+    const secondStarted = new Promise((resolve) => restartedCodex.once("turnStartAccepted", resolve));
+    restartedCodex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: {
+          id: "queued-restart-reply-001",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則已完成。",
+        },
+      },
+    });
+    restartedCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const automaticStart = await bounded(secondStarted, "restarted queued follow-up dispatch");
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(automaticStart.threadId, first.codex_thread_id);
+    assert.notEqual(automaticStart.turnId, first.codex_turn_id);
+    assert.equal(restartedCodex.turnStarts.length, 1);
+    assert.equal(
+      restartedService.primaryConversation().messages.find(
+        ({ id }) => id === "queued-restart-message-002",
+      )?.delivery_status,
+      "accepted",
+    );
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a queued dispatch proven not sent recovers with its one existing retry after restart", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-not-sent-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Queued retry", rootPath: directory });
+    const first = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-retry-message-001",
+      text: "第一則正常完成。",
+    });
+    await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-retry-message-002",
+      text: "這一則在 provider effect 前遇到 identity change。",
+    });
+    firstCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{
+        id: first.codex_turn_id,
+        status: "completed",
+        items: [{
+          id: "queued-retry-first-reply",
+          type: "agentMessage",
+          phase: "final_answer",
+          text: "第一則完成。",
+        }],
+      }],
+    };
+    let rejectQueuedDispatch;
+    const queuedDispatchRejected = new Promise((resolve) => {
+      rejectQueuedDispatch = resolve;
+    });
+    firstCodex.beforeTurnDispatch = ({ text }) => {
+      if (!text.includes("provider effect 前")) return;
+      rejectQueuedDispatch();
+      const error = new Error("effect identity changed before queued dispatch");
+      error.code = "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED";
+      throw error;
+    };
+    firstCodex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: firstCodex.resumeResult.turns[0].items[0],
+      },
+    });
+    firstCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    await bounded(queuedDispatchRejected, "queued pre-effect rejection");
+    await bounded((async () => {
+      while (firstStore.getWorkItem("primary").status !== "failed") {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })(), "queued pre-effect failure persistence");
+    assert.equal(firstCodex.turnStarts.length, 1, "the proven-not-sent attempt had zero provider effect");
+    const passive = await firstService.refreshPrimaryConversationObservation();
+    assert.equal(firstCodex.turnStarts.length, 1, "a passive GET-style refresh never retries the queue");
+    assert.match(passive.status_text, /重新連線/u);
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 1;
+    restartedCodex.resumeResult = firstCodex.resumeResult;
+    restartedCodex.readResults.set(first.codex_thread_id, firstCodex.resumeResult);
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const reconnected = await restartedService.reconnectPrimaryConversation();
+
+    assert.equal(reconnected.status, "running");
+    assert.equal(reconnected.codex_thread_id, first.codex_thread_id);
+    assert.notEqual(reconnected.codex_turn_id, first.codex_turn_id);
+    assert.equal(restartedCodex.turnStarts.length, 1, "only the existing bounded retry is sent");
+    assert.equal(
+      restartedStore.listEvents("primary").filter(
+        ({ kind }) => kind === "conversation_turn_dispatch_retry_intended",
+      ).length,
+      1,
+    );
+    assert.equal(
+      restartedStore.listEvents("primary").filter(
+        ({ kind, payload }) => kind === "conversation_message_accepted"
+          && payload.clientMessageId === "queued-retry-message-002",
+      ).length,
+      1,
+    );
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a queued provider turn created before local acceptance is adopted after restart without replay", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-marker-"));
+  const databasePath = path.join(directory, "control.db");
+  let firstStore;
+  let firstService;
+  let restartedStore;
+  let restartedService;
+  try {
+    firstStore = new LatticeStore(databasePath);
+    const firstCodex = new FakeCodex();
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    const project = firstService.createProject({ name: "Queued marker", rootPath: directory });
+    const first = await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-marker-message-001",
+      text: "第一則正常完成。",
+    });
+    await firstService.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "queued-marker-message-002",
+      text: "這一則已由 provider 建立但尚未留下本機 acceptance。",
+    });
+    const predecessor = {
+      id: first.codex_turn_id,
+      status: "completed",
+      items: [{
+        id: "queued-marker-first-reply",
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "第一則完成。",
+      }],
+    };
+    firstCodex.resumeResult = { id: first.codex_thread_id, turns: [predecessor] };
+    let exposeCreatedTurn;
+    const createdTurn = new Promise((resolve) => {
+      exposeCreatedTurn = resolve;
+    });
+    firstCodex.beforeTurnResult = ({ threadId, text }) => {
+      if (!text.includes("provider 建立")) return;
+      exposeCreatedTurn({ threadId, turnId: firstCodex.lastTurn.turnId, text });
+      throw new Error("transport closed after provider accepted queued turn");
+    };
+    firstCodex.emit("notification", {
+      method: "item/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turnId: first.codex_turn_id,
+        item: predecessor.items[0],
+      },
+    });
+    firstCodex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [] },
+      },
+    });
+    const providerTurn = await bounded(createdTurn, "queued provider turn creation");
+    await bounded((async () => {
+      while (firstStore.getWorkItem("primary").status !== "failed") {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    })(), "queued provider ambiguity persistence");
+    assert.equal(firstCodex.turnStarts.length, 2);
+    firstService.close();
+    firstService = null;
+    firstStore.close();
+    firstStore = null;
+
+    const recoveredTurn = {
+      id: providerTurn.turnId,
+      status: "inProgress",
+      items: [{
+        id: "queued-marker-user-item",
+        type: "userMessage",
+        content: [{ type: "text", text: providerTurn.text }],
+      }],
+    };
+    restartedStore = new LatticeStore(databasePath);
+    const restartedCodex = new FakeCodex();
+    restartedCodex.turns = 2;
+    restartedCodex.readResults.set(first.codex_thread_id, {
+      id: first.codex_thread_id,
+      turns: [predecessor, recoveredTurn],
+    });
+    restartedCodex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [predecessor, recoveredTurn],
+    };
+    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    const reconnected = await restartedService.reconnectPrimaryConversation();
+
+    assert.equal(reconnected.status, "running");
+    assert.equal(reconnected.codex_thread_id, first.codex_thread_id);
+    assert.equal(reconnected.codex_turn_id, providerTurn.turnId);
+    assert.equal(restartedCodex.turnStarts.length, 0, "the marker-bound provider turn is not replayed");
+    assert.equal(
+      restartedStore.listEvents("primary").filter(
+        ({ kind, payload }) => kind === "conversation_message_accepted"
+          && payload.clientMessageId === "queued-marker-message-002",
+      ).length,
+      1,
+    );
+  } finally {
+    restartedService?.close();
+    restartedStore?.close();
+    firstService?.close();
+    firstStore?.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("primary conversation records first activity and cancels no longer queued work", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
@@ -2405,6 +3274,58 @@ test("a queue deadline waits for reconnect and interrupts its retained exact tur
   }
 });
 
+test("disconnect and reconnect restore the original accepted turn queue deadline", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({
+    store,
+    codex,
+    lifecycleTimeoutMs: 250,
+    conversationStartTimeoutMs: 25,
+  });
+  try {
+    const project = service.createProject({ name: "Reconnect restores deadline", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "disconnect-deadline-message-001",
+      text: "斷線不得清除尚未開始輸出的原始 deadline。",
+    });
+    codex.emit("disconnect", { code: 17, signal: null });
+    codex.resumeResult = {
+      id: sent.codex_thread_id,
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+    };
+    const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
+    codex.once("interruptAccepted", ({ threadId, turnId }) => {
+      setImmediate(() => codex.emit("notification", {
+        method: "turn/completed",
+        params: { threadId, turn: { id: turnId, status: "interrupted", items: [] } },
+      }));
+    });
+    await new Promise((resolve) => setTimeout(resolve, 35));
+
+    const reconnected = await service.reconnectPrimaryConversation();
+    const interruptedTurn = await bounded(interrupted, "restored reconnect deadline", 250);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(reconnected.status, "running");
+    assert.deepEqual(interruptedTurn, {
+      threadId: sent.codex_thread_id,
+      turnId: sent.codex_turn_id,
+    });
+    assert.equal(codex.turnStarts.length, 1, "the retained accepted turn is never resent");
+    assert.equal(codex.interruptCalls.length, 1);
+    const timeouts = store.listEvents("primary")
+      .filter(({ kind }) => kind === "conversation_start_timeout");
+    assert.equal(timeouts.length, 1);
+    assert.equal(timeouts[0].payload.threadId, sent.codex_thread_id);
+    assert.equal(timeouts[0].payload.turnId, sent.codex_turn_id);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
 test("a queue deadline waiting behind reconnect no-ops after the retained turn is terminal", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
@@ -2459,7 +3380,7 @@ test("a queue deadline waiting behind reconnect no-ops after the retained turn i
   }
 });
 
-test("a queue deadline waits for a conflicting send without creating another claim or turn", async () => {
+test("a queue deadline waits for a conflicting cross-project send without creating another claim or turn", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
   const service = new LatticeControlService({
@@ -2477,6 +3398,7 @@ test("a queue deadline waits for a conflicting send without creating another cla
   });
   try {
     const project = service.createProject({ name: "Timeout waits for send", rootPath: process.cwd() });
+    const otherProject = service.createProject({ name: "Other timeout project", rootPath: tmpdir() });
     const sent = await service.sendPrimaryConversationMessage({
       projectId: project.id,
       clientMessageId: "timeout-send-overlap-001",
@@ -2494,7 +3416,7 @@ test("a queue deadline waits for a conflicting send without creating another cla
       }));
     });
     const laterSend = service.sendPrimaryConversationMessage({
-      projectId: project.id,
+      projectId: otherProject.id,
       clientMessageId: "timeout-send-overlap-002",
       text: "不得繞過第一個尚未終態的 claim。",
     });

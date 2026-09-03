@@ -495,7 +495,7 @@
       nodes.transcript.replaceChildren(...[historyNotice,...messages.map((message)=>{
         const article=element("article",undefined,"message "+message.role);article.dataset.messageId=message.id;
         article.append(element("p",message.text,"bubble"));
-        const delivery=message.role==="user"?(message.delivery_status==="accepted"?"已交給 Codex":message.delivery_status==="failed"?"已保存，尚未完成":message.delivery_status==="unknown"?"已保存，狀態待重新確認":"已保存"):"Codex 回覆";
+        const delivery=message.role==="user"?(message.queue_status==="queued"?"已排隊，前一回合結束後送出":message.delivery_status==="accepted"?"已交給 Codex":message.delivery_status==="failed"?"已保存，尚未完成":message.delivery_status==="unknown"?"已保存，狀態待重新確認":"已保存"):"Codex 回覆";
         article.append(element("span",delivery,"message-meta"));return article;
       })].filter(Boolean));
     }

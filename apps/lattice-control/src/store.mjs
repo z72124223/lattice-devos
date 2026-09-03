@@ -3065,6 +3065,7 @@ export class LatticeStore {
         const error = new Error("另一個 LATTICE Control 正在處理這條對話；本次不會重複送出");
         error.code = "CONVERSATION_WRITER_BUSY";
         error.status = 409;
+        error.leaseExpiresAt = current.lease_expires_at;
         throw error;
       }
       const generation = current
@@ -3419,11 +3420,28 @@ export class LatticeStore {
     return latestReply === null || latestMissing > latestReply;
   }
 
-  claimPrimaryConversationMessage({ projectId, clientMessageId, text, fence }) {
+  claimPrimaryConversationMessage({
+    projectId,
+    clientMessageId,
+    text,
+    fence,
+    queueAfterThreadId = null,
+    queueAfterTurnId = null,
+  }) {
     const normalizedProjectId = requireText(projectId, "project ID");
     const normalizedId = normalizeClientMessageId(clientMessageId);
     const normalizedText = boundedConversationText(text);
     const promptDigest = conversationMessageDigest(normalizedText);
+    const queueRequested = queueAfterThreadId !== null || queueAfterTurnId !== null;
+    if (queueRequested && (queueAfterThreadId === null || queueAfterTurnId === null)) {
+      throw new TypeError("queued conversation target must include both thread and turn IDs");
+    }
+    const normalizedQueueThreadId = queueRequested
+      ? boundedText(queueAfterThreadId, "queued Codex thread ID", 256)
+      : null;
+    const normalizedQueueTurnId = queueRequested
+      ? boundedText(queueAfterTurnId, "queued Codex turn ID", 256)
+      : null;
     if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
 
     this.database.exec("BEGIN IMMEDIATE;");
@@ -3480,7 +3498,10 @@ export class LatticeStore {
           throw new TypeError("client message ID was already used for different content");
         }
         const accepted = this.primaryConversationAcceptedEvent(normalizedId) !== null;
-        if (!accepted && item.status === "failed") {
+        const existingQueued = Boolean(
+          existing.payload.queueAfterThreadId && existing.payload.queueAfterTurnId
+        );
+        if (!accepted && !existingQueued && item.status === "failed") {
           const timestamp = now();
           this.database.prepare(`
             UPDATE work_items
@@ -3495,9 +3516,31 @@ export class LatticeStore {
             .get(primaryConversationId);
         }
         this.database.exec("COMMIT;");
-        return { claimed: false, item: decodeItem(item), event: existing };
+        return {
+          claimed: false,
+          queued: existingQueued,
+          item: decodeItem(item),
+          event: existing,
+        };
       }
-      if (!["draft", "codex_done", "failed"].includes(item.status)) {
+      if (queueRequested) {
+        const accepted = item.codex_thread_id && item.codex_turn_id
+          ? this.primaryConversationAcceptedForTurn(item.codex_thread_id, item.codex_turn_id)
+          : null;
+        if (
+          !["running", "waiting_approval"].includes(item.status)
+          || item.project_id !== normalizedProjectId
+          || item.codex_thread_id !== normalizedQueueThreadId
+          || item.codex_turn_id !== normalizedQueueTurnId
+          || !accepted
+          || this.primaryConversationTerminalEvent(normalizedQueueThreadId, normalizedQueueTurnId)
+        ) {
+          const error = new Error("the primary conversation is not safely queueable");
+          error.code = "CONVERSATION_BUSY";
+          error.status = 409;
+          throw error;
+        }
+      } else if (!["draft", "codex_done", "failed"].includes(item.status)) {
         const error = new Error("the primary conversation is already handling a message");
         error.code = "CONVERSATION_BUSY";
         error.status = 409;
@@ -3505,23 +3548,35 @@ export class LatticeStore {
       }
 
       const timestamp = now();
-      const update = this.database.prepare(`
-        UPDATE work_items
-        SET project_id = ?, status = 'starting', progress = ?, approval_json = NULL,
-            failure_summary = NULL, updated_at = ?
-        WHERE id = ? AND status IN ('draft', 'codex_done', 'failed')
-      `).run(
-        normalizedProjectId,
-        "訊息已保存；正在連接 Codex",
-        timestamp,
-        primaryConversationId,
-      );
-      if (update.changes !== 1) {
-        const error = new Error("the primary conversation changed before the message was claimed");
-        error.code = "CONVERSATION_BUSY";
-        error.status = 409;
-        throw error;
+      if (!queueRequested) {
+        const update = this.database.prepare(`
+          UPDATE work_items
+          SET project_id = ?, status = 'starting', progress = ?, approval_json = NULL,
+              failure_summary = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('draft', 'codex_done', 'failed')
+        `).run(
+          normalizedProjectId,
+          "訊息已保存；正在連接 Codex",
+          timestamp,
+          primaryConversationId,
+        );
+        if (update.changes !== 1) {
+          const error = new Error("the primary conversation changed before the message was claimed");
+          error.code = "CONVERSATION_BUSY";
+          error.status = 409;
+          throw error;
+        }
       }
+      const payload = {
+        clientMessageId: normalizedId,
+        projectId: normalizedProjectId,
+        text: normalizedText,
+        promptDigest,
+        ...(queueRequested ? {
+          queueAfterThreadId: normalizedQueueThreadId,
+          queueAfterTurnId: normalizedQueueTurnId,
+        } : {}),
+      };
       const inserted = this.database.prepare(`
         INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
         VALUES (?, ?, ?, ?)
@@ -3529,12 +3584,7 @@ export class LatticeStore {
       `).get(
         primaryConversationId,
         "conversation_message_claimed",
-        JSON.stringify({
-          clientMessageId: normalizedId,
-          projectId: normalizedProjectId,
-          text: normalizedText,
-          promptDigest,
-        }),
+        JSON.stringify(payload),
         timestamp,
       );
       item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
@@ -3542,19 +3592,95 @@ export class LatticeStore {
       this.database.exec("COMMIT;");
       return {
         claimed: true,
+        queued: queueRequested,
         item: decodeItem(item),
         event: {
           id: inserted.id,
           kind: "conversation_message_claimed",
-          payload: {
-            clientMessageId: normalizedId,
-            projectId: normalizedProjectId,
-            text: normalizedText,
-            promptDigest,
-          },
+          payload,
           created_at: timestamp,
         },
       };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  activatePrimaryConversationQueuedMessage({
+    clientMessageId,
+    queueAfterThreadId,
+    queueAfterTurnId,
+    fence,
+  }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    const normalizedThreadId = boundedText(queueAfterThreadId, "queued Codex thread ID", 256);
+    const normalizedTurnId = boundedText(queueAfterTurnId, "queued Codex turn ID", 256);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      const claim = this.primaryConversationMessage(normalizedId);
+      if (
+        !claim
+        || claim.payload.queueAfterThreadId !== normalizedThreadId
+        || claim.payload.queueAfterTurnId !== normalizedTurnId
+      ) throw new Error("queued conversation claim identity changed before dispatch");
+      const accepted = this.primaryConversationAcceptedEvent(normalizedId);
+      if (accepted) {
+        this.database.exec("COMMIT;");
+        return { activated: false, item: decodeItem(item), event: claim };
+      }
+      const unresolved = this.primaryConversationUnresolvedMessage();
+      const terminal = this.primaryConversationTerminalEvent(normalizedThreadId, normalizedTurnId);
+      const dispatchIntent = this.primaryConversationDispatchIntent(normalizedId);
+      const predecessorProjectionStatus = terminal?.payload.status === "completed"
+        ? "codex_done"
+        : ["interrupted", "failed"].includes(terminal?.payload.status)
+          ? "failed"
+          : null;
+      const recoveringDispatch = Boolean(
+        dispatchIntent
+        && dispatchIntent.payload.threadId === normalizedThreadId
+        && dispatchIntent.payload.promptDigest === claim.payload.promptDigest
+        && ["starting", "failed"].includes(item.status)
+      );
+      if (
+        unresolved?.id !== claim.id
+        || item.codex_thread_id !== normalizedThreadId
+        || item.codex_turn_id !== normalizedTurnId
+        || !terminal
+        || !predecessorProjectionStatus
+        || (item.status !== predecessorProjectionStatus && !recoveringDispatch)
+      ) throw new Error("queued conversation predecessor is not in the exact terminal state");
+      const activationStatus = item.status;
+      const timestamp = now();
+      const update = this.database.prepare(`
+        UPDATE work_items
+        SET status = 'starting', progress = ?, approval_json = NULL,
+            failure_summary = NULL, updated_at = ?
+        WHERE id = ? AND codex_thread_id = ? AND codex_turn_id = ?
+          AND status = ?
+      `).run(
+        "上一則已終止；正在送出排隊訊息",
+        timestamp,
+        primaryConversationId,
+        normalizedThreadId,
+        normalizedTurnId,
+        activationStatus,
+      );
+      if (update.changes !== 1) {
+        const error = new Error("primary conversation changed before queued dispatch activation");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return { activated: true, item: decodeItem(updated), event: claim };
     } catch (error) {
       this.database.exec("ROLLBACK;");
       throw error;
