@@ -108,17 +108,75 @@ function Stop-TestOwnedProcess {
     }
 }
 
+function Stop-TestBoundProcessIdentity {
+    param([object]$Identity)
+
+    $processId = [int]$Identity.process_id
+    $process = [Diagnostics.Process]$Identity.process
+    try {
+        if ($process.Id -ne $processId) { throw 'PROCESS_ID_CHANGED' }
+        [void]$process.Handle
+        $process.Refresh()
+        if ($process.HasExited) { return }
+        if ($process.StartTime.ToUniversalTime().Ticks -ne
+            ([DateTime]$Identity.started_at_utc).Ticks) {
+            throw 'PROCESS_START_TIME_CHANGED'
+        }
+    }
+    catch {
+        throw ("DESKTOP_MANAGED_CONTROL_BOUND_PROCESS_GENERATION_MISMATCH:" +
+            "$processId`:$($_.Exception.Message)")
+    }
+    Stop-TestOwnedProcess $process
+}
+
+function Invoke-TestBoundProcessContainment {
+    param([object[]]$Identities)
+
+    $errors = [Collections.Generic.List[string]]::new()
+    $seen = @{}
+    foreach ($identity in $Identities) {
+        if ($null -eq $identity) { continue }
+        $key = "$([int]$identity.process_id):$(([DateTime]$identity.started_at_utc).Ticks)"
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        try { Stop-TestBoundProcessIdentity $identity }
+        catch { [void]$errors.Add($_.Exception.Message) }
+    }
+    return $errors.ToArray()
+}
+
+function Get-TestProcessRecords {
+    param(
+        [ValidateSet('BY_ID', 'CHILDREN')][string]$QueryKind,
+        [int]$ProcessId,
+        [AllowNull()][scriptblock]$ProcessRecordProvider = $null
+    )
+
+    if ($null -ne $ProcessRecordProvider) {
+        return @(& $ProcessRecordProvider $QueryKind $ProcessId)
+    }
+    if ($QueryKind -ceq 'BY_ID') {
+        return @(Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId")
+    }
+    return @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId")
+}
+
 function Get-TestBoundProcessIdentity {
     param(
         [Diagnostics.Process]$Process,
         [int]$ExpectedParentProcessId = -1,
-        [DateTime]$ExpectedCreationUtc = [DateTime]::MinValue
+        [DateTime]$ExpectedCreationUtc = [DateTime]::MinValue,
+        [AllowNull()][scriptblock]$ProcessRecordProvider = $null
     )
 
     $processId = $Process.Id
     [void]$Process.Handle
     $startedAtUtc = $Process.StartTime.ToUniversalTime()
-    $records = @(Get-CimInstance Win32_Process -Filter "ProcessId = $processId")
+    $records = @(Get-TestProcessRecords `
+        -QueryKind 'BY_ID' `
+        -ProcessId $processId `
+        -ProcessRecordProvider $ProcessRecordProvider)
     if ($records.Count -ne 1) {
         throw "DESKTOP_MANAGED_CONTROL_PROCESS_CIM_IDENTITY_UNAVAILABLE:$processId"
     }
@@ -144,15 +202,147 @@ function Get-TestBoundProcessIdentity {
     }
 }
 
+function Get-TestOwnedParentBoundary {
+    param(
+        [object]$OwnedParent,
+        [AllowNull()][scriptblock]$ProcessRecordProvider = $null
+    )
+
+    $parentProcessId = [int]$OwnedParent.process_id
+    $parentProcess = [Diagnostics.Process]$OwnedParent.process
+    $storedStartedAtUtc = [DateTime]$OwnedParent.started_at_utc
+    $storedCreationUtc = [DateTime]$OwnedParent.creation_utc
+    try {
+        if ($parentProcess.Id -ne $parentProcessId) {
+            throw 'PROCESS_ID_CHANGED'
+        }
+        [void]$parentProcess.Handle
+        $parentProcess.Refresh()
+        if ($parentProcess.StartTime.ToUniversalTime().Ticks -ne $storedStartedAtUtc.Ticks) {
+            throw 'PROCESS_START_TIME_CHANGED'
+        }
+    }
+    catch {
+        throw ("DESKTOP_MANAGED_CONTROL_OWNED_PARENT_GENERATION_MISMATCH:" +
+            "$parentProcessId`:$($_.Exception.Message)")
+    }
+
+    if (-not $parentProcess.HasExited) {
+        try {
+            $verified = Get-TestBoundProcessIdentity `
+                -Process $parentProcess `
+                -ExpectedParentProcessId ([int]$OwnedParent.parent_process_id) `
+                -ExpectedCreationUtc $storedCreationUtc `
+                -ProcessRecordProvider $ProcessRecordProvider
+            if ([int]$verified.process_id -ne $parentProcessId -or
+                ([DateTime]$verified.started_at_utc).Ticks -ne $storedStartedAtUtc.Ticks) {
+                throw 'BOUND_PROCESS_GENERATION_CHANGED'
+            }
+            return [PSCustomObject][ordered]@{
+                state = 'ALIVE'
+                exit_utc = $null
+            }
+        }
+        catch {
+            # A retained exact handle can cross its exit boundary between the
+            # liveness check and the CIM generation check. Only that transition
+            # may continue to the exact ExitTime path below.
+            try { $parentProcess.Refresh() } catch { }
+            if (-not $parentProcess.HasExited) {
+                throw ("DESKTOP_MANAGED_CONTROL_OWNED_PARENT_GENERATION_MISMATCH:" +
+                    "$parentProcessId`:$($_.Exception.Message)")
+            }
+        }
+    }
+
+    try {
+        $exitUtc = $parentProcess.ExitTime.ToUniversalTime()
+        if ($exitUtc -lt $storedStartedAtUtc -or $exitUtc -lt $storedCreationUtc) {
+            throw 'EXIT_PRECEDES_PROCESS_GENERATION'
+        }
+    }
+    catch {
+        throw ("DESKTOP_MANAGED_CONTROL_OWNED_PARENT_EXIT_BOUND_UNAVAILABLE:" +
+            "$parentProcessId`:$($_.Exception.Message)")
+    }
+    return [PSCustomObject][ordered]@{
+        state = 'EXITED'
+        exit_utc = $exitUtc
+    }
+}
+
+function Assert-TestOwnedDescendantBoundary {
+    param(
+        [object]$OwnedParent,
+        [object]$ParentBoundary,
+        [object]$ChildIdentity,
+        [DateTime]$LatestOwnedStartUtc
+    )
+
+    $childProcessId = [int]$ChildIdentity.process_id
+    $childStartedAtUtc = [DateTime]$ChildIdentity.started_at_utc
+    $childCreationUtc = [DateTime]$ChildIdentity.creation_utc
+    if ([int]$ChildIdentity.parent_process_id -ne [int]$OwnedParent.process_id -or
+        $childStartedAtUtc -lt [DateTime]$OwnedParent.started_at_utc -or
+        $childCreationUtc -lt [DateTime]$OwnedParent.creation_utc) {
+        throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_IDENTITY_AMBIGUOUS:$childProcessId"
+    }
+
+    if ([string]$ParentBoundary.state -ceq 'EXITED') {
+        if ($null -eq $ParentBoundary.exit_utc) {
+            throw "DESKTOP_MANAGED_CONTROL_OWNED_PARENT_EXIT_BOUND_UNAVAILABLE:$([int]$OwnedParent.process_id)"
+        }
+        $parentExitUtc = [DateTime]$ParentBoundary.exit_utc
+        if ($parentExitUtc -lt [DateTime]$OwnedParent.started_at_utc -or
+            $parentExitUtc -lt [DateTime]$OwnedParent.creation_utc) {
+            throw "DESKTOP_MANAGED_CONTROL_OWNED_PARENT_EXIT_BOUND_AMBIGUOUS:$([int]$OwnedParent.process_id)"
+        }
+        if ($childCreationUtc -gt $parentExitUtc) {
+            # A process created after the exact retained-handle exit boundary is
+            # a proven numeric-PID reuse observation, not an owned descendant.
+            return $null
+        }
+    }
+    elseif ([string]$ParentBoundary.state -cne 'ALIVE') {
+        throw "DESKTOP_MANAGED_CONTROL_OWNED_PARENT_EXIT_BOUND_UNAVAILABLE:$([int]$OwnedParent.process_id)"
+    }
+
+    if ($childStartedAtUtc -gt $LatestOwnedStartUtc -or
+        $childCreationUtc -gt $LatestOwnedStartUtc) {
+        throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_IDENTITY_AMBIGUOUS:$childProcessId"
+    }
+    return $ChildIdentity
+}
+
 function Get-TestOwnedDescendantSnapshot {
-    param([object[]]$OwnedParents, [DateTime]$LatestOwnedStartUtc)
+    param(
+        [object[]]$OwnedParents,
+        [DateTime]$LatestOwnedStartUtc,
+        [AllowNull()][scriptblock]$ProcessRecordProvider = $null,
+        [AllowNull()][hashtable]$AcceptedIdentitySink = $null
+    )
 
     $found = [Collections.Generic.List[object]]::new()
     foreach ($ownedParent in $OwnedParents) {
         $parentProcessId = [int]$ownedParent.process_id
-        $parentStartedAtUtc = [DateTime]$ownedParent.started_at_utc
-        foreach ($childRecord in @(Get-CimInstance Win32_Process -Filter (
-            "ParentProcessId = $parentProcessId"))) {
+        $parentBoundaryBefore = Get-TestOwnedParentBoundary `
+            -OwnedParent $ownedParent `
+            -ProcessRecordProvider $ProcessRecordProvider
+        $childRecords = @(Get-TestProcessRecords `
+            -QueryKind 'CHILDREN' `
+            -ProcessId $parentProcessId `
+            -ProcessRecordProvider $ProcessRecordProvider)
+        $parentBoundaryAfter = Get-TestOwnedParentBoundary `
+            -OwnedParent $ownedParent `
+            -ProcessRecordProvider $ProcessRecordProvider
+        if ([string]$parentBoundaryBefore.state -ceq 'EXITED') {
+            if ([string]$parentBoundaryAfter.state -cne 'EXITED' -or
+                ([DateTime]$parentBoundaryBefore.exit_utc).Ticks -ne
+                    ([DateTime]$parentBoundaryAfter.exit_utc).Ticks) {
+                throw "DESKTOP_MANAGED_CONTROL_OWNED_PARENT_EXIT_BOUND_AMBIGUOUS:$parentProcessId"
+            }
+        }
+        foreach ($childRecord in $childRecords) {
             $childProcessId = [int]$childRecord.ProcessId
             $childCreationUtc = ([DateTime]$childRecord.CreationDate).ToUniversalTime()
             try {
@@ -160,16 +350,37 @@ function Get-TestOwnedDescendantSnapshot {
                 $childIdentity = Get-TestBoundProcessIdentity `
                     -Process $childProcess `
                     -ExpectedParentProcessId $parentProcessId `
-                    -ExpectedCreationUtc $childCreationUtc
+                    -ExpectedCreationUtc $childCreationUtc `
+                    -ProcessRecordProvider $ProcessRecordProvider
             }
             catch {
                 throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_IDENTITY_UNAVAILABLE:$childProcessId"
             }
-            if ([DateTime]$childIdentity.started_at_utc -lt $parentStartedAtUtc -or
-                [DateTime]$childIdentity.started_at_utc -gt $LatestOwnedStartUtc) {
-                throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_IDENTITY_AMBIGUOUS:$childProcessId"
+            $acceptedIdentity = Assert-TestOwnedDescendantBoundary `
+                -OwnedParent $ownedParent `
+                -ParentBoundary $parentBoundaryAfter `
+                -ChildIdentity $childIdentity `
+                -LatestOwnedStartUtc $LatestOwnedStartUtc
+            if ($null -ne $acceptedIdentity) {
+                $acceptedProcessId = [int]$acceptedIdentity.process_id
+                if ($null -ne $AcceptedIdentitySink) {
+                    if ($AcceptedIdentitySink.ContainsKey($acceptedProcessId)) {
+                        $known = $AcceptedIdentitySink[$acceptedProcessId]
+                        if ([int]$known.parent_process_id -ne
+                                [int]$acceptedIdentity.parent_process_id -or
+                            ([DateTime]$known.started_at_utc).Ticks -ne
+                                ([DateTime]$acceptedIdentity.started_at_utc).Ticks -or
+                            ([DateTime]$known.creation_utc).Ticks -ne
+                                ([DateTime]$acceptedIdentity.creation_utc).Ticks) {
+                            throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_GENERATION_CHANGED:$acceptedProcessId"
+                        }
+                    }
+                    else {
+                        $AcceptedIdentitySink[$acceptedProcessId] = $acceptedIdentity
+                    }
+                }
+                [void]$found.Add($acceptedIdentity)
             }
-            [void]$found.Add($childIdentity)
         }
     }
     return $found.ToArray()
@@ -179,7 +390,8 @@ function Stop-TestOwnedProcessTree {
     param(
         [Diagnostics.Process]$OwnedRoot,
         [AllowNull()][object]$OwnedRootIdentity,
-        [int]$TimeoutMilliseconds = 10000
+        [int]$TimeoutMilliseconds = 10000,
+        [AllowNull()][scriptblock]$ProcessRecordProvider = $null
     )
 
     $rootProcessId = $OwnedRoot.Id
@@ -198,59 +410,73 @@ function Stop-TestOwnedProcessTree {
 
     $latestOwnedStartUtc = $cleanupStartedAt.UtcDateTime.AddSeconds(2)
     $knownDescendants = @{}
-    $lastDiscoveryFailure = $null
     try {
-        foreach ($descendant in @(Get-TestOwnedDescendantSnapshot `
+        [void](Get-TestOwnedDescendantSnapshot `
             -OwnedParents @($OwnedRootIdentity) `
-            -LatestOwnedStartUtc $latestOwnedStartUtc)) {
-            $knownDescendants[[int]$descendant.process_id] = $descendant
-        }
+            -LatestOwnedStartUtc $latestOwnedStartUtc `
+            -ProcessRecordProvider $ProcessRecordProvider `
+            -AcceptedIdentitySink $knownDescendants)
     }
-    catch { $lastDiscoveryFailure = $_ }
-    if (Test-ProcessAlive $OwnedRoot) { try { $OwnedRoot.Kill() } catch { } }
+    catch {
+        $discoveryFailure = $_
+        $containmentErrors = @(Invoke-TestBoundProcessContainment `
+            -Identities (@($OwnedRootIdentity) + @($knownDescendants.Values)))
+        $message = 'DESKTOP_MANAGED_CONTROL_DESCENDANT_DISCOVERY_FAILED:' +
+            $discoveryFailure.Exception.Message
+        if ($containmentErrors.Count -gt 0) {
+            $message += ':EXACT_PROCESS_CONTAINMENT_FAILED:' +
+                ($containmentErrors -join '|')
+        }
+        throw $message
+    }
+    try { Stop-TestBoundProcessIdentity $OwnedRootIdentity }
+    catch {
+        $rootStopFailure = $_
+        $containmentErrors = @(Invoke-TestBoundProcessContainment `
+            -Identities (@($OwnedRootIdentity) + @($knownDescendants.Values)))
+        $message = 'DESKTOP_MANAGED_CONTROL_OWNED_ROOT_STOP_FAILED:' +
+            $rootStopFailure.Exception.Message
+        if ($containmentErrors.Count -gt 0) {
+            $message += ':EXACT_PROCESS_CONTAINMENT_FAILED:' +
+                ($containmentErrors -join '|')
+        }
+        throw $message
+    }
 
     $quietSince = $null
-    while ([DateTimeOffset]::UtcNow -lt $deadline) {
+    $discoverySafetyFailure = $null
+    :cleanupLoop while ([DateTimeOffset]::UtcNow -lt $deadline) {
         $newDescendantCount = 0
         do {
             $parents = @($OwnedRootIdentity) + @($knownDescendants.Values)
-            $newDescendantCount = 0
+            $knownCountBefore = $knownDescendants.Count
             try {
-                foreach ($descendant in @(Get-TestOwnedDescendantSnapshot `
+                [void](Get-TestOwnedDescendantSnapshot `
                     -OwnedParents $parents `
-                    -LatestOwnedStartUtc $latestOwnedStartUtc)) {
-                    $descendantProcessId = [int]$descendant.process_id
-                    if ($knownDescendants.ContainsKey($descendantProcessId)) {
-                        $known = $knownDescendants[$descendantProcessId]
-                        if ([int]$known.parent_process_id -ne [int]$descendant.parent_process_id -or
-                            ([DateTime]$known.started_at_utc).Ticks -ne
-                                ([DateTime]$descendant.started_at_utc).Ticks -or
-                            ([DateTime]$known.creation_utc).Ticks -ne
-                                ([DateTime]$descendant.creation_utc).Ticks) {
-                            throw "DESKTOP_MANAGED_CONTROL_DESCENDANT_GENERATION_CHANGED:$descendantProcessId"
-                        }
-                        continue
-                    }
-                    $knownDescendants[$descendantProcessId] = $descendant
-                    $newDescendantCount++
-                }
-                $lastDiscoveryFailure = $null
+                    -LatestOwnedStartUtc $latestOwnedStartUtc `
+                    -ProcessRecordProvider $ProcessRecordProvider `
+                    -AcceptedIdentitySink $knownDescendants)
+                $newDescendantCount = $knownDescendants.Count - $knownCountBefore
             }
-            catch { $lastDiscoveryFailure = $_ }
+            catch {
+                $discoverySafetyFailure = $_
+                break cleanupLoop
+            }
         } while ($newDescendantCount -gt 0 -and [DateTimeOffset]::UtcNow -lt $deadline)
 
         foreach ($owned in @($knownDescendants.Values)) {
-            if (Test-ProcessAlive ([Diagnostics.Process]$owned.process)) {
-                try { ([Diagnostics.Process]$owned.process).Kill() } catch { }
+            try { Stop-TestBoundProcessIdentity $owned }
+            catch {
+                $discoverySafetyFailure = $_
+                break cleanupLoop
             }
         }
-        if (Test-ProcessAlive $OwnedRoot) { try { $OwnedRoot.Kill() } catch { } }
 
         $aliveDescendants = @($knownDescendants.Values | Where-Object {
             Test-ProcessAlive ([Diagnostics.Process]$_.process)
         })
         if (-not (Test-ProcessAlive $OwnedRoot) -and $aliveDescendants.Count -eq 0 -and
-            $newDescendantCount -eq 0 -and $null -eq $lastDiscoveryFailure) {
+            $newDescendantCount -eq 0) {
             if ($null -eq $quietSince) { $quietSince = [DateTimeOffset]::UtcNow }
             elseif (([DateTimeOffset]::UtcNow - $quietSince).TotalMilliseconds -ge 500) {
                 $descendantIdentities = @($knownDescendants.Values |
@@ -277,17 +503,31 @@ function Stop-TestOwnedProcessTree {
         Start-Sleep -Milliseconds 50
     }
 
-    if ($null -ne $lastDiscoveryFailure) {
+    if ($null -ne $discoverySafetyFailure) {
+        $containmentErrors = @(Invoke-TestBoundProcessContainment `
+            -Identities (@($OwnedRootIdentity) + @($knownDescendants.Values)))
+        $containmentSuffix = ''
+        if ($containmentErrors.Count -gt 0) {
+            $containmentSuffix = ':EXACT_PROCESS_CONTAINMENT_FAILED:' +
+                ($containmentErrors -join '|')
+        }
         throw ('DESKTOP_MANAGED_CONTROL_DESCENDANT_DISCOVERY_FAILED:' +
-            $lastDiscoveryFailure.Exception.Message)
+            $discoverySafetyFailure.Exception.Message + $containmentSuffix)
     }
+    $timeoutContainmentErrors = @(Invoke-TestBoundProcessContainment `
+        -Identities (@($OwnedRootIdentity) + @($knownDescendants.Values)))
     $remainingProcessIds = @(
         if (Test-ProcessAlive $OwnedRoot) { $rootProcessId }
         $knownDescendants.Values | Where-Object {
             Test-ProcessAlive ([Diagnostics.Process]$_.process)
         } | ForEach-Object { [int]$_.process_id })
-    throw ('DESKTOP_MANAGED_CONTROL_OWNED_PROCESS_TREE_STOP_TIMEOUT:' +
-        (($remainingProcessIds | Sort-Object) -join ','))
+    $timeoutMessage = 'DESKTOP_MANAGED_CONTROL_OWNED_PROCESS_TREE_STOP_TIMEOUT:' +
+        (($remainingProcessIds | Sort-Object) -join ',')
+    if ($timeoutContainmentErrors.Count -gt 0) {
+        $timeoutMessage += ':EXACT_PROCESS_CONTAINMENT_FAILED:' +
+            ($timeoutContainmentErrors -join '|')
+    }
+    throw $timeoutMessage
 }
 
 function Test-ProcessIdentityAlive {
@@ -610,7 +850,9 @@ $foreignReady = Join-Path $temporaryRoot 'foreign-ready.txt'
 $unknownReady = Join-Path $temporaryRoot 'unknown-ready.txt'
 $mismatchReady = Join-Path $temporaryRoot 'mismatch-ready.json'
 $mismatchCleanupEvidencePath = Join-Path $temporaryRoot 'mismatch-cleanup.json'
+$pidReuseRootReady = Join-Path $temporaryRoot 'pid-reuse-root-ready.json'
 $identityExternalReady = Join-Path $temporaryRoot 'identity-external-ready.json'
+$pidReuseStore = Join-Path $temporaryRoot 'pid-reuse-store.txt'
 $mismatchRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'lattice-managed-control-mismatch-' + [Guid]::NewGuid().ToString('N'))
 $mismatchStore = Join-Path $mismatchRoot 'LATTICE\control\mismatch-store.txt'
@@ -621,6 +863,9 @@ $crossScopeControl = $null
 $foreignControl = $null
 $unknownControl = $null
 $identityExternalFixture = $null
+$pidReuseRootFixture = $null
+$pidReuseState = $null
+$pidReuseDiscoveryRejected = $false
 $result = $null
 $initialDesktopProcessIdentity = $null
 $wrongRevisionRejected = $false
@@ -629,6 +874,9 @@ $mismatchDescendantsStopped = $false
 $mismatchPortReleased = $false
 $mismatchStoreAndTempRemoved = $false
 $externalFixtureSurvivedIdentityMismatch = $false
+$parentGenerationMismatchRejected = $false
+$postExitChildRejected = $false
+$reusedPidExternalSurvived = $false
 $primaryFailure = $null
 $cleanupFailure = $null
 
@@ -667,20 +915,172 @@ try {
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
 
-    # A real mismatched executable is rejected only after its owned child has
-    # created a store and bound 4317. Identity failure must tear down that exact
-    # process tree while leaving an unrelated sibling fixture alive.
-    $identityExternalFixture = Start-ControlProcess $nodePath $mismatchFixture $repositoryRoot @{
-        'LATTICE_DESKTOP_MISMATCH_ROLE' = 'external'
-        'LATTICE_DESKTOP_MISMATCH_READY' = $identityExternalReady
+    # Exercise the complete discovery and stop path with an injected Windows
+    # process view: the exact root exits during its child query, then a live
+    # sentinel is reported under the old numeric PID. The sentinel's real
+    # CreationDate is later than the retained root handle's exact ExitTime. A
+    # final invalid row proves the already accepted 4317 child is still reaped.
+    $pidReuseRootFixture = Start-ControlProcess $nodePath $mismatchFixture $repositoryRoot @{
+        'LATTICE_DESKTOP_MISMATCH_ROLE' = 'root'
+        'LATTICE_DESKTOP_MISMATCH_READY' = $pidReuseRootReady
+        'LATTICE_DESKTOP_MISMATCH_STORE' = $pidReuseStore
     }
-    $identityExternalEvidence = (Wait-TextFile `
-        $identityExternalReady `
-        $identityExternalFixture `
+    $pidReuseRootEvidence = (Wait-TextFile `
+        $pidReuseRootReady `
+        $pidReuseRootFixture `
         $TimeoutSeconds) | ConvertFrom-Json
-    if ([int]$identityExternalEvidence.pid -ne $identityExternalFixture.Id -or
-        [int]$identityExternalEvidence.port -lt 1) {
-        throw 'DESKTOP_MANAGED_CONTROL_EXTERNAL_FIXTURE_IDENTITY_INVALID'
+    if ([int]$pidReuseRootEvidence.root_pid -ne $pidReuseRootFixture.Id -or
+        [int]$pidReuseRootEvidence.child_pid -lt 1 -or
+        [int]$pidReuseRootEvidence.port -ne 4317) {
+        throw 'DESKTOP_MANAGED_CONTROL_PID_REUSE_ROOT_IDENTITY_INVALID'
+    }
+    $pidReuseRootIdentity = Get-TestBoundProcessIdentity -Process $pidReuseRootFixture
+    $pidReuseChildProcess = [Diagnostics.Process]::GetProcessById(
+        [int]$pidReuseRootEvidence.child_pid)
+    $pidReuseChildRecords = @(Get-CimInstance Win32_Process -Filter (
+        "ProcessId = $([int]$pidReuseRootEvidence.child_pid)"))
+    if ($pidReuseChildRecords.Count -ne 1) {
+        throw 'DESKTOP_MANAGED_CONTROL_PID_REUSE_CHILD_IDENTITY_UNAVAILABLE'
+    }
+    $pidReuseChildIdentity = Get-TestBoundProcessIdentity `
+        -Process $pidReuseChildProcess `
+        -ExpectedParentProcessId ([int]$pidReuseRootIdentity.process_id) `
+        -ExpectedCreationUtc (([DateTime]$pidReuseChildRecords[0].CreationDate).ToUniversalTime())
+    $pidReuseState = @{
+        triggered = $false
+        root_identity = $pidReuseRootIdentity
+        root_exit_utc = $null
+        sentinel = $null
+        sentinel_evidence = $null
+        sentinel_identity = $null
+        owned_child_record = $pidReuseChildRecords[0]
+        owned_child_identity = $pidReuseChildIdentity
+    }
+    $pidReuseProcessRecordProvider = {
+        param([string]$QueryKind, [int]$ProcessId)
+
+        if ($QueryKind -ceq 'CHILDREN' -and
+            $ProcessId -eq [int]$pidReuseState.root_identity.process_id) {
+            if (-not $pidReuseState.triggered) {
+                Stop-TestBoundProcessIdentity $pidReuseState.root_identity
+                $rootBoundary = Get-TestOwnedParentBoundary `
+                    -OwnedParent $pidReuseState.root_identity
+                if ([string]$rootBoundary.state -cne 'EXITED' -or
+                    $null -eq $rootBoundary.exit_utc) {
+                    throw 'DESKTOP_MANAGED_CONTROL_PID_REUSE_ROOT_EXIT_UNPROVEN'
+                }
+                $pidReuseState.root_exit_utc = [DateTime]$rootBoundary.exit_utc
+                $pidReuseState.sentinel = Start-ControlProcess `
+                    $nodePath `
+                    $mismatchFixture `
+                    $repositoryRoot `
+                    @{
+                        'LATTICE_DESKTOP_MISMATCH_ROLE' = 'external'
+                        'LATTICE_DESKTOP_MISMATCH_READY' = $identityExternalReady
+                    }
+                $pidReuseState.sentinel_evidence = (Wait-TextFile `
+                    $identityExternalReady `
+                    $pidReuseState.sentinel `
+                    $TimeoutSeconds) | ConvertFrom-Json
+                $pidReuseState.sentinel_identity = Get-TestBoundProcessIdentity `
+                    -Process $pidReuseState.sentinel
+                if ([int]$pidReuseState.sentinel_evidence.pid -ne
+                        [int]$pidReuseState.sentinel_identity.process_id -or
+                    [int]$pidReuseState.sentinel_evidence.port -lt 1 -or
+                    [DateTime]$pidReuseState.sentinel_identity.creation_utc -le
+                        [DateTime]$pidReuseState.root_exit_utc) {
+                    throw 'DESKTOP_MANAGED_CONTROL_PID_REUSE_SENTINEL_IDENTITY_INVALID'
+                }
+                $pidReuseState.triggered = $true
+            }
+            $reusedPidRecord = [PSCustomObject][ordered]@{
+                ProcessId = [int]$pidReuseState.sentinel_identity.process_id
+                ParentProcessId = [int]$pidReuseState.root_identity.process_id
+                CreationDate = [DateTime]$pidReuseState.sentinel_identity.creation_utc
+            }
+            $invalidGenerationRecord = [PSCustomObject][ordered]@{
+                ProcessId = [int]$pidReuseState.sentinel_identity.process_id
+                ParentProcessId = [int]$pidReuseState.root_identity.process_id
+                CreationDate = ([DateTime]$pidReuseState.sentinel_identity.creation_utc).AddTicks(1)
+            }
+            return @(
+                $pidReuseState.owned_child_record,
+                $reusedPidRecord,
+                $invalidGenerationRecord)
+        }
+        if ($QueryKind -ceq 'BY_ID' -and $pidReuseState.triggered -and
+            $ProcessId -eq [int]$pidReuseState.sentinel_identity.process_id) {
+            return [PSCustomObject][ordered]@{
+                ProcessId = [int]$pidReuseState.sentinel_identity.process_id
+                ParentProcessId = [int]$pidReuseState.root_identity.process_id
+                CreationDate = [DateTime]$pidReuseState.sentinel_identity.creation_utc
+            }
+        }
+        if ($QueryKind -ceq 'BY_ID') {
+            return @(Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId")
+        }
+        return @(Get-CimInstance Win32_Process -Filter "ParentProcessId = $ProcessId")
+    }
+    try {
+        [void](Stop-TestOwnedProcessTree `
+            -OwnedRoot $pidReuseRootFixture `
+            -OwnedRootIdentity $pidReuseRootIdentity `
+            -ProcessRecordProvider $pidReuseProcessRecordProvider)
+    }
+    catch {
+        if ($_.Exception.Message -cnotlike
+            'DESKTOP_MANAGED_CONTROL_DESCENDANT_DISCOVERY_FAILED:' +
+                '*DESKTOP_MANAGED_CONTROL_DESCENDANT_IDENTITY_UNAVAILABLE:*') {
+            throw
+        }
+        $pidReuseDiscoveryRejected = $true
+    }
+    Wait-ControlPort $false $TimeoutSeconds
+    if (-not $pidReuseDiscoveryRejected -or
+        (Test-ProcessIdentityAlive `
+            -ProcessId ([int]$pidReuseRootIdentity.process_id) `
+            -StartedAtUtcTicks (([DateTime]$pidReuseRootIdentity.started_at_utc).Ticks)) -or
+        (Test-ProcessIdentityAlive `
+            -ProcessId ([int]$pidReuseChildIdentity.process_id) `
+            -StartedAtUtcTicks (([DateTime]$pidReuseChildIdentity.started_at_utc).Ticks))) {
+        throw 'DESKTOP_MANAGED_CONTROL_PID_REUSE_EXACT_CONTAINMENT_INCOMPLETE'
+    }
+    $pidReuseRootFixture = $null
+    $identityExternalFixture = [Diagnostics.Process]$pidReuseState.sentinel
+    $identityExternalEvidence = $pidReuseState.sentinel_evidence
+    $externalProcessIdentity = $pidReuseState.sentinel_identity
+    $postExitChildRejected = $pidReuseState.triggered -and
+        $pidReuseDiscoveryRejected -and
+        -not (Test-ControlPortReachable) -and
+        (Test-ProcessAlive $identityExternalFixture) -and
+        [DateTime]$externalProcessIdentity.creation_utc -gt
+            [DateTime]$pidReuseState.root_exit_utc
+
+    # A live parent handle whose stored CIM generation was substituted must
+    # fail before any stop call; the same sentinel stays alive for the real
+    # wrong-revision teardown below.
+    $simulatedReusedParent = [PSCustomObject][ordered]@{
+        process = $identityExternalFixture
+        process_id = [int]$externalProcessIdentity.process_id
+        parent_process_id = [int]$externalProcessIdentity.parent_process_id
+        started_at_utc = [DateTime]$externalProcessIdentity.started_at_utc
+        creation_utc = ([DateTime]$externalProcessIdentity.creation_utc).AddTicks(-1)
+    }
+    try {
+        [void](Get-TestOwnedParentBoundary -OwnedParent $simulatedReusedParent)
+    }
+    catch {
+        if ($_.Exception.Message -cnotlike
+            'DESKTOP_MANAGED_CONTROL_OWNED_PARENT_GENERATION_MISMATCH:*') {
+            throw
+        }
+        $parentGenerationMismatchRejected = $true
+    }
+    $reusedPidExternalSurvived = $parentGenerationMismatchRejected -and
+        $postExitChildRejected -and
+        (Test-ProcessAlive $identityExternalFixture)
+    if (-not $reusedPidExternalSurvived) {
+        throw 'DESKTOP_MANAGED_CONTROL_REUSED_PID_EXTERNAL_FIXTURE_UNSAFE'
     }
 
     try {
@@ -932,6 +1332,17 @@ try {
         mismatch_port_released = $mismatchPortReleased
         mismatch_store_and_temp_removed = $mismatchStoreAndTempRemoved
         external_fixture_survived_identity_mismatch = $externalFixtureSurvivedIdentityMismatch
+        parent_generation_mismatch_rejected = $parentGenerationMismatchRejected
+        post_exit_child_rejected = $postExitChildRejected
+        reused_pid_external_survived = $reusedPidExternalSurvived
+        pid_reuse_root_pid = [int]$pidReuseRootIdentity.process_id
+        pid_reuse_owned_child_pid = [int]$pidReuseChildIdentity.process_id
+        pid_reuse_discovery_failure_explicit = $pidReuseDiscoveryRejected
+        pid_reuse_root_exit_utc_ticks = ([DateTime]$pidReuseState.root_exit_utc).Ticks
+        pid_reuse_external_pid = [int]$externalProcessIdentity.process_id
+        pid_reuse_external_creation_utc_ticks =
+            ([DateTime]$externalProcessIdentity.creation_utc).Ticks
+        pid_reuse_external_excluded_from_owned_set = $postExitChildRejected
         mismatch_root_pid = [int]$mismatchEvidence.root_pid
         mismatch_child_pid = [int]$mismatchEvidence.child_pid
         production_control_port = 4317
@@ -963,13 +1374,18 @@ try {
 catch { $primaryFailure = $_ }
 finally {
     try { Close-TestDesktop $desktop } catch { $cleanupFailure = $_ }
+    $pidReuseSentinelFixture = if ($null -ne $pidReuseState) {
+        $pidReuseState.sentinel
+    } else { $null }
     foreach ($owned in @(
         $managedControl,
         $externalControl,
         $crossScopeControl,
         $unknownControl,
         $foreignControl,
-        $identityExternalFixture
+        $identityExternalFixture,
+        $pidReuseRootFixture,
+        $pidReuseSentinelFixture
     )) {
         try { Stop-TestOwnedProcess $owned } catch { if ($null -eq $cleanupFailure) { $cleanupFailure = $_ } }
     }
