@@ -468,7 +468,9 @@ export function createLatticeServer({
 
   server.on("close", () => {
     if (ownedShutdown) return;
-    void resolvedRuntimeHealth.close?.();
+    void Promise.resolve()
+      .then(() => resolvedRuntimeHealth.close?.())
+      .catch(() => { process.exitCode = 1; });
     service.close();
     void codex.close();
     store.close();

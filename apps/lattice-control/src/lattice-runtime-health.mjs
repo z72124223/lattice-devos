@@ -3,10 +3,12 @@ import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { isDeepStrictEqual } from "node:util";
 
 const protocolVersion = "2025-11-25";
 const maximumProbeOutputBytes = 65_536;
 const defaultProbeTimeoutMs = 30_000;
+const defaultProbeCleanupTimeoutMs = 2_000;
 const defaultCacheTtlMs = 60_000;
 
 export const latticeRuntimeTools = Object.freeze([
@@ -192,9 +194,41 @@ function exactKeys(value, keys) {
     && Object.keys(value).sort().join("\0") === [...keys].sort().join("\0");
 }
 
+const inheritedChildEnvironmentNames = new Set([
+  "COMSPEC",
+  "NUMBER_OF_PROCESSORS",
+  "OS",
+  "PATH",
+  "PATHEXT",
+  "PROCESSOR_ARCHITECTURE",
+  "PROCESSOR_IDENTIFIER",
+  "PROCESSOR_LEVEL",
+  "PROCESSOR_REVISION",
+  "SYSTEMDRIVE",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "WINDIR",
+]);
+
+function closedChildEnvironment(configuredEnvironment) {
+  const environment = Object.create(null);
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && inheritedChildEnvironmentNames.has(name.toUpperCase())) {
+      environment[name] = value;
+    }
+  }
+  for (const [name, value] of Object.entries(configuredEnvironment)) {
+    environment[name] = value;
+  }
+  environment.NO_COLOR = "1";
+  return environment;
+}
+
 function validInitializeResponse(message) {
   const result = message?.result;
-  return message?.jsonrpc === "2.0"
+  return exactKeys(message, ["jsonrpc", "id", "result"])
+    && message.jsonrpc === "2.0"
     && message.id === 1
     && exactKeys(result, ["protocolVersion", "capabilities", "serverInfo", "instructions"])
     && result.protocolVersion === protocolVersion
@@ -209,12 +243,29 @@ function validInitializeResponse(message) {
     && result.instructions.length <= 8_192;
 }
 
+function validToolDescriptor(tool) {
+  if (tool === null || typeof tool !== "object" || Array.isArray(tool)) return false;
+  if (!latticeRuntimeTools.includes(tool.name)) return false;
+  if (
+    tool.inputSchema === null
+    || typeof tool.inputSchema !== "object"
+    || Array.isArray(tool.inputSchema)
+  ) return false;
+  return tool.name !== "lattice_runtime_status"
+    || (exactKeys(tool.inputSchema, ["type", "additionalProperties"])
+      && tool.inputSchema.type === "object"
+      && tool.inputSchema.additionalProperties === false);
+}
+
 function validToolsResponse(message) {
   if (
-    message?.jsonrpc !== "2.0"
+    !exactKeys(message, ["jsonrpc", "id", "result"])
+    || message.jsonrpc !== "2.0"
     || message.id !== 2
-    || !Array.isArray(message?.result?.tools)
+    || !exactKeys(message.result, ["tools"])
+    || !Array.isArray(message.result.tools)
     || message.result.tools.length !== latticeRuntimeTools.length
+    || !message.result.tools.every(validToolDescriptor)
   ) return false;
   const names = message.result.tools.map((tool) => tool?.name);
   return names.every((name) => typeof name === "string")
@@ -222,27 +273,16 @@ function validToolsResponse(message) {
     && names.sort().join("\0") === [...latticeRuntimeTools].sort().join("\0");
 }
 
-function validRuntimeStatus(value) {
-  if (!exactKeys(value, [
-    "component",
-    "foreman",
-    "graphify_runtime_status",
-    "hermes_activation_status",
-    "hermes_runtime_status",
-    "runtime_integration",
-    "scope",
-    "status",
-  ])) return false;
-  if (
-    value.component !== "delivery-receipt"
-    || typeof value.status !== "string"
-    || typeof value.scope !== "string"
-    || typeof value.runtime_integration !== "string"
-    || typeof value.graphify_runtime_status !== "string"
-    || typeof value.hermes_runtime_status !== "string"
-    || typeof value.hermes_activation_status !== "string"
-  ) return false;
-  const foreman = value.foreman;
+const lowerSha256 = /^[0-9a-f]{64}$/u;
+
+function validDependencyContinuation(value) {
+  if (value === null) return true;
+  return typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length <= 32;
+}
+
+function validForemanProjection(foreman) {
   if (!exactKeys(foreman, [
     "active_count",
     "blocked_count",
@@ -257,28 +297,77 @@ function validRuntimeStatus(value) {
     "replay_status",
     "schema",
   ])) return false;
-  return foreman.schema === "lattice.foreman-runtime-projection/1.1"
+  if (!(foreman.schema === "lattice.foreman-runtime-projection/1.1"
     && foreman.replay_status === "VERIFIED"
-    && typeof foreman.checkpoint_status === "string"
-    && typeof foreman.next_action === "string"
     && ["active_count", "blocked_count", "completed_count", "latest_generation"]
       .every((key) => Number.isSafeInteger(foreman[key]) && foreman[key] >= 0)
-    && ["ledger_digest", "checkpoint_digest"]
-      .every((key) => foreman[key] === null || /^[0-9a-f]{64}$/u.test(foreman[key]))
-    && (foreman.degraded_code === null || typeof foreman.degraded_code === "string")
-    && (foreman.dependency === null
-      || (typeof foreman.dependency === "object" && !Array.isArray(foreman.dependency)));
+    && lowerSha256.test(foreman.ledger_digest)
+    && [null, "FOREMAN_WRITER_CONTENTION"].includes(foreman.degraded_code)
+    && validDependencyContinuation(foreman.dependency))) return false;
+  if (foreman.latest_generation === 0) {
+    if (foreman.checkpoint_status !== "NONE" || foreman.checkpoint_digest !== null) return false;
+  } else if (
+    foreman.checkpoint_status !== "AVAILABLE"
+    || !lowerSha256.test(foreman.checkpoint_digest)
+  ) return false;
+  const expectedNextAction = foreman.blocked_count > 0
+    ? "RESOLVE_BLOCKERS"
+    : foreman.active_count > 0
+      ? "CONTINUE"
+      : foreman.completed_count > 0 ? "ALL_COMPLETED" : "NO_DURABLE_SNAPSHOT";
+  return foreman.next_action === expectedNextAction;
+}
+
+function validRuntimeStatus(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!["CORE_ONLY", "GRAPHIFY", "GRAPHIFY_HERMES"].includes(value.runtime_integration)) {
+    return false;
+  }
+  const graphifyStatuses = value.runtime_integration === "CORE_ONLY"
+    ? ["DEFERRED"]
+    : ["READY", "DEGRADED"];
+  const hermesStatuses = value.runtime_integration === "GRAPHIFY_HERMES"
+    ? ["PREPARED", "DEGRADED"]
+    : ["DEFERRED"];
+  return graphifyStatuses.includes(value.graphify_runtime_status)
+    && hermesStatuses.includes(value.hermes_runtime_status)
+    && ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"]
+      .includes(value.hermes_activation_status)
+    && validForemanProjection(value.foreman);
+}
+
+function validToolResultEnvelope(result) {
+  if (
+    !exactKeys(result, ["content", "structuredContent", "isError"])
+    || typeof result.isError !== "boolean"
+    || !Array.isArray(result.content)
+    || result.content.length !== 1
+    || !exactKeys(result.content[0], ["type", "text"])
+    || result.content[0].type !== "text"
+    || typeof result.content[0].text !== "string"
+    || result.content[0].text.length > maximumProbeOutputBytes
+  ) return false;
+  try {
+    return isDeepStrictEqual(JSON.parse(result.content[0].text), result.structuredContent);
+  } catch {
+    return false;
+  }
 }
 
 function runtimeStatusFromMessage(message) {
   if (
-    message?.jsonrpc !== "2.0"
+    !exactKeys(message, ["jsonrpc", "id", "result"])
+    || message.jsonrpc !== "2.0"
     || message.id !== 3
-    || message.result === null
-    || typeof message.result !== "object"
-    || Array.isArray(message.result)
+    || !validToolResultEnvelope(message.result)
   ) return incompatible;
-  if (message.result.isError === true) return unreachable;
+  if (message.result.isError === true) {
+    return exactKeys(message.result.structuredContent, ["status", "code"])
+      && message.result.structuredContent.status === "ERROR"
+      && /^[A-Z][A-Z0-9_]{0,127}$/u.test(message.result.structuredContent.code)
+      ? unreachable
+      : incompatible;
+  }
   return message.result.isError === false
     && validRuntimeStatus(message.result.structuredContent)
     ? healthy
@@ -289,10 +378,41 @@ function requestLine(value) {
   return `${JSON.stringify(value)}\n`;
 }
 
+function childIsRunning(child) {
+  return child.exitCode === null && child.signalCode === null;
+}
+
+function stopOwnedChild(child, timeoutMs) {
+  if (!childIsRunning(child) || !Number.isInteger(child.pid)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let timer;
+    let complete = false;
+    const finish = (exited) => {
+      if (complete) return;
+      complete = true;
+      clearTimeout(timer);
+      child.removeListener?.("exit", onExit);
+      child.removeListener?.("close", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(!childIsRunning(child));
+    child.once("exit", onExit);
+    child.once("close", onExit);
+    try { child.kill(); } catch { /* bounded exit wait below */ }
+    if (!childIsRunning(child)) {
+      finish(true);
+      return;
+    }
+    timer = setTimeout(() => finish(!childIsRunning(child)), timeoutMs);
+    timer.unref?.();
+  });
+}
+
 export function probeLatticeRuntimeEndpoint({
   executablePath,
   environment,
   timeoutMs = defaultProbeTimeoutMs,
+  cleanupTimeoutMs = defaultProbeCleanupTimeoutMs,
   spawnProcess = spawn,
   signal,
   onOwnedChild,
@@ -306,6 +426,9 @@ export function probeLatticeRuntimeEndpoint({
     || !Number.isInteger(timeoutMs)
     || timeoutMs < 100
     || timeoutMs > 30_000
+    || !Number.isInteger(cleanupTimeoutMs)
+    || cleanupTimeoutMs < 10
+    || cleanupTimeoutMs > 5_000
     || typeof spawnProcess !== "function"
     || (onOwnedChild !== undefined && typeof onOwnedChild !== "function")
     || (signal !== undefined
@@ -322,7 +445,7 @@ export function probeLatticeRuntimeEndpoint({
     try {
       child = spawnProcess(executablePath, [], {
         cwd: path.dirname(executablePath),
-        env: { ...process.env, ...environment },
+        env: closedChildEnvironment(environment),
         shell: false,
         stdio: ["pipe", "pipe", "ignore"],
         windowsHide: true,
@@ -334,24 +457,23 @@ export function probeLatticeRuntimeEndpoint({
     try {
       onOwnedChild?.(child);
     } catch {
-      try { child.kill(); } catch { /* failed spawn cleanup */ }
-      resolve({ ...unreachable });
+      child.once?.("error", () => {});
+      void stopOwnedChild(child, cleanupTimeoutMs).then(() => resolve({ ...unreachable }));
       return;
     }
 
-    let settled = false;
+    let settling = false;
     let output = Buffer.alloc(0);
     let observedOutputBytes = 0;
     let phase = "initialize";
     const settle = (status) => {
-      if (settled) return;
-      settled = true;
+      if (settling) return;
+      settling = true;
       clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      if (child.exitCode === null && child.signalCode === null) {
-        try { child.kill(); } catch { /* already exited */ }
-      }
-      resolve({ ...status });
+      void stopOwnedChild(child, cleanupTimeoutMs).then((exited) => {
+        resolve({ ...(exited ? status : unreachable) });
+      });
     };
     const onAbort = () => settle(unreachable);
     const timer = setTimeout(() => settle(unreachable), timeoutMs);
@@ -365,17 +487,17 @@ export function probeLatticeRuntimeEndpoint({
     child.stdin.on("error", () => settle(unreachable));
     child.on("error", () => settle(unreachable));
     child.on("exit", () => {
-      if (!settled) settle(unreachable);
+      if (!settling) settle(unreachable);
     });
     child.stdout.on("data", (chunk) => {
-      if (settled) return;
+      if (settling) return;
       observedOutputBytes += chunk.length;
       if (observedOutputBytes > maximumProbeOutputBytes) {
         settle(incompatible);
         return;
       }
       output = Buffer.concat([output, chunk]);
-      while (!settled) {
+      while (!settling) {
         const newline = output.indexOf(0x0a);
         if (newline < 0) break;
         const frame = output.subarray(0, newline);
@@ -477,6 +599,7 @@ function normalizeHealth(value) {
 export class LatticeRuntimeHealthMonitor {
   constructor({
     ttlMs = defaultCacheTtlMs,
+    cleanupTimeoutMs = defaultProbeCleanupTimeoutMs,
     probe = probeConfiguredLatticeRuntime,
     now = () => Date.now(),
   } = {}) {
@@ -484,10 +607,14 @@ export class LatticeRuntimeHealthMonitor {
       !Number.isInteger(ttlMs)
       || ttlMs < 0
       || ttlMs > 300_000
+      || !Number.isInteger(cleanupTimeoutMs)
+      || cleanupTimeoutMs < 10
+      || cleanupTimeoutMs > 5_000
       || typeof probe !== "function"
       || typeof now !== "function"
     ) throw new TypeError("LATTICE_RUNTIME_HEALTH_MONITOR_INVALID");
     this.ttlMs = ttlMs;
+    this.cleanupTimeoutMs = cleanupTimeoutMs;
     this.probe = probe;
     this.now = now;
     this.cached = null;
@@ -509,13 +636,13 @@ export class LatticeRuntimeHealthMonitor {
     let finish;
     const exited = new Promise((resolve) => { finish = resolve; });
     const done = () => {
-      if (!this.ownedChildren.has(child)) return;
+      if (childIsRunning(child) || !this.ownedChildren.has(child)) return;
       this.ownedChildren.delete(child);
       finish();
     };
     this.ownedChildren.set(child, exited);
     child.once("exit", done);
-    child.once("error", done);
+    child.once("close", done);
   }
 
   current({ waitForProbe = true } = {}) {
@@ -525,6 +652,9 @@ export class LatticeRuntimeHealthMonitor {
     if (this.closed) return Promise.resolve({ ...stopped });
     if (this.cached && this.now() < this.cached.expiresAt) {
       return Promise.resolve(this.cached.health);
+    }
+    if (!this.pending && this.ownedChildren.size > 0) {
+      return Promise.resolve({ ...unreachable });
     }
     if (!this.pending) {
       const probeController = new AbortController();
@@ -552,10 +682,11 @@ export class LatticeRuntimeHealthMonitor {
   }
 
   async close() {
-    if (this.closed) return;
-    this.closed = true;
-    this.cached = { health: { ...stopped }, expiresAt: Number.POSITIVE_INFINITY };
-    this.probeController?.abort();
+    if (!this.closed) {
+      this.closed = true;
+      this.cached = { health: { ...stopped }, expiresAt: Number.POSITIVE_INFINITY };
+      this.probeController?.abort();
+    }
     if (this.pending) await this.pending;
     const children = [...this.ownedChildren.keys()];
     for (const child of children) {
@@ -569,13 +700,18 @@ export class LatticeRuntimeHealthMonitor {
         await Promise.race([
           Promise.allSettled([...this.ownedChildren.values()]),
           new Promise((resolve) => {
-            timer = setTimeout(resolve, 2_000);
+            timer = setTimeout(resolve, this.cleanupTimeoutMs);
             timer.unref?.();
           }),
         ]);
       } finally {
         clearTimeout(timer);
       }
+    }
+    if (this.ownedChildren.size > 0) {
+      const error = new Error("LATTICE_RUNTIME_PROBE_CLEANUP_TIMEOUT");
+      error.code = "LATTICE_RUNTIME_PROBE_CLEANUP_TIMEOUT";
+      throw error;
     }
   }
 }

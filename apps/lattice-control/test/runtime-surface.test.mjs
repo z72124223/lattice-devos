@@ -305,6 +305,78 @@ test("a cold formal Runtime probe warms in the background without delaying the d
   }
 });
 
+test("an unavailable formal Runtime stays isolated from Control SQLite and conversation", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-runtime-isolation-"));
+  const secretCanary = "runtime-private-canary";
+  const runtimeHealth = new LatticeRuntimeHealthMonitor({
+    probe: async () => ({
+      postgresql: "UNREACHABLE",
+      detail: "LATTICE_RUNTIME_UNREACHABLE",
+      executablePath: `C:\\private\\${secretCanary}.exe`,
+      stderr: secretCanary,
+    }),
+  });
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex: new QuietCodex(),
+    runtimeHealth,
+  });
+  try {
+    const origin = await listen(application);
+    const first = await (await fetch(`${origin}/api/runtime`)).json();
+    assert.equal(first.capabilities.find(({ id }) => id === "postgresql").status, "NO_DATA");
+    await runtimeHealth.current();
+
+    const [runtimeResponse, stateResponse, conversationResponse] = await Promise.all([
+      fetch(`${origin}/api/runtime`),
+      fetch(`${origin}/api/state`),
+      fetch(`${origin}/api/conversation`),
+    ]);
+    assert.equal(runtimeResponse.status, 200);
+    assert.equal(stateResponse.status, 200);
+    assert.equal(conversationResponse.status, 200);
+    const runtime = await runtimeResponse.json();
+    assert.equal(runtime.capabilities.find(({ id }) => id === "control_sqlite").status, "HEALTHY");
+    assert.equal(runtime.capabilities.find(({ id }) => id === "postgresql").status, "UNREACHABLE");
+    assert.doesNotMatch(JSON.stringify(runtime), new RegExp(secretCanary, "u"));
+  } finally {
+    await close(application);
+    await runtimeHealth.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("an unowned server close contains a Runtime child cleanup rejection", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-runtime-close-failure-"));
+  const application = createLatticeServer({
+    databasePath: path.join(directory, "control.db"),
+    codex: new QuietCodex(),
+    runtimeHealth: {
+      current: async () => ({ postgresql: "UNREACHABLE" }),
+      close: async () => {
+        const error = new Error("test Runtime cleanup failure");
+        error.code = "LATTICE_RUNTIME_PROBE_CLEANUP_TIMEOUT";
+        throw error;
+      },
+    },
+  });
+  const previousExitCode = process.exitCode;
+  let unhandled = false;
+  const onUnhandled = () => { unhandled = true; };
+  process.once("unhandledRejection", onUnhandled);
+  try {
+    await listen(application);
+    await close(application);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(unhandled, false);
+    assert.equal(process.exitCode, 1);
+  } finally {
+    process.removeListener("unhandledRejection", onUnhandled);
+    process.exitCode = previousExitCode;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the four-core page renders the runtime capability list without adding a fifth core", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-runtime-page-"));
   const application = createLatticeServer({
