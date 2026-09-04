@@ -3951,11 +3951,35 @@ export class LatticeStore {
     }
   }
 
-  recordPrimaryConversationReply({ threadId, turnId, messageId, text, fence }) {
+  primaryConversationReplyIdentities(threadId, turnId) {
+    const rows = this.database.prepare(`
+      SELECT kind, payload_json FROM work_events
+      WHERE work_item_id = ?
+        AND kind IN ('conversation_assistant_message', 'conversation_reply_alias')
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id ASC
+    `).all(primaryConversationId, threadId, turnId);
+    const replies = new Map();
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json);
+      if (row.kind === "conversation_assistant_message") {
+        replies.set(payload.messageId, { ...payload, aliases: [] });
+      } else {
+        replies.get(payload.canonicalMessageId)?.aliases.push(payload.messageId);
+      }
+    }
+    return [...replies.values()];
+  }
+
+  recordPrimaryConversationReply({ threadId, turnId, messageId, text, fence, replayOf = null }) {
     const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
     const normalizedTurnId = boundedText(turnId, "Codex turn ID", 256);
     const normalizedMessageId = boundedText(messageId, "Codex message ID", 256);
     const normalizedText = boundedConversationReply(text);
+    const canonicalMessageId = replayOf === null
+      ? null
+      : boundedText(replayOf, "Codex canonical message ID", 256);
     this.database.exec("BEGIN IMMEDIATE;");
     try {
       const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
@@ -3971,17 +3995,53 @@ export class LatticeStore {
       }
       const existingRow = this.database.prepare(`
         SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+        WHERE work_item_id = ?
           AND json_extract(payload_json, '$.messageId') = ?
-        ORDER BY id DESC LIMIT 1
-      `).get(primaryConversationId, normalizedMessageId);
-      const existing = existingRow ? JSON.parse(existingRow.payload_json) : null;
+          AND (kind = 'conversation_assistant_message' OR (
+            kind = 'conversation_reply_alias'
+            AND json_extract(payload_json, '$.threadId') = ?
+            AND json_extract(payload_json, '$.turnId') = ?
+          ))
+        ORDER BY (kind = 'conversation_reply_alias') DESC, id DESC LIMIT 1
+      `).get(primaryConversationId, normalizedMessageId, normalizedThreadId, normalizedTurnId);
+      let existing = existingRow ? JSON.parse(existingRow.payload_json) : null;
+      if (existing?.canonicalMessageId) {
+        const canonicalRow = this.database.prepare(`
+          SELECT payload_json FROM work_events
+          WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+            AND json_extract(payload_json, '$.messageId') = ?
+            AND json_extract(payload_json, '$.threadId') = ?
+            AND json_extract(payload_json, '$.turnId') = ?
+          ORDER BY id DESC LIMIT 1
+        `).get(primaryConversationId, existing.canonicalMessageId, normalizedThreadId, normalizedTurnId);
+        existing = canonicalRow ? JSON.parse(canonicalRow.payload_json) : null;
+        if (!existing) throw new Error("Codex reply alias has no canonical message");
+      }
       if (existing) {
         if (
           existing.threadId !== normalizedThreadId
           || existing.turnId !== normalizedTurnId
           || existing.text !== normalizedText
+          || (canonicalMessageId !== null && existing.messageId !== canonicalMessageId)
         ) throw new Error("Codex message identity changed during replay");
+        this.database.exec("COMMIT;");
+        return false;
+      }
+      if (canonicalMessageId !== null) {
+        const canonical = this.primaryConversationReplyIdentities(normalizedThreadId, normalizedTurnId)
+          .find((reply) => reply.messageId === canonicalMessageId);
+        if (!canonical || canonical.text !== normalizedText) {
+          throw new Error("Codex message identity changed during replay");
+        }
+        this.database.prepare(`
+          INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(primaryConversationId, "conversation_reply_alias", JSON.stringify({
+          messageId: normalizedMessageId,
+          canonicalMessageId,
+          threadId: normalizedThreadId,
+          turnId: normalizedTurnId,
+        }), now());
         this.database.exec("COMMIT;");
         return false;
       }

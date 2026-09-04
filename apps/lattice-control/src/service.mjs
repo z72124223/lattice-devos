@@ -2819,7 +2819,7 @@ export class LatticeControlService {
     );
   }
 
-  #persistConversationReply(id, threadId, turnId, entry, fence = null) {
+  #persistConversationReply(id, threadId, turnId, entry, fence = null, replayOf = null) {
     if (
       id !== primaryConversationId
       || entry?.type !== "agentMessage"
@@ -2834,13 +2834,31 @@ export class LatticeControlService {
       messageId: entry.id,
       text: entry.text,
       fence: this.#assertPrimaryConversationFence(fence ?? this.conversationLeaseFence),
+      replayOf,
     });
   }
 
   #persistConversationRepliesFromTurn(id, threadId, turn, fence = null) {
-    if (!Array.isArray(turn?.items)) return;
+    if (id !== primaryConversationId || !Array.isArray(turn?.items)) return;
+    const replies = this.store.primaryConversationReplyIdentities(threadId, turn.id);
+    const identities = new Map(replies.flatMap((reply) =>
+      [reply.messageId, ...reply.aliases].map((messageId) => [messageId, reply.messageId])));
+    // Reserve exact IDs before matching renamed snapshot items. Equal text can
+    // describe multiple distinct final replies, even within the same turn.
+    const used = new Set(turn.items.map((entry) => identities.get(entry?.id)).filter(Boolean));
     for (const entry of turn.items) {
-      this.#persistConversationReply(id, threadId, turn.id, entry, fence);
+      if (entry?.type !== "agentMessage" || entry.phase !== "final_answer"
+        || typeof entry.id !== "string" || typeof entry.text !== "string" || !entry.text.trim()) continue;
+      const canonicalId = identities.get(entry.id) ?? replies.find((reply) =>
+        !used.has(reply.messageId) && reply.text === entry.text.trim())?.messageId ?? null;
+      this.#persistConversationReply(id, threadId, turn.id, entry, fence, canonicalId);
+      if (canonicalId !== null) {
+        used.add(canonicalId);
+        identities.set(entry.id, canonicalId);
+      } else {
+        identities.set(entry.id, entry.id);
+        used.add(entry.id);
+      }
     }
   }
 
@@ -3229,7 +3247,14 @@ export class LatticeControlService {
       return;
     }
     if (message.method === "turn/completed") {
-      this.#persistConversationRepliesFromTurn(item.id, threadId, message.params?.turn, fence);
+      const turn = message.params?.turn;
+      // Live terminal items retain provider IDs; only read/resume snapshots can
+      // rename those IDs and require reply alias reconciliation.
+      if (Array.isArray(turn?.items)) {
+        for (const entry of turn.items) {
+          this.#persistConversationReply(item.id, threadId, turn.id, entry, fence);
+        }
+      }
       this.#applyTerminal(item.id, message, fence);
       return;
     }

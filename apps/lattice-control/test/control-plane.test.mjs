@@ -2117,6 +2117,254 @@ test("the primary conversation keeps one UI identity, persists real replies, and
   }
 });
 
+test("primary reply replay preserves one message when the next send renames its provider ID", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Reply replay", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "reply-replay-first",
+      text: "Reply UI_ONE_OK.",
+    });
+    const reply = {
+      id: "msg-provider-first",
+      type: "agentMessage",
+      phase: "final_answer",
+      text: "UI_ONE_OK",
+    };
+    codex.emit("notification", {
+      method: "item/completed",
+      params: { threadId: first.codex_thread_id, turnId: first.codex_turn_id, item: reply },
+    });
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: {
+        threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: [reply] },
+      },
+    });
+    const before = service.primaryConversation().messages.filter(({ role }) => role === "assistant");
+    assert.equal(before.length, 1);
+    codex.resumeResult = {
+      id: first.codex_thread_id,
+      turns: [{
+        id: first.codex_turn_id,
+        status: "completed",
+        items: [{ ...reply, id: "item-30" }],
+      }],
+    };
+
+    const second = await service.sendPrimaryConversationMessage({
+      projectId: project.id,
+      clientMessageId: "reply-replay-second",
+      text: "Reply UI_TWO_OK.",
+    });
+    assert.deepEqual(
+      second.messages.filter(({ role }) => role === "assistant"),
+      before,
+      "a renamed thread/items replay must retain the original reply identity and timestamp",
+    );
+    assert.equal(store.listEvents("primary")
+      .filter(({ kind }) => kind === "conversation_assistant_message").length, 1);
+    assert.equal(codex.threadStarts.length, 1);
+    assert.equal(codex.turnStarts.length, 2);
+    assert.equal(second.codex_turn_id, "turn-2");
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary reply replay reserves exact IDs, preserves equal-text multiplicity, and survives restart", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-reply-alias-"));
+  const databasePath = path.join(directory, "control.db");
+  let store = new LatticeStore(databasePath);
+  let codex = new FakeCodex();
+  let service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Reply identities", rootPath: directory });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "equal-replies-first", text: "Repeat a reply.",
+    });
+    const reply = { type: "agentMessage", phase: "final_answer", text: "Same reply" };
+    const liveItems = ["msg-a", "msg-b"].map((id) => ({ ...reply, id }));
+    for (const item of liveItems) {
+      codex.emit("notification", {
+        method: "item/completed",
+        params: { threadId: first.codex_thread_id, turnId: first.codex_turn_id, item },
+      });
+    }
+    codex.emit("notification", {
+      method: "turn/completed",
+      params: { threadId: first.codex_thread_id,
+        turn: { id: first.codex_turn_id, status: "completed", items: liveItems } },
+    });
+    const original = service.primaryConversation().messages.filter(({ role }) => role === "assistant");
+    assert.equal(original.length, 2, "distinct live IDs with equal text must not be collapsed");
+    const snapshot = {
+      id: first.codex_thread_id,
+      turns: [{ id: first.codex_turn_id, status: "completed", items: [
+        { ...reply, id: "item-30" },
+        liveItems[0],
+        { ...reply, id: "item-32" },
+        { ...reply, id: "commentary", phase: "commentary" },
+      ] }],
+    };
+    codex.resumeResult = snapshot;
+    const replay = await service.reconnectPrimaryConversation();
+    const replies = replay.messages.filter(({ role }) => role === "assistant");
+    assert.deepEqual(replies.slice(0, 2), original);
+    assert.deepEqual(replies.map(({ id }) => id), ["msg-a", "msg-b", "item-32"]);
+    const alias = store.listEvents("primary").find(({ kind }) => kind === "conversation_reply_alias");
+    assert.equal(alias.payload.messageId, "item-30");
+    assert.equal(alias.payload.canonicalMessageId, "msg-b", "the later exact msg-a reserves its own slot");
+    const eventCount = store.listEvents("primary")
+      .filter(({ kind }) => kind.startsWith("conversation_reply") || kind === "conversation_assistant_message").length;
+
+    service.close();
+    store.close();
+    store = new LatticeStore(databasePath);
+    codex = new FakeCodex();
+    codex.turns = 1;
+    codex.resumeResult = snapshot;
+    service = new LatticeControlService({ store, codex });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const restarted = await service.reconnectPrimaryConversation();
+      assert.deepEqual(restarted.messages.filter(({ role }) => role === "assistant"), replies);
+    }
+    assert.equal(store.listEvents("primary")
+      .filter(({ kind }) => kind.startsWith("conversation_reply") || kind === "conversation_assistant_message").length,
+    eventCount, "replaying a retained alias must append neither a message nor another alias");
+
+    const second = await service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "equal-replies-second", text: "Repeat in a new turn.",
+    });
+    codex.emit("notification", {
+      method: "item/completed",
+      params: { threadId: second.codex_thread_id, turnId: second.codex_turn_id,
+        item: { ...reply, id: "msg-next-turn" } },
+    });
+    assert.equal(service.primaryConversation().messages.filter(({ role }) => role === "assistant").length, 4);
+    assert.equal(service.primaryConversation().messages.at(-1).turn_id, second.codex_turn_id);
+  } finally {
+    service.close();
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("primary reply live terminal retains a distinct equal-text provider ID", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Live terminal replies", rootPath: process.cwd() });
+    const sent = await service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "live-terminal-replies", text: "Repeat a reply.",
+    });
+    const reply = { type: "agentMessage", phase: "final_answer", text: "Same reply" };
+    codex.emit("notification", { method: "item/completed", params: {
+      threadId: sent.codex_thread_id, turnId: sent.codex_turn_id,
+      item: { ...reply, id: "msg-live-first" },
+    } });
+    codex.emit("notification", { method: "turn/completed", params: {
+      threadId: sent.codex_thread_id,
+      turn: { id: sent.codex_turn_id, status: "completed", items: [{ ...reply, id: "msg-live-second" }] },
+    } });
+    assert.deepEqual(service.primaryConversation().messages
+      .filter(({ role }) => role === "assistant").map(({ id }) => id),
+    ["msg-live-first", "msg-live-second"]);
+    assert.equal(store.listEvents("primary").filter(({ kind }) => kind === "conversation_reply_alias").length, 0);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary reply replay IDs are local to their exact thread and turn", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const projects = [process.cwd(), tmpdir()].map((rootPath, index) =>
+      service.createProject({ name: `Reply scope ${index}`, rootPath }));
+    for (const [index, project] of projects.entries()) {
+      const sent = await service.sendPrimaryConversationMessage({
+        projectId: project.id, clientMessageId: `reply-scope-${index}`, text: "Reply in this project.",
+      });
+      const item = { id: `msg-scope-${index}`, type: "agentMessage", phase: "final_answer", text: "Same reply" };
+      codex.emit("notification", { method: "item/completed", params: {
+        threadId: sent.codex_thread_id, turnId: sent.codex_turn_id, item,
+      } });
+      codex.emit("notification", { method: "turn/completed", params: {
+        threadId: sent.codex_thread_id,
+        turn: { id: sent.codex_turn_id, status: "completed", items: [item] },
+      } });
+      codex.resumeResult = { id: sent.codex_thread_id, turns: [{
+        id: sent.codex_turn_id, status: "completed", items: [{ ...item, id: "item-30" }],
+      }] };
+      const replay = await service.reconnectPrimaryConversation();
+      assert.equal(replay.status, "codex_done");
+      assert.deepEqual(replay.messages.filter(({ role }) => role === "assistant").map(({ id }) => id),
+        projects.slice(0, index + 1).map((_, replyIndex) => `msg-scope-${replyIndex}`));
+    }
+    assert.equal(codex.threadStarts.length, 2);
+    assert.equal(store.listEvents("primary").filter(({ kind }) => kind === "conversation_reply_alias").length, 2);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
+test("primary reply aliases retain identity conflicts and writer fencing", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Alias conflicts", rootPath: process.cwd() });
+    const first = await service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "alias-conflict-first", text: "First reply.",
+    });
+    const fence = { ...service.conversationLeaseFence };
+    const input = { threadId: first.codex_thread_id, turnId: first.codex_turn_id,
+      messageId: "msg-original", text: "Original reply", fence };
+    assert.equal(store.recordPrimaryConversationReply(input), true);
+    const alias = { ...input, messageId: "item-30", replayOf: "msg-original" };
+    assert.equal(store.recordPrimaryConversationReply(alias), false);
+    const before = store.listEvents("primary");
+    assert.equal(store.recordPrimaryConversationReply({ ...alias, replayOf: null }), false);
+    assert.throws(() => store.recordPrimaryConversationReply({ ...alias, text: "Changed reply" }),
+      /identity changed during replay/u);
+    assert.throws(() => store.recordPrimaryConversationReply({ ...alias, replayOf: "another-message" }),
+      /identity changed during replay/u);
+    assert.throws(() => store.recordPrimaryConversationReply({ ...alias,
+      messageId: "stale-alias", fence: { ...fence, generation: fence.generation + 1 } }),
+    { code: "CONVERSATION_WRITER_LOST" });
+    assert.deepEqual(store.listEvents("primary"), before, "failed or exact alias replays append nothing");
+
+    codex.emit("notification", { method: "turn/completed", params: {
+      threadId: first.codex_thread_id, turn: { id: first.codex_turn_id, status: "completed", items: [] },
+    } });
+    const second = await service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "alias-conflict-second", text: "Second reply.",
+    });
+    assert.throws(() => store.recordPrimaryConversationReply({ ...input,
+      turnId: second.codex_turn_id, messageId: "item-30", replayOf: "msg-original" }),
+    /identity changed during replay/u);
+    assert.throws(() => store.recordPrimaryConversationReply({ ...input,
+      turnId: second.codex_turn_id }), /identity changed during replay/u);
+    assert.equal(store.recordPrimaryConversationReply({ ...input,
+      turnId: second.codex_turn_id, messageId: "msg-new-turn" }), true);
+    assert.equal(store.recordPrimaryConversationReply({ ...input,
+      turnId: second.codex_turn_id, messageId: "item-30", replayOf: "msg-new-turn" }), false);
+  } finally {
+    service.close();
+    store.close();
+  }
+});
+
 test("the primary conversation records a verifiable thread handoff when the project changes", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
