@@ -28,6 +28,40 @@ function Get-Sha256Hex {
     }
 }
 
+function Resolve-LatticeDesktopPublishNodeApplication {
+    param([object[]]$CommandCandidates)
+
+    foreach ($commandCandidate in $CommandCandidates) {
+        if ($null -eq $commandCandidate) {
+            continue
+        }
+        $commandTypeProperty = $commandCandidate.PSObject.Properties['CommandType']
+        $sourceProperty = $commandCandidate.PSObject.Properties['Source']
+        if ($null -eq $commandTypeProperty -or
+            [string]$commandTypeProperty.Value -cne 'Application' -or
+            $null -eq $sourceProperty -or
+            $sourceProperty.Value -isnot [string]) {
+            continue
+        }
+        $source = [string]$sourceProperty.Value
+        if ([string]::IsNullOrWhiteSpace($source) -or
+            $source.Contains('::') -or
+            -not [IO.Path]::IsPathRooted($source)) {
+            continue
+        }
+        try {
+            $fullPath = [IO.Path]::GetFullPath($source)
+        }
+        catch {
+            continue
+        }
+        if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+            return $fullPath
+        }
+    }
+    throw 'DESKTOP_CANDIDATE_NODE_APPLICATION_UNAVAILABLE'
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $repositoryRoot 'apps\lattice-control-desktop\Lattice.Control.Desktop.csproj'
 $controlSourceRoot = Join-Path $repositoryRoot 'apps\lattice-control'
@@ -46,8 +80,15 @@ foreach ($installerSourcePath in @(
         throw "DESKTOP_INSTALLER_SOURCE_MISSING:$installerSourcePath"
     }
 }
-$nodePath = [IO.Path]::GetFullPath(
-    (Get-Command node.exe -CommandType Application -ErrorAction Stop).Source)
+try {
+    $nodeApplications = @(
+        Get-Command node.exe -CommandType Application -All -ErrorAction Stop)
+}
+catch {
+    throw 'DESKTOP_CANDIDATE_NODE_APPLICATION_UNAVAILABLE'
+}
+$nodePath = Resolve-LatticeDesktopPublishNodeApplication `
+    -CommandCandidates $nodeApplications
 $nodeVersion = ([string](& $nodePath --version)).Trim()
 if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v([0-9]+\.[0-9]+\.[0-9]+)$') {
     throw 'DESKTOP_CANDIDATE_NODE_VERSION_UNAVAILABLE'
