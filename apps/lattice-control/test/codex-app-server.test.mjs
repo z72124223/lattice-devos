@@ -635,6 +635,80 @@ test("uses the official JSONL handshake and model listing without starting a tur
   await codex.close();
 });
 
+test("new Control threads use Astra and the connected host reasoning catalog", async () => {
+  const { codex, messages } = createInitializedConnector((message, child) => {
+    if (message.method === "model/list") {
+      sendServerMessage(child, {
+        id: message.id,
+        result: message.params.cursor ? {
+          data: [{
+            id: "astra-picker-entry",
+            model: "gpt-6-astra",
+            defaultReasoningEffort: "high",
+            supportedReasoningEfforts: [{ reasoningEffort: "high" }, { reasoningEffort: "max" }],
+          }],
+          nextCursor: null,
+        } : { data: [{ model: "gpt-5.6-terra" }], nextCursor: "next-model-page" },
+      });
+    } else if (message.method === "thread/start") {
+      sendServerMessage(child, { id: message.id, result: { thread: { id: "astra-thread" } } });
+    }
+  });
+  try {
+    await codex.startThread({ cwd: "C:\\workspace", config: { model_verbosity: "low" } });
+    await codex.startThread({ cwd: "C:\\workspace", config: { model_reasoning_effort: "max" } });
+    const starts = messages.filter(({ method }) => method === "thread/start");
+    assert.equal(starts[0].params.model, "gpt-6-astra");
+    assert.deepEqual(starts[0].params.config, { model_verbosity: "low", model_reasoning_effort: "high" });
+    assert.equal(starts[1].params.config.model_reasoning_effort, "max");
+  } finally {
+    await codex.close();
+  }
+});
+
+test("Astra absence or unsupported reasoning blocks before creating a thread", async () => {
+  for (const data of [
+    [{ model: "gpt-5.6-terra" }],
+    [{ model: "gpt-6-astra", defaultReasoningEffort: "medium", supportedReasoningEfforts: [{ reasoningEffort: "medium" }] }],
+    [{ model: "gpt-6-astra" }],
+  ]) {
+    const { codex, messages } = createInitializedConnector((message, child) => {
+      if (message.method === "model/list") {
+        sendServerMessage(child, { id: message.id, result: { data, nextCursor: null } });
+      }
+    });
+    try {
+      await assert.rejects(codex.startThread({
+        cwd: "C:\\workspace",
+        config: { model_reasoning_effort: "ultra" },
+      }), { code: data[0].model === "gpt-6-astra" ? "CODEX_REASONING_UNAVAILABLE" : "CODEX_MODEL_UNAVAILABLE" });
+      assert.equal(messages.some(({ method }) => method === "thread/start"), false);
+    } finally {
+      await codex.close();
+    }
+  }
+});
+
+test("Astra capabilities cannot cross an App Server reconnection", async () => {
+  const { codex, messages } = createInitializedConnector();
+  codex.listModels = async () => {
+    codex.connectionGeneration += 1;
+    return { data: [{
+      model: "gpt-6-astra",
+      defaultReasoningEffort: "high",
+      supportedReasoningEfforts: [{ reasoningEffort: "high" }],
+    }] };
+  };
+  try {
+    await assert.rejects(codex.startThread({ cwd: "C:\\workspace" }), {
+      code: "CODEX_APP_SERVER_EFFECT_IDENTITY_CHANGED",
+    });
+    assert.equal(messages.some(({ method }) => method === "thread/start"), false);
+  } finally {
+    await codex.close();
+  }
+});
+
 test("account readiness is sanitized and bound to the exact App Server generation", async () => {
   const { codex, messages } = createInitializedConnector((message, child) => {
     if (message.method === "account/read") {
@@ -741,8 +815,8 @@ test("concurrent starts share one connection and cannot outrun initialized", asy
     },
   });
   const starts = [
-    codex.startThread({ cwd: "C:\\workspace-a" }),
-    codex.startThread({ cwd: "C:\\workspace-b" }),
+    codex.startThread({ cwd: "C:\\workspace-a", model: "gpt-5.6-terra" }),
+    codex.startThread({ cwd: "C:\\workspace-b", model: "gpt-5.6-terra" }),
   ];
 
   try {
@@ -897,7 +971,7 @@ test("accepted starts correlate exact started notifications before or after the 
   });
 
   try {
-    const thread = await codex.startThread({ cwd: "C:\\workspace" });
+    const thread = await codex.startThread({ cwd: "C:\\workspace", model: "gpt-5.6-terra" });
     await codex.waitForThreadStarted(thread.id, { timeoutMs: 200 });
 
     const turn = await codex.startTurn(thread.id, "Run the focused check.", {

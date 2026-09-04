@@ -28,14 +28,14 @@
 
 ## 下一個產品里程碑
 
-1. 維持 Store、Writer、Foreman 與 Runtime 的精確 catalog／ACL 相容性，
-   所有 extension 只允許經驗證的版本化物件。
-2. 讓 Control 的 radar、project catalog 與安裝 observation 在重新啟動後
-   可精確重播，且持續標示 authority 邊界。
-3. 將每次候選交付綁定同一 Git commit、release artifact、installed smoke、
-   PR checks 與產品分支 ancestry。
-4. 對高風險執行保留一次有界 live attempt、獨立 review、明確 rollback 與
-   fail-closed cleanup。
+1. 用 Codex 原生工作視窗、上下文、工具、子代理與排程承擔通用執行能力；
+   LATTICE 集中在耐久任務、授權、證據與有價值的衍生查詢。
+2. 讓專案、工作與 Codex thread 連結在重開後可恢復；完成狀態必須有
+   對應證據，不能由聊天結束或舊安裝觀察推定。
+3. 新 Control 工作與工程使用 `gpt-6-astra`，推理強度依執行介面宣告；
+   不暗換模型，也不重寫既有 thread、持久收據或受管模型相容契約。
+4. 精簡已無引用的成果及過期流程，保留歷史證據、使用者資料與有依賴的
+   分支；驗證依變更風險進行，交付全套關卡只用於實際發布工作。
 
 ## 穩定非目標
 

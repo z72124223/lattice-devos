@@ -448,7 +448,7 @@ test("work survives restart and keeps the same Codex thread through verification
     const started = await firstService.start(created.id);
     assert.equal(started.status, "running");
     assert.equal(started.codex_thread_id, "thread-1");
-    assert.equal(firstCodex.startOptions.model, "gpt-5.6-terra");
+    assert.equal(firstCodex.startOptions.model, "gpt-6-astra");
     assert.equal(firstCodex.startOptions.cwd, path.resolve(directory));
 
     firstCodex.emit("notification", {
@@ -2011,8 +2011,8 @@ test("the primary conversation keeps one UI identity, persists real replies, and
     });
     assert.equal(firstCodex.threadStarts.length, 1);
     assert.equal(firstCodex.turnStarts.length, 1);
-    assert.equal(firstCodex.turnStarts[0].model, "gpt-5.6-luna");
-    assert.equal(firstCodex.threadStarts[0].model, "gpt-5.6-luna");
+    assert.equal(firstCodex.turnStarts[0].model, null);
+    assert.equal(firstCodex.threadStarts[0].model, "gpt-6-astra");
     assert.equal(firstCodex.threadStarts[0].sandbox, "read-only");
     assert.equal(firstCodex.threadStarts[0].approvalPolicy, "never");
     assert.deepEqual(firstCodex.threadStarts[0].effectIdentity, {
@@ -2108,6 +2108,7 @@ test("the primary conversation keeps one UI identity, persists real replies, and
     assert.deepEqual(restartedCodex.resumed, ["thread-1"]);
     assert.equal(restartedCodex.threadStarts.length, 0, "a recoverable thread must be resumed");
     assert.equal(restartedCodex.turnStarts.length, 1);
+    assert.equal(restartedCodex.turnStarts[0].model, null, "resume must inherit the existing Codex model");
   } finally {
     restartedService?.close();
     restartedStore?.close();

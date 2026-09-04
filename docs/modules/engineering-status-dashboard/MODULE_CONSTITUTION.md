@@ -2,8 +2,12 @@
 module_id: engineering-status-dashboard
 name: Engineering Status Dashboard
 constitution_version: 1.2
-status: active
+status: retired
 ---
+
+> 已淘汰：對應程式與 npm 入口已移除，原始碼可由 Git 歷史恢復。
+> 本文件僅保留工程證據，不是目前操作指令。現行規則見 [AGENTS.md](../../../AGENTS.md)。
+
 
 # Engineering Status Dashboard module constitution
 

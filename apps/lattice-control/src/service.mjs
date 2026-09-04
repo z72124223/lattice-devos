@@ -6,6 +6,7 @@ import {
   ProjectInspectionError,
 } from "./project-inspector.mjs";
 import { normalizeProjectDisplayName } from "./store.mjs";
+import { DEFAULT_CODEX_MODEL } from "./codex-app-server.mjs";
 
 const approvalMethods = new Set([
   "item/commandExecution/requestApproval",
@@ -285,8 +286,8 @@ export class LatticeControlService {
   constructor({
     store,
     codex,
-    model = "gpt-5.6-terra",
-    conversationModel = "gpt-5.6-luna",
+    model = DEFAULT_CODEX_MODEL,
+    conversationModel = DEFAULT_CODEX_MODEL,
     threadOptions = {},
     lifecycleTimeoutMs = 30_000,
     approvalTimeoutMs = 300_000,
@@ -1460,7 +1461,6 @@ export class LatticeControlService {
         fence,
         () => this.codex.startTurn(threadId, prompt, {
           effectIdentity,
-          model: this.conversationModel,
         }),
       );
     } catch (error) {

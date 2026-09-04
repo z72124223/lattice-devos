@@ -32,41 +32,6 @@ function relative(file) {
   return path.relative(root, file).replaceAll("\\", "/");
 }
 
-function frontmatterListIncludes(frontmatter, key, expectedValue) {
-  const lines = frontmatter.split(/\r?\n/gu);
-  const start = lines.findIndex((line) => line === `${key}:`);
-  if (start < 0) return false;
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (/^[a-zA-Z0-9_]+:/u.test(line)) break;
-    const item = line.match(/^\s+-\s*(.*?)\s*$/u);
-    if (item?.[1] === expectedValue) return true;
-  }
-  return false;
-}
-
-function frontmatterScalar(frontmatter, key) {
-  const pattern = new RegExp(`^${key}:\\s*(\\S+)\\s*$`, "gmu");
-  const matches = [...frontmatter.matchAll(pattern)];
-  return {
-    valid: matches.length === 1,
-    value: matches.length === 1 ? matches[0][1] : null,
-  };
-}
-
-function frontmatterTextScalar(frontmatter, key) {
-  const pattern = new RegExp(`^${key}:[ \\t]*(.*?)[ \\t]*$`, "gmu");
-  const matches = [...frontmatter.matchAll(pattern)];
-  return {
-    valid: matches.length === 1,
-    value: matches.length === 1 ? matches[0][1] : null,
-  };
-}
-
-function frontmatterHasKey(frontmatter, key) {
-  return new RegExp(`^${key}:`, "mu").test(frontmatter);
-}
-
 const files = await walk(root);
 const errors = [];
 let runtimeContractChecked = false;
@@ -114,7 +79,6 @@ if (!engineeringProtocolFile) {
     "Tests prove only what they execute",
     "## Delivery and authority",
     "Ordinary local completion does not require a ticket",
-    "npm.cmd run delivery:finish",
     "default-branch mutation",
   ];
   for (const required of requiredProtocolContent) {
@@ -270,42 +234,13 @@ for (const file of ticketFiles) {
     errors.push(`${relative(file)}: expected exactly one canonical module_id.`);
     continue;
   }
-  const moduleId = moduleMatches[0][1];
-  const branchMatches = [...frontmatter.matchAll(/^branch:\s*(\S+)\s*$/gmu)];
-  const branch = branchMatches.length === 1 ? branchMatches[0][1] : null;
-  const deliveryRemote = frontmatterScalar(frontmatter, "delivery_remote");
-  const deliveryRepository = frontmatterScalar(frontmatter, "delivery_repository");
-  const deliveryPush = frontmatterScalar(frontmatter, "delivery_push");
-  const deliveryArchive = frontmatterScalar(frontmatter, "delivery_archive");
-  const status = frontmatterScalar(frontmatter, "status");
-  const displayName = frontmatterTextScalar(frontmatter, "display_name_zh_tw");
-  const displayPurpose = frontmatterTextScalar(frontmatter, "display_purpose_zh_tw");
-  const includesBranchGuide = frontmatterListIncludes(
-    frontmatter,
-    "allowed_paths",
-    "tools/engineering-status-dashboard/branch-guide.zh-TW.json",
-  );
   const prior = ticketOwners.get(ticketId);
   if (prior) {
     errors.push(
       `${relative(file)}: duplicate ticket_id '${ticketId}' also owned by ${prior.file}.`,
     );
   } else {
-    ticketOwners.set(ticketId, {
-      file: relative(file),
-      moduleId,
-      branch,
-      includesBranchGuide,
-      deliveryRemote,
-      deliveryRepository,
-      deliveryPush,
-      deliveryArchive,
-      status,
-      displayName,
-      displayPurpose,
-      hasTicketLocalDisplay: frontmatterHasKey(frontmatter, "display_name_zh_tw") ||
-        frontmatterHasKey(frontmatter, "display_purpose_zh_tw"),
-    });
+    ticketOwners.set(ticketId, { file: relative(file) });
   }
 }
 

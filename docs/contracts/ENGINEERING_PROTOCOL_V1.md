@@ -43,10 +43,9 @@ Tests prove only what they execute. Static files do not prove live services.
 Ordinary local completion does not require a ticket, finisher, dashboard
 refresh, root plan update, root handoff update, or separate review document.
 
-`npm.cmd run delivery:finish` is an optional boundary for an explicitly
-authorized non-force feature delivery. It never grants permission for a force
-push, default-branch mutation, merge, deployment, release, public exposure,
-credential change, destructive cleanup, or irreversible action.
+Local commits do not grant permission for a push, default-branch mutation,
+merge, deployment, release, public exposure, credential change, destructive
+cleanup, or irreversible action.
 
 Preserve unrelated work, credential confidentiality, local-only network
 defaults, and explicit user authority for consequential external actions.

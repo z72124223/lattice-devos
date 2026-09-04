@@ -1,3 +1,6 @@
+> 歷史架構與模組索引：保留演進證據；其中 OpenClaw 入口、逐工單治理及舊工具安裝核准流程不再作為現行要求。
+> 目前產品邊界與驗證方式以 [AGENTS.md](../AGENTS.md) 及其工程契約為準。
+
 # LATTICE DevOS Product Charter
 
 ## Identity

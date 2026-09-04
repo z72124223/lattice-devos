@@ -11,6 +11,8 @@ import {
 } from "./wsl2-execution-domain.mjs";
 import { probeWsl2ProviderPostExit } from "./wsl2-provider-subtree-reconcile.mjs";
 
+export const DEFAULT_CODEX_MODEL = "gpt-6-astra";
+
 const ATTEMPT_RECEIPT = /^attempt-receipt:sha256:[a-f0-9]{64}$/u;
 const HEX_64 = /^[a-f0-9]{64}$/u;
 const TOOL_INPUT_KEYS = Object.freeze([
@@ -955,13 +957,41 @@ export class CodexAppServer extends EventEmitter {
     request.timer.unref?.();
   }
 
-  async listModels({ effectIdentity = null } = {}) {
+  async listModels({ effectIdentity = null, cursor = null } = {}) {
     await this.connect();
-    return this.request("model/list", { limit: 100 }, effectIdentity ?? {});
+    return this.request("model/list", { limit: 100, ...(cursor ? { cursor } : {}) }, effectIdentity ?? {});
   }
 
-  async startThread({ cwd, model = "gpt-5.6-terra", effectIdentity = null, ...options }) {
+  async startThread({ cwd, model = DEFAULT_CODEX_MODEL, effectIdentity = null, ...options }) {
     await this.connect();
+    // Retained managed profiles keep their original model contracts. New Control
+    // work uses the current model only when this exact host advertises it.
+    if (model === DEFAULT_CODEX_MODEL) {
+      effectIdentity ??= {
+        expectedGeneration: this.connectionGeneration,
+        expectedSessionId: this.appServerSessionId,
+      };
+      let selected;
+      let cursor = null;
+      for (let page = 0; page < 4; page += 1) {
+        const listed = await this.listModels({ effectIdentity, cursor });
+        selected = listed?.data?.find((entry) => (entry.model ?? entry.id) === model);
+        if (selected || !listed?.nextCursor) break;
+        cursor = listed.nextCursor;
+      }
+      if (!selected) {
+        const error = new Error(`Codex App Server does not advertise ${model}; no model was substituted`);
+        error.code = "CODEX_MODEL_UNAVAILABLE";
+        throw error;
+      }
+      const effort = options.config?.model_reasoning_effort ?? selected.defaultReasoningEffort;
+      if (!selected.supportedReasoningEfforts?.some((entry) => entry.reasoningEffort === effort)) {
+        const error = new Error(`Codex App Server does not advertise the requested reasoning effort for ${model}`);
+        error.code = "CODEX_REASONING_UNAVAILABLE";
+        throw error;
+      }
+      options.config = { ...options.config, model_reasoning_effort: effort };
+    }
     const result = await this.request(
       "thread/start",
       { cwd, model, ...options },
