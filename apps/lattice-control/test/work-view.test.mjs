@@ -1,0 +1,71 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { layoutGraph, layoutTree, workAppearance, exampleSnapshot } from '../public/work-view.mjs';
+
+function assertVisibleWithoutOverlap(layout) {
+  const boxes = [...layout.positions.values()];
+  for (const [index, box] of boxes.entries()) {
+    assert.ok(box.x >= 0 && box.y >= 0);
+    assert.ok(box.x + box.width <= layout.width);
+    assert.ok(box.y + box.height <= layout.height);
+    for (const other of boxes.slice(index + 1)) {
+      assert.ok(box.x + box.width <= other.x || other.x + other.width <= box.x
+        || box.y + box.height <= other.y || other.y + other.height <= box.y, 'work cards must not overlap');
+    }
+  }
+}
+
+test('work graph keeps more than six unrelated and dependent tasks individually visible', () => {
+  for (const count of [0, 1, 7, 11, 100]) {
+    for (const connected of [false, true]) {
+      const nodes = Array.from({ length: count }, (_, i) => ({ id: `task-${i}`, depends_on: connected && i ? [`task-${i - 1}`] : [] }));
+      const layout = layoutGraph(nodes);
+      assert.equal(layout.positions.size, count);
+      assertVisibleWithoutOverlap(layout);
+      for (const node of nodes) for (const dependency of node.depends_on) {
+        assert.ok(layout.positions.get(dependency).x < layout.positions.get(node.id).x);
+      }
+    }
+  }
+});
+
+test('tree uses actual children and preserves other branches when one is collapsed', () => {
+  const full = layoutTree(exampleSnapshot.tree);
+  assert.equal(full.positions.size, exampleSnapshot.tree.nodes.length);
+  assert.equal(full.edges.length, exampleSnapshot.tree.nodes.length - 1);
+  assertVisibleWithoutOverlap(full);
+  const collapsed = layoutTree(exampleSnapshot.tree, new Set(['website']));
+  for (const id of ['login', 'list', 'booking']) assert.equal(collapsed.positions.has(id), false);
+  for (const id of ['website', 'payment', 'acceptance', 'launch']) assert.equal(collapsed.positions.has(id), true);
+  const rootOnly = layoutTree(exampleSnapshot.tree, new Set(['goal']));
+  assert.equal(rootOnly.positions.size, 1);
+});
+
+test('wide and deep real work trees stay within their canvas without overlapping', () => {
+  const nodes = [];
+  for (let branch = 0; branch < 11; branch++) {
+    for (let depth = 0; depth < 7; depth++) {
+      nodes.push({ id: `${branch}-${depth}`, children: depth === 6 ? [] : [`${branch}-${depth + 1}`] });
+    }
+  }
+  const tree = { nodes, roots: Array.from({ length: 11 }, (_, i) => `${i}-0`) };
+  const layout = layoutTree(tree);
+  assert.equal(layout.positions.size, nodes.length + 1);
+  assert.equal(layout.edges.length, nodes.length);
+  assertVisibleWithoutOverlap(layout);
+});
+
+test('completion, approval, blockers and unknown states are not conflated', () => {
+  assert.equal(workAppearance({ status: 'verified' }).label, '已完成');
+  assert.equal(workAppearance({ status: 'draft' }).label, '待開始');
+  assert.equal(workAppearance({ status: 'waiting_approval' }).label, '等你決定');
+  assert.equal(workAppearance({ status: 'running', blocker: { status: 'blocked' } }).label, '遇到阻礙');
+  assert.equal(workAppearance({ status: 'archived' }).label, '已封存');
+  assert.equal(workAppearance({ status: 'codex_done' }).label, '等待驗收');
+  assert.equal(workAppearance({ status: 'unknown' }).label, '狀態待確認');
+});
+
+test('invalid cycles fail visibly instead of hanging the browser', () => {
+  assert.throws(() => layoutGraph([{ id: 'a', depends_on: ['b'] }, { id: 'b', depends_on: ['a'] }]), /循環/u);
+  assert.throws(() => layoutTree({ roots: ['a'], nodes: [{ id: 'a', children: ['b'] }, { id: 'b', children: ['a'] }] }), /循環/u);
+});

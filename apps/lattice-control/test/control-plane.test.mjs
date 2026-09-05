@@ -5690,6 +5690,14 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.match(pageHtml, /assertSharedWorkSnapshot/u);
     assert.match(pageHtml, /renderWorkGraph\(workSnapshot\.graph\)/u);
     assert.match(pageHtml, /renderWorkTree\(workSnapshot\.tree\)/u);
+    for (const [asset, contentType] of [["work-view.mjs", "text/javascript"], ["work-view.css", "text/css"]]) {
+      const assetResponse = await fetch(`${origin}/${asset}`);
+      assert.equal(assetResponse.status, 200);
+      assert.ok(assetResponse.headers.get("content-type").startsWith(contentType));
+      assert.equal(assetResponse.headers.get("cache-control"), "no-store");
+      assert.ok((await assetResponse.text()).length > 100);
+    }
+    assert.equal((await fetch(`${origin}/unknown-asset.mjs`)).status, 404);
     assert.match(pageHtml, /if\(state\.pollPromise\)return state\.pollPromise/u);
     assert.doesNotMatch(pageHtml, /api\("\/api\/work-snapshot"/u);
 

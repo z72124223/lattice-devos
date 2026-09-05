@@ -18,6 +18,11 @@ import { FormalTaskService } from "./formal-task-service.mjs";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicDirectory = path.resolve(sourceDirectory, "..", "public");
+const publicAssets = new Map([
+  ["/", ["index.html", "text/html; charset=utf-8"]],
+  ["/work-view.mjs", ["work-view.mjs", "text/javascript; charset=utf-8"]],
+  ["/work-view.css", ["work-view.css", "text/css; charset=utf-8"]],
+]);
 const maximumDesktopShutdownFrameBytes = 4_096;
 const desktopShutdownSchemaVersion = "lattice.control.desktop-shutdown.v1";
 
@@ -251,10 +256,11 @@ export function createLatticeServer({
       inFlightRequests.add(trackedRequest);
       const url = new URL(request.url, "http://127.0.0.1");
       assertMutationAdmission(request, url);
-      if (request.method === "GET" && url.pathname === "/") {
-        const body = await readFile(path.join(publicDirectory, "index.html"));
+      if (request.method === "GET" && publicAssets.has(url.pathname)) {
+        const [fileName, contentType] = publicAssets.get(url.pathname);
+        const body = await readFile(path.join(publicDirectory, fileName));
         response.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
+          "content-type": contentType,
           "content-length": body.length,
           "cache-control": "no-store",
         });

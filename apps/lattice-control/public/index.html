@@ -241,12 +241,6 @@
     .graph-edge.reverse { stroke:var(--cyan); stroke-dasharray:5 5; }
     .graph-list { position:relative; display:block; width:100%; min-width:860px; height:100%; min-height:520px; }
     .graph-node { position:absolute; display:grid; gap:7px; width:210px; min-height:100px; padding:14px; border:1px solid #40525d; border-radius:9px; background:linear-gradient(145deg,#10202b,#0a1721); box-shadow:0 12px 26px rgba(0,0,0,.28); z-index:2; }
-    .graph-node:nth-of-type(6n+1) { left:7%; top:24%; }
-    .graph-node:nth-of-type(6n+2) { left:36%; top:8%; }
-    .graph-node:nth-of-type(6n+3) { left:38%; top:43%; }
-    .graph-node:nth-of-type(6n+4) { left:69%; top:25%; }
-    .graph-node:nth-of-type(6n+5) { left:66%; top:64%; }
-    .graph-node:nth-of-type(6n+6) { left:12%; top:66%; }
     .graph-node[data-status="running"],.graph-node[data-status="starting"] { border-color:var(--cyan); box-shadow:0 0 0 1px rgba(22,213,243,.24),0 14px 30px rgba(0,0,0,.34); }
     .graph-node[data-status="verified"],.graph-node[data-status="archived"] { border-color:#61d873; }
     .graph-node[data-blocked="true"],.graph-node[data-status="failed"] { border-color:var(--amber); box-shadow:0 0 18px rgba(255,181,27,.09); }
@@ -320,6 +314,7 @@
       .error { position:static; margin:0 10px 6px; }
     }
   </style>
+  <link rel="stylesheet" href="/work-view.css">
 </head>
 <body>
 <main class="app" data-lattice-shell="desktop-cockpit">
@@ -354,11 +349,34 @@
             <div id="transcript" class="transcript" role="log" aria-live="polite" aria-relevant="additions text"><div class="empty">確認主要專案後，就能從這裡送出第一則訊息。</div></div>
           </div>
         </section>
-        <section id="core-work-graph" class="core-panel" role="tabpanel" aria-labelledby="tab-work-graph" data-core-panel="work-graph">
-          <div class="panel graph-panel"><div class="panel-heading"><div><h2>工作圖譜</h2><p>與目前目標有關的工作、依賴與反向影響。</p></div><span id="graph-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div class="graph-viewport"><svg id="graph-edge-layer" aria-hidden="true"><defs><marker id="graph-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"></path></marker></defs></svg><div id="graph-list" class="graph-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div></div>
-        </section>
-        <section id="core-work-tree" class="core-panel" role="tabpanel" aria-labelledby="tab-work-tree" data-core-panel="work-tree" hidden>
-          <div class="panel"><div class="panel-heading"><div><h2>工作樹</h2><p>從目標一路展開子工作與目前施工區段。</p></div><span id="tree-identity" class="identity">尚未載入</span></div><div class="scroll-body"><p id="tree-current" class="tree-current">目前沒有進行中的工作。</p><div id="tree-list" class="tree-list"><div class="empty">尚未有可顯示的工作脈絡。</div></div></div></div>
+        <section id="work-views" class="work-views" aria-label="工作視圖">
+          <header class="work-view-header">
+            <h1><span>LATTICE</span><i aria-hidden="true"></i>工作視圖</h1>
+            <div class="work-view-tools">
+              <button id="work-back" type="button">對話</button>
+              <button id="work-decisions" type="button">決策記憶</button>
+              <div class="work-source-wrap"><span id="work-source-label">我的工作</span><button id="work-source" type="button" aria-pressed="false">我的工作 · 查看設計示例</button></div>
+            </div>
+          </header>
+          <p id="work-empty" role="status">正在讀取工作…</p>
+          <div id="work-diagrams" class="work-diagrams" hidden>
+            <section id="core-work-graph" class="work-view-card" aria-labelledby="graph-heading">
+              <header><h2 id="graph-heading">工作圖譜</h2><p>哪些工作互相影響？</p></header>
+              <div class="work-diagram-scroll" tabindex="0" aria-label="工作圖譜，可捲動查看所有節點"><div class="work-graph-canvas"><svg id="graph-edge-layer" aria-hidden="true"></svg><svg id="graph-list" aria-label="工作與依賴關係"></svg></div></div>
+              <p id="graph-note" class="work-note"></p>
+            </section>
+            <section id="core-work-tree" class="work-view-card" aria-labelledby="tree-heading">
+              <header><h2 id="tree-heading">工作樹</h2><p>一個目標，拆成哪些工作？</p></header>
+              <div class="work-diagram-scroll" tabindex="0" aria-label="工作樹，可捲動查看所有分支"><div id="tree-list"></div></div>
+              <p id="tree-current" class="work-note"></p>
+            </section>
+          </div>
+          <footer class="work-legend" aria-label="工作狀態圖例">
+            <span style="--legend-color:#7ed46b"><i aria-hidden="true"></i>已完成</span>
+            <span style="--legend-color:#39d5e7"><i aria-hidden="true"></i>進行中</span>
+            <span style="--legend-color:#aebdca"><i aria-hidden="true"></i>待開始</span>
+            <span style="--legend-color:#ffc43d"><i aria-hidden="true"></i>等你決定</span>
+          </footer>
         </section>
         <section id="core-decisions" class="core-panel" role="tabpanel" aria-labelledby="tab-decisions" data-core-panel="decisions" hidden>
           <div class="panel"><div class="panel-heading"><div><h2>決策記憶</h2><p>只保存明確決策、來源與取代關係。</p></div><span id="decision-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div id="decision-list" class="decision-list"><div class="empty">目前沒有已確認的決策。</div></div></div></div>
@@ -386,7 +404,9 @@
 <dialog id="new-work-dialog" aria-labelledby="new-work-title"><div class="dialog-head"><h2 id="new-work-title">開始新工作</h2><button class="dialog-close" type="button" data-close-dialog="new-work-dialog" aria-label="關閉">×</button></div><div class="dialog-body"><p>選擇專案，再用自己的話描述想完成的成果。</p><div id="new-work-projects" class="project-choice-list"></div><form id="formal-work-form" hidden><label for="formal-objective">你想完成什麼？</label><textarea id="formal-objective" maxlength="512" required rows="5" style="width:100%;margin:12px 0" placeholder="例如：做一個能新增、完成和保存待辦事項的小工具。"></textarea><button type="submit" class="primary-button">建立並開始</button></form><p id="new-work-status" class="new-work-status" aria-live="polite"></p></div></dialog>
 <dialog id="work-detail-dialog" aria-labelledby="work-detail-title"><div class="dialog-head"><h2 id="work-detail-title">工作詳情</h2><button class="dialog-close" type="button" data-close-dialog="work-detail-dialog" aria-label="關閉">×</button></div><div id="work-detail-body" class="dialog-body"></div></dialog>
 <dialog id="decision-detail-dialog" aria-labelledby="decision-detail-title"><div class="dialog-head"><h2 id="decision-detail-title">決策歷史</h2><button class="dialog-close" type="button" data-close-dialog="decision-detail-dialog" aria-label="關閉">×</button></div><div id="decision-detail-body" class="dialog-body"></div></dialog>
+<dialog id="work-example-detail" aria-labelledby="work-example-title"><div class="dialog-head"><h2 id="work-example-title">設計示例</h2><button class="dialog-close" type="button" data-close-dialog="work-example-detail" aria-label="關閉">×</button></div><div class="dialog-body"><p></p></div></dialog>
 <script type="module">
+  import { createWorkView } from '/work-view.mjs';
   const pendingKey = "lattice.control.pending-message.v1";
   const textSizeKey = "lattice.control.text-size.v1";
   const textSizes = new Set(["standard","comfortable","large"]);
@@ -404,14 +424,12 @@
     binding:document.querySelector("#conversation-binding"), transcript:document.querySelector("#transcript"),
     form:document.querySelector("#conversation-form"), message:document.querySelector("#message"),
     send:document.querySelector("#send"), interrupt:document.querySelector("#interrupt"),
-    reconnect:document.querySelector("#reconnect"), graphIdentity:document.querySelector("#graph-identity"),
+    reconnect:document.querySelector("#reconnect"),
     reopen:document.querySelector("#reopen"), pendingSend:document.querySelector("#pending-send"),
-    graphList:document.querySelector("#graph-list"), treeIdentity:document.querySelector("#tree-identity"),
-    treeCurrent:document.querySelector("#tree-current"), treeList:document.querySelector("#tree-list"),
     decisionIdentity:document.querySelector("#decision-identity"), decisionList:document.querySelector("#decision-list"),
     workDialog:document.querySelector("#work-detail-dialog"), workDetail:document.querySelector("#work-detail-body"),
     decisionDialog:document.querySelector("#decision-detail-dialog"), decisionDetail:document.querySelector("#decision-detail-body"),
-    edgeLayer:document.querySelector("#graph-edge-layer"), inspectorTitle:document.querySelector("#inspector-title"),
+    inspectorTitle:document.querySelector("#inspector-title"),
     inspectorStatus:document.querySelector("#inspector-status"), inspectorProblem:document.querySelector("#inspector-problem"),
     inspectorDependencies:document.querySelector("#inspector-dependencies"), inspectorReverse:document.querySelector("#inspector-reverse"),
     inspectorOpen:document.querySelector("#inspector-open-detail"), newWork:document.querySelector("#new-work"), recentList:document.querySelector("#recent-work-list"),
@@ -419,6 +437,7 @@
     runtimeCapabilities:document.querySelector("#runtime-capabilities"), error:document.querySelector("#error"),
     textSize:document.querySelector("#text-size"),
   };
+  const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore});
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
   function showError(error,source="action") { nodes.error.textContent=error.message; nodes.error.dataset.source=source; }
   async function api(path,options={}) {
@@ -452,6 +471,7 @@
   }
   function activateCore(core){
     state.activeCore=core;
+    if(core==="work-graph"||core==="work-tree")workView.show();else workView.hide();
     document.body.dataset.activeCore=core;
     for(const tab of document.querySelectorAll("[data-core-target]")){const active=tab.dataset.coreTarget===core;tab.classList.toggle("is-active",active);tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;}
     for(const panel of document.querySelectorAll("[data-core-panel]"))panel.hidden=panel.dataset.corePanel!==core;
@@ -530,13 +550,6 @@
     nodes.inspectorOpen.disabled=false;
     nodes.inspectorOpen.dataset.workItemId=work.id;
   }
-  function renderGraphEdges(graph){
-    for(const edge of nodes.edgeLayer.querySelectorAll(".graph-edge"))edge.remove();
-    const graphBounds=nodes.graphList.getBoundingClientRect(),byId=new Map(graph.nodes.map((work)=>[work.id,work]));
-    nodes.edgeLayer.setAttribute("viewBox","0 0 "+Math.max(nodes.graphList.scrollWidth,860)+" "+Math.max(nodes.graphList.scrollHeight,520));
-    const point=(id,side)=>{const node=nodes.graphList.querySelector('[data-node-id="'+CSS.escape(id)+'"]');if(!node)return null;const bounds=node.getBoundingClientRect();return {x:side==="out"?bounds.right-graphBounds.left:bounds.left-graphBounds.left,y:bounds.top-graphBounds.top+bounds.height/2};};
-    for(const work of graph.nodes){for(const dependencyId of work.depends_on){if(!byId.has(dependencyId))continue;const start=point(dependencyId,"out"),end=point(work.id,"in");if(!start||!end)continue;const bend=Math.max(42,Math.abs(end.x-start.x)*.42),path=document.createElementNS("http://www.w3.org/2000/svg","path");path.setAttribute("class","graph-edge");path.setAttribute("d","M "+start.x+" "+start.y+" C "+(start.x+bend)+" "+start.y+", "+(end.x-bend)+" "+end.y+", "+end.x+" "+end.y);path.setAttribute("marker-end","url(#graph-arrow)");nodes.edgeLayer.append(path);}}
-  }
   function renderRecentWork(graph){
     if(!graph.nodes.length){nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));return;}
     nodes.recentList.replaceChildren(...graph.nodes.slice(0,3).map((work)=>{
@@ -545,39 +558,8 @@
       button.append(dot,document.createTextNode(work.title));button.addEventListener("click",()=>{activateCore("work-graph");selectWork(work);});return button;
     }));
   }
-  function renderWorkGraph(graph){
-    nodes.graphIdentity.textContent="rev "+graph.revision+" · "+graph.digest;
-    renderRecentWork(graph);
-    if(!graph.nodes.length){nodes.graphList.replaceChildren(element("div","這個專案目前沒有工作節點。","empty"));return;}
-    nodes.graphList.replaceChildren(...graph.nodes.map((work)=>{
-      const button=element("button",undefined,"graph-node");button.type="button";button.dataset.nodeId=work.id;button.dataset.status=work.status;button.dataset.blocked=String(work.blocker.status==="blocked");
-      const head=element("div",undefined,"node-head");head.append(element("span",work.title,"node-title"),element("span",statusLabels.get(work.status)||work.status,"badge"));
-      const relations=element("div",undefined,"relations"),dependency=element("div"),reverse=element("div");
-      dependency.append(element("strong","依賴："),document.createTextNode(relationText(work.depends_on)));
-      reverse.append(element("strong","反向依賴："),document.createTextNode(relationText(work.reverse_dependents)));
-      relations.append(dependency,reverse);button.append(head,relations,element("div",blockerText(work.blocker),"blocker"));
-      button.addEventListener("click",()=>selectWork(work));return button;
-    }));
-    const selected=graph.nodes.find((work)=>work.id===state.selectedWorkId)||graph.nodes.find((work)=>work.blocker.status==="blocked")||graph.nodes.find((work)=>activeWorkStatuses.has(work.status))||graph.nodes[0];
-    selectWork(selected);requestAnimationFrame(()=>renderGraphEdges(graph));
-  }
-  function renderWorkTree(tree){
-    nodes.treeIdentity.textContent="rev "+tree.revision+" · "+tree.digest;
-    const byId=new Map(tree.nodes.map((work)=>[work.id,work])),current=tree.nodes.find((work)=>activeWorkStatuses.has(work.status));
-    nodes.treeCurrent.textContent=current?("目前正在做："+current.title+" · "+(current.progress||statusLabels.get(current.status)||current.status)):"目前沒有進行中的工作。";
-    if(!tree.nodes.length){nodes.treeList.replaceChildren(element("div","這個專案目前沒有工作節點。","empty"));return;}
-    const branch=(ids,depth=0)=>{
-      const list=element("ul",undefined,"tree-level");
-      for(const id of ids){const work=byId.get(id);if(!work)continue;const item=element("li"),button=element("button",undefined,"tree-node");
-        button.type="button";button.dataset.nodeId=work.id;button.dataset.status=work.status;button.dataset.blocked=String(work.blocker.status==="blocked");
-        button.append(element("span",depth===0?"◆":"└","tree-branch"));const copy=element("span",undefined,"tree-copy");
-        copy.append(element("span",work.title,"node-title"),element("small",work.progress||blockerText(work.blocker)));
-        button.append(copy,element("span",statusLabels.get(work.status)||work.status,"badge"));button.addEventListener("click",()=>{selectWork(state.surface.work_snapshot.graph.nodes.find((candidate)=>candidate.id===work.id));if(matchMedia("(max-width:980px)").matches)void openWorkDetail(work.id);});item.append(button);
-        if(work.children.length)item.append(branch(work.children,depth+1));list.append(item);
-      }return list;
-    };
-    nodes.treeList.replaceChildren(branch(tree.roots));
-  }
+  function renderWorkGraph(graph){renderRecentWork(graph);}
+  function renderWorkTree(tree){workView.update(state.surface.work_snapshot,state.surface.context);}
   function displayDate(value){const date=new Date(value);return Number.isFinite(date.getTime())?new Intl.DateTimeFormat("zh-TW",{dateStyle:"medium",timeStyle:"short"}).format(date):value;}
   function renderDecisions(packet){
     nodes.decisionIdentity.textContent="rev "+packet.revision+" · "+packet.digest;
@@ -591,8 +573,9 @@
     })].filter(Boolean));
   }
   function renderEmptyCores(){
-    nodes.graphIdentity.textContent=nodes.treeIdentity.textContent=nodes.decisionIdentity.textContent="not ready";nodes.treeCurrent.textContent="目前無法確認工作脈絡。";
-    nodes.graphList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.treeList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.decisionList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));
+    nodes.decisionIdentity.textContent="not ready";
+    workView.update(null,state.surface.context);
+    nodes.decisionList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));
   }
   function renderSurface(){
     renderContext();renderConversation();const workSnapshot=state.surface.work_snapshot;
@@ -638,7 +621,7 @@
     const textSize=textSizes.has(value)?value:"comfortable";
     document.documentElement.dataset.textSize=textSize;nodes.textSize.value=textSize;
     if(persist)try{localStorage.setItem(textSizeKey,textSize);}catch{}
-    requestAnimationFrame(()=>{resizeMessageInput();const graph=state.surface?.work_snapshot?.graph;if(graph)renderGraphEdges(graph);});
+    requestAnimationFrame(resizeMessageInput);
   }
   async function resumePending(){const pending=readPending();if(!pending||state.surface?.conversation?.can_reopen)return;if(pending.projectId!==currentProjectId()){showError(new Error("未自動送出另一個工作脈絡的待續訊息。"));renderConversation();return;}try{await deliver(pending);}catch(error){showError(error);await poll();}}
   async function conversationAction(path,body={}){nodes.error.textContent="";try{const conversation=await api(path,{method:"POST",body:JSON.stringify(body)});state.surface.conversation=conversation;await poll();}catch(error){showError(error);await poll();}}
@@ -787,7 +770,7 @@
       await api("/api/conversation",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});await poll();nodes.newWorkDialog.close();await openFormalDetail(result.id);
     }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}finally{button.disabled=false;}
   });
-  addEventListener("resize",()=>{const graph=state.surface?.work_snapshot?.graph;if(graph)requestAnimationFrame(()=>renderGraphEdges(graph));});
+
   applyTextSize(document.documentElement.dataset.textSize,{persist:false});resizeMessageInput();activateCore("work-graph");await poll();setInterval(()=>void poll(),2_000);
 </script>
 </body>
