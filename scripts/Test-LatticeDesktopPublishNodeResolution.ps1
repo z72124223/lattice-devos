@@ -63,6 +63,8 @@ try {
             throw 'DESKTOP_PUBLISH_TEST_BACKGROUND_FILE_CONTENT_MISMATCH'
         }
     }
+    $realNodePath = @(Get-Command node.exe -CommandType Application -All -ErrorAction Stop)[0].Source
+    Copy-Item -LiteralPath $realNodePath -Destination (Join-Path $runtimeRoot 'node.exe')
     $missingDestination = Join-Path $temporaryRoot 'missing-source-runtime'
     try {
         Copy-LatticeControlBackgroundScripts -RepositoryRoot $temporaryRoot -ControlRuntimeDirectory $missingDestination
@@ -95,6 +97,37 @@ try {
         throw 'DESKTOP_PUBLISH_NODE_TEST_SELECTION_NOT_DETERMINISTIC'
     }
 
+    $candidateAst = [Management.Automation.Language.Parser]::ParseFile(
+        (Join-Path $PSScriptRoot 'Test-LatticeDesktopCandidate.ps1'), [ref]$tokens, [ref]$parseErrors)
+    $nodeAssignment = @($candidateAst.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -ceq '$nodePath'
+    }, $true))
+    if ($parseErrors.Count -ne 0 -or $nodeAssignment.Count -ne 1) {
+        throw 'DESKTOP_CANDIDATE_NODE_TEST_ASSIGNMENT_MISSING'
+    }
+    $candidateDirectoryFull = $temporaryRoot
+    $controlRuntimeExecutable = 'control-runtime/node.exe'
+    Invoke-Expression $nodeAssignment[0].Extent.Text
+    if ($nodePath -isnot [string] -or $nodePath -cne (Join-Path $runtimeRoot 'node.exe')) {
+        throw 'DESKTOP_CANDIDATE_NODE_TEST_PACKAGED_NODE_NOT_SELECTED'
+    }
+    $nodeStart = [Diagnostics.ProcessStartInfo]::new()
+    $nodeStart.FileName = $nodePath
+    $nodeStart.Arguments = '--version'
+    $nodeStart.UseShellExecute = $false
+    $nodeStart.CreateNoWindow = $true
+    $nodeStart.RedirectStandardOutput = $true
+    $nodeProcess = [Diagnostics.Process]::Start($nodeStart)
+    try {
+        $nodeVersion = $nodeProcess.StandardOutput.ReadToEnd()
+        $nodeProcess.WaitForExit()
+        if ($nodeProcess.ExitCode -ne 0 -or $nodeVersion.Trim() -cnotmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+            throw 'DESKTOP_CANDIDATE_NODE_TEST_PACKAGED_NODE_LAUNCH_FAILED'
+        }
+    } finally { $nodeProcess.Dispose() }
+
     $invalid = @(
         [pscustomobject]@{ CommandType = 'Application'; Source = $nodePaths },
         [pscustomobject]@{ CommandType = 'Application'; Source = 'Microsoft.PowerShell.Core\FileSystem::' + $nodePaths[0] },
@@ -117,6 +150,7 @@ try {
     }
     Write-Output 'LATTICE_DESKTOP_PUBLISH_NODE_RESOLUTION_TEST_PASS'
     Write-Output 'LATTICE_DESKTOP_PUBLISH_SOURCE_STATE_AND_BACKGROUND_PAYLOAD_TEST_PASS'
+    Write-Output 'LATTICE_DESKTOP_CANDIDATE_PACKAGED_NODE_TEST_PASS'
 }
 finally {
     $env:PATH = $originalPath
