@@ -237,7 +237,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
         } else {
           const x = start.x + start.width, y = start.y + start.height / 2, endX = end.x - 6, endY = end.y + end.height / 2;
           const bend = Math.max(42, (endX - x) * .55);
-          path = `M ${x} ${y} C ${x + bend} ${y} ${endX} ${y} ${endX} ${endY}`;
+          path = `M ${x} ${y} C ${x + bend} ${y} ${endX - bend} ${endY} ${endX} ${endY}`;
         }
         graphLayer.append(svg('path', { class: 'work-dependency', d: path, stroke: color, 'marker-end': `url(#${markerId})`, 'data-from': id, 'data-to': work.id }));
       }
