@@ -7,6 +7,7 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 import { FormalTaskService } from '../src/formal-task-service.mjs';
+import { recoveryPrompt, openCircuitSummary } from '../src/execution-recovery.mjs';
 const projectId = 'memory-project';
 const taskRef = 'a'.repeat(64);
 const workspace = path.resolve('formal-test-memory-workspace');
@@ -101,6 +102,12 @@ class MemoryCodex extends EventEmitter {
   deferServerRequest(id) { this.calls.push({ method: 'deferServerRequest', id }); }
   rejectServerRequest(id) { this.calls.push({ method: 'rejectServerRequest', id }); }
   respond(id, response) { this.calls.push({ method: 'respond', id, response: clone(response) }); }
+  async request(method, params) { this.calls.push({ method, ...clone(params) }); return {}; }
+  async interruptTurn(id, turnId) {
+    this.calls.push({ method: 'interruptTurn', id, turnId });
+    const turn = this.threads.get(id).turns.find((row) => row.id === turnId);
+    turn.status = 'interrupted'; return clone(turn);
+  }
   async close() {}
 }
 function setup(t, claims, threads) {
@@ -109,6 +116,136 @@ function setup(t, claims, threads) {
   t.after(() => service.close());
   return { store, codex, service };
 }
+
+function recoveryFixture(t) {
+  const executor = claim('EXECUTION', { turn_id: 'recovery-turn', input_id: 'recovery-input',
+    last_sequence: 3, dispatch_started: true, dispatch_sequence: 2, turn_status: 'TURN_BOUND' });
+  const fixture = setup(t, [executor], [{ id: executor.thread_id, turns: [nativeTurn(executor, executor.turn_id)] }]);
+  const owner = { projectId, taskRef, claimId: executor.claim_id };
+  fixture.service.owners.set(executor.thread_id, owner);
+  const deny = async (id, service = fixture.service) => {
+    const item = { type: 'commandExecution', id, status: 'failed', aggregatedOutput: 'CreateProcess rejected: blocked by policy' };
+    const turn = fixture.codex.threads.get(executor.thread_id).turns[0];
+    if (!turn.items.some((row) => row.id === id)) turn.items.push(item);
+    await service.redirectDeniedTurn(owner, { turnId: executor.turn_id, item });
+  };
+  return { ...fixture, executor, owner, deny };
+}
+
+test('first policy denial redirects the same native turn to safer alternatives exactly once', async (t) => {
+  const { codex, store, deny } = recoveryFixture(t);
+  await deny('denial-one'); await deny('denial-one');
+  const redirects = codex.calls.filter((row) => row.method === 'turn/steer');
+  assert.equal(redirects.length, 1);
+  assert.equal(redirects[0].expectedTurnId, 'recovery-turn');
+  assert.equal(redirects[0].input[0].text, recoveryPrompt);
+  assert.equal(codex.calls.some((row) => ['interruptTurn', 'startTurn', 'startThread'].includes(row.method)), false);
+  assert.equal(store.state.product.observations.length, 1);
+  assert.equal(store.state.completion_verified, false);
+});
+
+test('a second policy denial interrupts and cannot automatically dispatch queued input or verify', async (t) => {
+  const { service, store, codex, deny } = recoveryFixture(t);
+  await deny('denial-one'); await deny('denial-two'); await deny('denial-two');
+  store.state.claims[0].pending_inputs.push({ input_id: 'queued', summary: 'retry' });
+  service.beginVerification = async () => assert.fail('open circuit must not verify');
+  await service.reconcile(projectId, taskRef, { advance: true, resumePrepared: true });
+  assert.equal(codex.calls.filter((row) => row.method === 'interruptTurn').length, 1);
+  assert.equal(codex.calls.some((row) => row.method === 'startTurn'), false);
+  assert.equal(store.state.claims[0].turn_status, 'INTERRUPTED');
+  assert.equal(store.state.product.observations.at(-1).summary, openCircuitSummary);
+});
+
+test('native denial history reconstructs the open circuit after restart despite a completed final reply', async (t) => {
+  const { service, store, codex, executor } = recoveryFixture(t);
+  const turn = codex.threads.get(executor.thread_id).turns[0];
+  turn.status = 'completed';
+  turn.items.push(...['one', 'two'].map((id) => ({ id, type: 'commandExecution', status: 'declined' })));
+  service.beginVerification = async () => assert.fail('denied work must not be promoted to completion');
+  await service.reconcile(projectId, taskRef, { advance: true });
+  await service.reconcile(projectId, taskRef, { advance: true });
+  assert.equal(store.state.claims[0].turn_status, 'TURN_COMPLETED');
+  assert.equal(store.state.completion_verified, false);
+  assert.equal(store.state.product.observations.length, 1);
+  assert.equal(codex.calls.some((row) => row.method === 'startTurn'), false);
+});
+
+test('a lost redirect response is never replayed, including after the progress preview is truncated', async (t) => {
+  const { store, codex, deny } = recoveryFixture(t);
+  codex.request = async () => { throw new Error('response lost'); };
+  await assert.rejects(deny('denial-one'), /response lost/);
+  // Runtime retains the idempotency record even when the bounded snapshot
+  // no longer includes this progress observation.
+  store.state.product.observations = [];
+  store.state.claims[0].last_sequence += 10;
+  const restarted = new FormalTaskService({ store, codex });
+  t.after(() => restarted.close());
+  let repeated = 0; codex.request = async () => { repeated += 1; };
+  await deny('denial-one', restarted);
+  assert.equal(repeated, 0);
+});
+
+test('a stale denial notification cannot redirect another turn', async (t) => {
+  const { service, owner, codex, store } = recoveryFixture(t);
+  await service.redirectDeniedTurn(owner, { turnId: 'older-turn', item: { id: 'old', type: 'commandExecution', status: 'declined' } });
+  assert.equal(codex.calls.length, 0); assert.equal(store.calls.length, 0);
+});
+
+test('one denied action followed by a successful alternative still reaches independent verification', async (t) => {
+  const { service, codex, executor, deny } = recoveryFixture(t);
+  await deny('denial-one');
+  codex.threads.get(executor.thread_id).turns[0].status = 'completed';
+  let verified = 0; service.beginVerification = async () => { verified += 1; };
+  await service.reconcile(projectId, taskRef, { advance: true });
+  assert.equal(verified, 1);
+});
+
+test('the native notification route redirects failed tool output while retaining exact task ownership', async (t) => {
+  const { service, codex, store, executor } = recoveryFixture(t);
+  codex.emit('notification', { method: 'item/completed', params: {
+    threadId: executor.thread_id, turnId: executor.turn_id,
+    item: { id: 'native-error', type: 'mcpToolCall', status: 'failed', error: { message: 'blocked by policy' } },
+  } });
+  await Promise.all([...service.operations.values()]);
+  assert.equal(codex.calls.filter((row) => row.method === 'turn/steer').length, 1);
+  assert.equal(store.state.product.observations[0].claim_id, executor.claim_id);
+});
+
+test('durable observation failure prevents an unrecorded redirect or automatic retry', async (t) => {
+  const { store, codex, deny } = recoveryFixture(t);
+  store.update = async () => { throw new Error('database unavailable'); };
+  await assert.rejects(deny('denial-one'), /database unavailable/);
+  await deny('denial-one');
+  assert.equal(codex.calls.some((row) => row.method === 'turn/steer'), false);
+});
+
+test('a denied turn whose binding response was lost is reconciled before the circuit is recorded', async (t) => {
+  const executor = claim('EXECUTION', { input_id: 'lost-binding', last_sequence: 2, dispatch_started: true,
+    dispatch_sequence: 2, turn_status: 'DISPATCH_STARTED' });
+  const turn = nativeTurn(executor, 'lost-native-turn', 'completed');
+  turn.items.push(...['one', 'two'].map((id) => ({ id, type: 'commandExecution', status: 'declined' })));
+  const { store, service, codex } = setup(t, [executor], [{ id: executor.thread_id, turns: [turn] }]);
+  await service.reconcile(projectId, taskRef, { advance: true });
+  assert.equal(store.state.claims[0].turn_id, turn.id);
+  assert.equal(store.state.product.observations.at(-1).summary, openCircuitSummary);
+  assert.equal(codex.calls.some((row) => row.method === 'startTurn'), false);
+});
+
+test('an explicitly revised executor result can replace a verifier from an older blocked generation', async (t) => {
+  const executor = claim('EXECUTION', { turn_id: 'revised-result', input_id: 'new-plan', last_sequence: 8,
+    dispatch_started: true, dispatch_sequence: 6, turn_status: 'TURN_COMPLETED' });
+  const verifier = claim('VERIFICATION', { turn_id: 'old-verification', input_id: 'old-input', last_sequence: 5,
+    dispatch_started: true, dispatch_sequence: 2, execution_sequence: 2, turn_status: 'INTERRUPTED' });
+  const old = nativeTurn(verifier, verifier.turn_id, 'interrupted');
+  old.items.push(...['one', 'two'].map((id) => ({ id, type: 'commandExecution', status: 'declined' })));
+  const { service } = setup(t, [executor, verifier], [
+    { id: executor.thread_id, turns: [nativeTurn(executor, executor.turn_id, 'completed')] },
+    { id: verifier.thread_id, turns: [old] },
+  ]);
+  let replacements = 0; service.beginVerification = async () => { replacements += 1; };
+  await service.reconcile(projectId, taskRef, { advance: true });
+  assert.equal(replacements, 1);
+});
 
 test('saved bound empty thread: explicit start resumes the original and dispatches once', async (t) => {
   const executor = claim();

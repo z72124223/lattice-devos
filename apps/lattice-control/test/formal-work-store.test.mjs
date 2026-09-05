@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs";
+import { openCircuitSummary } from "../src/execution-recovery.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
 function page() {
@@ -10,6 +11,18 @@ function page() {
       ledger: { project_id: "project-a", status: "SUBMITTED", result_digest: null, ledger_head_digest: "2".repeat(64) } })),
     product: { metadata: [{ task_ref: taskB, dependency_refs: [taskA], priority: 2 }], claims: [], observations: [], decisions: [] } };
 }
+
+test("a completed native reply with an open circuit stays visibly failed and does not satisfy dependencies", () => {
+  const input = page();
+  input.product.claims.push({ claim_id: "claim-a", task_ref: taskA, phase: "EXECUTION", turn_status: "TURN_COMPLETED" });
+  input.product.observations.push({ claim_id: "claim-a", kind: "TURN_COMPLETED", summary: openCircuitSummary,
+    observed_at: "2026-09-06T00:00:00Z" });
+  const { rows, snapshot } = projectFormalWork([input]);
+  assert.equal(rows[0].status, "failed");
+  assert.equal(rows[0].progress, openCircuitSummary);
+  assert.equal(rows[0].completion_verified, false);
+  assert.equal(snapshot.graph.nodes[1].blocker.status, "blocked");
+});
 
 test("archive and model completion cannot satisfy a formal dependency", () => {
   const input = page();

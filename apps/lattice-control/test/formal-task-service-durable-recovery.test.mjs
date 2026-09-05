@@ -8,6 +8,7 @@ import path from 'node:path';
 
 
 import { FormalTaskService } from "../src/formal-task-service.mjs";
+import { recoveryPrompt } from "../src/execution-recovery.mjs";
 const projectId = 'memory-project';
 const taskRef = 'a'.repeat(64);
 const workspace = path.resolve('formal-test-memory-workspace');
@@ -198,7 +199,7 @@ test('a saved but undispatched queued input resumes its original identity once a
   await service.action(projectId, taskRef, 'reconcile');
   const first = codex.calls.filter((row) => row.method === 'startTurn');
   assert.equal(first.length, 1); assert.equal(first[0].id, executor.thread_id);
-  assert.equal(first[0].text, nativeMarker(executor, pending.input_id) + '\n' + pending.summary);
+  assert.equal(first[0].text, nativeMarker(executor, pending.input_id) + '\n' + pending.summary + '\n\n' + recoveryPrompt);
   assert.deepEqual(store.calls.map((row) => row.kind), ['DISPATCH_STARTED', 'TURN_BOUND']);
   assert.deepEqual(store.state.claims[0].pending_inputs, []);
   await service.close();

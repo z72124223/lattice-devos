@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { projectControlWorkSnapshot } from "./store.mjs";
 import { LatticeRuntimeClient } from "./lattice-runtime-client.mjs";
 import { runtimeHealthFromValue } from "./lattice-runtime-health.mjs";
+import { openCircuitSummary } from "./execution-recovery.mjs";
 
 const source = Object.freeze({ kind: "POSTGRESQL_CONTROL_PRODUCT", authority: "POSTGRESQL_TASK_LEDGER" });
 const priorities = ["urgent", "high", "normal", "low"];
@@ -30,6 +31,7 @@ function taskProjection(task, facts) {
     ? verifier.verification_outcome : null;
   let status = "draft";
   if (completed) status = "verified";
+  else if (latest?.summary === openCircuitSummary) status = "failed";
   else if (claims.some((claim) => pendingCount(claim) > 0)) status = "waiting_approval";
   else if (activeClaim) status = activeClaim.turn_id ? "running" : "starting";
   else if (failedVerification) status = "failed";

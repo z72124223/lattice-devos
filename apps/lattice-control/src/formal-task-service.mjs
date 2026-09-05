@@ -7,6 +7,7 @@ import { CodexAppServer } from "./codex-app-server.mjs";
 import { formalWorkError } from "./formal-work-store.mjs";
 import { closedChildEnvironment, loadLatticeRuntimeConfiguration } from "./lattice-runtime-health.mjs";
 import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./result-preview.mjs";
+import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -60,12 +61,16 @@ export class FormalTaskService {
     this.questions = new Map();
     this.progressAt = new Map();
     this.previews = new Map();
+    this.deniedTurns = new Map();
     this.closed = false;
     this.onNotification = (message) => {
       const threadId = message.params?.threadId;
       const owner = this.owners.get(threadId);
       if (!owner || this.closed) return;
-      if (message.method === "turn/completed") {
+      if (message.method === "item/completed" && isExecutionDenied(message.params?.item)) {
+        void this.serial(owner.taskRef, () => this.redirectDeniedTurn(owner, message.params))
+          .catch((error) => this.recordFailure(owner, error));
+      } else if (message.method === "turn/completed") {
         void this.serial(owner.taskRef, () => this.reconcile(owner.projectId, owner.taskRef, { advance: true }))
           .catch((error) => this.recordFailure(owner, error));
       } else if (message.method === "item/completed" && message.params?.item?.type === "agentMessage"
@@ -110,6 +115,32 @@ export class FormalTaskService {
       ...(claim.input_id ? { input_id: claim.input_id } : {}), ...values });
     claim.last_sequence = result.record.sequence;
     return result.record;
+  }
+  async redirectDeniedTurn(owner, { turnId, item }) {
+    const detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const claim = detail.claims.find((row) => row.claim_id === owner.claimId);
+    if (detail.completion_verified || !claim || claim.archived || terminal.has(claim.turn_status) || claim.turn_id !== turnId) return;
+    const key = `${claim.thread_id}:${turnId}`;
+    let denied = this.deniedTurns.get(key);
+    if (!denied) {
+      const thread = await this.codex.readThread(claim.thread_id);
+      denied = deniedItemIds(thread.turns?.find((turn) => turn.id === turnId));
+      this.deniedTurns.set(key, denied);
+    } else if (denied.has(item.id) || denied.size >= 2) return;
+    denied.add(item.id);
+    const open = denied.size >= 2;
+    const requestId = `recovery:${sha(JSON.stringify([claim.claim_id, turnId, open ? "open" : "redirect"]))}`;
+    // Persist intent before a native side effect. Never resend an uncertain
+    // redirect after restart; every dispatched turn already carries the policy.
+    if (detail.product.observations.some((row) => row.request_id === requestId)) return;
+    const previousSequence = claim.last_sequence;
+    const observation = await this.observe(claim, "PROGRESS", { request_id: requestId,
+      summary: open ? openCircuitSummary : recoverySummary });
+    if (observation.sequence <= previousSequence) return;
+    if (!this.codex.isTurnActive(claim.thread_id, turnId)) return;
+    if (open) await this.codex.interruptTurn(claim.thread_id, turnId);
+    else await this.codex.request("turn/steer", { threadId: claim.thread_id,
+      expectedTurnId: turnId, input: [{ type: "text", text: recoveryPrompt }] });
   }
   create({ projectId, objective, clientRequestId }) {
     if (typeof objective !== "string" || !objective.trim() || [...objective].length > 512
@@ -209,10 +240,11 @@ export class FormalTaskService {
     await this.dispatch(claim, claim.claim_id, claim.prompt);
   }
   async dispatch(claim, inputId, prompt) {
+    if (claim.turn_id) this.deniedTurns.delete(`${claim.thread_id}:${claim.turn_id}`);
     await this.observe(claim, "DISPATCH_STARTED", { turn_id: null, input_id: inputId, summary: "已保存本次派送身份，正在等待 Codex 回合確認。" });
     claim.turn_id = null;
     claim.input_id = inputId;
-    const turn = await this.codex.startTurn(claim.thread_id, `${marker(claim, inputId)}\n${prompt}`, {
+    const turn = await this.codex.startTurn(claim.thread_id, `${marker(claim, inputId)}\n${prompt}\n\n${recoveryPrompt}`, {
       model: claim.model, outputSchema: claim.phase === "EXECUTION" ? executionOutput : verificationOutput,
     });
     await this.observe(claim, "TURN_BOUND", { turn_id: turn.id, input_id: inputId, summary: "Codex 已開始本次工作回合。" });
@@ -236,6 +268,7 @@ export class FormalTaskService {
   }
   async reconcile(projectId, taskRef, { advance = false, resumePrepared = false } = {}) {
     let detail = await this.store.detail(projectId, taskRef);
+    let circuitOpen = false;
     for (const claim of detail.claims) {
       if (resumePrepared && !claim.dispatch_started && !claim.archived) {
         await this.recoverPrepared(detail, claim);
@@ -263,15 +296,31 @@ export class FormalTaskService {
       const turn = claim.turn_id ? thread.turns.find((row) => row.id === claim.turn_id) : matches[0];
       if (!turn) continue;
       if (!hasMarker(turn, marker(claim, claim.input_id))) throw formalWorkError("CONTROL_TURN_MISMATCH", "原生回合與正式工作身份不符。");
-      // Cold persisted reads can normalize an ongoing turn to interrupted.
-      // A still-live owner's notification has precedence over that projection.
-      if (ownedActive && this.codex.isTurnActive(claim.thread_id, claim.turn_id)) continue;
       if (!claim.turn_id) {
         if (thread.turns.at(-1)?.id !== turn.id) throw formalWorkError("CONTROL_TURN_MISMATCH", "原生對話已有其他回合，未採納過時回合。");
         await this.codex.resumeThread(claim.thread_id, { expectedTurnId: turn.id });
         await this.observe(claim, "TURN_BOUND", { turn_id: turn.id, summary: "已核對回應遺失前建立的原回合。" });
         claim.turn_id = turn.id;
       }
+      // Reconstruct the bound from native history, including after a restart.
+      // Two denied tool results must never advance into automatic repair,
+      // queued input, verification or a result import, even after a final reply.
+      const supersededVerification = claim.phase === "VERIFICATION"
+        && claim.execution_sequence !== detail.claims.find((row) => row.phase === "EXECUTION")?.dispatch_sequence;
+      if (!supersededVerification && deniedItemIds(turn).size >= 2) {
+        circuitOpen = true;
+        const stopped = this.codex.isTurnActive(claim.thread_id, turn.id)
+          ? await this.codex.interruptTurn(claim.thread_id, turn.id) : turn;
+        if (!terminal.has(claim.turn_status) && ["completed", "failed", "interrupted"].includes(stopped?.status)) {
+          const kind = { completed: "TURN_COMPLETED", failed: "TURN_FAILED", interrupted: "INTERRUPTED" }[stopped.status];
+          await this.observe(claim, kind, { summary: openCircuitSummary });
+          claim.turn_status = kind;
+        }
+        continue;
+      }
+      // Cold persisted reads can normalize an ongoing turn to interrupted.
+      // A still-live owner's notification has precedence over that projection.
+      if (ownedActive && this.codex.isTurnActive(claim.thread_id, claim.turn_id)) continue;
       if (!terminal.has(claim.turn_status) && ["completed", "failed", "interrupted"].includes(turn.status)) {
         const kind = { completed: "TURN_COMPLETED", failed: "TURN_FAILED", interrupted: "INTERRUPTED" }[turn.status];
         await this.observe(claim, kind, { summary: bounded(finalText(turn) || `Codex 回合狀態：${turn.status}`) });
@@ -279,6 +328,7 @@ export class FormalTaskService {
       }
     }
     detail = await this.store.detail(projectId, taskRef);
+    if (circuitOpen) return detail;
     // INPUT_QUEUED is the durable send intent. Recover that exact input before
     // advancing an old result into verification; DISPATCH_STARTED still uses
     // native marker reconciliation and is never blindly sent again.
@@ -557,6 +607,7 @@ export class FormalTaskService {
     await Promise.allSettled([...this.operations.values()]);
     await Promise.all([...this.previews.values()].map(closeResultPreview));
     this.previews.clear();
+    this.deniedTurns.clear();
     await this.codex.close();
   }
 }
