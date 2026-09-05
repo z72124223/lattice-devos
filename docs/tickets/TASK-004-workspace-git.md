@@ -118,3 +118,13 @@ conflict selection.
 ## Human Gate
 
 none
+
+## 2026-08-25 reconciliation
+
+This ticket remains `partial`. The current implementation validates a retained
+fencing counter before use, but the next token is still computed as
+`current + 1` without a fail-closed check that the result remains a safe
+integer. No current regression covers `Number.MAX_SAFE_INTEGER`.
+
+Next action: add a failing overflow test and reject before writing the counter
+or creating a lease whenever the next fencing token is not a safe integer.

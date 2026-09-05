@@ -5,7 +5,7 @@ spec_id: SPEC-006
 spec_version: 3
 module_id: foreman-state
 constitution_version: 1.2
-status: in_progress
+status: completed
 parallel_safe: false
 depends_on:
   - TASK-048
@@ -124,3 +124,15 @@ same-transaction Writer Lease assertion. A child physical row is valid only
 when its matching Ledger event and command are committed in the same
 transaction; it is never an independent current-state table. Epistemic pointers
 remain expiring evidence and cannot derive or override lifecycle state.
+
+## 2026-08-25 reconciliation
+
+The former Writer-v3 apply/rebind blocker was completed by TASK-094, and
+TASK-105 then completed the durable foreman checkpoint plus fresh-process
+restart replay on schema-v6. PR #20 merged that accepted lineage as commit
+`89b2d00e6fbed728d8aac1054dbbca59a33896e8`.
+
+Current `lattice_runtime_status` independently reports foreman replay
+`VERIFIED`, checkpoint `AVAILABLE`, generation `4`, completed count `1`, and
+next action `ALL_COMPLETED`. This closes TASK-079 without treating its earlier
+`NOT_RUN` evidence as if it had passed at the time.

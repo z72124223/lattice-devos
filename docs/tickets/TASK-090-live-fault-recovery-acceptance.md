@@ -5,7 +5,7 @@ spec_id: SPEC-007
 spec_version: 1
 module_id: latticed
 constitution_version: 2.5
-status: in_progress
+status: paused
 parallel_safe: false
 depends_on:
   - TASK-050
@@ -49,3 +49,16 @@ owned-root checks fail.
 3. On this machine, the first slice either records the full restart evidence
    described in SPEC-007 or preserves the run root with one bounded blocker.
 4. The existing lattice-runtime focused tests and formatting pass.
+
+## 2026-08-25 reconciliation
+
+This ticket is paused and genuinely incomplete. The planned
+`apps/lattice-runtime/tests/live_fault_acceptance.rs` suite is absent. The
+current binary has argument/opt-in unit coverage, but its source still records
+that marker-and-stop-proof cleanup must be added; there is no complete
+negative matrix for executable identity, root containment, and unproved
+cleanup.
+
+Next action: add those fail-closed non-live regressions and the bounded cleanup
+proof, then run the exact current schema-v6 live acceptance. Later TASK-091 or
+historical TASK-092 runs do not substitute for TASK-090's missing evidence.

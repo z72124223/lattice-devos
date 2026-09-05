@@ -4,7 +4,7 @@ spec_id: SPEC-003
 spec_version: 4
 module_id: latticed
 constitution_version: 1.4
-status: in-progress
+status: superseded
 parallel_safe: false
 depends_on:
   - TASK-014
@@ -296,7 +296,20 @@ it stops on eleven pre-existing lints in unchanged
 `crates/lattice-hermes-adapter`; TASK-038 does not expand into that TASK-041/042
 slice.
 
-TASK-038 remains `in-progress` until the actual Secure MCP Tunnel is refreshed
-and a real ChatGPT session discovers/invokes both new task tools, followed by a
+At that historical checkpoint, TASK-038 remained `in-progress` until the
+actual Secure MCP Tunnel was refreshed and a real ChatGPT session discovered
+and invoked both new task tools, followed by a
 separate-session status replay. The local scope is explicitly
 `LOCAL_CANONICAL_MCP_NOT_CHATGPT_TUNNEL` and is not relabeled as ChatGPT proof.
+
+## 2026-08-25 reconciliation
+
+The unfinished public Secure MCP Tunnel / separate ChatGPT-session requirement
+is superseded by the current local product direction. Codex App or the Codex
+SDK owns the thread and MCP harness, while the supported path is
+`Codex App -> local MCP -> latticed -> PostgreSQL`; no public tunnel is now a
+product milestone requirement.
+
+The canonical local gateway implementation and its historical acceptance
+evidence remain valid history. This status does not claim the abandoned tunnel
+item passed and does not remove or weaken the local MCP security controls.

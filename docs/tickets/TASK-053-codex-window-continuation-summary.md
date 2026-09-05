@@ -7,7 +7,7 @@ related_spec_id: SPEC-003
 related_spec_version: 4
 module_id: lattice-cli
 constitution_version: 1.0
-status: waiting_dependency
+status: superseded
 parallel_safe: false
 depends_on:
   - TASK-050
@@ -175,3 +175,14 @@ None after all fail-closed preconditions are satisfied and implementation
 stays inside `allowed_paths`. Any required global Codex configuration change,
 memory write, new MCP/IPC surface, external publication, protected action, or
 scope expansion is a new user decision.
+
+## 2026-08-25 reconciliation
+
+This planned renderer/bootstrap was never implemented and is not marked
+complete. It is superseded by the current Control product and Codex-owned
+thread model: Control creates or resumes the durable linked Codex thread, and
+the persisted work item retains that thread link across a Control reopen.
+
+The planned CLI renderer, Codex skill, source-precedence file, and TASK-053
+acceptance script do not exist in the current product. No automatic voice or
+unbound-window continuation capability is claimed.
