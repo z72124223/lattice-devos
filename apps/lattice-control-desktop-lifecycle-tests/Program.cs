@@ -237,6 +237,18 @@ try
             Require(!manager.OwnsControl, "compatible external Control was incorrectly owned");
         }
         Require(!external.HasExited, "disposing the desktop manager stopped a reused Control");
+        using (ControlRuntimeManager recovery = new(reusedOrigin, reusedSpec,
+            probeTimeout: TimeSpan.FromMilliseconds(500), probeHandler: new DelayFirstProbeHandler()))
+        {
+            ControlRuntimeEvaluation delayed = await recovery.EnsureReadyAsync();
+            Require(delayed.Detail == "CONTROL_LISTENER_UNVERIFIED", "slow HTTP probe was misclassified");
+            Require(delayed.Action == ControlRuntimeAction.FailClosed && !recovery.OwnsControl,
+                "a live but unverified listener allowed a replacement process");
+            ControlRuntimeEvaluation recovered = await recovery.EnsureReadyAsync();
+            Require(recovered.Health == ControlRuntimeHealth.HEALTHY && !recovery.OwnsControl,
+                "the original Control listener did not recover after a transient timeout");
+        }
+        Require(!external.HasExited, "a timeout recovery stopped the existing Control process");
     }
     finally
     {
@@ -620,6 +632,29 @@ internal sealed class ForeignRuntimeServer : IDisposable
         listener.Stop();
         try { acceptLoop?.Wait(2_000); } catch (AggregateException) { }
         cancellation.Dispose();
+    }
+}
+
+internal sealed class DelayFirstProbeHandler : HttpMessageHandler
+{
+    private bool first = true;
+    private readonly HttpClient client = new(new SocketsHttpHandler { UseProxy = false });
+
+    protected override async Task<HttpResponseMessage> SendAsync(
+        HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (first)
+        {
+            first = false;
+            await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+        return await client.GetAsync(request.RequestUri, cancellationToken);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) client.Dispose();
+        base.Dispose(disposing);
     }
 }
 

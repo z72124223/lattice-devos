@@ -327,8 +327,11 @@ Require(absent.Health == ControlRuntimeHealth.UNREACHABLE, "absent Control was n
 Require(absent.Action == ControlRuntimeAction.StartOwned, "absent Control did not permit owned start");
 
 ControlRuntimeEvaluation unknownListener = ControlRuntimeContract.EvaluateProbe(true, null, null, expectedScope);
-Require(unknownListener.Health == ControlRuntimeHealth.INCOMPATIBLE, "unknown listener was not incompatible");
+Require(unknownListener.Health == ControlRuntimeHealth.UNREACHABLE, "an unanswered health check was incorrectly identified as foreign");
 Require(unknownListener.Action == ControlRuntimeAction.FailClosed, "unknown listener did not fail closed");
+Require(unknownListener.Detail == "CONTROL_LISTENER_UNVERIFIED", "unverified listener detail was lost");
+Require(DesktopPolicy.DescribeRuntimeFailure(unknownListener).AutoReconnect,
+    "a slow health response permanently blocked the desktop instead of rechecking");
 
 foreach (string incompatibleSurface in new[]
 {
