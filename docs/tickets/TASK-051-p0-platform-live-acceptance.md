@@ -5,7 +5,7 @@ spec_id: SPEC-003
 spec_version: 5
 module_id: latticed
 constitution_version: 1.8
-status: waiting_dependency
+status: superseded
 parallel_safe: false
 depends_on:
   - TASK-050
@@ -178,3 +178,16 @@ The execution gate was explicitly authorized by the user in source thread `019ff
 - The user directed Codex to pause another TASK-051 runtime attempt while TASK-077 builds a local engineering-status dashboard.
 - The preserved terminal state remains `FAIL`. TASK-077 is a visibility improvement, not an acceptance dependency or substitute.
 - Resuming this ticket still requires the separately reviewed correction and new live-run authorization already recorded above.
+
+## 2026-08-25 reconciliation
+
+The old current-machine gate is superseded, not verified. Its exact four-tool
+and six-field contract no longer matches the expanded current MCP surface and
+the eight-field `lattice.task.status.v2` fail-closed projection. The 2026-08-17 live
+`FAIL` and 2026-08-20 pause above remain immutable historical evidence.
+
+Later product work supplied historical receipt isolation, the current durable
+Runtime, and the bounded task submit/status path. A current live canary now
+completes through official Codex and replays the same PostgreSQL digests from
+separate status calls. That evidence validates the successor path only; it
+must not be used to rewrite this ticket's failed four-tool acceptance run.

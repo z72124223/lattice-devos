@@ -15,7 +15,7 @@ additional_modules:
     constitution_version: 1.0
   - module_id: postgres-store
     constitution_version: 1.4
-status: in-progress
+status: superseded
 parallel_safe: false
 depends_on:
   - TASK-021
@@ -144,14 +144,14 @@ wrapper over the identical composition.
 7. LIVE: the official Codex app-server completes the isolated change and the
    combined acceptance command reports the durable commit evidence.
 
-## Active Incident Gate
+## Historical 2026-08-05 incident gate
 
 The 2026-08-05 official-live attempt is `FAILED_DIAGNOSTIC`: Windows failed the
 OpenAI-signed `codex-windows-sandbox-setup.exe` helper with "The specified
 module could not be found". OpenAI issues
 [#29952](https://github.com/openai/codex/issues/29952) and
 [#29200](https://github.com/openai/codex/issues/29200) record the same open
-Windows sandbox-helper regression. Official live remains disabled before any
+Windows sandbox-helper regression. At that checkpoint, official live remained disabled before any
 database or process effect; no retry, unelevated/no-sandbox switch, or system
 component change is permitted without a later explicit user decision. TDD,
 scripted acceptance, review, and handoff may proceed, but item 7 and TASK-032
@@ -177,3 +177,25 @@ compatibility wrapper, and this allowlist update. Direct project execution and
 local commits are authorized without another routine prompt. Push,
 primary-branch merge, public exposure, payment, and irreversible protected
 actions remain outside scope.
+
+## 2026-08-25 reconciliation
+
+This historical two-tool fixed delivery profile is superseded by the bounded,
+server-owned `lattice_task_submit` / `lattice_task_status` path. ADR-025 keeps
+the old profile's non-success terminal receipt read-only; neither successor
+ingress nor this status correction may retry or rewrite it.
+
+Current live evidence uses the successor path: task
+`8811d0d7c070ddd61759588b7cd3d1c33d22230d670fbbb7e67d2274e2cc6a9b`
+completed a real restricted Codex edit and local Git commit, then separate MCP
+status reads returned ledger digest
+`5188c5a447b6e835c30bbb2d004136673db0fcc4a6ce04264bf615635b72af7d`
+and result digest
+`9280a61189fc74a890e0648db48edb44166f73277e62acb6f457d78cd79631e0`
+without a second execution. A separately launched read-only `latticed`
+process (binary SHA-256
+`419a495dd79b3f483bf2dc9ad697742350ec48fbe64415e14c48ec9cf9376feb`)
+returned the exact same structured status and then exited. This proves the
+successor bounded canary and fresh-process PostgreSQL replay; it does not claim
+a physical database restart or a retroactive PASS for the legacy receipt and
+its 2026-08-05 incident.

@@ -5,7 +5,7 @@ spec_id: SPEC-007
 spec_version: 1
 module_id: latticed
 constitution_version: 2.5
-status: in_progress
+status: paused
 parallel_safe: false
 depends_on:
   - TASK-090
@@ -42,3 +42,16 @@ and is reconciled by a fresh client without applying a second effect.
 2. The reconciled effect counter is exactly one.
 3. A missing marker, unknown reconciliation, duplicate effect, or failed
    owned-cluster stop fails closed.
+
+## 2026-08-25 reconciliation
+
+The current code contains the fixed disconnect marker check and a fresh-client
+exact-retry fixture. Historical schema-v5 evidence also recorded successful
+initial, disconnect, and restart phases with one reconciled effect. That
+historical PASS is not current schema-v6 acceptance, and TASK-090 remains
+incomplete.
+
+Next action: after TASK-090's safe cleanup/negative foundation is complete,
+run the exact marker-owned three-phase acceptance from the current product SHA,
+preserve source and stop-proof identities, and require one effect plus an
+identical fresh-process result. The ticket remains paused until then.
