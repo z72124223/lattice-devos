@@ -490,7 +490,7 @@ try {
     }
     Assert-InstallerTest $alternateStreamRejected 'DESKTOP_INSTALLER_ALTERNATE_DATA_STREAM_NOT_REJECTED'
     Assert-InstallerTest (@(Get-Item -LiteralPath $alternateStreamFile -Stream 'foreign-state').Count -eq 1) 'DESKTOP_INSTALLER_ALTERNATE_DATA_STREAM_DELETED'
-    Remove-Item -LiteralPath ($alternateStreamFile + ':foreign-state') -Force
+    Remove-Item -LiteralPath $alternateStreamFile -Stream 'foreign-state' -Force
 
     $unknownRegistrySubkey = Join-Path ([string]$paths.RegistryPath) 'ForeignState'
     New-Item -Path $unknownRegistrySubkey -Force | Out-Null

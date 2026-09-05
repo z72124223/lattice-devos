@@ -2453,6 +2453,13 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             ForemanExtensionDatabaseRole::Migrator,
         )
         .is_ok()
+            && migrator
+                .query_one(
+                    "SELECT pg_catalog.to_regnamespace('control_product') IS NOT NULL",
+                    &[],
+                )
+                .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?
+                .get::<_, bool>(0)
     } else {
         false
     };
