@@ -647,7 +647,7 @@ public static class LatticeDesktopCandidateNative
     public static extern uint GetDpiForWindow(IntPtr window);
 }
 '@
-    $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+    $nodePath = Join-Path $candidateDirectoryFull ($controlRuntimeExecutable.Replace('/', '\'))
 
     $gatewayStart = [Diagnostics.ProcessStartInfo]::new()
     $gatewayStart.FileName = $nodePath
