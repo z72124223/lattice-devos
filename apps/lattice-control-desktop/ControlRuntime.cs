@@ -359,8 +359,10 @@ internal static class ControlRuntimeContract
     private static bool ValidCapabilityData(string id, JsonElement capability)
     {
         if (!capability.TryGetProperty("has_data", out JsonElement hasData)) return false;
+        // PostgreSQL-backed work can be unknown while its first snapshot loads
+        // or its cache expires. Null is not a foreign-server identity.
         return id is "work_mcp" or "decision_mcp"
-            ? hasData.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? hasData.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null
             : hasData.ValueKind == JsonValueKind.Null;
     }
 
