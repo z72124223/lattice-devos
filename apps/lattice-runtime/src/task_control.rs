@@ -28,10 +28,11 @@ use lattice_task_ledger::{
     AutonomyModel as LedgerAutonomyModel, AutonomyObservedTaskState, AutonomyRecommendation,
     AutonomyRiskClass as LedgerAutonomyRiskClass, AutonomyTaskKind,
     AutonomyVerification as LedgerAutonomyVerification, CommandId, CommandOutcome, CorrelationId,
-    Diagnostic, LedgerEventKind, LedgerOutcome, ReasonCode, TaskCreatedProfile, TaskIngressClaim,
+    Diagnostic, ExternalVerifiedResultAdoption, LedgerEventKind, LedgerOutcome,
+    LocalVerifiedResultAdoption, ReasonCode, TaskCreatedProfile, TaskIngressClaim,
     TaskIngressRequestKind, TaskSubmissionEnvelope, VerifiedAutonomyReceipt,
     VerifiedAutonomyReceiptState, VerifiedStream, classify_task_created_profile,
-    plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
+    is_local_verified_result, plan_autonomy_receipt_append, verify_exact_autonomy_receipt_retry,
 };
 
 use crate::delivery_ledger::{DeliveryDatabaseBinding, connect_fixed_runtime_client};
@@ -363,6 +364,48 @@ impl PostgresTaskLifecycle {
         self.ingress_peer
             .clone()
             .ok_or_else(|| corrupt("LATTICE_TASK_INGRESS_PEER_REQUIRED"))
+    }
+
+    /// Adopts independently imported evidence without scheduling or acquiring a writer.
+    pub fn adopt_external_result(
+        &mut self,
+        adoption: &ExternalVerifiedResultAdoption,
+        occurred_at: &str,
+    ) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence> {
+        let submission = self.general_submission()?;
+        if submission.task_ref() != adoption.task_ref()
+            || submission.client_request_id() != adoption.client_request_id()
+        {
+            return Err(rejected("LATTICE_TASK_REFERENCE_REJECTED"));
+        }
+        ensure_before(self.deadline)?;
+        self.ledger
+            .execute_external_verified_result_adoption(adoption, &self.authority, occurred_at)
+            .map_err(map_store_error)?;
+        let binding = TaskIntakeBinding::try_from_stream_identity(&self.identity)
+            .map_err(|_| corrupt("LATTICE_TASK_INTAKE_BINDING_REJECTED"))?;
+        TaskIntakeLifecyclePort::load(self, &binding)
+    }
+
+    /// Adopts independently imported evidence without scheduling or acquiring a writer.
+    pub fn adopt_local_result(
+        &mut self,
+        adoption: &LocalVerifiedResultAdoption,
+        occurred_at: &str,
+    ) -> TaskLifecycleResult<TaskIntakeLifecycleEvidence> {
+        let submission = self.general_submission()?;
+        if submission.task_ref() != adoption.task_ref()
+            || submission.client_request_id() != adoption.client_request_id()
+        {
+            return Err(rejected("LATTICE_TASK_REFERENCE_REJECTED"));
+        }
+        ensure_before(self.deadline)?;
+        self.ledger
+            .execute_local_verified_result_adoption(adoption, &self.authority, occurred_at)
+            .map_err(map_store_error)?;
+        let binding = TaskIntakeBinding::try_from_stream_identity(&self.identity)
+            .map_err(|_| corrupt("LATTICE_TASK_INTAKE_BINDING_REJECTED"))?;
+        TaskIntakeLifecyclePort::load(self, &binding)
     }
 
     fn ensure_controlled_profile(&self) -> TaskLifecycleResult<()> {
@@ -709,27 +752,39 @@ fn project_intake_evidence(
     }
 
     let terminal = &stream.events()[1];
-    if terminal.kind() != LedgerEventKind::ExternalVerifiedResultAdopted
+    let local = is_local_verified_result(terminal.kind(), terminal.action().as_str());
+    let action = if local {
+        "LOCAL_VERIFIED_RESULT_ADOPTED"
+    } else {
+        "ADOPT_VERIFIED_RESULT_V1"
+    };
+    let reason = if local {
+        "LOCAL_VERIFIED_RESULT_ADOPTED"
+    } else {
+        "EXTERNAL_VERIFIED_RESULT_ADOPTED"
+    };
+    let prefix = if local {
+        "local-result-adoption"
+    } else {
+        "external-result-adoption"
+    };
+    if (!local && terminal.kind() != LedgerEventKind::ExternalVerifiedResultAdopted)
         || terminal.actor_id().as_str() != ingress_peer.actor_id().as_str()
         || terminal.correlation_id().as_str() != GENERAL_TASK_CORRELATION_ID
         || terminal.outcome() != LedgerOutcome::Recorded
-        || terminal.action().as_str() != "ADOPT_VERIFIED_RESULT_V1"
-        || terminal.reason_code().as_str() != "EXTERNAL_VERIFIED_RESULT_ADOPTED"
+        || terminal.action().as_str() != action
+        || terminal.reason_code().as_str() != reason
         || terminal
             .subject_digest()
             .as_str()
             .bytes()
             .all(|byte| byte == b'0')
         || terminal.diagnostic().is_some()
-        || terminal.command_id().as_str()
-            != format!(
-                "external-result-adoption:{}",
-                submission.client_request_id()
-            )
+        || terminal.command_id().as_str() != format!("{prefix}:{}", submission.client_request_id())
     {
         return Err(corrupt("LATTICE_TASK_INTAKE_EXTERNAL_RESULT_REJECTED"));
     }
-    TaskIntakeLifecycleEvidence::externally_adopted(
+    TaskIntakeLifecycleEvidence::verified_result(
         binding.clone(),
         stream.head().head_digest().clone(),
         terminal.subject_digest().clone(),

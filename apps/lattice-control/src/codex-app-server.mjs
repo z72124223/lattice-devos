@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 
@@ -10,6 +9,7 @@ import {
   WSL2_SUBTREE_EXIT_SCHEMA,
 } from "./wsl2-execution-domain.mjs";
 import { probeWsl2ProviderPostExit } from "./wsl2-provider-subtree-reconcile.mjs";
+import { resolveWindowsCodexRuntime } from "./codex-runtime-resolution.mjs";
 
 export const DEFAULT_CODEX_MODEL = "gpt-6-astra";
 
@@ -176,6 +176,7 @@ export class CodexAppServer extends EventEmitter {
     lifecycleTimeoutMs = 30_000,
     sessionIdentityFactory = () => `app-server-session:sha256:${randomBytes(32).toString("hex")}`,
     runPostExitProbe = probeWsl2ProviderPostExit,
+    resolveRuntime = resolveWindowsCodexRuntime,
   } = {}) {
     super();
     this.codexBin = codexBin;
@@ -185,6 +186,7 @@ export class CodexAppServer extends EventEmitter {
     this.lifecycleTimeoutMs = lifecycleTimeoutMs;
     this.sessionIdentityFactory = sessionIdentityFactory;
     this.runPostExitProbe = runPostExitProbe;
+    this.resolveRuntime = resolveRuntime;
     this.process = null;
     this.closingProcess = null;
     this.closePromise = null;
@@ -194,6 +196,7 @@ export class CodexAppServer extends EventEmitter {
     this.appServerSessionId = null;
     this.ready = false;
     this.connectPromise = null;
+    this.connectionAttemptEpoch = 0;
     this.nextId = 1;
     this.pending = new Map();
     this.serverRequests = new Map();
@@ -376,7 +379,7 @@ export class CodexAppServer extends EventEmitter {
     if (this.connected) return;
     const unresolvedProcessDomain = this.#unresolvedProcessDomainFailure();
     if (unresolvedProcessDomain) throw unresolvedProcessDomain;
-    const attempt = this.#connectOnce();
+    const attempt = this.#connectOnce(++this.connectionAttemptEpoch);
     this.connectPromise = attempt;
     try {
       await attempt;
@@ -385,7 +388,15 @@ export class CodexAppServer extends EventEmitter {
     }
   }
 
-  async #connectOnce() {
+  #assertConnectionAttempt(epoch) {
+    if (epoch !== this.connectionAttemptEpoch) {
+      const error = new Error("Codex connection attempt was cancelled before readiness");
+      error.code = "CODEX_APP_SERVER_CONNECT_CANCELLED";
+      throw error;
+    }
+  }
+
+  async #connectOnce(epoch) {
     let command = this.codexBin || "codex";
     let args = ["app-server", "--stdio"];
     if (this.launchSpec !== null) {
@@ -405,23 +416,11 @@ export class CodexAppServer extends EventEmitter {
         ? wsl2ProcessDomainContract(this.launchSpec)
         : null;
     } else if (process.platform === "win32" && !this.codexBin) {
-      const codexScript = path.join(
-        process.env.APPDATA || "",
-        "npm",
-        "node_modules",
-        "@openai",
-        "codex",
-        "bin",
-        "codex.js",
-      );
-      if (!existsSync(codexScript)) {
-        throw new Error("Codex npm runtime was not found; set codexBin to an exact trusted path");
-      }
-      command = process.execPath;
-      args = [codexScript, "app-server", "--stdio"];
+      ({ command, args } = await this.resolveRuntime());
     } else if (process.platform === "win32" && this.codexBin) {
       ({ command, args } = resolveCodexAppServerLaunch(this.codexBin));
     }
+    this.#assertConnectionAttempt(epoch);
     const sessionId = this.sessionIdentityFactory();
     if (!/^app-server-session:sha256:[0-9a-f]{64}$/u.test(sessionId)) {
       const error = new Error("Codex App Server session identity was not exact");
@@ -501,10 +500,12 @@ export class CodexAppServer extends EventEmitter {
           version: "0.1.0",
         },
       }, { allowUnready: true });
+      this.#assertConnectionAttempt(epoch);
       this.#send({ method: "initialized" }, { allowUnready: true });
       if (this.processDomainContract) {
         await this.#awaitProcessDomainIdentity(child, generation);
       }
+      this.#assertConnectionAttempt(epoch);
       this.ready = true;
     } catch (error) {
       if (this.process === child) await this.close();
@@ -514,6 +515,8 @@ export class CodexAppServer extends EventEmitter {
 
   close() {
     if (this.closePromise) return this.closePromise;
+    // Invalidate even an attempt whose async runtime resolution has no child yet.
+    this.connectionAttemptEpoch += 1;
     const attempt = Promise.resolve().then(() => this.#closeOnce());
     let tracked;
     tracked = attempt.finally(() => {
@@ -865,6 +868,7 @@ export class CodexAppServer extends EventEmitter {
         reject,
         timer: null,
         method,
+        threadId: typeof params?.threadId === "string" ? params.threadId : null,
         signal,
         abortListener: null,
         cleanup: null,
@@ -1084,6 +1088,7 @@ export class CodexAppServer extends EventEmitter {
       lifecycleTimeoutMs: this.lifecycleTimeoutMs,
       sessionIdentityFactory: this.sessionIdentityFactory,
       runPostExitProbe: this.runPostExitProbe,
+      resolveRuntime: this.resolveRuntime,
     });
     try {
       return await probe.readThread(threadId, { includeTurns, allowEmpty });
@@ -1165,12 +1170,13 @@ export class CodexAppServer extends EventEmitter {
     return reconciled;
   }
 
-  async startTurn(threadId, text, { effectIdentity = null, model = null } = {}) {
+  async startTurn(threadId, text, { effectIdentity = null, model = null, outputSchema = null } = {}) {
     await this.connect();
     const result = await this.request("turn/start", {
       threadId,
       input: [{ type: "text", text }],
       ...(model ? { model } : {}),
+      ...(outputSchema ? { outputSchema } : {}),
     }, effectIdentity ?? {});
     return result.turn;
   }
@@ -1264,6 +1270,17 @@ export class CodexAppServer extends EventEmitter {
   async archiveThread(threadId, { effectIdentity = null } = {}) {
     await this.connect();
     return this.request("thread/archive", { threadId }, effectIdentity ?? {});
+  }
+
+  async unarchiveThread(threadId, { effectIdentity = null } = {}) {
+    await this.connect();
+    const result = await this.request("thread/unarchive", { threadId }, effectIdentity ?? {});
+    if (result?.thread?.id !== threadId) {
+      const error = new Error("Codex did not reopen the exact saved conversation");
+      error.code = "CODEX_THREAD_NOT_RECOVERABLE";
+      throw error;
+    }
+    return result.thread;
   }
 
   #waitForNotification({
@@ -1410,6 +1427,16 @@ export class CodexAppServer extends EventEmitter {
         error.data = message.error.data ?? null;
         error.method = pending.method;
         error.requestId = message.id;
+        // Only a rejection naming the exact requested session proves archival.
+        // Generic RPC failures must never authorize restoring a thread.
+        if (pending.method === "thread/resume" && pending.threadId
+          && new RegExp(`^(?:session|thread) ${pending.threadId.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")} is archived(?:[.;:]|$)`, "iu")
+            .test(error.message)) {
+          error.code = "CODEX_THREAD_ARCHIVED";
+          error.threadId = pending.threadId;
+          error.status = 409;
+          error.message = "此對話已在 Codex 封存。內容仍保留；如要繼續，請按「重新開啟此對話」。訊息不會自動重送。";
+        }
         pending.reject(error);
       } else {
         pending.resolve(message.result);

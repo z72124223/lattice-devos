@@ -26,6 +26,7 @@ use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use unicode_normalization::is_nfc;
 
+pub use crate::control_product::{ControlSnapshotArguments, ControlUpdateArguments};
 use crate::mcp_budget::{McpAdmission, McpBudget, McpToolClass};
 
 /// Legacy stateful MCP protocol version implemented by this server.
@@ -44,6 +45,10 @@ pub const DELIVERY_RECONCILE_TOOL: &str = "lattice_delivery_reconcile";
 pub const TASK_SUBMIT_TOOL: &str = "lattice_task_submit";
 /// Bounded durable task status tool.
 pub const TASK_STATUS_TOOL: &str = "lattice_task_status";
+/// Product read model backed by the verified PostgreSQL Task Ledger.
+pub const CONTROL_SNAPSHOT_TOOL: &str = "lattice_control_snapshot";
+/// Closed product metadata, conversation observation and decision writes.
+pub const CONTROL_UPDATE_TOOL: &str = "lattice_control_update";
 /// Sole durable foreman checkpoint tool.
 pub const FOREMAN_CHECKPOINT_TOOL: &str = "lattice_foreman_checkpoint";
 /// Retained exact canary intent accepted alongside bounded general objectives.
@@ -2277,6 +2282,28 @@ pub trait DeliveryToolService {
     fn task_status(&mut self, arguments: &TaskStatusArguments)
     -> Result<Value, ToolExecutionError>;
 
+    /// Reads product facts and verified task identities without dispatching Codex.
+    ///
+    /// # Errors
+    /// Returns a stable code if the configured product extension is unavailable.
+    fn control_snapshot(
+        &mut self,
+        _arguments: &ControlSnapshotArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new("CONTROL_PRODUCT_UNAVAILABLE"))
+    }
+
+    /// Saves one bounded product fact; cannot set formal task completion.
+    ///
+    /// # Errors
+    /// Returns a stable validation, scope, revision or persistence failure.
+    fn control_update(
+        &mut self,
+        _arguments: &ControlUpdateArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new("CONTROL_PRODUCT_UNAVAILABLE"))
+    }
+
     /// Records or exactly replays the sole foreman's durable checkpoint.
     ///
     /// # Errors
@@ -2321,7 +2348,7 @@ impl ToolSurface {
     const fn instructions(self) -> &'static str {
         match self {
             Self::CanonicalTaskControl => {
-                "Five bounded LATTICE tools. Authority, task binding, orchestration, and execution configuration remain server-owned."
+                "Bounded LATTICE tools for verified tasks, product facts, and delivery. Authority, task binding, orchestration, and execution configuration remain server-owned."
             }
             Self::LegacyDeliveryObserver => {
                 "Legacy LATTICE delivery observer. Delivery mutation and task control are available only through the canonical latticed entrypoint."
@@ -2602,6 +2629,8 @@ impl<S: DeliveryToolService> McpServer<S> {
                         | DELIVERY_RECONCILE_TOOL
                         | TASK_SUBMIT_TOOL
                         | TASK_STATUS_TOOL
+                        | CONTROL_SNAPSHOT_TOOL
+                        | CONTROL_UPDATE_TOOL
                         | FOREMAN_CHECKPOINT_TOOL
                 )
             })
@@ -2655,6 +2684,8 @@ impl<S: DeliveryToolService> McpServer<S> {
                     | DELIVERY_RECONCILE_TOOL
                     | TASK_SUBMIT_TOOL
                     | TASK_STATUS_TOOL
+                    | CONTROL_SNAPSHOT_TOOL
+                    | CONTROL_UPDATE_TOOL
                     | FOREMAN_CHECKPOINT_TOOL
             )
         {
@@ -2716,6 +2747,30 @@ impl<S: DeliveryToolService> McpServer<S> {
                 };
                 ToolOperation::ForemanCheckpoint(arguments)
             }
+            CONTROL_SNAPSHOT_TOOL => {
+                let Some(arguments) = ControlSnapshotArguments::from_value(params.get("arguments"))
+                else {
+                    return self.reject_observed_probe(
+                        id,
+                        "MCP_INVALID_PARAMS",
+                        -32602,
+                        "Invalid product snapshot arguments",
+                    );
+                };
+                ToolOperation::ControlSnapshot(arguments)
+            }
+            CONTROL_UPDATE_TOOL => {
+                let Some(arguments) = ControlUpdateArguments::from_value(params.get("arguments"))
+                else {
+                    return self.reject_observed_probe(
+                        id,
+                        "MCP_INVALID_PARAMS",
+                        -32602,
+                        "Invalid product update arguments",
+                    );
+                };
+                ToolOperation::ControlUpdate(arguments)
+            }
             _ => {
                 return self.reject_observed_probe(id, "MCP_UNKNOWN_TOOL", -32602, "Unknown tool");
             }
@@ -2724,6 +2779,7 @@ impl<S: DeliveryToolService> McpServer<S> {
             &operation,
             ToolOperation::DeliveryRun
                 | ToolOperation::TaskSubmit(_)
+                | ToolOperation::ControlUpdate(_)
                 | ToolOperation::ForemanCheckpoint(_)
         ) {
             McpToolClass::Execution
@@ -2757,6 +2813,8 @@ impl<S: DeliveryToolService> McpServer<S> {
             ToolOperation::TaskStatus(arguments) => {
                 closed_task_public_status(self.service.task_status(&arguments))
             }
+            ToolOperation::ControlSnapshot(arguments) => self.service.control_snapshot(&arguments),
+            ToolOperation::ControlUpdate(arguments) => self.service.control_update(&arguments),
             ToolOperation::ForemanCheckpoint(arguments) => {
                 closed_foreman_checkpoint_result(self.service.foreman_checkpoint(&arguments))
             }
@@ -2793,6 +2851,8 @@ enum ToolOperation {
     DeliveryReconcile,
     TaskSubmit(TaskSubmitArguments),
     TaskStatus(TaskStatusArguments),
+    ControlSnapshot(ControlSnapshotArguments),
+    ControlUpdate(ControlUpdateArguments),
     ForemanCheckpoint(ForemanCheckpointArguments),
 }
 
@@ -3593,6 +3653,20 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
                 "description": "Records or exactly replays one closed durable foreman checkpoint through the existing orchestrator.",
                 "inputSchema": foreman_checkpoint_arguments_schema(),
                 "outputSchema": foreman_checkpoint_output_schema()
+            }),
+            json!({
+                "name": CONTROL_SNAPSHOT_TOOL,
+                "title": "Read LATTICE work and conversation state",
+                "description": "Reads one bounded PostgreSQL product snapshot with replay-verified task identities, acceptance criteria, Codex bindings, pending questions and decisions. Never dispatches work.",
+                "inputSchema": crate::control_product::snapshot_schema(),
+                "annotations": {"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
+            }),
+            json!({
+                "name": CONTROL_UPDATE_TOOL,
+                "title": "Save a LATTICE product fact",
+                "description": "Saves task metadata, claims one native Codex conversation, records an observed conversation event, or retains an explicit decision. Runtime chooses the model and workspace. This tool cannot grant protected-action authority or mark a task completed.",
+                "inputSchema": crate::control_product::update_schema(),
+                "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}
             }),
         ]);
     }

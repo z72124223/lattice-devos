@@ -47,7 +47,7 @@ function capability(id, label, status, hasData = null) {
   return { id, label, status, has_data: hasData };
 }
 
-export function createRuntimeSurface(service, { databasePath, mcpHealth, runtimeHealth }) {
+export function createRuntimeSurface(service, { databasePath, mcpHealth, runtimeHealth, formalRuntime = null }) {
   const state = service.state();
   const dataPresence = service.runtimeDataPresence();
 
@@ -62,14 +62,14 @@ export function createRuntimeSurface(service, { databasePath, mcpHealth, runtime
       capability(
         "codex_app_server",
         "Codex App Server",
-        state.codexConnected ? "HEALTHY" : "STOPPED",
+        state.codexConnected || formalRuntime?.codexConnected ? "HEALTHY" : "STOPPED",
       ),
-      capability("work_mcp", "Work MCP", mcpHealth.work_mcp, dataPresence.work),
+      capability("work_mcp", "Work MCP", mcpHealth.work_mcp, formalRuntime ? formalRuntime.work : dataPresence.work),
       capability(
         "decision_mcp",
         "Decision MCP",
         mcpHealth.decision_mcp,
-        dataPresence.decisions,
+        formalRuntime ? formalRuntime.decisions : dataPresence.decisions,
       ),
       capability("postgresql", "正式 PostgreSQL", runtimeHealth.postgresql),
     ],

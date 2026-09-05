@@ -2100,3 +2100,105 @@ fn fake_execution_is_byte_equal_to_the_shared_pure_planner() {
         pure_stale.next_state().clone()
     );
 }
+
+#[test]
+fn local_verified_result_has_typed_terminal_replay_and_substitution_guards() {
+    use lattice_task_ledger::{
+        LocalVerifiedResultAdoption, export_untrusted_snapshot,
+        verify_untrusted_snapshot_against_checkpoint,
+    };
+    let submission = general_submission();
+    let vacant = VerifiedStream::vacant(submission.identity().clone(), RuntimeKind::Live).unwrap();
+    let created = apply_append_plan(
+        &vacant,
+        &plan_append(
+            &vacant,
+            AppendCommand::new_general_task_created(
+                vacant.head().clone(),
+                CommandId::new(format!("mcp-submit:{}", submission.client_request_id())).unwrap(),
+                CorrelationId::new("general-task-intake-v1").unwrap(),
+                "2000-01-01T00:00:00Z",
+                ActorId::new("lattice-mcp").unwrap(),
+                &submission,
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let artifact = format!("evidence:sha256:{}", "a".repeat(64));
+    let acceptance = format!("evidence:sha256:{}", "b".repeat(64));
+    let adoption = LocalVerifiedResultAdoption::new(
+        submission.task_ref().clone(),
+        submission.client_request_id(),
+        created.head().head_digest().clone(),
+        artifact,
+        acceptance.clone(),
+    )
+    .unwrap();
+    let command = AppendCommand::new_local_verified_result_adopted(
+        created.head().clone(),
+        "2026-09-05T02:00:00Z",
+        ActorId::new("lattice-mcp").unwrap(),
+        &adoption,
+    )
+    .unwrap();
+    assert!(
+        AppendCommand::new(
+            created.head().clone(),
+            CommandId::new(adoption.command_id()).unwrap(),
+            CorrelationId::new("general-task-intake-v1").unwrap(),
+            "2026-09-05T02:00:00Z",
+            LedgerEventKind::EvidenceRecorded,
+            ActorId::new("lattice-mcp").unwrap(),
+            ActionId::new("LOCAL_VERIFIED_RESULT_ADOPTED").unwrap(),
+            LedgerOutcome::Recorded,
+            ReasonCode::new("LOCAL_VERIFIED_RESULT_ADOPTED").unwrap(),
+            adoption.result_digest().clone(),
+            None,
+            None
+        )
+        .is_err()
+    );
+    let completed =
+        apply_append_plan(&created, &plan_append(&created, command.clone()).unwrap()).unwrap();
+    let replayed = verify_untrusted_snapshot_against_checkpoint(
+        &export_untrusted_snapshot(&completed),
+        completed.checkpoint(),
+    )
+    .unwrap();
+    assert_eq!(replayed.events().len(), 2);
+    assert_eq!(
+        replayed.events()[1].subject_digest(),
+        adoption.result_digest()
+    );
+    assert!(plan_append(&replayed, command).unwrap().is_exact_retry());
+    let changed = LocalVerifiedResultAdoption::new(
+        submission.task_ref().clone(),
+        submission.client_request_id(),
+        created.head().head_digest().clone(),
+        format!("evidence:sha256:{}", "c".repeat(64)),
+        acceptance,
+    )
+    .unwrap();
+    let changed_command = AppendCommand::new_local_verified_result_adopted(
+        created.head().clone(),
+        "2026-09-05T02:00:00Z",
+        ActorId::new("lattice-mcp").unwrap(),
+        &changed,
+    )
+    .unwrap();
+    assert_eq!(
+        plan_append(&replayed, changed_command),
+        Err(LedgerError::CommandIdReuse)
+    );
+    assert!(
+        AppendCommand::new_local_verified_result_adopted(
+            completed.head().clone(),
+            "2026-09-05T02:00:01Z",
+            ActorId::new("lattice-mcp").unwrap(),
+            &adoption
+        )
+        .is_err()
+    );
+}

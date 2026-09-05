@@ -185,6 +185,7 @@ const conversationStartWarningMs = 30_000;
 
 function conversationStatusText(item, codexConnected = false, now = Date.now()) {
   if (!item) return "確認主要專案後即可開始對話。";
+  if (item.archived_at) return "此對話已在 Codex 封存。內容仍保留；如要繼續，請按「重新開啟此對話」。訊息不會自動重送。";
   if (
     !codexConnected
     && ["starting", "running", "waiting_approval"].includes(item.status)
@@ -286,6 +287,7 @@ export class LatticeControlService {
   constructor({
     store,
     codex,
+    formalWorkStore = null,
     model = DEFAULT_CODEX_MODEL,
     conversationModel = DEFAULT_CODEX_MODEL,
     threadOptions = {},
@@ -298,6 +300,7 @@ export class LatticeControlService {
   }) {
     this.store = store;
     this.codex = codex;
+    this.formalWorkStore = formalWorkStore;
     this.model = model;
     this.conversationModel = conversationModel;
     this.threadOptions = { ...threadOptions };
@@ -725,6 +728,7 @@ export class LatticeControlService {
         can_send: false,
         can_interrupt: false,
         can_reconnect: false,
+        can_reopen: false,
         messages: [],
         handoffs: [],
         messages_truncated: false,
@@ -807,6 +811,8 @@ export class LatticeControlService {
         created_at: event.created_at,
       }));
     const selectionPending = item.status === "selection_pending";
+    const selectedProjectChanged = this.#conversationBinding()?.payload.projectId !== item.project_id;
+    const archivedCurrentProject = Boolean(item.archived_at && !selectedProjectChanged);
     const activeFollowUpSlot = ["running", "waiting_approval"].includes(item.status)
       && Boolean(item.codex_thread_id && item.codex_turn_id)
       && !this.#conversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
@@ -818,15 +824,16 @@ export class LatticeControlService {
       codex_thread_id: item.codex_thread_id ?? null,
       codex_turn_id: item.codex_turn_id ?? null,
       status: selectionPending ? "not_started" : item.status,
-      status_text: queuedMessageTarget
+      status_text: queuedMessageTarget && !archivedCurrentProject
         ? (queuedPredecessorTerminal
           ? "補充訊息仍安全保存；請重新連線核對後繼續，不會自動重送。"
           : this.codex.connected
             ? "補充訊息已排隊；Codex 結束本回合後會自動繼續。"
             : "補充訊息已保存；重新連線後會先核對目前回合，再繼續處理。")
-        : conversationStatusText(item, this.codex.connected),
+        : conversationStatusText(selectedProjectChanged ? { ...item, archived_at: null } : item, this.codex.connected),
       codex_connected: Boolean(this.codex.connected),
       can_send: this.primaryConversationReady
+        && !archivedCurrentProject
         && !hasUnresolvedMessage
         && !missingCurrentFinal
         && (
@@ -836,7 +843,8 @@ export class LatticeControlService {
       can_interrupt: ["running", "waiting_approval"].includes(item.status) && Boolean(
         this.codex.isTurnActive?.(item.codex_thread_id, item.codex_turn_id),
       ),
-      can_reconnect: Boolean(
+      can_reopen: Boolean(archivedCurrentProject && item.codex_thread_id),
+      can_reconnect: !item.archived_at && Boolean(
         queuedMessageTarget
         || (
           ["starting", "running", "waiting_approval", "failed"].includes(item.status)
@@ -866,6 +874,7 @@ export class LatticeControlService {
         decisions: null,
       };
     }
+    if (this.formalWorkStore) return this.#formalFourCoreSurface(context, boundedConversation);
     const workSnapshot = this.store.getWorkSnapshot({
       projectId: context.project_id,
       maxNodes: 256,
@@ -887,6 +896,13 @@ export class LatticeControlService {
       work_snapshot: workSnapshot,
       decisions: this.#fourCoreDecisions(context.project_id),
     };
+  }
+
+  async #formalFourCoreSurface(context, conversation) {
+    const workSnapshot = await this.formalWorkStore.getWorkSnapshot({ projectId: context.project_id });
+    const decisions = await this.formalWorkStore.decisions(context.project_id);
+    return { schema_version: fourCoreSurfaceSchemaVersion, context, conversation,
+      work_snapshot: workSnapshot, decisions, formal_work_enabled: true };
   }
 
   runtimeDataPresence() {
@@ -912,6 +928,9 @@ export class LatticeControlService {
 
   fourCoreWorkNode({ workItemId, expectedRevision, expectedDigest }) {
     const context = this.#requireFourCoreProjectContext();
+    if (this.formalWorkStore) return this.formalWorkStore.getWorkNode({
+      projectId: context.project_id, workItemId, expectedRevision, expectedDigest,
+    });
     return this.store.getWorkNode({
       projectId: context.project_id,
       workItemId,
@@ -924,6 +943,9 @@ export class LatticeControlService {
 
   fourCoreDecisionHistory({ decisionId, expectedRevision, expectedDigest }) {
     const context = this.#requireFourCoreProjectContext();
+    if (this.formalWorkStore) return this.formalWorkStore.decisionHistory({
+      projectId: context.project_id, decisionId, expectedRevision, expectedDigest,
+    });
     const packet = this.store.readDecision({
       decisionId,
       maxDepth: 32,
@@ -1039,6 +1061,10 @@ export class LatticeControlService {
         const fence = this.#acquirePrimaryConversationLease();
         let claim = null;
         try {
+          const retained = requireItem(this.store, primaryConversationId);
+          if (retained.archived_at && this.#conversationBinding()?.payload.projectId === projectId) {
+            throw conversationError("CODEX_THREAD_ARCHIVED", conversationStatusText(retained));
+          }
           const existing = this.store.primaryConversationMessage(clientMessageId);
           if (existing) {
             claim = this.store.claimPrimaryConversationMessage({
@@ -1189,6 +1215,12 @@ export class LatticeControlService {
 
   async #reconcilePrimaryConversationBeforeClaim(projectId, effectIdentity, fence) {
     const before = requireItem(this.store, primaryConversationId);
+    if (before.archived_at && this.#conversationBinding()?.payload.projectId !== projectId
+      && !this.store.primaryConversationUnresolvedMessage()
+      && !this.store.primaryConversationHasUnresolvedTurn()) {
+      // A separately selected project gets its own thread; the old one stays archived.
+      return;
+    }
     if (!before.codex_thread_id && !before.codex_turn_id) return;
     if (!before.codex_thread_id || !before.codex_turn_id) {
       throw conversationError(
@@ -1997,6 +2029,65 @@ export class LatticeControlService {
     });
   }
 
+  reopenPrimaryConversation({ threadId } = {}) {
+    return this.#runPrimaryConversationMutation(`conversation-reopen:${threadId}`, async () => {
+      const fence = this.#acquirePrimaryConversationLease();
+      const item = requireItem(this.store, primaryConversationId);
+      if (!threadId || item.codex_thread_id !== threadId) {
+        throw conversationError("CONVERSATION_RECONCILIATION_REQUIRED", "目前對話已變更，請重新載入後再開啟。");
+      }
+      if (!item.archived_at) return this.primaryConversation();
+      const effectIdentity = await this.#conversationEffectIdentity(fence);
+      let reconciledTurnId = item.codex_turn_id;
+      const resume = async () => {
+        let expectedTurnId = item.codex_turn_id;
+        const unresolved = this.store.primaryConversationUnresolvedMessage();
+        if (unresolved || !expectedTurnId) {
+          const observed = await this.#fencedConversationEffect(fence, () => this.codex.readThread(threadId, {
+            includeTurns: true, allowEmpty: true, effectIdentity,
+          }));
+          if (observed?.id !== threadId || !Array.isArray(observed.turns)) {
+            throw conversationError("CONVERSATION_RECONCILIATION_REQUIRED", "原對話身份仍需核對；訊息尚未送出。");
+          }
+          if (observed.turns.length) {
+            const matches = unresolved ? observed.turns.filter((turn) =>
+              turnStartsWithConversationMarker(turn, conversationMarker(unresolved.payload))) : [];
+            if (matches.length > 1 || (matches.length === 1 && matches[0] !== observed.turns.at(-1))
+              || (matches.length === 0 && (!expectedTurnId || observed.turns.at(-1)?.id !== expectedTurnId))) {
+              throw conversationError("CONVERSATION_RECONCILIATION_REQUIRED", "保存的訊息與原回合尚未核對一致；訊息尚未送出。");
+            }
+            if (matches.length === 1) expectedTurnId = matches[0].id;
+          }
+        }
+        const resumed = await this.#fencedConversationEffect(fence, () => expectedTurnId
+          ? this.codex.resumeThread(threadId, { expectedTurnId, effectIdentity })
+          : this.codex.resumeEmptyThread(threadId, { effectIdentity }));
+        reconciledTurnId = expectedTurnId;
+        return resumed;
+      };
+      let thread;
+      try {
+        // Also recovers a successful unarchive whose response was lost.
+        thread = await resume();
+      } catch (error) {
+        if (error?.code !== "CODEX_THREAD_ARCHIVED" || error.threadId !== threadId) throw error;
+        await this.#fencedConversationEffect(fence, () => this.codex.unarchiveThread(threadId, { effectIdentity }));
+        thread = await resume();
+      }
+      if (thread?.id !== threadId || !Array.isArray(thread.turns)
+        || (reconciledTurnId && thread.turns.at(-1)?.id !== reconciledTurnId)) {
+        throw conversationError("CONVERSATION_RECONCILIATION_REQUIRED", "對話已開啟，但回合身份仍需核對；訊息尚未送出。");
+      }
+      // Restoring visibility is separate from reconnecting or delivering saved input.
+      // In particular, do not apply a terminal here: it can schedule a queued turn.
+      this.store.updateWorkItem(primaryConversationId, { archived_at: null, failure_summary: null }, fence);
+      this.#appendEventOnce(primaryConversationId, "conversation_reopened", {
+        threadId, turnId: item.codex_turn_id, observedTurnId: reconciledTurnId, archivedAt: item.archived_at,
+      }, fence);
+      return this.primaryConversation();
+    });
+  }
+
   async interruptPrimaryConversation() {
     return this.#runPrimaryConversationMutation("conversation-interrupt", async () => {
       const fence = this.#acquirePrimaryConversationLease();
@@ -2481,6 +2572,17 @@ export class LatticeControlService {
         await this.#handlePrimaryConversationLeaseLoss(fence);
         throw leaseError;
       }
+      const item = this.store.getWorkItem(primaryConversationId);
+      if (error?.code === "CODEX_THREAD_ARCHIVED" && error.threadId === item?.codex_thread_id) {
+        this.store.updateWorkItem(primaryConversationId, {
+          archived_at: item.archived_at ?? new Date().toISOString(),
+          failure_summary: boundedText(error.message, 2_048),
+        }, fence);
+        this.#appendEventOnce(primaryConversationId, "conversation_archive_detected", {
+          threadId: error.threadId, turnId: item.codex_turn_id,
+          pausedClientMessageId: this.store.primaryConversationUnresolvedMessage()?.payload.clientMessageId ?? null,
+        }, fence);
+      }
       throw error;
     }
   }
@@ -2550,10 +2652,12 @@ export class LatticeControlService {
   }
 
   #scheduleQueuedPrimaryConversationAfterTerminal(threadId, turnId) {
+    if (this.store.getWorkItem(primaryConversationId)?.archived_at) return Promise.resolve(false);
     const queued = this.store.primaryConversationUnresolvedMessage();
     const target = queuedConversationTarget(queued);
     if (
       !queued
+      || this.store.primaryConversationMessageRequiresExplicitRetry(queued.payload.clientMessageId)
       || target?.threadId !== threadId
       || target?.turnId !== turnId
       || !queuedPredecessorProjectionStatus(this.#conversationTerminalEvent(threadId, turnId))
@@ -2568,6 +2672,8 @@ export class LatticeControlService {
           const retainedTarget = queuedConversationTarget(retained);
           if (
             retained?.id !== queued.id
+            || this.store.getWorkItem(primaryConversationId)?.archived_at
+            || this.store.primaryConversationMessageRequiresExplicitRetry(queued.payload.clientMessageId)
             || retainedTarget?.threadId !== threadId
             || retainedTarget?.turnId !== turnId
             || !queuedPredecessorProjectionStatus(

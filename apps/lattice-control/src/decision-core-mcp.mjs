@@ -1,11 +1,9 @@
-import { existsSync, statSync } from "node:fs";
-import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { defaultControlDatabasePath } from "./database-path.mjs";
 import { ControlDecisionService } from "./decision-core-service.mjs";
 import { LatticeStore } from "./store.mjs";
+import { FormalWorkStore } from "./formal-work-store.mjs";
 
 const protocolVersion = "2025-11-25";
 const supportedProtocolVersions = new Set([protocolVersion, "2025-06-18"]);
@@ -289,21 +287,6 @@ function validateSearchArguments(value) {
     && safeDigest(value.digest);
 }
 
-function configuredDatabasePath() {
-  const databasePath = process.env.LATTICE_CONTROL_DATABASE_PATH
-    || defaultControlDatabasePath();
-  if (
-    !path.isAbsolute(databasePath)
-    || databasePath.length > 2_048
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(databasePath)
-    || !existsSync(databasePath)
-    || !statSync(databasePath).isFile()
-  ) {
-    throw new Error("LATTICE_CONTROL_DATABASE_UNAVAILABLE");
-  }
-  return path.normalize(databasePath);
-}
-
 function safeError(error) {
   const code = typeof error?.code === "string"
     && /^[A-Z0-9_]{1,128}$/u.test(error.code)
@@ -358,9 +341,10 @@ function toolTextSummary(name, structuredContent) {
 export function runControlDecisionMcp({
   input = process.stdin,
   output = process.stdout,
-  databasePath = configuredDatabasePath(),
+  databasePath,
+  formalWorkStore,
 } = {}) {
-  const store = new LatticeStore(databasePath);
+  const store = formalWorkStore ?? (databasePath === undefined ? new FormalWorkStore() : new LatticeStore(databasePath));
   const service = new ControlDecisionService({ store });
   let initialized = false;
   let initializeSeen = false;
@@ -368,6 +352,7 @@ export function runControlDecisionMcp({
   let closed = false;
   let backpressured = false;
   let inputEnded = false;
+  let handling = false;
   const toolCallTimestamps = [];
 
   const reserveToolCall = () => {
@@ -569,11 +554,16 @@ export function runControlDecisionMcp({
           expectedDigest: args.digest,
         });
       }
-      success(request.id, {
-        content: [{ type: "text", text: toolTextSummary(name, structuredContent) }],
-        structuredContent,
+      const deliver = (packet) => success(request.id, {
+        content: [{ type: "text", text: toolTextSummary(name, packet) }],
+        structuredContent: packet,
         isError: false,
       });
+      if (typeof structuredContent?.then === "function") return structuredContent.then(deliver, (error) => {
+        const { code, message } = safeError(error);
+        toolFailure(request.id, code, message);
+      });
+      deliver(structuredContent);
     } catch (error) {
       const { code, message } = safeError(error);
       toolFailure(request.id, code, message);
@@ -590,11 +580,11 @@ export function runControlDecisionMcp({
     input.pause();
     buffer = Buffer.alloc(0);
     toolCallTimestamps.length = 0;
-    store.close();
+    void Promise.resolve(store.close()).catch(() => { process.exitCode = 1; });
   };
 
   function processBufferedFrames() {
-    if (closed || backpressured) return;
+    if (closed || backpressured || handling) return;
     while (true) {
       const newline = buffer.indexOf(0x0a);
       if (newline < 0) break;
@@ -607,7 +597,19 @@ export function runControlDecisionMcp({
         close();
         return;
       }
-      handle(frame);
+      const result = handle(frame);
+      if (typeof result?.then === "function") {
+        handling = true;
+        input.pause();
+        void result.catch(() => { process.exitCode = 1; close(); }).finally(() => {
+          handling = false;
+          if (closed) return;
+          processBufferedFrames();
+          if (inputEnded) finishInput();
+          else if (!handling && !backpressured) input.resume();
+        });
+        return;
+      }
       if (closed || backpressured) return;
     }
     if (buffer.length > maximumFrameBytes) {
@@ -619,9 +621,9 @@ export function runControlDecisionMcp({
   }
 
   function finishInput() {
-    if (closed || backpressured || !inputEnded) return;
+    if (closed || backpressured || handling || !inputEnded) return;
     processBufferedFrames();
-    if (closed || backpressured) return;
+    if (closed || backpressured || handling) return;
     if (buffer.length > 0) {
       failure(null, -32600, "Incomplete MCP frame rejected");
       process.exitCode = 1;

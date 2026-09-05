@@ -35,6 +35,35 @@ fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     if let Some(argument) = arguments.next() {
+        if argument == "--external-result-import" || argument == "--local-result-import" {
+            let Some(path) = arguments.next() else {
+                eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                return ExitCode::from(2);
+            };
+            if arguments.next().is_some() {
+                eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                return ExitCode::from(2);
+            }
+            let result = if argument == "--local-result-import" {
+                lattice_runtime::composition::import_local_result_from_environment(
+                    std::path::Path::new(&path),
+                )
+            } else {
+                lattice_runtime::composition::import_external_result_from_environment(
+                    std::path::Path::new(&path),
+                )
+            };
+            return match result {
+                Ok(receipt) => {
+                    println!("{receipt}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--hermes-prepare" && arguments.next().is_none() {
             return run_hermes_prepare();
         }

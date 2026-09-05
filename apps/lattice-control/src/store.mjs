@@ -2197,6 +2197,64 @@ function readControlWorkSnapshot(database, {
     return { work_item_id: workItemId, depends_on_work_item_id: dependsOnId };
   });
 
+  return projectControlWorkSnapshot({
+    projectId: normalizedProjectId, nodes, relations, dependencies,
+  });
+}
+
+// Both product readers use one projection; this function never reads or writes
+// SQLite. The supplied authority identity participates in the shared revision.
+export function projectControlWorkSnapshot({
+  projectId, nodes: inputNodes, relations: inputRelations, dependencies: inputDependencies,
+  source = controlWorkSource, sourceIdentity = null,
+}) {
+  const normalizedProjectId = normalizedWorkCoreId(projectId, "project ID");
+  if (!Array.isArray(inputNodes) || !Array.isArray(inputRelations) || !Array.isArray(inputDependencies)
+    || inputNodes.length > controlWorkMaximumNodes
+    || inputRelations.length > controlWorkMaximumNodes
+    || inputDependencies.length + inputRelations.filter((row) => row.parent_work_item_id).length > controlWorkMaximumEdges) {
+    throw controlWorkError("CONTROL_WORK_PROJECTION_INPUT_REJECTED", "Work projection exceeds its bounds");
+  }
+  const nodes = inputNodes.map((node) => {
+    const id = normalizedWorkCoreId(node.id, "work item ID");
+    if (!statuses.has(node.status) || !priorities.has(node.priority)) {
+      throw controlWorkError("CONTROL_WORK_NODE_STATE_REJECTED", "Work item has an invalid state");
+    }
+    return {
+      id,
+      title: normalizedWorkText(node.title, "work item title", 512),
+      objective: normalizedWorkText(node.objective, "work item objective", 4_096),
+      priority: node.priority, status: node.status,
+      progress: normalizedWorkText(node.progress, "work item progress", 4_096, { nullable: true }),
+      updated_at: normalizedWorkText(node.updated_at, "work item update time", 128),
+      ...(source.authority === "POSTGRESQL_TASK_LEDGER"
+        ? { completion_verified: node.completion_verified === true } : {}),
+    };
+  }).sort((a, b) => a.id.localeCompare(b.id, "en"));
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  if (nodeById.size !== nodes.length) {
+    throw controlWorkError("CONTROL_WORK_PROJECTION_INPUT_REJECTED", "Duplicate work identity");
+  }
+  const relations = inputRelations.map((row) => {
+    if (!nodeById.has(row.work_item_id) || (row.parent_work_item_id && !nodeById.has(row.parent_work_item_id))) {
+      throw controlWorkError("CONTROL_WORK_ORPHAN_REJECTED", "Work relation has no project node");
+    }
+    const blocker = normalizedBlocker(row.blocker_status === "clear"
+      ? { status: "clear" } : { status: row.blocker_status, reason: row.blocker_reason });
+    return { work_item_id: row.work_item_id, parent_work_item_id: row.parent_work_item_id ?? null,
+      blocker_status: blocker.status, blocker_reason: blocker.reason };
+  }).sort((a, b) => a.work_item_id.localeCompare(b.work_item_id, "en"));
+  const dependencies = inputDependencies.map((row) => {
+    if (!nodeById.has(row.work_item_id) || !nodeById.has(row.depends_on_work_item_id)) {
+      throw controlWorkError("CONTROL_WORK_ORPHAN_REJECTED", "Work dependency has no project node");
+    }
+    return { work_item_id: row.work_item_id, depends_on_work_item_id: row.depends_on_work_item_id };
+  }).sort((a, b) => a.work_item_id.localeCompare(b.work_item_id, "en")
+    || a.depends_on_work_item_id.localeCompare(b.depends_on_work_item_id, "en"));
+  if (new Set(relations.map((row) => row.work_item_id)).size !== relations.length
+    || new Set(dependencies.map((row) => row.work_item_id + "\0" + row.depends_on_work_item_id)).size !== dependencies.length) {
+    throw controlWorkError("CONTROL_WORK_PROJECTION_INPUT_REJECTED", "Duplicate work relation");
+  }
   const parentByChild = new Map();
   const childrenByParent = new Map(nodes.map(({ id }) => [id, []]));
   for (const relation of relations) {
@@ -2235,7 +2293,10 @@ function readControlWorkSnapshot(database, {
     }
     for (const dependencyId of dependsOnByNode.get(id)) {
       const dependencyStatus = nodeById.get(dependencyId).status;
-      if (!satisfiedDependencyStatuses.has(dependencyStatus)) {
+      const satisfied = source.authority === "POSTGRESQL_TASK_LEDGER"
+        ? nodeById.get(dependencyId).completion_verified
+        : satisfiedDependencyStatuses.has(dependencyStatus);
+      if (!satisfied) {
         reasons.push({ kind: "dependency", work_item_id: dependencyId, status: dependencyStatus });
       }
     }
@@ -2248,6 +2309,7 @@ function readControlWorkSnapshot(database, {
     nodes,
     relations,
     dependencies,
+    ...(sourceIdentity == null ? {} : { authority_identity: sourceIdentity }),
   };
   const revision = workSnapshotHash(sourceRows);
   const treeNodes = nodes.map((node) => ({
@@ -2287,7 +2349,7 @@ function readControlWorkSnapshot(database, {
   });
   const snapshot = {
     schema_version: controlWorkSnapshotSchemaVersion,
-    source: { ...controlWorkSource },
+    source: { ...source },
     project_id: normalizedProjectId,
     revision,
     digest,
@@ -3290,6 +3352,15 @@ export class LatticeStore {
     `).get(primaryConversationId, normalizedId));
   }
 
+  primaryConversationMessageRequiresExplicitRetry(clientMessageId) {
+    return Boolean(this.database.prepare(`
+      SELECT 1 FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_archive_detected'
+        AND json_extract(payload_json, '$.pausedClientMessageId') = ?
+      LIMIT 1
+    `).get(primaryConversationId, normalizeClientMessageId(clientMessageId)));
+  }
+
   primaryConversationUnresolvedMessage() {
     const latestClaim = this.database.prepare(`
       SELECT id, kind, payload_json, created_at
@@ -3849,7 +3920,7 @@ export class LatticeStore {
       this.database.prepare(`
         UPDATE work_items
         SET project_id = ?, codex_thread_id = ?, codex_turn_id = NULL,
-            progress = ?, updated_at = ?
+            archived_at = NULL, progress = ?, updated_at = ?
         WHERE id = ?
       `).run(
         normalizedProjectId,

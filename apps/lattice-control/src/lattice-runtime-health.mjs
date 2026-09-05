@@ -12,6 +12,8 @@ const defaultProbeCleanupTimeoutMs = 2_000;
 const defaultCacheTtlMs = 60_000;
 
 export const latticeRuntimeTools = Object.freeze([
+  "lattice_control_snapshot",
+  "lattice_control_update",
   "lattice_delivery_reconcile",
   "lattice_delivery_run",
   "lattice_delivery_status",
@@ -211,7 +213,7 @@ const inheritedChildEnvironmentNames = new Set([
   "WINDIR",
 ]);
 
-function closedChildEnvironment(configuredEnvironment) {
+export function closedChildEnvironment(configuredEnvironment) {
   const environment = Object.create(null);
   for (const [name, value] of Object.entries(process.env)) {
     if (value !== undefined && inheritedChildEnvironmentNames.has(name.toUpperCase())) {
@@ -334,6 +336,10 @@ function validRuntimeStatus(value) {
     && ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"]
       .includes(value.hermes_activation_status)
     && validForemanProjection(value.foreman);
+}
+
+export function runtimeHealthFromValue(value) {
+  return { ...(validRuntimeStatus(value) ? healthy : incompatible) };
 }
 
 function validToolResultEnvelope(result) {

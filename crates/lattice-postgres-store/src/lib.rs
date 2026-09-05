@@ -1,5 +1,6 @@
 //! Typed Store conformance fake plus exact live `PostgreSQL` adapter for LATTICE.
 
+mod control_product;
 mod foreman_coordination;
 mod live;
 mod migrations;
@@ -8,6 +9,7 @@ mod project_registry;
 mod schema_v6_profile;
 mod task_ledger;
 
+pub use control_product::{ControlProductCommand, PostgresControlProduct};
 pub use foreman_coordination::PostgresForemanCoordination;
 pub use live::PostgresControlStore;
 pub use migrations::{
@@ -17,8 +19,9 @@ pub use migrations::{
     migration_manifest, verify_embedded_manifest,
 };
 pub use postgres_setup::{
-    BootstrapAdmission, MigrationApplyOutcome, MigrationBootstrapProfile, PostgresSchemaEvidence,
-    apply_migrations, inspect_migration_profile, verify_postgres_schema,
+    BootstrapAdmission, CONTROL_PRODUCT_SQL, MigrationApplyOutcome, MigrationBootstrapProfile,
+    PostgresSchemaEvidence, apply_control_product_extension, apply_migrations,
+    inspect_migration_profile, verify_postgres_schema,
 };
 pub use project_registry::{
     PostgresProjectRegistry, PostgresProjectRegistryError, PostgresProjectRegistryErrorKind,

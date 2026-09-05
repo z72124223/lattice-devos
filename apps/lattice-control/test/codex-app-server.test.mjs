@@ -594,6 +594,41 @@ function createInitializedConnector(onMessage = () => {}, options = {}) {
   return { child, codex, messages };
 }
 
+for (const reconnectBeforeResolution of [false, true]) {
+  test(`close cancels pending runtime resolution without a late spawn${reconnectBeforeResolution ? " or disturbing a replacement" : ""}`, {
+    skip: process.platform !== "win32",
+  }, async () => {
+    const resolution = deferred();
+    const launches = [];
+    let resolutions = 0;
+    const { child, codex, messages } = createInitializedConnector(() => {}, {
+      codexBin: null,
+      resolveRuntime: () => ++resolutions === 1
+        ? resolution.promise
+        : Promise.resolve({ command: "replacement-codex", args: ["app-server", "--stdio"] }),
+      spawnProcess: (command, args) => { launches.push({ command, args }); return child; },
+    });
+    try {
+      const cancelled = assert.rejects(codex.connect(), { code: "CODEX_APP_SERVER_CONNECT_CANCELLED" });
+      await nextMacrotask();
+      assert.equal(resolutions, 1);
+      assert.deepEqual(await codex.close(), { exited: true, processId: null });
+      assert.equal(launches.length, 0);
+      if (reconnectBeforeResolution) await codex.connect();
+      resolution.resolve({ command: "cancelled-codex", args: ["app-server", "--stdio"] });
+      await cancelled;
+      assert.equal(launches.length, Number(reconnectBeforeResolution));
+      assert.equal(codex.connected, reconnectBeforeResolution);
+      assert.equal(child.killCount, 0);
+      assert.equal(messages.filter(({ method }) => method === "initialize").length, Number(reconnectBeforeResolution));
+      if (reconnectBeforeResolution) assert.equal(launches[0].command, "replacement-codex");
+    } finally {
+      resolution.resolve({ command: "cancelled-codex", args: [] });
+      await codex.close();
+    }
+  });
+}
+
 test("uses the official JSONL handshake and model listing without starting a turn", async () => {
   const child = new FakeProcess();
   const launches = [];
@@ -617,6 +652,7 @@ test("uses the official JSONL handshake and model listing without starting a tur
   });
 
   const codex = new CodexAppServer({
+    codexBin: process.platform === "win32" ? String.raw`C:\Trusted\Codex\codex.exe` : "/usr/bin/codex",
     spawnProcess(command, args, options) {
       launches.push({ command, args, options });
       return child;
@@ -626,12 +662,11 @@ test("uses the official JSONL handshake and model listing without starting a tur
   assert.equal(models.data[0].id, "gpt-5.6-terra");
   assert.equal(launches.length, 1);
   if (process.platform === "win32") {
-    assert.equal(launches[0].command, process.execPath);
-    assert.match(launches[0].args[0], /@openai[\\/]codex[\\/]bin[\\/]codex\.js$/iu);
-    assert.deepEqual(launches[0].args.slice(1), ["app-server", "--stdio"]);
+    assert.equal(launches[0].command, String.raw`C:\Trusted\Codex\codex.exe`);
   } else {
-    assert.equal(launches[0].command, "codex");
+    assert.equal(launches[0].command, "/usr/bin/codex");
   }
+  assert.deepEqual(launches[0].args, ["app-server", "--stdio"]);
   await codex.close();
 });
 
@@ -1429,6 +1464,46 @@ test("empty thread recovery requires the same exact empty rollout twice", async 
   } finally {
     await codex.close();
   }
+});
+
+test("archived resume names only the exact session and never restores it automatically", async () => {
+  const { codex, messages } = createInitializedConnector((message, server) => {
+    if (message.method === "thread/resume") sendServerMessage(server, {
+      id: message.id,
+      error: { code: -32600, message: `session ${message.params.threadId} is archived; run codex unarchive` },
+    });
+    if (message.method === "thread/unarchive") sendServerMessage(server, {
+      id: message.id, result: { thread: { id: message.params.threadId, turns: [] } },
+    });
+  });
+  try {
+    await assert.rejects(codex.resumeThread("thread-archived"), (error) => {
+      assert.equal(error.code, "CODEX_THREAD_ARCHIVED");
+      assert.equal(error.threadId, "thread-archived");
+      assert.match(error.message, /重新開啟此對話/u);
+      assert.doesNotMatch(error.message, /codex unarchive/iu);
+      return true;
+    });
+    assert.equal(messages.some(({ method }) => method === "thread/unarchive"), false);
+    await codex.unarchiveThread("thread-archived");
+    assert.deepEqual(messages.at(-1).params, { threadId: "thread-archived" });
+    assert.equal(messages.some(({ method }) => method === "turn/start"), false);
+  } finally { await codex.close(); }
+});
+
+test("another session archive error cannot offer recovery and unarchive checks identity", async () => {
+  const { codex } = createInitializedConnector((message, server) => {
+    if (message.method === "thread/resume") sendServerMessage(server, {
+      id: message.id, error: { code: -32600, message: "session another-thread is archived; run codex unarchive" },
+    });
+    if (message.method === "thread/unarchive") sendServerMessage(server, {
+      id: message.id, result: { thread: { id: "another-thread", turns: [] } },
+    });
+  });
+  try {
+    await assert.rejects(codex.resumeThread("retained-thread"), { code: "CODEX_APP_SERVER_RPC_REJECTED" });
+    await assert.rejects(codex.unarchiveThread("retained-thread"), { code: "CODEX_THREAD_NOT_RECOVERABLE" });
+  } finally { await codex.close(); }
 });
 
 test("resume rejects an empty loaded rollout before reconciliation read", async () => {

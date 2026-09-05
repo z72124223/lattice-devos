@@ -14,8 +14,10 @@ import { runControlWorkMcp } from "../src/work-core-mcp.mjs";
 
 function startMcp(databasePath) {
   const child = spawn(process.execPath, [
-    path.resolve(import.meta.dirname, "../src/work-core-mcp.mjs"),
+    "--input-type=module", "-e",
+    "import {runControlWorkMcp} from './apps/lattice-control/src/work-core-mcp.mjs'; runControlWorkMcp({databasePath:process.env.LATTICE_CONTROL_DATABASE_PATH});",
   ], {
+    cwd: path.resolve(import.meta.dirname, "../../.."),
     env: { ...process.env, LATTICE_CONTROL_DATABASE_PATH: databasePath },
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,

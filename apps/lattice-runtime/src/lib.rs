@@ -1,9 +1,12 @@
 //! LATTICE runtime composition entry.
 
 pub mod composition;
+mod control_product;
 pub mod coordination;
 pub mod delivery_ledger;
+mod external_result_import;
 pub mod git_delivery;
+mod local_result_import;
 mod managed_execution_environment;
 mod managed_file_identity;
 mod managed_foreman_service;

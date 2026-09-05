@@ -1,6 +1,8 @@
 //! Pure Task Ledger V2 semantic owner, append planner, and non-durable fake.
 
 mod foreman;
+mod local_result;
+pub use local_result::*;
 mod task_runtime;
 
 pub use foreman::*;
@@ -115,6 +117,8 @@ pub enum LedgerError {
     },
     /// A retained external verified-result adoption diverged from its digest or event binding.
     ExternalVerifiedResultAdoptionMismatch,
+    /// Local result identity or terminal profile was substituted.
+    LocalVerifiedResultAdoptionMismatch,
     /// One authoritative task-ingress claim field is malformed.
     InvalidTaskIngressClaim {
         /// Stable field name; never includes submitted content.
@@ -226,6 +230,9 @@ impl LedgerError {
             Self::ExternalVerifiedResultAdoptionMismatch => {
                 "LEDGER_EXTERNAL_VERIFIED_RESULT_ADOPTION_MISMATCH"
             }
+            Self::LocalVerifiedResultAdoptionMismatch => {
+                "LEDGER_LOCAL_VERIFIED_RESULT_ADOPTION_MISMATCH"
+            }
             Self::InvalidTaskIngressClaim { .. } => "LEDGER_INVALID_TASK_INGRESS_CLAIM",
             Self::UnknownTaskIngressClaimVersion => "LEDGER_UNKNOWN_TASK_INGRESS_CLAIM_VERSION",
             Self::TaskIngressClaimMismatch => "LEDGER_TASK_INGRESS_CLAIM_MISMATCH",
@@ -312,6 +319,9 @@ impl fmt::Display for LedgerError {
             }
             Self::ExternalVerifiedResultAdoptionMismatch => {
                 formatter.write_str("external verified-result adoption binding mismatch")
+            }
+            Self::LocalVerifiedResultAdoptionMismatch => {
+                formatter.write_str("local verified-result adoption binding mismatch")
             }
             Self::InvalidTaskIngressClaim { field } => {
                 write!(formatter, "invalid task-ingress claim {field}")
@@ -2186,6 +2196,7 @@ enum AppendConstruction {
     VerifiedAutonomy,
     VerifiedForeman,
     VerifiedExternalResultAdoption,
+    VerifiedLocalResultAdoption,
     VerifiedReplay,
 }
 
@@ -2387,7 +2398,7 @@ impl AppendCommand {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn from_fields(
         expected_head: TaskLedgerStreamHead,
         command_id: CommandId,
@@ -2446,6 +2457,20 @@ impl AppendCommand {
         {
             return Err(LedgerError::ExternalVerifiedResultAdoptionMismatch);
         }
+        if action.as_str() == LOCAL_RESULT_ADOPTION_ACTION
+            && (!is_local_verified_result(kind, action.as_str())
+                || !matches!(
+                    construction,
+                    AppendConstruction::VerifiedLocalResultAdoption
+                        | AppendConstruction::VerifiedReplay
+                )
+                || outcome != LedgerOutcome::Recorded
+                || reason_code.as_str() != LOCAL_RESULT_ADOPTION_REASON
+                || diagnostic.is_some()
+                || resource_snapshot.is_some())
+        {
+            return Err(LedgerError::LocalVerifiedResultAdoptionMismatch);
+        }
         if matches!(kind, LedgerEventKind::TaskCreated) {
             let profile = classify_task_created_action(action.as_str())?;
             match construction {
@@ -2474,6 +2499,7 @@ impl AppendCommand {
                 | AppendConstruction::VerifiedAutonomy
                 | AppendConstruction::VerifiedForeman
                 | AppendConstruction::VerifiedExternalResultAdoption
+                | AppendConstruction::VerifiedLocalResultAdoption
                 | AppendConstruction::VerifiedReplay => {}
             }
         }
@@ -3589,6 +3615,8 @@ pub fn plan_append(
         &command.subject_digest,
     )?;
     let external_adoption = command.kind == LedgerEventKind::ExternalVerifiedResultAdopted;
+    let local_adoption = is_local_verified_result(command.kind, command.action.as_str());
+    let result_adoption = external_adoption || local_adoption;
     match current.identity().subject_kind() {
         TaskLedgerSubjectKind::TaskSpec
             if requested_profile == Some(TaskCreatedProfile::GeneralTaskIntakeV1) =>
@@ -3597,7 +3625,7 @@ pub fn plan_append(
         }
         TaskLedgerSubjectKind::GeneralTaskIntake
             if requested_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
-                && !external_adoption =>
+                && !result_adoption =>
         {
             return Err(LedgerError::GeneralTaskIntakeCreateOnly);
         }
@@ -3617,19 +3645,22 @@ pub fn plan_append(
         .transpose()?
         .flatten()
         == Some(TaskCreatedProfile::GeneralTaskIntakeV1)
-        && !external_adoption
+        && !result_adoption
     {
         return Err(LedgerError::GeneralTaskIntakeCreateOnly);
     }
-    if external_adoption {
+    if result_adoption {
         let valid_terminal = current.identity().subject_kind()
             == TaskLedgerSubjectKind::GeneralTaskIntake
             && current.events.len() == 1
             && classify_task_created_profile(&current.events[0])?
                 == Some(TaskCreatedProfile::GeneralTaskIntakeV1)
             && command.expected_head.sequence() == 1
-            && command.action.as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
-            && command.reason_code.as_str() == EXTERNAL_RESULT_ADOPTION_REASON
+            && ((external_adoption
+                && command.action.as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
+                && command.reason_code.as_str() == EXTERNAL_RESULT_ADOPTION_REASON)
+                || (local_adoption
+                    && command.reason_code.as_str() == LOCAL_RESULT_ADOPTION_REASON))
             && command.outcome == LedgerOutcome::Recorded
             && command.diagnostic.is_none()
             && command.resource_snapshot.is_none();
@@ -3988,7 +4019,7 @@ pub fn verify_untrusted_autonomy_receipt_rows(
             if rows.is_empty()
                 && autonomy_events.is_empty()
                 && (stream.events().len() == 1
-                    || valid_general_external_adoption_events(stream.events()))
+                    || valid_general_result_adoption_events(stream.events()))
             {
                 Ok(VerifiedAutonomyReceiptState::NotApplicable)
             } else {
@@ -5213,7 +5244,7 @@ pub fn verify_untrusted_snapshot(
         TaskLedgerSubjectKind::GeneralTaskIntake
             if !events.is_empty()
                 && (retained_profile != Some(TaskCreatedProfile::GeneralTaskIntakeV1)
-                    || !(events.len() == 1 || valid_general_external_adoption_events(&events))) =>
+                    || !(events.len() == 1 || valid_general_result_adoption_events(&events))) =>
         {
             return Err(LedgerError::GeneralTaskIntakeCreateOnly);
         }
@@ -5326,7 +5357,7 @@ fn validate_autonomy_order(
     Ok(())
 }
 
-fn valid_general_external_adoption_events(events: &[LedgerEvent]) -> bool {
+fn valid_general_result_adoption_events(events: &[LedgerEvent]) -> bool {
     let [created, terminal] = events else {
         return false;
     };
@@ -5336,13 +5367,18 @@ fn valid_general_external_adoption_events(events: &[LedgerEvent]) -> bool {
     classify_task_created_profile(created).ok()
         == Some(Some(TaskCreatedProfile::GeneralTaskIntakeV1))
         && valid_task_ingress_client_request_id(client_request_id)
-        && terminal.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
+        && ((terminal.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
+            && terminal.action().as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
+            && terminal.reason_code().as_str() == EXTERNAL_RESULT_ADOPTION_REASON
+            && terminal.command_id().as_str()
+                == format!("external-result-adoption:{client_request_id}"))
+            || (is_local_verified_result(terminal.kind(), terminal.action().as_str())
+                && terminal.reason_code().as_str() == LOCAL_RESULT_ADOPTION_REASON
+                && terminal.command_id().as_str()
+                    == format!("local-result-adoption:{client_request_id}")))
         && terminal.actor_id() == created.actor_id()
         && terminal.correlation_id().as_str() == GENERAL_TASK_INTAKE_CORRELATION_ID
-        && terminal.action().as_str() == EXTERNAL_RESULT_ADOPTION_ACTION
         && terminal.outcome() == LedgerOutcome::Recorded
-        && terminal.reason_code().as_str() == EXTERNAL_RESULT_ADOPTION_REASON
-        && terminal.command_id().as_str() == format!("external-result-adoption:{client_request_id}")
         && !is_zero_digest(terminal.subject_digest())
         && terminal.diagnostic().is_none()
         && terminal.resource_snapshot().is_none()

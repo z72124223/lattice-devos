@@ -109,10 +109,11 @@ use lattice_postgres_foreman::{
     verify_extension as verify_postgres_foreman_extension,
 };
 use lattice_postgres_store::{
-    DatabaseRole as StoreDatabaseRole, MigrationBootstrapProfile,
-    MigrationTarget as StoreMigrationTarget, PostgresForemanCoordination, PostgresProjectRegistry,
-    PostgresTaskLedger, PostgresTaskLedgerErrorKind, apply_migrations as apply_store_migrations,
-    inspect_migration_profile, verify_postgres_schema as verify_store_schema,
+    ControlProductCommand, DatabaseRole as StoreDatabaseRole, MigrationBootstrapProfile,
+    MigrationTarget as StoreMigrationTarget, PostgresControlProduct, PostgresForemanCoordination,
+    PostgresProjectRegistry, PostgresTaskLedger, PostgresTaskLedgerErrorKind,
+    apply_migrations as apply_store_migrations, inspect_migration_profile,
+    verify_postgres_schema as verify_store_schema,
 };
 use lattice_postgres_writer_lease::{
     ExtensionApplyOutcome as WriterExtensionApplyOutcome,
@@ -159,9 +160,10 @@ use crate::managed_foreman_service::{
 };
 use crate::managed_worker_adapter::ManagedWorkerCancellation;
 use crate::mcp::{
-    self, DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
-    ObservedEffectKind, TASK_PUBLIC_OBJECTIVE_SUMMARY, TaskStatusArguments, TaskSubmitArguments,
-    ToolExecutionError, record_observed_effect, task_public_objective_digest,
+    self, ControlSnapshotArguments, ControlUpdateArguments, DeliveryToolArguments,
+    DeliveryToolService, ForemanCheckpointArguments, ObservedEffectKind,
+    TASK_PUBLIC_OBJECTIVE_SUMMARY, TaskStatusArguments, TaskSubmitArguments, ToolExecutionError,
+    record_observed_effect, task_public_objective_digest,
 };
 use crate::project_bridge::{ProjectSelector, ResolvedProjectAuthority, resolve_project_authority};
 use crate::task_control::{
@@ -2696,6 +2698,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             ));
         }
     }
+    lattice_postgres_store::apply_control_product_extension(&mut migrator, &store_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
     let final_store =
         verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
@@ -2912,6 +2916,159 @@ fn connect_migrator(
         .batch_execute("SET ROLE lattice_migrator")
         .map_err(|_| LatticedError::new(LatticedErrorKind::LedgerConfiguration))?;
     Ok(client)
+}
+
+/// Imports externally issued delivery evidence through the explicit maintenance
+/// CLI. The MCP service never receives raw receipts or a migrator connection.
+///
+/// # Errors
+/// Returns a bounded failure without exposing paths, receipt bytes or credentials.
+pub fn import_external_result_from_environment(path: &Path) -> Result<Value, &'static str> {
+    let request = crate::external_result_import::parse(path)?;
+    let (_config, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)
+            .map_err(|error| error.code())?;
+    let git = PathBuf::from(
+        required_environment("LATTICE_DELIVERY_GIT_EXE").map_err(|error| error.code())?,
+    );
+    let mut migrator = connect_migrator(&database, &password).map_err(|error| error.code())?;
+    acquire_postgres_bootstrap_gate(&mut migrator).map_err(|error| error.code())?;
+    let result = (|| {
+        let target = StoreMigrationTarget::new(database.database_name(), database.run_id())
+            .map_err(|_| "LATTICE_EXTERNAL_RESULT_IMPORT_DATABASE_UNAVAILABLE")?;
+        let until =
+            deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)).map_err(|error| error.code())?;
+        let runtime = connect_fixed_runtime_client(&database, &password, until)
+            .map_err(|_| "LATTICE_EXTERNAL_RESULT_IMPORT_DATABASE_UNAVAILABLE")?;
+        let mut ledger = PostgresTaskLedger::new(runtime, &target).map_err(|error| error.code())?;
+        let retained = ledger
+            .load_submission_by_task_ref(request.adoption.task_ref())
+            .map_err(|error| error.code())?
+            .ok_or("LATTICE_TASK_REFERENCE_NOT_FOUND")?;
+        let stream = retained.ledger().stream();
+        let exact_replay = stream.commands().iter().any(|record| {
+            let command = record.request();
+            command.command_id().as_str() == request.adoption.command_id()
+                && command.subject_digest() == request.adoption.result_digest()
+                && command.expected_head().head_digest()
+                    == request.adoption.expected_ledger_head_digest()
+        });
+        if stream.head().head_digest() != request.adoption.expected_ledger_head_digest()
+            && !exact_replay
+        {
+            return Err("LATTICE_EXTERNAL_RESULT_EVIDENCE_MISMATCH");
+        }
+        let runtime = connect_fixed_runtime_client(&database, &password, until)
+            .map_err(|_| "LATTICE_EXTERNAL_RESULT_IMPORT_DATABASE_UNAVAILABLE")?;
+        let mut registry =
+            PostgresProjectRegistry::new(runtime, &target).map_err(|error| error.code())?;
+        let registered = registry.load().map_err(|error| error.code())?;
+        let project = registered
+            .state()
+            .project(retained.submission().identity().project_id())
+            .ok_or("PROJECT_IS_NOT_REGISTERED")?;
+        if project.authority().lifecycle() != ProjectLifecycle::Active {
+            return Err("PROJECT_IS_NOT_ACTIVE");
+        }
+        // Historical intake keeps its original snapshot. Only the registered
+        // repository locator is read here; observing delivery does not refresh it.
+        let repository = Path::new(project.observation().canonical_root());
+        let verified = request.verify(retained.submission(), repository, &git)?;
+        crate::external_result_import::retain(&mut migrator, &verified)
+    })();
+    let released = release_postgres_bootstrap_gate(&mut migrator).map_err(|error| error.code());
+    match (result, released) {
+        (Ok(receipt), Ok(())) => Ok(receipt),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+    }
+}
+
+/// Trusted local maintenance executes the fixed verifier and adopts through Runtime.
+pub fn import_local_result_from_environment(path: &Path) -> Result<Value, &'static str> {
+    let request = crate::local_result_import::parse(path)?;
+    let (_config, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting).map_err(|e| e.code())?;
+    let git =
+        PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE").map_err(|e| e.code())?);
+    let node =
+        PathBuf::from(required_environment("LATTICE_LOCAL_RESULT_NODE_EXE").map_err(|e| e.code())?);
+    let mut migrator = connect_migrator(&database, &password).map_err(|e| e.code())?;
+    acquire_postgres_bootstrap_gate(&mut migrator).map_err(|e| e.code())?;
+    let result = (|| {
+        let target = StoreMigrationTarget::new(database.database_name(), database.run_id())
+            .map_err(|_| "LATTICE_LOCAL_RESULT_DATABASE_UNAVAILABLE")?;
+        let until = deadline(Duration::from_secs(180)).map_err(|e| e.code())?;
+        let runtime = connect_fixed_runtime_client(&database, &password, until)
+            .map_err(|_| "LATTICE_LOCAL_RESULT_DATABASE_UNAVAILABLE")?;
+        let mut ledger = PostgresTaskLedger::new(runtime, &target).map_err(|e| e.code())?;
+        let retained = ledger
+            .load_submission_by_task_ref(request.adoption.task_ref())
+            .map_err(|e| e.code())?
+            .ok_or("LATTICE_TASK_REFERENCE_NOT_FOUND")?;
+        let stream = retained.ledger().stream();
+        let replay = stream.commands().iter().any(|r| {
+            r.request().command_id().as_str() == request.adoption.command_id()
+                && r.request().subject_digest() == request.adoption.result_digest()
+                && r.request().expected_head().head_digest()
+                    == request.adoption.expected_ledger_head_digest()
+        });
+        if stream.head().head_digest() != request.adoption.expected_ledger_head_digest() && !replay
+        {
+            return Err("LATTICE_LOCAL_RESULT_EVIDENCE_MISMATCH");
+        }
+        let runtime = connect_fixed_runtime_client(&database, &password, until)
+            .map_err(|_| "LATTICE_LOCAL_RESULT_DATABASE_UNAVAILABLE")?;
+        let mut registry = PostgresProjectRegistry::new(runtime, &target).map_err(|e| e.code())?;
+        let registered = registry.load().map_err(|e| e.code())?;
+        let project = registered
+            .state()
+            .project(retained.submission().identity().project_id())
+            .ok_or("PROJECT_IS_NOT_REGISTERED")?;
+        if project.authority().lifecycle() != ProjectLifecycle::Active {
+            return Err("PROJECT_IS_NOT_ACTIVE");
+        }
+        let import = request.verify_and_retain(
+            retained.submission(),
+            Path::new(project.observation().canonical_root()),
+            &git,
+            &node,
+            &mut migrator,
+        )?;
+        let authority = configured_store_authority().map_err(|e| e.code())?;
+        let peer =
+            configured_task_ingress_peer(&daemon_process_start_identity().map_err(|e| e.code())?)
+                .map_err(|e| e.code())?;
+        let mut lifecycle = PostgresTaskLifecycle::connect_with_ingress_peer_and_admission_profile(
+            &database,
+            &password,
+            until,
+            retained.submission().identity().clone(),
+            authority,
+            peer,
+            TaskAdmissionProfile::GeneralTaskIntake(Box::new(retained.submission().clone())),
+        )
+        .map_err(|e| e.code())?;
+        let now = time::OffsetDateTime::now_utc()
+            .replace_nanosecond(0)
+            .map_err(|_| "LATTICE_LOCAL_RESULT_IMPORT_REJECTED")?
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|_| "LATTICE_LOCAL_RESULT_IMPORT_REJECTED")?;
+        let evidence = lifecycle
+            .adopt_local_result(&request.adoption, &now)
+            .map_err(|e| e.code())?;
+        let mut status =
+            general_task_public_status(&evidence, retained.submission()).map_err(|e| e.code())?;
+        status
+            .as_object_mut()
+            .ok_or("LATTICE_LOCAL_RESULT_IMPORT_REJECTED")?
+            .insert("verification".to_owned(), import);
+        Ok(status)
+    })();
+    let released = release_postgres_bootstrap_gate(&mut migrator).map_err(|e| e.code());
+    match (result, released) {
+        (Ok(receipt), Ok(())) => Ok(receipt),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -5579,6 +5736,60 @@ fn task_lifecycle_at<H: FullChainHermesPort>(
         core.store_authority.clone(),
         core.task_ingress_peer.clone(),
     )
+}
+
+fn connect_control_product<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+) -> Result<PostgresControlProduct, ToolExecutionError> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| ToolExecutionError::new("LATTICE_MCP_OBSERVED_EFFECT_REJECTED"))?;
+    let target = StoreMigrationTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_STORE_REJECTED"))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+    )
+    .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_DATABASE_UNAVAILABLE"))?;
+    PostgresControlProduct::new(client, &target).map_err(ToolExecutionError::new)
+}
+
+fn control_product_project<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    project_id: &str,
+) -> Result<Value, ToolExecutionError> {
+    let id = ProjectId::new(project_id)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let target = StoreMigrationTarget::new(
+        core.delivery.database.database_name(),
+        core.delivery.database.run_id(),
+    )
+    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let client = connect_fixed_runtime_client(
+        &core.delivery.database,
+        &core.delivery.password,
+        deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+    )
+    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let mut registry = PostgresProjectRegistry::new(client, &target)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let loaded = registry
+        .load()
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+    let project = loaded
+        .state()
+        .project(&id)
+        .ok_or_else(|| ToolExecutionError::new("PROJECT_IS_NOT_REGISTERED"))?;
+    Ok(json!({
+        "id":project_id,
+        "canonical_path":project.observation().canonical_root(),
+        "project_snapshot_id":project.authority().project_snapshot_id().as_str(),
+        "active":project.authority().lifecycle()==ProjectLifecycle::Active,
+    }))
 }
 
 fn general_task_lifecycle<H: FullChainHermesPort>(
@@ -8872,14 +9083,38 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             &run_id,
             CanonicalHermesTool::TaskSubmit,
         )?;
-        if arguments.verified_result_adoption().is_some() {
-            // The mutation path is deliberately unavailable until the
-            // Postgres receipt verifier can re-check the immutable evidence
-            // bundle in the same serializable transaction.  Never reinterpret
-            // this closed input as ordinary general intake or schedule work.
-            return Err(ToolExecutionError::new(
-                "LATTICE_EXTERNAL_RESULT_EVIDENCE_UNAVAILABLE",
-            ));
+        if let Some(input) = arguments.verified_result_adoption() {
+            let digest = |value: &str| {
+                ContentDigest::from_sha256(value)
+                    .map_err(|_| ToolExecutionError::new("LATTICE_TASK_REFERENCE_REJECTED"))
+            };
+            let adoption = lattice_task_ledger::ExternalVerifiedResultAdoption::new(
+                digest(input.task_ref())?,
+                arguments.client_request_id(),
+                digest(input.expected_ledger_head_digest())?,
+                input.source_sha(),
+                input.target_sha(),
+                input.push_merge_receipt_ref(),
+                input.deployment_receipt_ref(),
+                input.deployment_artifact_ref(),
+                input.independent_acceptance_ref(),
+                input.protected_action_approval_refs().to_vec(),
+            )
+            .map_err(|_| ToolExecutionError::new("LATTICE_EXTERNAL_RESULT_REJECTED"))?;
+            let submission = load_general_submission_by_task_ref(&core, adoption.task_ref())?
+                .ok_or_else(|| ToolExecutionError::new("LATTICE_TASK_REFERENCE_NOT_FOUND"))?;
+            let mut lifecycle = general_task_lifecycle(&core, &submission)
+                .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+            let occurred_at = time::OffsetDateTime::now_utc()
+                .replace_nanosecond(0)
+                .map_err(|_| ToolExecutionError::new("LATTICE_EXTERNAL_RESULT_REJECTED"))?
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|_| ToolExecutionError::new("LATTICE_EXTERNAL_RESULT_REJECTED"))?;
+            let evidence = lifecycle
+                .adopt_external_result(&adoption, &occurred_at)
+                .map_err(|failure| ToolExecutionError::new(failure.code()))?;
+            return general_task_public_status(&evidence, &submission)
+                .map_err(|failure| ToolExecutionError::new(failure.code()));
         }
         let existing_general =
             load_general_submission_by_request(&core, arguments.client_request_id())?;
@@ -9015,6 +9250,240 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))?;
         verified_task_status(&mut core, &evidence, &task_ref)
             .map_err(|error| ToolExecutionError::new(error.code()))
+    }
+
+    fn control_snapshot(
+        &mut self,
+        arguments: &ControlSnapshotArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_UNAVAILABLE"))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskStatus,
+        )?;
+        let mut product = connect_control_product(&core)?;
+        if let Some(query) = &arguments.decisions {
+            let result = query.read(&mut product).map_err(ToolExecutionError::new)?;
+            let project_id = query
+                .scope()
+                .or_else(|| result["decision"]["scope"].as_str())
+                .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_RESPONSE_REJECTED"))?;
+            control_product_project(&core, project_id)?;
+            return Ok(result);
+        }
+        let refs = match &arguments.task_ref {
+            Some(task_ref) => vec![task_ref.as_str().to_owned()],
+            None => product
+                .task_refs(&arguments.project_id, &arguments.after_task_ref, 32)
+                .map_err(ToolExecutionError::new)?,
+        };
+        let project = control_product_project(&core, &arguments.project_id)?;
+        let status_config = core
+            .managed_foreman
+            .as_ref()
+            .map(|config| config.begin_status_request_at(Instant::now()))
+            .transpose()
+            .map_err(|error| ToolExecutionError::new(error.code()))?;
+        let mut tasks = Vec::with_capacity(refs.len());
+        for task_ref in &refs {
+            let reference = ContentDigest::from_sha256(task_ref)
+                .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_REFERENCE_REJECTED"))?;
+            let submission = load_general_submission_by_task_ref(&core, &reference)?
+                .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING"))?;
+            if submission.identity().project_id().as_str() != arguments.project_id {
+                return Err(ToolExecutionError::new("CONTROL_PRODUCT_SCOPE_REJECTED"));
+            }
+            let binding = general_task_binding(&submission)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let mut lifecycle = general_task_lifecycle(&core, &submission)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let evidence = TaskIntakeLifecyclePort::load(&mut lifecycle, &binding)
+                .map_err(|error| ToolExecutionError::new(error.code()))?;
+            let status = managed_general_task_public_status(
+                &core,
+                &evidence,
+                &submission,
+                status_config.as_ref(),
+            )?;
+            tasks.push(json!({
+                "task_ref":task_ref,"client_request_id":submission.client_request_id(),
+                "objective":submission.objective(),"ledger":status,
+            }));
+        }
+        let mut facts = product
+            .snapshot(&arguments.project_id, &refs)
+            .map_err(ToolExecutionError::new)?;
+        crate::control_product::bound_snapshot(&mut facts, arguments.task_ref.is_some());
+        if let (Some(task_ref), Some(question_id)) = (&arguments.task_ref, &arguments.question_id) {
+            facts["question_resolution"] = product
+                .question_resolution(&arguments.project_id, task_ref.as_str(), question_id)
+                .map_err(ToolExecutionError::new)?;
+        }
+        let mut response = json!({
+            "schema_version":"lattice.control.product-snapshot.v1",
+            "source":{"kind":"POSTGRESQL_CONTROL_PRODUCT","authority":"POSTGRESQL_TASK_LEDGER"},
+            "project":project,"tasks":tasks,"product":facts,
+            "next_task_ref":if arguments.task_ref.is_none()&&refs.len()==32 {refs.last().cloned()} else {None},
+        });
+        if response.to_string().len() > 500_000 {
+            return Err(ToolExecutionError::new(
+                "CONTROL_PRODUCT_RESPONSE_LIMIT_EXCEEDED",
+            ));
+        }
+        let revision = digest(
+            "lattice.control.product-snapshot.v1",
+            &CanonicalValue::String(response.to_string()),
+        )
+        .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_RESPONSE_REJECTED"))?;
+        response["revision"] = json!(revision.as_str());
+        Ok(response)
+    }
+
+    fn control_update(
+        &mut self,
+        arguments: &ControlUpdateArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let mut core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_UNAVAILABLE"))?;
+        let run_id = core.delivery.database.run_id().to_owned();
+        apply_canonical_hermes_tool_policy(
+            &mut core.hermes,
+            &run_id,
+            CanonicalHermesTool::TaskSubmit,
+        )?;
+        let mut product = connect_control_product(&core)?;
+        let mut repository_path = None;
+        let command = match arguments {
+            ControlUpdateArguments::Claim {
+                task_ref,
+                claim_id,
+                phase,
+                prompt,
+            } => {
+                let submission = load_general_submission_by_task_ref(&core, task_ref)?
+                    .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING"))?;
+                let facts = product
+                    .snapshot(
+                        submission.identity().project_id().as_str(),
+                        &[task_ref.as_str().to_owned()],
+                    )
+                    .map_err(ToolExecutionError::new)?;
+                let claims = facts["claims"]
+                    .as_array()
+                    .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_RESPONSE_REJECTED"))?;
+                let existing = claims
+                    .iter()
+                    .find(|claim| claim["phase"].as_str() == Some(phase));
+                let project = if existing.is_some() {
+                    load_registered_project_for_general_status(
+                        &core,
+                        &submission,
+                        deadline(core.delivery.timeout)
+                            .map_err(|e| ToolExecutionError::new(e.code()))?,
+                    )?
+                    .canonical_path
+                } else {
+                    resolve_registered_project_for_general_submission(&core, &submission)?
+                        .canonical_path()
+                        .to_owned()
+                };
+                repository_path = Some(project);
+                let execution = claims.iter().find(|claim| claim["phase"] == "EXECUTION");
+                let retained_workspace = existing
+                    .or(execution)
+                    .and_then(|claim| claim["worktree_path"].as_str());
+                let workspace = match retained_workspace {
+                    Some(path) => PathBuf::from(path),
+                    None => {
+                        let root = core.delivery.delivery.as_ref().ok_or_else(|| {
+                            ToolExecutionError::new("CONTROL_PRODUCT_WORKSPACE_UNAVAILABLE")
+                        })?;
+                        root.delivery_root
+                            .join("control-worktrees")
+                            .join(task_ref.as_str())
+                    }
+                };
+                if !workspace.is_absolute() {
+                    return Err(ToolExecutionError::new(
+                        "CONTROL_PRODUCT_WORKSPACE_REJECTED",
+                    ));
+                }
+                ControlProductCommand::Claim {
+                    task_ref: task_ref.clone(),
+                    claim_id: claim_id.clone(),
+                    phase: phase.clone(),
+                    prompt: prompt.clone(),
+                    model: existing
+                        .and_then(|claim| claim["model"].as_str())
+                        .unwrap_or("gpt-6-astra")
+                        .to_owned(),
+                    worktree_path: workspace
+                        .to_str()
+                        .ok_or_else(|| {
+                            ToolExecutionError::new("CONTROL_PRODUCT_WORKSPACE_REJECTED")
+                        })?
+                        .to_owned(),
+                }
+            }
+            ControlUpdateArguments::Command(command) => {
+                match command {
+                    ControlProductCommand::Metadata { task_ref, .. } => {
+                        load_general_submission_by_task_ref(&core, task_ref)?.ok_or_else(|| {
+                            ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING")
+                        })?;
+                    }
+                    ControlProductCommand::Observe {
+                        task_ref,
+                        claim_id,
+                        kind,
+                        ..
+                    } => {
+                        let submission = load_general_submission_by_task_ref(&core, task_ref)?
+                            .ok_or_else(|| {
+                                ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING")
+                            })?;
+                        let facts = product
+                            .snapshot(
+                                submission.identity().project_id().as_str(),
+                                &[task_ref.as_str().to_owned()],
+                            )
+                            .map_err(ToolExecutionError::new)?;
+                        if !facts["claims"].as_array().is_some_and(|claims| {
+                            claims
+                                .iter()
+                                .any(|claim| claim["claim_id"].as_str() == Some(claim_id))
+                        }) {
+                            return Err(ToolExecutionError::new("CONTROL_PRODUCT_SCOPE_REJECTED"));
+                        }
+                        if kind == "DISPATCH_STARTED" {
+                            resolve_registered_project_for_general_submission(&core, &submission)?;
+                        }
+                    }
+                    ControlProductCommand::Decision { project_id, .. } => {
+                        control_product_project(&core, project_id)?;
+                    }
+                    ControlProductCommand::Claim { .. } => {
+                        return Err(ToolExecutionError::new("CONTROL_PRODUCT_INPUT_REJECTED"));
+                    }
+                }
+                command.clone()
+            }
+        };
+        let mut result = product.execute(&command).map_err(ToolExecutionError::new)?;
+        if matches!(&command, ControlProductCommand::Decision { .. }) {
+            return Ok(result);
+        }
+        if let Some(path) = repository_path {
+            result["repository_path"] = json!(path);
+        }
+        Ok(json!({"schema_version":"lattice.control.product-update.v1","record":result}))
     }
 
     fn task_status(

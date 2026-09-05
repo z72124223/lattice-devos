@@ -12,6 +12,8 @@ import {
 } from "../src/lattice-runtime-health.mjs";
 
 const expectedTools = [
+  "lattice_control_snapshot",
+  "lattice_control_update",
   "lattice_delivery_reconcile",
   "lattice_delivery_run",
   "lattice_delivery_status",
