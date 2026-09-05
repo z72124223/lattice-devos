@@ -26,7 +26,7 @@ const surface = {
     { id: "codex_app_server", label: "Codex App Server", status: "STOPPED", has_data: null },
     { id: "work_mcp", label: "Work MCP", status: "HEALTHY", has_data: false },
     { id: "decision_mcp", label: "Decision MCP", status: "HEALTHY", has_data: false },
-    { id: "postgresql", label: "正式 PostgreSQL", status: "NOT_IMPLEMENTED", has_data: null },
+    { id: "postgresql", label: "正式 PostgreSQL", status: "NO_DATA", has_data: null },
   ],
 };
 

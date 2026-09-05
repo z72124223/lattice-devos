@@ -260,7 +260,7 @@ string compatibleSurface = """
     {"id":"codex_app_server","label":"Codex App Server","status":"STOPPED","has_data":null},
     {"id":"work_mcp","label":"Work MCP","status":"HEALTHY","has_data":false},
     {"id":"decision_mcp","label":"Decision MCP","status":"HEALTHY","has_data":false},
-    {"id":"postgresql","label":"正式 PostgreSQL","status":"NOT_IMPLEMENTED","has_data":null}
+    {"id":"postgresql","label":"正式 PostgreSQL","status":"HEALTHY","has_data":null}
   ]
 }
 """.Replace("EXPECTED_SCOPE_DIGEST", expectedScope.Digest, StringComparison.Ordinal);
@@ -271,6 +271,21 @@ ControlRuntimeEvaluation compatible = ControlRuntimeContract.EvaluateProbe(
     expectedScope: expectedScope);
 Require(compatible.Health == ControlRuntimeHealth.HEALTHY, "compatible Control was not healthy");
 Require(compatible.Action == ControlRuntimeAction.Reuse, "compatible Control was not reused");
+foreach (string runtimeStatus in new[] { "STOPPED", "UNREACHABLE", "INCOMPATIBLE", "NO_DATA" })
+{
+    ControlRuntimeEvaluation degradedRuntime = ControlRuntimeContract.EvaluateProbe(
+        tcpReachable: true,
+        statusCode: 200,
+        responseBody: compatibleSurface.Replace(
+            "\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"HEALTHY\"",
+            $"\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"{runtimeStatus}\"",
+            StringComparison.Ordinal),
+        expectedScope: expectedScope);
+    Require(degradedRuntime.Health == ControlRuntimeHealth.HEALTHY,
+        $"compatible Control rejected PostgreSQL state {runtimeStatus}");
+    Require(degradedRuntime.Action == ControlRuntimeAction.Reuse,
+        $"compatible Control was not reused for PostgreSQL state {runtimeStatus}");
+}
 ControlRuntimeEvaluation reconciliation = ControlRuntimeContract.EvaluateProbe(
     tcpReachable: true,
     statusCode: 200,
@@ -312,6 +327,7 @@ foreach (string incompatibleSurface in new[]
     compatibleSurface.Replace("LATTICE_CONTROL", "FOREIGN_CONTROL", StringComparison.Ordinal),
     compatibleSurface.Replace("lattice.control.runtime-surface.v2", "lattice.control.runtime-surface.v1", StringComparison.Ordinal),
     compatibleSurface.Replace(expectedScope.Digest, new string('0', 64), StringComparison.Ordinal),
+    compatibleSurface.Replace("\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"HEALTHY\"", "\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"NOT_IMPLEMENTED\"", StringComparison.Ordinal),
     compatibleSurface.Replace("\"work_mcp\",\"label\":\"Work MCP\",\"status\":\"HEALTHY\"", "\"work_mcp\",\"label\":\"Work MCP\",\"status\":\"NO_DATA\"", StringComparison.Ordinal),
     compatibleSurface.Replace("\"has_data\":false", "\"has_data\":null", StringComparison.Ordinal),
     compatibleSurface.Replace("\"HEALTHY\"", "\"UNKNOWN\"", StringComparison.Ordinal),

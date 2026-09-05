@@ -38,6 +38,67 @@ function Get-Sha256Hex {
     }
 }
 
+function Assert-CandidateProcessIdentity {
+    param(
+        [Diagnostics.Process]$DesktopProcess,
+        [string]$ExpectedExecutablePath,
+        [string]$ExpectedExecutableSha256,
+        [string]$ExpectedSourceCommit
+    )
+
+    $identityDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while ($true) {
+        try {
+            $DesktopProcess.Refresh()
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_CANDIDATE_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            $observedPath = [IO.Path]::GetFullPath($DesktopProcess.MainModule.FileName)
+            break
+        }
+        catch {
+            if ($_.Exception.Message -clike 'DESKTOP_CANDIDATE_PROCESS_EXITED:*') {
+                throw
+            }
+            try { $DesktopProcess.Refresh() } catch { }
+            if ($DesktopProcess.HasExited) {
+                throw "DESKTOP_CANDIDATE_PROCESS_EXITED:$($DesktopProcess.ExitCode)"
+            }
+            if ([DateTimeOffset]::UtcNow -ge $identityDeadline) {
+                throw 'DESKTOP_CANDIDATE_PROCESS_IDENTITY_UNAVAILABLE'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    }
+
+    $expectedPath = [IO.Path]::GetFullPath($ExpectedExecutablePath)
+    if (-not [string]::Equals(
+        $observedPath,
+        $expectedPath,
+        [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_PATH_MISMATCH'
+    }
+    $observedSha256 = Get-Sha256Hex -LiteralPath $observedPath
+    if ($observedSha256 -cne $ExpectedExecutableSha256) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_HASH_MISMATCH'
+    }
+    $productVersion = [string]([Diagnostics.FileVersionInfo]::GetVersionInfo(
+        $observedPath).ProductVersion)
+    if (-not $productVersion.EndsWith(
+        '+' + $ExpectedSourceCommit,
+        [StringComparison]::Ordinal)) {
+        throw 'DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH'
+    }
+
+    return [PSCustomObject][ordered]@{
+        pid = $DesktopProcess.Id
+        executable_path = $observedPath
+        executable_sha256 = $observedSha256
+        source_revision = $ExpectedSourceCommit
+        product_version = $productVersion
+    }
+}
+
 function Get-RequiredPropertyValue {
     param(
         [object]$InputObject,
@@ -130,6 +191,141 @@ function Wait-ConnectionItemStatus {
         Start-Sleep -Milliseconds 100
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     throw "DESKTOP_CANDIDATE_ITEM_STATUS_TIMEOUT:$Expected"
+}
+
+function Wait-DesktopFirstPaint {
+    param(
+        [Diagnostics.Process]$DesktopProcess,
+        [string]$ScreenshotPath,
+        [ValidateRange(1, 30)]
+        [int]$TimeoutSeconds = 5
+    )
+
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastMeasurement = $null
+    do {
+        $DesktopProcess.Refresh()
+        if ($DesktopProcess.HasExited -or $DesktopProcess.MainWindowHandle -eq 0) {
+            throw 'DESKTOP_CANDIDATE_FIRST_PAINT_WINDOW_UNAVAILABLE'
+        }
+        $windowHandle = [IntPtr]$DesktopProcess.MainWindowHandle
+        if ([LatticeDesktopCandidateNative]::GetForegroundWindow() -ne $windowHandle) {
+            [void][LatticeDesktopCandidateNative]::SetForegroundWindow($windowHandle)
+            Start-Sleep -Milliseconds 50
+        }
+        if ([LatticeDesktopCandidateNative]::GetForegroundWindow() -ne $windowHandle) {
+            throw 'DESKTOP_CANDIDATE_FIRST_PAINT_FOREGROUND_UNAVAILABLE'
+        }
+
+        $windowRect = [LatticeDesktopCandidateNative+NativeRect]::new()
+        $clientRect = [LatticeDesktopCandidateNative+NativeRect]::new()
+        $clientOrigin = [LatticeDesktopCandidateNative+NativePoint]::new()
+        if (-not [LatticeDesktopCandidateNative]::GetWindowRect(
+            $windowHandle,
+            [ref]$windowRect) -or
+            -not [LatticeDesktopCandidateNative]::GetClientRect(
+                $windowHandle,
+                [ref]$clientRect) -or
+            -not [LatticeDesktopCandidateNative]::ClientToScreen(
+                $windowHandle,
+                [ref]$clientOrigin)) {
+            throw 'DESKTOP_CANDIDATE_FIRST_PAINT_BOUNDS_UNAVAILABLE'
+        }
+
+        $windowWidth = $windowRect.Right - $windowRect.Left
+        $windowHeight = $windowRect.Bottom - $windowRect.Top
+        $clientWidth = $clientRect.Right - $clientRect.Left
+        $clientHeight = $clientRect.Bottom - $clientRect.Top
+        $dpi = [LatticeDesktopCandidateNative]::GetDpiForWindow($windowHandle)
+        $dpiScale = [double]$dpi / 96.0
+        $edgeInset = [int][Math]::Round(6.0 * $dpiScale)
+        $titleInset = [int][Math]::Round(42.0 * $dpiScale)
+        $webViewLeft = $clientOrigin.X + $edgeInset
+        $webViewTop = $clientOrigin.Y + $titleInset
+        $webViewWidth = $clientWidth - (2 * $edgeInset)
+        $webViewHeight = $clientHeight - $titleInset - $edgeInset
+        if ($windowWidth -le 0 -or $windowHeight -le 0 -or
+            $webViewWidth -le 0 -or $webViewHeight -le 0) {
+            throw 'DESKTOP_CANDIDATE_FIRST_PAINT_BOUNDS_INVALID'
+        }
+
+        $bitmap = [Drawing.Bitmap]::new($windowWidth, $windowHeight)
+        $graphics = [Drawing.Graphics]::FromImage($bitmap)
+        try {
+            $graphics.CopyFromScreen(
+                $windowRect.Left,
+                $windowRect.Top,
+                0,
+                0,
+                $bitmap.Size)
+            $bitmap.Save($ScreenshotPath, [Drawing.Imaging.ImageFormat]::Png)
+
+            $colors = [Collections.Generic.Dictionary[int, int]]::new()
+            $sampleCount = 0
+            $sampleLeft = $webViewLeft - $windowRect.Left
+            $sampleTop = $webViewTop - $windowRect.Top
+            for ($y = $sampleTop; $y -lt $sampleTop + $webViewHeight; $y += 4) {
+                for ($x = $sampleLeft; $x -lt $sampleLeft + $webViewWidth; $x += 4) {
+                    $argb = $bitmap.GetPixel($x, $y).ToArgb()
+                    if ($colors.ContainsKey($argb)) {
+                        $colors[$argb] += 1
+                    }
+                    else {
+                        $colors[$argb] = 1
+                    }
+                    $sampleCount += 1
+                }
+            }
+            $dominant = $colors.GetEnumerator() |
+                Sort-Object -Property Value -Descending |
+                Select-Object -First 1
+            $dominantColor = [Drawing.Color]::FromArgb($dominant.Key)
+            $dominantRatio = [double]$dominant.Value / [double]$sampleCount
+            $lastMeasurement = [PSCustomObject][ordered]@{
+                before_resize = $true
+                window_bounds_physical = [ordered]@{
+                    x = $windowRect.Left
+                    y = $windowRect.Top
+                    width = $windowWidth
+                    height = $windowHeight
+                }
+                client_bounds_physical = [ordered]@{
+                    x = $clientOrigin.X
+                    y = $clientOrigin.Y
+                    width = $clientWidth
+                    height = $clientHeight
+                }
+                expected_webview_bounds_physical = [ordered]@{
+                    x = $webViewLeft
+                    y = $webViewTop
+                    width = $webViewWidth
+                    height = $webViewHeight
+                }
+                dpi = $dpi
+                sampled_pixels = $sampleCount
+                unique_colors = $colors.Count
+                dominant_color = '#{0:X2}{1:X2}{2:X2}' -f
+                    $dominantColor.R,
+                    $dominantColor.G,
+                    $dominantColor.B
+                dominant_ratio = [Math]::Round($dominantRatio, 6)
+                screenshot_path = [IO.Path]::GetFullPath($ScreenshotPath)
+                screenshot_sha256 = Get-Sha256Hex -LiteralPath $ScreenshotPath
+            }
+            if ($colors.Count -ge 64 -and $dominantRatio -lt 0.95) {
+                return $lastMeasurement
+            }
+        }
+        finally {
+            $graphics.Dispose()
+            $bitmap.Dispose()
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+
+    throw ('DESKTOP_CANDIDATE_FIRST_PAINT_TIMEOUT:UNIQUE_' +
+        $lastMeasurement.unique_colors + ':DOMINANT_' +
+        $lastMeasurement.dominant_ratio)
 }
 
 function Wait-ProcessTextFile {
@@ -256,8 +452,17 @@ $externalNavigationMarker = Join-Path $temporaryRoot 'external-navigation-reques
 $captureReadyPath = Join-Path $temporaryRoot 'capture-port.txt'
 $captureMarkerPath = Join-Path $temporaryRoot 'external-navigation-capture.txt'
 $controlReadyPath = Join-Path $temporaryRoot 'control-port.txt'
+$firstPaintEvidenceRoot = Join-Path (
+    [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
+) 'LATTICE\candidate-evidence'
+$firstPaintEvidencePath = Join-Path $firstPaintEvidenceRoot (
+    'desktop-first-paint-' + $headSha.Substring(0, 12) + '-' +
+    [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' +
+    [Guid]::NewGuid().ToString('N') + '.png')
 
 $desktopProcess = $null
+$desktopProcessIdentity = $null
+$wrongRevisionRejected = $false
 $gatewayProcess = $null
 $controlProcess = $null
 $acceptanceResult = $null
@@ -396,6 +601,52 @@ try {
 
     Add-Type -AssemblyName UIAutomationClient
     Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class LatticeDesktopCandidateNative
+{
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativeRect
+    {
+        public int Left;
+        public int Top;
+        public int Right;
+        public int Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct NativePoint
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr window, out NativeRect rectangle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetClientRect(IntPtr window, out NativeRect rectangle);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(IntPtr window, ref NativePoint point);
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetForegroundWindow(IntPtr window);
+
+    [DllImport("user32.dll")]
+    public static extern uint GetDpiForWindow(IntPtr window);
+}
+'@
     $nodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
 
     $gatewayStart = [Diagnostics.ProcessStartInfo]::new()
@@ -433,6 +684,27 @@ try {
     $desktopProcess = [Diagnostics.Process]::Start($desktopStart)
     if ($null -eq $desktopProcess) {
         throw 'DESKTOP_CANDIDATE_PROCESS_START_FAILED'
+    }
+    $desktopProcessIdentity = Assert-CandidateProcessIdentity `
+        -DesktopProcess $desktopProcess `
+        -ExpectedExecutablePath $candidateExecutable `
+        -ExpectedExecutableSha256 $manifestExecutableSha256 `
+        -ExpectedSourceCommit $manifestSourceCommit
+    try {
+        [void](Assert-CandidateProcessIdentity `
+            -DesktopProcess $desktopProcess `
+            -ExpectedExecutablePath $candidateExecutable `
+            -ExpectedExecutableSha256 $manifestExecutableSha256 `
+            -ExpectedSourceCommit ('0' * 40))
+    }
+    catch {
+        if ($_.Exception.Message -cne 'DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH') {
+            throw
+        }
+        $wrongRevisionRejected = $true
+    }
+    if (-not $wrongRevisionRejected) {
+        throw 'DESKTOP_CANDIDATE_WRONG_REVISION_ACCEPTED'
     }
     $startedAt = [DateTimeOffset]::UtcNow
 
@@ -503,6 +775,10 @@ try {
     [IO.File]::WriteAllText($gatewayModePath, "proxy`n", [Text.UTF8Encoding]::new($false))
     $connectedStatus = Wait-ConnectionStatus $desktopProcess $connectedConnectionStatus $ReconnectTimeoutSeconds
     Wait-ConnectionItemStatus $desktopProcess 'connected' $ReconnectTimeoutSeconds | Out-Null
+    [IO.Directory]::CreateDirectory($firstPaintEvidenceRoot) | Out-Null
+    $firstPaint = Wait-DesktopFirstPaint `
+        -DesktopProcess $desktopProcess `
+        -ScreenshotPath $firstPaintEvidencePath
 
     $monitorStartedAt = [DateTimeOffset]::UtcNow
     $lifetimeDeadline = $monitorStartedAt.AddSeconds($MinimumLifetimeSeconds)
@@ -557,6 +833,9 @@ try {
         webview_user_data_override = 'WEBVIEW2_USER_DATA_FOLDER'
         webview_data_outside_candidate = $true
         desktop_process_alive = -not $desktopProcess.HasExited
+        desktop_process_identity = $desktopProcessIdentity
+        wrong_revision_rejected = $wrongRevisionRejected
+        first_paint = $firstPaint
         owned_endpoint_processes_alive = -not $gatewayProcess.HasExited -and -not $controlProcess.HasExited
     }
 }

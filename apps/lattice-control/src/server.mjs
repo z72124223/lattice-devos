@@ -9,6 +9,7 @@ import {
   defaultControlDatabasePath,
 } from "./database-path.mjs";
 import { ControlMcpHealthMonitor } from "./mcp-health.mjs";
+import { LatticeRuntimeHealthMonitor } from "./lattice-runtime-health.mjs";
 import { createRuntimeSurface } from "./runtime-surface.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
@@ -157,13 +158,22 @@ export function createLatticeServer({
   codex = new CodexAppServer(),
   projectInspector,
   mcpHealth,
+  runtimeHealth,
+  prewarmCodex = false,
+  conversationModel,
+  conversationStartTimeoutMs,
 }) {
   const store = new LatticeStore(databasePath);
   const service = new LatticeControlService({
     store,
     codex,
     ...(projectInspector ? { projectInspector } : {}),
+    ...(conversationModel ? { conversationModel } : {}),
+    ...(conversationStartTimeoutMs ? { conversationStartTimeoutMs } : {}),
   });
+  const codexPrewarm = prewarmCodex
+    ? service.prewarmCodex().catch((error) => ({ ready: false, error }))
+    : Promise.resolve({ ready: false, skipped: true });
   const resolvedMcpHealth = mcpHealth ?? (typeof databasePath === "string"
     ? new ControlMcpHealthMonitor({ databasePath })
     : {
@@ -172,6 +182,7 @@ export function createLatticeServer({
           decision_mcp: "UNREACHABLE",
         }),
       });
+  const resolvedRuntimeHealth = runtimeHealth ?? new LatticeRuntimeHealthMonitor();
   let acceptingEffects = true;
   let ownedShutdown = false;
   let ownedShutdownPromise = null;
@@ -246,17 +257,31 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/runtime") {
+        const [currentMcpHealth, currentRuntimeHealth] = await Promise.all([
+          resolvedMcpHealth.current(),
+          resolvedRuntimeHealth.current({ waitForProbe: false }),
+        ]);
         sendJson(response, 200, createRuntimeSurface(service, {
           databasePath,
-          mcpHealth: await resolvedMcpHealth.current(),
+          mcpHealth: currentMcpHealth,
+          runtimeHealth: currentRuntimeHealth,
         }));
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/conversation") {
+        void service.refreshPrimaryConversationObservation();
         sendJson(response, 200, service.primaryConversation());
         return;
       }
+      if (request.method === "POST" && url.pathname === "/api/conversation") {
+        const body = await readMutationJson(request, url);
+        sendJson(response, 200, await service.startPrimaryConversation({
+          projectId: body.projectId,
+        }));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/api/four-core") {
+        void service.refreshPrimaryConversationObservation();
         sendJson(response, 200, service.fourCoreSurface());
         return;
       }
@@ -443,6 +468,9 @@ export function createLatticeServer({
 
   server.on("close", () => {
     if (ownedShutdown) return;
+    void Promise.resolve()
+      .then(() => resolvedRuntimeHealth.close?.())
+      .catch(() => { process.exitCode = 1; });
     service.close();
     void codex.close();
     store.close();
@@ -452,6 +480,7 @@ export function createLatticeServer({
     service,
     store,
     codex,
+    codexPrewarm,
     stopAcceptingEffects() {
       acceptingEffects = false;
       service.stopAcceptingEffects();
@@ -462,6 +491,13 @@ export function createLatticeServer({
       application.stopAcceptingEffects();
       ownedShutdownPromise = (async () => {
         const deadline = Date.now() + timeoutMs;
+        const runtimeHealthResult = await settleWithin(
+          resolvedRuntimeHealth.close?.(),
+          deadline,
+        );
+        if (!runtimeHealthResult.settled || runtimeHealthResult.error) {
+          throw shutdownDrainTimeoutError();
+        }
         const outcome = await service.shutdown({
           timeoutMs: Math.max(1, deadline - Date.now()),
         });
@@ -557,6 +593,8 @@ export async function startDefaultServer() {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
+  application.codexPrewarm = application.service.prewarmCodex()
+    .catch((error) => ({ ready: false, error }));
   process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });

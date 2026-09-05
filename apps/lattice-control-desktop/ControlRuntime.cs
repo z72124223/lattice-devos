@@ -347,7 +347,11 @@ internal static class ControlRuntimeContract
             "work_mcp" or "decision_mcp" => status is nameof(ControlRuntimeHealth.HEALTHY)
                 or nameof(ControlRuntimeHealth.UNREACHABLE)
                 or nameof(ControlRuntimeHealth.INCOMPATIBLE),
-            "postgresql" => status == nameof(ControlRuntimeHealth.NOT_IMPLEMENTED),
+            "postgresql" => status is nameof(ControlRuntimeHealth.HEALTHY)
+                or nameof(ControlRuntimeHealth.STOPPED)
+                or nameof(ControlRuntimeHealth.UNREACHABLE)
+                or nameof(ControlRuntimeHealth.INCOMPATIBLE)
+                or nameof(ControlRuntimeHealth.NO_DATA),
             _ => false,
         };
     }
@@ -465,8 +469,12 @@ internal sealed class ControlRuntimeManager : IDisposable
             "lattice-control",
             "src",
             "server.mjs");
-        string localApplicationData = Environment.GetEnvironmentVariable("LOCALAPPDATA")
-            ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string localApplicationData = Path.GetFullPath(
+            Environment.GetEnvironmentVariable("LOCALAPPDATA")
+                ?? Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData));
+        string controlWorkingDirectory = Directory.Exists(localApplicationData)
+            ? localApplicationData
+            : Path.GetFullPath(Path.GetTempPath());
         string databasePath = Path.GetFullPath(Path.Combine(
             localApplicationData,
             "LATTICE",
@@ -477,7 +485,7 @@ internal sealed class ControlRuntimeManager : IDisposable
             new ControlRuntimeLaunchSpec(
                 nodePath,
                 serverPath,
-                runtimeRoot,
+                controlWorkingDirectory,
                 new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["LATTICE_CONTROL_PORT"] = controlOrigin.Port.ToString(CultureInfo.InvariantCulture),

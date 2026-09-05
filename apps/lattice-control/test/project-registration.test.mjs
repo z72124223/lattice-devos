@@ -583,6 +583,128 @@ test("Git metadata redirects and repository-local config includes are rejected b
   }
 });
 
+async function linkedWorktreeFixture(directory) {
+  const repository = path.join(directory, "repository");
+  const worktree = path.join(directory, "linked");
+  await mkdir(repository);
+  await git(repository, "init", "-b", "main");
+  await git(repository, "config", "core.autocrlf", "false");
+  await git(repository, "config", "user.name", "LATTICE Test");
+  await git(repository, "config", "user.email", "lattice@example.invalid");
+  await writeFile(path.join(repository, "AGENTS.md"), "# Linked worktree rules\n");
+  await writeFile(path.join(repository, ".gitattributes"), "tracked.txt filter=evil\n");
+  await writeFile(path.join(repository, "tracked.txt"), "initial\n");
+  await git(repository, "add", ".");
+  await git(repository, "commit", "-m", "linked worktree fixture");
+  await git(repository, "worktree", "add", "-b", "linked", worktree);
+  const marker = path.join(worktree, ".git");
+  const metadata = (await readFile(marker, "utf8")).trim().slice("gitdir: ".length);
+  return { repository, worktree, marker, metadata };
+}
+
+test("Git linked worktrees report their own root and branch and disable worktree filters", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-project-linked-worktree-"));
+  try {
+    const { repository, worktree, marker, metadata } = await linkedWorktreeFixture(directory);
+    const originalMarker = await readFile(marker);
+    const originalIndex = await readFile(path.join(metadata, "index"));
+    const clean = await inspectProject(worktree);
+    assert.equal(clean.git.status, "complete", JSON.stringify(clean.git.failures));
+    assert.equal(clean.repo_root, await realpath(worktree));
+    assert.equal(clean.git.branch, "linked");
+    assert.equal(clean.git.dirty, false);
+    assert.equal(clean.git.head_sha, (await git(worktree, "rev-parse", "HEAD")).stdout.trim());
+
+    const sentinel = path.join(directory, "FILTER_RAN");
+    const filter = path.join(directory, "filter.mjs");
+    await writeFile(filter, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(sentinel)}, "ran");\nprocess.stdin.pipe(process.stdout);\n`);
+    await git(repository, "config", "extensions.worktreeConfig", "true");
+    await git(worktree, "config", "--worktree", "filter.evil.clean",
+      `"${process.execPath.replaceAll("\\", "/")}" "${filter.replaceAll("\\", "/")}"`);
+    await git(worktree, "config", "--worktree", "filter.evil.required", "true");
+    await writeFile(path.join(worktree, "tracked.txt"), "changed\n");
+    const nested = path.join(worktree, "nested");
+    await mkdir(nested);
+    const dirty = await inspectProject(nested);
+    assert.equal(dirty.git.status, "complete", JSON.stringify(dirty.git.failures));
+    assert.equal(dirty.repo_root, clean.repo_root);
+    assert.equal(dirty.git.branch, "linked");
+    assert.equal(dirty.git.dirty, true);
+    await assert.rejects(access(sentinel), (error) => error.code === "ENOENT");
+    assert.deepEqual(await readFile(marker), originalMarker);
+    assert.deepEqual(await readFile(path.join(metadata, "index")), originalIndex);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Git linked worktrees reject broken back-links and configuration includes before Git", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-project-worktree-boundary-"));
+  try {
+    const { repository, worktree, metadata } = await linkedWorktreeFixture(directory);
+    const variants = [
+      [path.join(metadata, "gitdir"), `${path.join(repository, ".git")}\n`, "GIT_METADATA_REDIRECTED"],
+      [path.join(metadata, "commondir"), `${repository}\n`, "GIT_METADATA_REDIRECTED"],
+      [path.join(metadata, "commondir"), "nested/../../..\n", "GIT_METADATA_REDIRECTED"],
+      [path.join(repository, ".git", "config"), '[include]\npath = outside\n', "GIT_CONFIG_INCLUDE_UNSAFE"],
+      [path.join(metadata, "config.worktree"), '[includeIf "gitdir:**"]\npath = outside\n', "GIT_CONFIG_INCLUDE_UNSAFE"],
+    ];
+    for (const [file, replacement, expectedCode] of variants) {
+      const original = await readFile(file).catch((error) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      try {
+        await writeFile(file, replacement);
+        let gitCalls = 0;
+        const inspection = await inspectProject(worktree, {
+          gitExecutor: async () => {
+            gitCalls += 1;
+            return { exit_code: 0, stdout: "", stderr: "" };
+          },
+        });
+        assert.equal(gitCalls, 0, file);
+        assert.equal(inspection.git.is_repository, null);
+        assert.ok(inspection.git.failures.some((failure) => failure.code === expectedCode), file);
+      } finally {
+        if (original === null) await rm(file);
+        else await writeFile(file, original);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Git linked worktree metadata changes invalidate observation before another Git command", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-project-worktree-changed-"));
+  try {
+    const { worktree, metadata } = await linkedWorktreeFixture(directory);
+    for (const file of [path.join(metadata, "gitdir"), path.join(metadata, "HEAD")]) {
+      const original = await readFile(file, "utf8");
+      let gitCalls = 0;
+      try {
+        const inspection = await inspectProject(worktree, {
+          gitExecutor: async (request) => {
+            gitCalls += 1;
+            const result = await defaultGitExecutor(request);
+            if (gitCalls === 1) await writeFile(file, `${original}\n`);
+            return result;
+          },
+        });
+        assert.equal(gitCalls, 1, file);
+        assert.equal(inspection.repo_root, null);
+        assert.equal(inspection.git.is_repository, null);
+        assert.ok(inspection.git.failures.some((failure) => /^GIT_METADATA_/u.test(failure.code)));
+      } finally {
+        await writeFile(file, original);
+      }
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Git core.worktree cannot expand the observed repository root beyond its metadata boundary", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-project-git-worktree-root-"));
   const repository = path.join(directory, "repository");

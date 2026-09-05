@@ -68,6 +68,35 @@ test("the desktop shell keeps WebView2 data outside the candidate and reconnects
   assert.match(controlMarkup, /grid-template-rows:\s*auto auto auto minmax\(520px,1fr\) auto/u);
 });
 
+test("the composition WebView stays visible through its first layout and uses overlay-only connection states", async () => {
+  const [windowMarkup, windowCode] = await Promise.all([
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
+    repositoryFile("apps/lattice-control-desktop/MainWindow.xaml.cs"),
+  ]);
+
+  assert.match(
+    windowMarkup,
+    /<wv2:WebView2CompositionControl\s+[\s\S]*?x:Name="ControlView"[\s\S]*?Visibility="Visible"[\s\S]*?IsEnabled="False"[\s\S]*?IsHitTestVisible="False"[\s\S]*?HorizontalAlignment="Stretch"[\s\S]*?VerticalAlignment="Stretch"[\s\S]*?AutomationProperties\.AutomationId="LatticeWebViewSurface"/u,
+  );
+  assert.doesNotMatch(
+    windowCode,
+    /ControlView\.Visibility\s*=\s*Visibility\.(?:Collapsed|Hidden|Visible)/u,
+    "changing composition-control visibility after initialization can strand its first capture surface until WM_SIZE",
+  );
+  assert.match(
+    windowCode,
+    /ShowConnectingState\(\)[\s\S]{0,360}ControlView\.IsEnabled = false;[\s\S]{0,120}ControlView\.IsHitTestVisible = false;[\s\S]{0,180}ReconnectButton\.Focus\(\);/u,
+  );
+  assert.match(
+    windowCode,
+    /ShowConnectionFailure\([\s\S]{0,560}ControlView\.IsEnabled = false;[\s\S]{0,120}ControlView\.IsHitTestVisible = false;[\s\S]{0,180}ReconnectButton\.Focus\(\);/u,
+  );
+  assert.match(
+    windowCode,
+    /Core_NavigationCompleted[\s\S]{0,1800}ControlView\.IsEnabled = true;[\s\S]{0,120}ControlView\.IsHitTestVisible = true;[\s\S]{0,120}ConnectionOverlay\.Visibility = Visibility\.Collapsed;/u,
+  );
+});
+
 test("the resizable desktop can reach compact scrolling without desktop or mobile regressions", async () => {
   const [windowMarkup, windowCode, resizePolicy, controlMarkup] = await Promise.all([
     repositoryFile("apps/lattice-control-desktop/MainWindow.xaml"),
@@ -95,8 +124,8 @@ test("the resizable desktop can reach compact scrolling without desktop or mobil
   assert.match(windowMarkup, /WindowStyle="None"[\s\S]*ResizeMode="CanResize"/u);
   assert.match(windowMarkup, /<WindowChrome CaptionHeight="42"[\s\S]*ResizeBorderThickness="12"/u);
   assert.match(windowMarkup, /<Setter Property="Margin" Value="6,0,6,6" \/>[\s\S]*Value="Maximized">[\s\S]*<Setter Property="Margin" Value="0" \/>/u);
-  assert.match(windowMarkup, /<wv2:WebView2CompositionControl x:Name="ControlView"/u);
-  assert.doesNotMatch(windowMarkup, /<wv2:WebView2 x:Name="ControlView"/u);
+  assert.match(windowMarkup, /<wv2:WebView2CompositionControl\s+[\s\S]*?x:Name="ControlView"/u);
+  assert.doesNotMatch(windowMarkup, /<wv2:WebView2\s+[\s\S]*?x:Name="ControlView"/u);
   assert.doesNotMatch(windowCode, /BrowserHost_SizeChanged|SyncWebViewBounds|ControlView\.UpdateLayout\(\)/u);
   assert.match(windowMarkup, /MouseLeftButtonDown="TitleBar_MouseLeftButtonDown"/u);
   assert.match(windowMarkup, /Click="Minimize_Click"/u);
@@ -189,7 +218,7 @@ test("the desktop probes and owns only its compatible default Control before nav
 });
 
 test("the Windows candidate is a repeatable self-contained per-user installable package", async () => {
-  const [publishScript, installerScript, uninstallerScript, installerCommon, installerTest, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, policyTestIgnore, packageJson] = await Promise.all([
+  const [publishScript, installerScript, uninstallerScript, installerCommon, installerTest, acceptanceScript, managedControlScript, externalNavigationFixture, isolatedControlFixture, incompatibleControlFixture, mismatchedCandidateFixture, policyTestIgnore, packageJson] = await Promise.all([
     repositoryFile("scripts/Publish-LatticeDesktopCandidate.ps1"),
     repositoryFile("scripts/Install-LATTICE.ps1"),
     repositoryFile("scripts/Uninstall-LATTICE.ps1"),
@@ -200,6 +229,7 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
     repositoryFile("apps/lattice-control/test/fixtures/desktop-external-redirect.mjs"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-isolated-control.mjs"),
     repositoryFile("apps/lattice-control/test/fixtures/desktop-incompatible-control.mjs"),
+    repositoryFile("apps/lattice-control/test/fixtures/desktop-mismatched-candidate.mjs"),
     repositoryFile("apps/lattice-control-desktop-policy-tests/.gitignore"),
     repositoryFile("package.json"),
   ]);
@@ -211,7 +241,7 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(publishScript, /Compress-Archive/u);
   assert.match(publishScript, /LocalApplicationData/u);
   assert.match(publishScript, /HANDOFF\.md/u);
-  assert.match(publishScript, /\$expectedProtectedDirtyState = ' M HANDOFF\.md'/u);
+  // Clean and protected-dirty source behavior is exercised by the PowerShell publisher tests.
   assert.match(publishScript, /git -C \$repositoryRoot diff --cached --name-only/u);
   assert.match(publishScript, /files\s*=\s*\$artifactFiles/u);
   assert.match(publishScript, /lattice\.control\.desktop-portable-candidate\.v2/u);
@@ -255,6 +285,13 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(acceptanceScript, /if \(-not \$OwnedProcess\.WaitForExit\(10000\)\)/u);
   assert.match(acceptanceScript, /DESKTOP_CANDIDATE_OWNED_PROCESS_STOP_TIMEOUT/u);
   assert.match(acceptanceScript, /LatticeConnectionStatus/u);
+  assert.match(acceptanceScript, /function Wait-DesktopFirstPaint/u);
+  assert.match(acceptanceScript, /GetClientRect/u);
+  assert.match(acceptanceScript, /GetForegroundWindow/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_FIRST_PAINT_TIMEOUT/u);
+  assert.match(acceptanceScript, /LATTICE[\\/]candidate-evidence/u);
+  assert.match(acceptanceScript, /screenshot_path/u);
+  assert.match(acceptanceScript, /first_paint/u);
   assert.match(acceptanceScript, /candidate-manifest\.json/u);
   assert.match(acceptanceScript, /schema_version/u);
   assert.match(acceptanceScript, /source_commit/u);
@@ -262,6 +299,14 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(acceptanceScript, /runtime_identifier/u);
   assert.match(acceptanceScript, /self_contained/u);
   assert.match(acceptanceScript, /executable_sha256/u);
+  assert.match(acceptanceScript, /function Assert-CandidateProcessIdentity/u);
+  assert.match(acceptanceScript, /MainModule\.FileName/u);
+  assert.match(acceptanceScript, /FileVersionInfo\]::GetVersionInfo/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_PATH_MISMATCH/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_HASH_MISMATCH/u);
+  assert.match(acceptanceScript, /DESKTOP_CANDIDATE_PROCESS_REVISION_MISMATCH/u);
+  assert.match(acceptanceScript, /desktop_process_identity/u);
+  assert.match(acceptanceScript, /wrong_revision_rejected/u);
   assert.match(publishScript, /function Get-Sha256Hex/u);
   assert.match(acceptanceScript, /function Get-Sha256Hex/u);
   assert.doesNotMatch(publishScript, /Get-FileHash/u);
@@ -278,6 +323,38 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(managedControlScript, /compatible_control_reused/u);
   assert.match(managedControlScript, /incompatible_status/u);
   assert.match(managedControlScript, /Get-CimInstance Win32_Process -Filter "ParentProcessId/u);
+  assert.match(managedControlScript, /function Assert-CandidateProcessIdentity/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_PATH_MISMATCH/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_HASH_MISMATCH/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_PROCESS_REVISION_MISMATCH/u);
+  assert.match(managedControlScript, /wrong_revision_rejected/u);
+  assert.match(managedControlScript, /function Stop-TestOwnedProcessTree/u);
+  assert.match(managedControlScript, /DESKTOP_MANAGED_CONTROL_IDENTITY_FAILURE_CLEANUP_FAILED/u);
+  assert.match(managedControlScript, /desktop-mismatched-candidate\.mjs/u);
+  assert.match(managedControlScript, /mismatch_desktop_stopped/u);
+  assert.match(managedControlScript, /mismatch_descendants_stopped/u);
+  assert.match(managedControlScript, /mismatch_port_released/u);
+  assert.match(managedControlScript, /mismatch_store_and_temp_removed/u);
+  assert.match(managedControlScript, /external_fixture_survived_identity_mismatch/u);
+  assert.match(managedControlScript, /function Get-TestBoundProcessIdentity/u);
+  assert.match(managedControlScript, /function Get-TestOwnedParentBoundary/u);
+  assert.match(managedControlScript, /function Assert-TestOwnedDescendantBoundary/u);
+  assert.match(managedControlScript, /ProcessRecordProvider/u);
+  assert.match(managedControlScript, /CreationDate/u);
+  assert.match(managedControlScript, /\.ExitTime/u);
+  assert.match(managedControlScript, /PROCESS_CIM_GENERATION_MISMATCH/u);
+  assert.match(managedControlScript, /OWNED_PARENT_GENERATION_MISMATCH/u);
+  assert.match(managedControlScript, /OWNED_PARENT_EXIT_BOUND_UNAVAILABLE/u);
+  assert.match(managedControlScript, /ExpectedParentProcessId/u);
+  assert.match(managedControlScript, /root_started_at_utc_ticks/u);
+  assert.match(managedControlScript, /descendant_process_identities/u);
+  assert.match(managedControlScript, /function Test-ProcessIdentityAlive/u);
+  assert.match(managedControlScript, /parent_generation_mismatch_rejected/u);
+  assert.match(managedControlScript, /post_exit_child_rejected/u);
+  assert.match(managedControlScript, /reused_pid_external_survived/u);
+  assert.match(managedControlScript, /pid_reuse_external_excluded_from_owned_set/u);
+  assert.doesNotMatch(managedControlScript, /\('0' \* 40\)/u);
+  assert.doesNotMatch(managedControlScript, /AddSeconds\(-1\)/u);
   assert.doesNotMatch(managedControlScript, /Get-NetTCPConnection|Stop-Process\s+-Name|taskkill|\.ArgumentList|\.Kill\(\$true\)/iu);
   assert.match(externalNavigationFixture, /writeHead\(302/u);
   assert.match(externalNavigationFixture, /\/outside/u);
@@ -288,6 +365,10 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(isolatedControlFixture, /listen\(0, "127\.0\.0\.1"/u);
   assert.match(incompatibleControlFixture, /0\.0\.0-foreign/u);
   assert.match(incompatibleControlFixture, /id: "postgresql"[\s\S]*status: "NOT_IMPLEMENTED"/u);
+  assert.match(mismatchedCandidateFixture, /spawn\(process\.execPath/u);
+  assert.match(mismatchedCandidateFixture, /LATTICE_DESKTOP_MISMATCH_ROLE/u);
+  assert.match(mismatchedCandidateFixture, /listen\(4317, "127\.0\.0\.1"/u);
+  assert.match(mismatchedCandidateFixture, /writeFileSync\(storePath/u);
   assert.match(policyTestIgnore, /^bin\/$/mu);
   assert.match(policyTestIgnore, /^obj\/$/mu);
   assert.match(packageJson, /"desktop:policy-test"/u);

@@ -317,7 +317,7 @@ function requireGitObservationBudget(budget) {
   }
 }
 
-async function inspectGitConfigFile(configPath, { required, budget }) {
+async function inspectGitConfigFile(configPath, { required, budget, includeContent = false }) {
   requireGitObservationBudget(budget);
   let before;
   let handle;
@@ -380,6 +380,7 @@ async function inspectGitConfigFile(configPath, { required, budget }) {
     if (
       afterLink.isSymbolicLink()
       || !samePath(afterCanonical, canonical)
+      || !sameFileIdentity(afterLink, after)
       || !sameFileIdentity(opened, after)
       || opened.size !== after.size
       || opened.mtimeMs !== after.mtimeMs
@@ -403,6 +404,7 @@ async function inspectGitConfigFile(configPath, { required, budget }) {
       size: after.size.toString(),
       mtime_ns: after.mtimeNs?.toString() ?? after.mtimeMs.toString(),
       sha256: createHash("sha256").update(content).digest("hex"),
+      ...(includeContent ? { content: content.toString("utf8") } : {}),
     };
   } catch (error) {
     if (error instanceof ProjectInspectionError) throw error;
@@ -416,10 +418,11 @@ async function inspectGitConfigFile(configPath, { required, budget }) {
   }
 }
 
-async function inspectGitMetadataGuardPaths(metadataRoot, budget) {
+async function inspectGitMetadataGuardPaths(metadataRoot, budget, { linkedWorktree = false } = {}) {
   const guardPaths = [
     "HEAD",
     "commondir",
+    "gitdir",
     "config",
     "config.worktree",
     "index",
@@ -457,7 +460,8 @@ async function inspectGitMetadataGuardPaths(metadataRoot, budget) {
         "Git metadata contains a symbolic link or junction",
       );
     }
-    if (redirectedGitMetadataFiles.has(relativePath.toLowerCase())) {
+    if (redirectedGitMetadataFiles.has(relativePath.toLowerCase())
+      && !(linkedWorktree && relativePath === "commondir")) {
       throw gitMetadataError(
         "GIT_METADATA_REDIRECTED",
         "Git metadata contains an external metadata pointer",
@@ -604,6 +608,80 @@ function gitMetadataGuardFingerprint(boundary) {
   return JSON.stringify(parsed);
 }
 
+async function linkedWorktreeBoundary(root, markerPath, budget, scanTree) {
+  const invalid = (cause) => gitMetadataError(
+    "GIT_METADATA_REDIRECTED",
+    "Git file must belong to a canonical linked worktree with matching metadata back-links",
+    cause,
+  );
+  function requireAbsolutePointer(value) {
+    if (!path.isAbsolute(value) || value.split(/[\\/]/u).some((part) => part === "." || part === "..")) {
+      throw invalid();
+    }
+    try { normalizeRequestedProjectPath(value); } catch (error) { throw invalid(error); }
+  }
+  async function pointer(pointerPath, prefix = "") {
+    const { content, ...identity } = await inspectGitConfigFile(pointerPath, {
+      required: true, budget, includeContent: true,
+    });
+    const value = content.replace(/\r?\n$/u, "");
+    if (!value.startsWith(prefix) || hasUnsafeControlCharacters(value)
+      || value.length > 32_767 || value.length === prefix.length) throw invalid();
+    return { value: value.slice(prefix.length), identity };
+  }
+  async function directory(value) {
+    try {
+      requireGitObservationBudget(budget);
+      const result = await canonicalProjectDirectory(value);
+      await verifyProjectDirectoryIdentity(result);
+      requireGitObservationBudget(budget);
+      return {
+        path: result.canonical_path,
+        identities: result.path_identities.map(({ path: entryPath, dev, ino }) => (
+          [entryPath, dev.toString(), ino.toString()]
+        )),
+      };
+    } catch (error) {
+      if (error?.code === "GIT_OBSERVATION_TIMEOUT") throw error;
+      throw invalid(error);
+    }
+  }
+
+  const marker = await pointer(markerPath, "gitdir: ");
+  requireAbsolutePointer(marker.value);
+  const metadata = await directory(marker.value);
+  const commonPointer = await pointer(path.join(metadata.path, "commondir"));
+  if (commonPointer.value.replaceAll("\\", "/") !== "../..") {
+    requireAbsolutePointer(commonPointer.value);
+  }
+  const common = await directory(path.resolve(metadata.path, commonPointer.value));
+  if (!samePath(path.dirname(metadata.path), path.join(common.path, "worktrees"))) {
+    throw invalid();
+  }
+  const backlink = await pointer(path.join(metadata.path, "gitdir"));
+  requireAbsolutePointer(backlink.value);
+  if (!samePath(backlink.value, markerPath)) throw invalid();
+
+  const configs = [
+    await inspectGitConfigFile(path.join(common.path, "config"), { required: true, budget }),
+    await inspectGitConfigFile(path.join(metadata.path, "config.worktree"), {
+      required: false, budget,
+    }),
+  ].filter(Boolean);
+  const guard_paths = {
+    common: await inspectGitMetadataGuardPaths(common.path, budget),
+    worktree: await inspectGitMetadataGuardPaths(metadata.path, budget, { linkedWorktree: true }),
+  };
+  // The shared metadata tree contains this worktree's metadata as well. Only the
+  // three checked pointer files above may connect it to this working directory.
+  const tree = scanTree ? await scanGitMetadataTree(common.path, budget) : null;
+  return JSON.stringify({
+    kind: "linked-worktree", root, metadata, common,
+    pointers: [marker.identity, commonPointer.identity, backlink.identity],
+    configs, guard_paths, tree,
+  });
+}
+
 async function gitMetadataBoundary(canonicalPath, budget, { scanTree = true } = {}) {
   requireGitObservationBudget(budget);
   let cursor = canonicalPath;
@@ -623,11 +701,25 @@ async function gitMetadataBoundary(canonicalPath, budget, { scanTree = true } = 
       }
     }
     if (marker) {
-      if (marker.isSymbolicLink() || marker.isFile()) {
+      if (marker.isSymbolicLink()) {
         throw gitMetadataError(
           "GIT_METADATA_REDIRECTED",
           "Redirected Git metadata is not followed during project observation",
         );
+      }
+      if (marker.isFile()) {
+        try {
+          return await linkedWorktreeBoundary(cursor, markerPath, budget, scanTree);
+        } catch (error) {
+          if (error?.code === "GIT_METADATA_UNREADABLE") {
+            throw gitMetadataError(
+              "GIT_METADATA_REDIRECTED",
+              "Git file does not resolve to complete linked-worktree metadata",
+              error,
+            );
+          }
+          throw error;
+        }
       }
       if (!marker.isDirectory()) {
         throw gitMetadataError(

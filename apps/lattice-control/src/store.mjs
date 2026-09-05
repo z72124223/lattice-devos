@@ -3065,6 +3065,7 @@ export class LatticeStore {
         const error = new Error("另一個 LATTICE Control 正在處理這條對話；本次不會重複送出");
         error.code = "CONVERSATION_WRITER_BUSY";
         error.status = 409;
+        error.leaseExpiresAt = current.lease_expires_at;
         throw error;
       }
       const generation = current
@@ -3168,8 +3169,9 @@ export class LatticeStore {
     ).changes === 1;
   }
 
-  ensurePrimaryConversation(projectId) {
+  ensurePrimaryConversation(projectId, { provisional = false } = {}) {
     const normalizedProjectId = requireText(projectId, "project ID");
+    if (typeof provisional !== "boolean") throw new TypeError("provisional must be boolean");
     if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
     this.database.exec("BEGIN IMMEDIATE;");
     try {
@@ -3187,7 +3189,7 @@ export class LatticeStore {
           "主對話",
           "Stable LATTICE Control user conversation binding.",
           "normal",
-          "draft",
+          provisional ? "selection_pending" : "draft",
           timestamp,
           timestamp,
         );
@@ -3206,6 +3208,71 @@ export class LatticeStore {
       assertPrimaryConversationIdentity(this.database, item);
       this.database.exec("COMMIT;");
       return decodeItem(item);
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  selectPrimaryConversationProject({ projectId, fence }) {
+    const normalizedProjectId = requireText(projectId, "project ID");
+    if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      if (["starting", "running", "waiting_approval"].includes(item.status)) {
+        const error = new Error("目前的對話仍在執行，請先等待完成或中斷");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      if (this.primaryConversationUnresolvedMessage()) {
+        const error = new Error("已有保存但尚未確認的訊息，請先重新連線");
+        error.code = "CONVERSATION_RECONCILIATION_REQUIRED";
+        error.status = 409;
+        throw error;
+      }
+      if (this.primaryConversationHasUnresolvedTurn()) {
+        const error = new Error("目前的對話尚未留下可驗證的結尾，請先重新連線");
+        error.code = "CONVERSATION_RECONCILIATION_REQUIRED";
+        error.status = 409;
+        throw error;
+      }
+      if (item.project_id === normalizedProjectId && item.status !== "selection_pending") {
+        this.database.exec("COMMIT;");
+        return decodeItem(item);
+      }
+      const timestamp = now();
+      const targetStatus = item.status === "selection_pending" ? "draft" : item.status;
+      this.database.prepare(`
+        UPDATE work_items
+        SET project_id = ?, status = ?, progress = ?, updated_at = ?
+        WHERE id = ?
+      `).run(
+        normalizedProjectId,
+        targetStatus,
+        "已選定工作專案；準備連接 Codex",
+        timestamp,
+        primaryConversationId,
+      );
+      this.database.prepare(`
+        INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+        VALUES (?, 'conversation_project_selected', ?, ?)
+      `).run(
+        primaryConversationId,
+        JSON.stringify({
+          projectId: normalizedProjectId,
+          previousProjectId: item.project_id,
+        }),
+        timestamp,
+      );
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return decodeItem(updated);
     } catch (error) {
       this.database.exec("ROLLBACK;");
       throw error;
@@ -3246,6 +3313,21 @@ export class LatticeStore {
     return this.primaryConversationUnresolvedMessage() !== null;
   }
 
+  primaryConversationHasUnresolvedTurn() {
+    const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+      .get(primaryConversationId);
+    if (!item) return false;
+    if (Boolean(item.codex_thread_id) !== Boolean(item.codex_turn_id)) return true;
+    if (!item.codex_thread_id || !item.codex_turn_id) return false;
+    const accepted = this.primaryConversationAcceptedForTurn(
+      item.codex_thread_id,
+      item.codex_turn_id,
+    );
+    if (!accepted) return false;
+    return !this.primaryConversationTerminalEvent(item.codex_thread_id, item.codex_turn_id)
+      || this.primaryConversationMissingFinal(item.codex_thread_id, item.codex_turn_id);
+  }
+
   latestPrimaryConversationBinding() {
     return decodeWorkEvent(this.database.prepare(`
       SELECT id, kind, payload_json, created_at
@@ -3276,6 +3358,19 @@ export class LatticeStore {
         AND json_extract(payload_json, '$.threadId') = ?
         AND json_extract(payload_json, '$.turnId') = ?
       ORDER BY id DESC LIMIT 1
+    `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
+  }
+
+  primaryConversationFirstActivity(threadId, turnId) {
+    const normalizedThreadId = requireText(threadId, "Codex thread ID");
+    const normalizedTurnId = requireText(turnId, "Codex turn ID");
+    return decodeWorkEvent(this.database.prepare(`
+      SELECT id, kind, payload_json, created_at
+      FROM work_events
+      WHERE work_item_id = ? AND kind = 'conversation_first_activity'
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id ASC LIMIT 1
     `).get(primaryConversationId, normalizedThreadId, normalizedTurnId));
   }
 
@@ -3325,11 +3420,28 @@ export class LatticeStore {
     return latestReply === null || latestMissing > latestReply;
   }
 
-  claimPrimaryConversationMessage({ projectId, clientMessageId, text, fence }) {
+  claimPrimaryConversationMessage({
+    projectId,
+    clientMessageId,
+    text,
+    fence,
+    queueAfterThreadId = null,
+    queueAfterTurnId = null,
+  }) {
     const normalizedProjectId = requireText(projectId, "project ID");
     const normalizedId = normalizeClientMessageId(clientMessageId);
     const normalizedText = boundedConversationText(text);
     const promptDigest = conversationMessageDigest(normalizedText);
+    const queueRequested = queueAfterThreadId !== null || queueAfterTurnId !== null;
+    if (queueRequested && (queueAfterThreadId === null || queueAfterTurnId === null)) {
+      throw new TypeError("queued conversation target must include both thread and turn IDs");
+    }
+    const normalizedQueueThreadId = queueRequested
+      ? boundedText(queueAfterThreadId, "queued Codex thread ID", 256)
+      : null;
+    const normalizedQueueTurnId = queueRequested
+      ? boundedText(queueAfterTurnId, "queued Codex turn ID", 256)
+      : null;
     if (!this.getProject(normalizedProjectId)) throw new Error("project not found");
 
     this.database.exec("BEGIN IMMEDIATE;");
@@ -3386,7 +3498,10 @@ export class LatticeStore {
           throw new TypeError("client message ID was already used for different content");
         }
         const accepted = this.primaryConversationAcceptedEvent(normalizedId) !== null;
-        if (!accepted && item.status === "failed") {
+        const existingQueued = Boolean(
+          existing.payload.queueAfterThreadId && existing.payload.queueAfterTurnId
+        );
+        if (!accepted && !existingQueued && item.status === "failed") {
           const timestamp = now();
           this.database.prepare(`
             UPDATE work_items
@@ -3401,9 +3516,31 @@ export class LatticeStore {
             .get(primaryConversationId);
         }
         this.database.exec("COMMIT;");
-        return { claimed: false, item: decodeItem(item), event: existing };
+        return {
+          claimed: false,
+          queued: existingQueued,
+          item: decodeItem(item),
+          event: existing,
+        };
       }
-      if (!["draft", "codex_done", "failed"].includes(item.status)) {
+      if (queueRequested) {
+        const accepted = item.codex_thread_id && item.codex_turn_id
+          ? this.primaryConversationAcceptedForTurn(item.codex_thread_id, item.codex_turn_id)
+          : null;
+        if (
+          !["running", "waiting_approval"].includes(item.status)
+          || item.project_id !== normalizedProjectId
+          || item.codex_thread_id !== normalizedQueueThreadId
+          || item.codex_turn_id !== normalizedQueueTurnId
+          || !accepted
+          || this.primaryConversationTerminalEvent(normalizedQueueThreadId, normalizedQueueTurnId)
+        ) {
+          const error = new Error("the primary conversation is not safely queueable");
+          error.code = "CONVERSATION_BUSY";
+          error.status = 409;
+          throw error;
+        }
+      } else if (!["draft", "codex_done", "failed"].includes(item.status)) {
         const error = new Error("the primary conversation is already handling a message");
         error.code = "CONVERSATION_BUSY";
         error.status = 409;
@@ -3411,23 +3548,35 @@ export class LatticeStore {
       }
 
       const timestamp = now();
-      const update = this.database.prepare(`
-        UPDATE work_items
-        SET project_id = ?, status = 'starting', progress = ?, approval_json = NULL,
-            failure_summary = NULL, updated_at = ?
-        WHERE id = ? AND status IN ('draft', 'codex_done', 'failed')
-      `).run(
-        normalizedProjectId,
-        "訊息已保存；正在連接 Codex",
-        timestamp,
-        primaryConversationId,
-      );
-      if (update.changes !== 1) {
-        const error = new Error("the primary conversation changed before the message was claimed");
-        error.code = "CONVERSATION_BUSY";
-        error.status = 409;
-        throw error;
+      if (!queueRequested) {
+        const update = this.database.prepare(`
+          UPDATE work_items
+          SET project_id = ?, status = 'starting', progress = ?, approval_json = NULL,
+              failure_summary = NULL, updated_at = ?
+          WHERE id = ? AND status IN ('draft', 'codex_done', 'failed')
+        `).run(
+          normalizedProjectId,
+          "訊息已保存；正在連接 Codex",
+          timestamp,
+          primaryConversationId,
+        );
+        if (update.changes !== 1) {
+          const error = new Error("the primary conversation changed before the message was claimed");
+          error.code = "CONVERSATION_BUSY";
+          error.status = 409;
+          throw error;
+        }
       }
+      const payload = {
+        clientMessageId: normalizedId,
+        projectId: normalizedProjectId,
+        text: normalizedText,
+        promptDigest,
+        ...(queueRequested ? {
+          queueAfterThreadId: normalizedQueueThreadId,
+          queueAfterTurnId: normalizedQueueTurnId,
+        } : {}),
+      };
       const inserted = this.database.prepare(`
         INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
         VALUES (?, ?, ?, ?)
@@ -3435,12 +3584,7 @@ export class LatticeStore {
       `).get(
         primaryConversationId,
         "conversation_message_claimed",
-        JSON.stringify({
-          clientMessageId: normalizedId,
-          projectId: normalizedProjectId,
-          text: normalizedText,
-          promptDigest,
-        }),
+        JSON.stringify(payload),
         timestamp,
       );
       item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
@@ -3448,19 +3592,95 @@ export class LatticeStore {
       this.database.exec("COMMIT;");
       return {
         claimed: true,
+        queued: queueRequested,
         item: decodeItem(item),
         event: {
           id: inserted.id,
           kind: "conversation_message_claimed",
-          payload: {
-            clientMessageId: normalizedId,
-            projectId: normalizedProjectId,
-            text: normalizedText,
-            promptDigest,
-          },
+          payload,
           created_at: timestamp,
         },
       };
+    } catch (error) {
+      this.database.exec("ROLLBACK;");
+      throw error;
+    }
+  }
+
+  activatePrimaryConversationQueuedMessage({
+    clientMessageId,
+    queueAfterThreadId,
+    queueAfterTurnId,
+    fence,
+  }) {
+    const normalizedId = normalizeClientMessageId(clientMessageId);
+    const normalizedThreadId = boundedText(queueAfterThreadId, "queued Codex thread ID", 256);
+    const normalizedTurnId = boundedText(queueAfterTurnId, "queued Codex turn ID", 256);
+    this.database.exec("BEGIN IMMEDIATE;");
+    try {
+      const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      assertPrimaryConversationIdentity(this.database, item);
+      assertPrimaryConversationFence(this.database, fence);
+      const claim = this.primaryConversationMessage(normalizedId);
+      if (
+        !claim
+        || claim.payload.queueAfterThreadId !== normalizedThreadId
+        || claim.payload.queueAfterTurnId !== normalizedTurnId
+      ) throw new Error("queued conversation claim identity changed before dispatch");
+      const accepted = this.primaryConversationAcceptedEvent(normalizedId);
+      if (accepted) {
+        this.database.exec("COMMIT;");
+        return { activated: false, item: decodeItem(item), event: claim };
+      }
+      const unresolved = this.primaryConversationUnresolvedMessage();
+      const terminal = this.primaryConversationTerminalEvent(normalizedThreadId, normalizedTurnId);
+      const dispatchIntent = this.primaryConversationDispatchIntent(normalizedId);
+      const predecessorProjectionStatus = terminal?.payload.status === "completed"
+        ? "codex_done"
+        : ["interrupted", "failed"].includes(terminal?.payload.status)
+          ? "failed"
+          : null;
+      const recoveringDispatch = Boolean(
+        dispatchIntent
+        && dispatchIntent.payload.threadId === normalizedThreadId
+        && dispatchIntent.payload.promptDigest === claim.payload.promptDigest
+        && ["starting", "failed"].includes(item.status)
+      );
+      if (
+        unresolved?.id !== claim.id
+        || item.codex_thread_id !== normalizedThreadId
+        || item.codex_turn_id !== normalizedTurnId
+        || !terminal
+        || !predecessorProjectionStatus
+        || (item.status !== predecessorProjectionStatus && !recoveringDispatch)
+      ) throw new Error("queued conversation predecessor is not in the exact terminal state");
+      const activationStatus = item.status;
+      const timestamp = now();
+      const update = this.database.prepare(`
+        UPDATE work_items
+        SET status = 'starting', progress = ?, approval_json = NULL,
+            failure_summary = NULL, updated_at = ?
+        WHERE id = ? AND codex_thread_id = ? AND codex_turn_id = ?
+          AND status = ?
+      `).run(
+        "上一則已終止；正在送出排隊訊息",
+        timestamp,
+        primaryConversationId,
+        normalizedThreadId,
+        normalizedTurnId,
+        activationStatus,
+      );
+      if (update.changes !== 1) {
+        const error = new Error("primary conversation changed before queued dispatch activation");
+        error.code = "CONVERSATION_BUSY";
+        error.status = 409;
+        throw error;
+      }
+      const updated = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
+        .get(primaryConversationId);
+      this.database.exec("COMMIT;");
+      return { activated: true, item: decodeItem(updated), event: claim };
     } catch (error) {
       this.database.exec("ROLLBACK;");
       throw error;
@@ -3731,11 +3951,35 @@ export class LatticeStore {
     }
   }
 
-  recordPrimaryConversationReply({ threadId, turnId, messageId, text, fence }) {
+  primaryConversationReplyIdentities(threadId, turnId) {
+    const rows = this.database.prepare(`
+      SELECT kind, payload_json FROM work_events
+      WHERE work_item_id = ?
+        AND kind IN ('conversation_assistant_message', 'conversation_reply_alias')
+        AND json_extract(payload_json, '$.threadId') = ?
+        AND json_extract(payload_json, '$.turnId') = ?
+      ORDER BY id ASC
+    `).all(primaryConversationId, threadId, turnId);
+    const replies = new Map();
+    for (const row of rows) {
+      const payload = JSON.parse(row.payload_json);
+      if (row.kind === "conversation_assistant_message") {
+        replies.set(payload.messageId, { ...payload, aliases: [] });
+      } else {
+        replies.get(payload.canonicalMessageId)?.aliases.push(payload.messageId);
+      }
+    }
+    return [...replies.values()];
+  }
+
+  recordPrimaryConversationReply({ threadId, turnId, messageId, text, fence, replayOf = null }) {
     const normalizedThreadId = boundedText(threadId, "Codex thread ID", 256);
     const normalizedTurnId = boundedText(turnId, "Codex turn ID", 256);
     const normalizedMessageId = boundedText(messageId, "Codex message ID", 256);
     const normalizedText = boundedConversationReply(text);
+    const canonicalMessageId = replayOf === null
+      ? null
+      : boundedText(replayOf, "Codex canonical message ID", 256);
     this.database.exec("BEGIN IMMEDIATE;");
     try {
       const item = this.database.prepare("SELECT * FROM work_items WHERE id = ?")
@@ -3751,17 +3995,53 @@ export class LatticeStore {
       }
       const existingRow = this.database.prepare(`
         SELECT payload_json FROM work_events
-        WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+        WHERE work_item_id = ?
           AND json_extract(payload_json, '$.messageId') = ?
-        ORDER BY id DESC LIMIT 1
-      `).get(primaryConversationId, normalizedMessageId);
-      const existing = existingRow ? JSON.parse(existingRow.payload_json) : null;
+          AND (kind = 'conversation_assistant_message' OR (
+            kind = 'conversation_reply_alias'
+            AND json_extract(payload_json, '$.threadId') = ?
+            AND json_extract(payload_json, '$.turnId') = ?
+          ))
+        ORDER BY (kind = 'conversation_reply_alias') DESC, id DESC LIMIT 1
+      `).get(primaryConversationId, normalizedMessageId, normalizedThreadId, normalizedTurnId);
+      let existing = existingRow ? JSON.parse(existingRow.payload_json) : null;
+      if (existing?.canonicalMessageId) {
+        const canonicalRow = this.database.prepare(`
+          SELECT payload_json FROM work_events
+          WHERE work_item_id = ? AND kind = 'conversation_assistant_message'
+            AND json_extract(payload_json, '$.messageId') = ?
+            AND json_extract(payload_json, '$.threadId') = ?
+            AND json_extract(payload_json, '$.turnId') = ?
+          ORDER BY id DESC LIMIT 1
+        `).get(primaryConversationId, existing.canonicalMessageId, normalizedThreadId, normalizedTurnId);
+        existing = canonicalRow ? JSON.parse(canonicalRow.payload_json) : null;
+        if (!existing) throw new Error("Codex reply alias has no canonical message");
+      }
       if (existing) {
         if (
           existing.threadId !== normalizedThreadId
           || existing.turnId !== normalizedTurnId
           || existing.text !== normalizedText
+          || (canonicalMessageId !== null && existing.messageId !== canonicalMessageId)
         ) throw new Error("Codex message identity changed during replay");
+        this.database.exec("COMMIT;");
+        return false;
+      }
+      if (canonicalMessageId !== null) {
+        const canonical = this.primaryConversationReplyIdentities(normalizedThreadId, normalizedTurnId)
+          .find((reply) => reply.messageId === canonicalMessageId);
+        if (!canonical || canonical.text !== normalizedText) {
+          throw new Error("Codex message identity changed during replay");
+        }
+        this.database.prepare(`
+          INSERT INTO work_events (work_item_id, kind, payload_json, created_at)
+          VALUES (?, ?, ?, ?)
+        `).run(primaryConversationId, "conversation_reply_alias", JSON.stringify({
+          messageId: normalizedMessageId,
+          canonicalMessageId,
+          threadId: normalizedThreadId,
+          turnId: normalizedTurnId,
+        }), now());
         this.database.exec("COMMIT;");
         return false;
       }

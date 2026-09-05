@@ -20,6 +20,29 @@ LATTICE DevOS 是一套**本機優先的 AI 開發工作控制台與耐久執行
 - **安全邊界**：Codex App 繼續擁有 agent loop、context、sandbox、工具、MCP 與核准流程，
   LATTICE 不重新實作第二套代理迴圈。
 
+## 與目前 Codex 平台的分工
+
+依 2026-09-05 查閱的官方文件對照原定功能：
+
+| 原定需求 | 現在使用的能力 | LATTICE 保留的責任 |
+|---|---|---|
+| 代理執行、對話與上下文接續 | [Codex App Server](https://learn.chatgpt.com/docs/app-server)／[SDK](https://learn.chatgpt.com/docs/codex-sdk) | 耐久工作身分、原 Codex thread 連結、結果與證據 |
+| 平行工作與工具擴充 | [Codex 子代理](https://learn.chatgpt.com/docs/agent-configuration/subagents)、App 原生 skills／plugins／MCP | 有界任務與授權資料；不再建通用代理或 MCP host |
+| 定時工作與續看 | [平台排程](https://learn.chatgpt.com/docs/automations?surface=app) | 保存任務結果；不另造排程器，本輪既有排程維持暫停 |
+| 長期記憶與關係查詢 | Codex 管理工作上下文 | PostgreSQL 保存權威事實；Graphify 衍生查詢，Hermes 建議不直接改寫事實 |
+| 工程進度與交付 | Git、GitHub PR／CI | 可定位的本機提交與交付證據；已淘汰重複的本機工程看板／交付 finisher |
+
+目前新 Control 工作與主對話預設 `gpt-6-astra`；既有 Codex thread 續接時保留原模型。
+推理強度由連線主機的 `model/list` 能力決定，明確指定的強度必須在其支援清單內，
+不把 [API 的 Astra 推理選項](https://developers.openai.com/api/docs/models/gpt-6-astra)
+直接當成 App Server 的可用性證明。缺少模型或強度時在建立 thread 前停止，不暗換模型。
+
+這項變更沒有遷移既有 managed Foreman／semantic reviewer／Hermes 固定模型路徑：
+它們仍有資料庫約束、舊收據及恢復程序依賴，保留相容性，不作為新工程工作的模型政策。
+現有 Control 對話介面與受管執行隔離也仍有實際使用，保留用途；不再擴充為第二套 Codex。
+歷史 charter、module 規格、plans、tickets、reviews 僅供追溯；現行要求以
+[`AGENTS.md`](AGENTS.md) 與其工程契約為準。
+
 ## 目前可用
 
 | 能力 | 狀態 | 說明 |
@@ -39,6 +62,8 @@ LATTICE DevOS 是一套**本機優先的 AI 開發工作控制台與耐久執行
 - Windows 11
 - Node.js 24.15 或更新版本
 - Git
+- 要建立新工作，連接的 Codex App Server 必須在 `model/list` 宣告 `gpt-6-astra`
+  與有效推理選項；Codex App、npm CLI 和 API 的模型可用性可能不同。
 
 ### 執行
 

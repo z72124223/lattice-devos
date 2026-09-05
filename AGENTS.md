@@ -27,6 +27,14 @@ smallest workflow and verification that can prove the requested result.
 - Do not rebuild a generic agent loop, process supervisor, sandbox, context
   store, MCP host, or multi-provider abstraction while Codex already provides
   the required behavior.
+- Use Codex native subagents, skills/plugins, worktrees, and scheduled tasks
+  when needed. LATTICE supplies durable task/approval/evidence contracts and
+  derived queries; it does not add a second conversation or scheduler system.
+- New Control threads and engineering work target `gpt-6-astra`. Resolve
+  reasoning effort from the actual execution interface, without assuming API
+  and App Server effort names are identical. Preserve existing thread models
+  on resume. Historical managed-worker model restrictions are compatibility
+  contracts, not a model whitelist for new engineering work.
 - Historical V2 plans, tickets, branches, and full-chain acceptance documents
   remain evidence, not current implementation requirements.
 

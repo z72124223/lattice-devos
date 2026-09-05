@@ -22,7 +22,7 @@ use lattice_project_registry::{
 use postgres::types::{FromSqlOwned, ToSql};
 use postgres::{Client, Error as PostgresError, GenericClient, IsolationLevel, Row, Transaction};
 
-use crate::migrations::CURRENT_V5_MANIFEST_SHA256;
+use crate::migrations::{CURRENT_V5_MANIFEST_SHA256, CURRENT_V7_MANIFEST_SHA256};
 use crate::postgres_setup::verify_runtime_store_schema;
 use crate::{MigrationTarget, PostgresStoreSetupErrorKind};
 
@@ -2179,6 +2179,11 @@ fn retained_command_persistence_from_parts(
         schema_version == 4 && manifest_sha256 == REGISTRY_V4_MANIFEST_SHA256;
     let profile_is_frozen_v5 = schema_version == FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION
         && manifest_sha256 == CURRENT_V5_MANIFEST_SHA256;
+    // Upgrading the live schema does not rewrite historical command receipts.
+    let profile_is_frozen_v7 = current.schema_version()
+        == EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION
+        && schema_version == CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION
+        && manifest_sha256 == CURRENT_V7_MANIFEST_SHA256;
     let profile_is_current = schema_version == current.schema_version()
         && matches!(
             current.schema_version(),
@@ -2187,7 +2192,11 @@ fn retained_command_persistence_from_parts(
                 | EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION
         )
         && manifest_sha256 == current.manifest_digest().as_str();
-    if !profile_is_frozen_v4 && !profile_is_frozen_v5 && !profile_is_current {
+    if !profile_is_frozen_v4
+        && !profile_is_frozen_v5
+        && !profile_is_frozen_v7
+        && !profile_is_current
+    {
         return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
     }
     Ok(PostgresProjectRegistryPersistenceEvidence {
@@ -2464,6 +2473,64 @@ mod tests {
                 Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))
             );
         }
+    }
+
+    #[test]
+    fn retained_registry_v7_commands_replay_under_v8_with_the_exact_frozen_manifest() {
+        let current_v8 = PostgresProjectRegistryPersistenceEvidence {
+            database_identity_digest: digest(&"a".repeat(64)).expect("database identity"),
+            schema_version: EXTERNAL_ADOPTION_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            manifest_digest: digest(crate::migrations::CURRENT_V8_MANIFEST_SHA256)
+                .expect("v8 manifest"),
+        };
+        let historical = retained_command_persistence_from_parts(
+            CURRENT_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            crate::migrations::CURRENT_V7_MANIFEST_SHA256,
+            &current_v8,
+        )
+        .expect("frozen v7 command survives the v8 migration");
+        assert_eq!(historical.schema_version(), 7);
+        assert_eq!(
+            historical.manifest_digest().as_str(),
+            crate::migrations::CURRENT_V7_MANIFEST_SHA256
+        );
+        assert_eq!(
+            historical.database_identity_digest(),
+            current_v8.database_identity_digest()
+        );
+        assert_eq!(
+            retained_command_persistence_from_parts(
+                8,
+                current_v8.manifest_digest().as_str(),
+                &current_v8,
+            ),
+            Ok(current_v8.clone())
+        );
+        for (version, manifest) in [
+            (7, current_v8.manifest_digest().as_str()),
+            (7, CURRENT_V5_MANIFEST_SHA256),
+            (6, crate::migrations::CURRENT_V7_MANIFEST_SHA256),
+            (9, crate::migrations::CURRENT_V7_MANIFEST_SHA256),
+            (8, crate::migrations::CURRENT_V7_MANIFEST_SHA256),
+        ] {
+            assert_eq!(
+                retained_command_persistence_from_parts(version, manifest, &current_v8),
+                Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))
+            );
+        }
+        let current_v5 = PostgresProjectRegistryPersistenceEvidence {
+            database_identity_digest: current_v8.database_identity_digest().clone(),
+            schema_version: FROZEN_GLOBAL_REGISTRY_SCHEMA_VERSION,
+            manifest_digest: digest(CURRENT_V5_MANIFEST_SHA256).expect("v5 manifest"),
+        };
+        assert_eq!(
+            retained_command_persistence_from_parts(
+                7,
+                crate::migrations::CURRENT_V7_MANIFEST_SHA256,
+                &current_v5,
+            ),
+            Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))
+        );
     }
 
     #[test]

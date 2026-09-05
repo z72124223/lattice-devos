@@ -11,6 +11,8 @@ import {
 } from "./wsl2-execution-domain.mjs";
 import { probeWsl2ProviderPostExit } from "./wsl2-provider-subtree-reconcile.mjs";
 
+export const DEFAULT_CODEX_MODEL = "gpt-6-astra";
+
 const ATTEMPT_RECEIPT = /^attempt-receipt:sha256:[a-f0-9]{64}$/u;
 const HEX_64 = /^[a-f0-9]{64}$/u;
 const TOOL_INPUT_KEYS = Object.freeze([
@@ -955,13 +957,41 @@ export class CodexAppServer extends EventEmitter {
     request.timer.unref?.();
   }
 
-  async listModels({ effectIdentity = null } = {}) {
+  async listModels({ effectIdentity = null, cursor = null } = {}) {
     await this.connect();
-    return this.request("model/list", { limit: 100 }, effectIdentity ?? {});
+    return this.request("model/list", { limit: 100, ...(cursor ? { cursor } : {}) }, effectIdentity ?? {});
   }
 
-  async startThread({ cwd, model = "gpt-5.6-terra", effectIdentity = null, ...options }) {
+  async startThread({ cwd, model = DEFAULT_CODEX_MODEL, effectIdentity = null, ...options }) {
     await this.connect();
+    // Retained managed profiles keep their original model contracts. New Control
+    // work uses the current model only when this exact host advertises it.
+    if (model === DEFAULT_CODEX_MODEL) {
+      effectIdentity ??= {
+        expectedGeneration: this.connectionGeneration,
+        expectedSessionId: this.appServerSessionId,
+      };
+      let selected;
+      let cursor = null;
+      for (let page = 0; page < 4; page += 1) {
+        const listed = await this.listModels({ effectIdentity, cursor });
+        selected = listed?.data?.find((entry) => (entry.model ?? entry.id) === model);
+        if (selected || !listed?.nextCursor) break;
+        cursor = listed.nextCursor;
+      }
+      if (!selected) {
+        const error = new Error(`Codex App Server does not advertise ${model}; no model was substituted`);
+        error.code = "CODEX_MODEL_UNAVAILABLE";
+        throw error;
+      }
+      const effort = options.config?.model_reasoning_effort ?? selected.defaultReasoningEffort;
+      if (!selected.supportedReasoningEfforts?.some((entry) => entry.reasoningEffort === effort)) {
+        const error = new Error(`Codex App Server does not advertise the requested reasoning effort for ${model}`);
+        error.code = "CODEX_REASONING_UNAVAILABLE";
+        throw error;
+      }
+      options.config = { ...options.config, model_reasoning_effort: effort };
+    }
     const result = await this.request(
       "thread/start",
       { cwd, model, ...options },
@@ -1032,6 +1062,34 @@ export class CodexAppServer extends EventEmitter {
       throw error;
     }
     return thread;
+  }
+
+  async readThreadFresh(
+    threadId,
+    { includeTurns = true, allowEmpty = false } = {},
+  ) {
+    if (this.launchSpec?.processFence) {
+      const error = new Error("a process-fenced App Server launch cannot be reused for a fresh probe");
+      error.code = "CODEX_APP_SERVER_FRESH_READ_UNAVAILABLE";
+      throw error;
+    }
+    // The active App Server can retain an in-memory inProgress view after a
+    // terminal notification is lost. A separate read-only process consults
+    // persisted Codex state without closing or interrupting the active adapter.
+    const probe = new CodexAppServer({
+      codexBin: this.codexBin,
+      launchSpec: this.launchSpec,
+      spawnProcess: this.spawnProcess,
+      requestTimeoutMs: this.requestTimeoutMs,
+      lifecycleTimeoutMs: this.lifecycleTimeoutMs,
+      sessionIdentityFactory: this.sessionIdentityFactory,
+      runPostExitProbe: this.runPostExitProbe,
+    });
+    try {
+      return await probe.readThread(threadId, { includeTurns, allowEmpty });
+    } finally {
+      await probe.close();
+    }
   }
 
   /** Loads one exact persisted thread that is proven to have no turns yet. */
@@ -1107,11 +1165,12 @@ export class CodexAppServer extends EventEmitter {
     return reconciled;
   }
 
-  async startTurn(threadId, text, { effectIdentity = null } = {}) {
+  async startTurn(threadId, text, { effectIdentity = null, model = null } = {}) {
     await this.connect();
     const result = await this.request("turn/start", {
       threadId,
       input: [{ type: "text", text }],
+      ...(model ? { model } : {}),
     }, effectIdentity ?? {});
     return result.turn;
   }
@@ -1150,6 +1209,12 @@ export class CodexAppServer extends EventEmitter {
 
   isTurnActive(threadId, turnId) {
     return this.activeTurns.get(threadId) === turnId;
+  }
+
+  hasActiveTurnOtherThan(threadId, turnId) {
+    return [...this.activeTurns].some(
+      ([activeThreadId, activeTurnId]) => activeThreadId !== threadId || activeTurnId !== turnId,
+    );
   }
 
   async interruptTurn(
