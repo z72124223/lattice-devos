@@ -4,6 +4,7 @@ param(
     [string]$NodePath = '',
     [string]$DatabasePath = (Join-Path $env:LOCALAPPDATA 'LATTICE\control\lattice-control.db'),
     [ValidateRange(1024, 65535)][int]$Port = 4317,
+    [ValidatePattern('^$|^[0-9a-f]{64}$')][string]$ExpectedPreviousTaskSha256 = '',
     [switch]$NoStart
 )
 
@@ -54,9 +55,23 @@ if ($null -ne $existing) {
     }
     $sameOwner = $existingOwner -eq $identity.User.Value
     if (-not $sameOwner -or $existing.Description -ne $taskDescription -or
-        @($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $powershellPath -or
-        $existing.Actions[0].Arguments -ne $arguments -or $existing.Actions[0].WorkingDirectory -ne $repositoryRoot) {
+        @($existing.Actions).Count -ne 1 -or $existing.Actions[0].Execute -ne $powershellPath) {
         throw 'LATTICE_CONTROL_EXISTING_TASK_SCOPE_MISMATCH'
+    }
+    $sameScope = $existing.Actions[0].Arguments -eq $arguments -and $existing.Actions[0].WorkingDirectory -eq $repositoryRoot
+    if (-not $sameScope) {
+        # A version migration must bind the exact stopped task previously inspected by the installer.
+        if ([string]::IsNullOrEmpty($ExpectedPreviousTaskSha256) -or $existing.State -eq 'Running') {
+            throw 'LATTICE_CONTROL_EXISTING_TASK_SCOPE_MISMATCH'
+        }
+        $previousXml = Export-ScheduledTask -TaskName $TaskName -TaskPath '\'
+        $hashAlgorithm = [Security.Cryptography.SHA256]::Create()
+        try {
+            $previousHash = ([BitConverter]::ToString($hashAlgorithm.ComputeHash([Text.Encoding]::UTF8.GetBytes($previousXml)))).Replace('-', '').ToLowerInvariant()
+        } finally { $hashAlgorithm.Dispose() }
+        if ($previousHash -cne $ExpectedPreviousTaskSha256) {
+            throw 'LATTICE_CONTROL_PREVIOUS_TASK_CHANGED'
+        }
     }
     $logonTriggers = @($existing.Triggers | Where-Object { $_.CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger' -and $_.Enabled })
     $recoveryTriggers = @($existing.Triggers | Where-Object {
@@ -64,7 +79,7 @@ if ($null -ne $existing) {
         $_.Repetition.Interval -eq 'PT1M' -and [string]::IsNullOrEmpty($_.Repetition.Duration) -and
         [string]::IsNullOrEmpty($_.EndBoundary)
     })
-    $needsRegistration = -not ($existing.Principal.LogonType -eq 'Interactive' -and
+    $needsRegistration = -not ($sameScope -and $existing.Principal.LogonType -eq 'Interactive' -and
         $existing.Principal.RunLevel -eq 'Limited' -and $existing.Settings.Enabled -and
         $existing.Settings.MultipleInstances -eq 'IgnoreNew' -and $existing.Settings.ExecutionTimeLimit -eq 'PT0S' -and
         $existing.Settings.RestartCount -eq 3 -and $existing.Settings.RestartInterval -eq 'PT1M' -and

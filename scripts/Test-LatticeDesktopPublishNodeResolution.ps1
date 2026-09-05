@@ -9,20 +9,74 @@ $tokens = $null
 $parseErrors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile(
     $publisherPath, [ref]$tokens, [ref]$parseErrors)
-$definition = @($ast.FindAll({
-    param($node)
-    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-        $node.Name -ceq 'Resolve-LatticeDesktopPublishNodeApplication'
-}, $true))
-if ($parseErrors.Count -ne 0 -or $definition.Count -ne 1) {
-    throw 'DESKTOP_PUBLISH_NODE_TEST_RESOLVER_MISSING'
+if ($parseErrors.Count -ne 0) {
+    throw 'DESKTOP_PUBLISH_TEST_PARSE_ERROR'
 }
-Invoke-Expression $definition[0].Extent.Text
+foreach ($functionName in @(
+    'Resolve-LatticeDesktopPublishNodeApplication',
+    'Assert-LatticeDesktopPublishSourceState',
+    'Copy-LatticeControlBackgroundScripts')) {
+    $definition = @($ast.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -ceq $functionName
+    }, $true))
+    if ($definition.Count -ne 1) {
+        throw "DESKTOP_PUBLISH_TEST_FUNCTION_MISSING:$functionName"
+    }
+    Invoke-Expression $definition[0].Extent.Text
+}
+
+Assert-LatticeDesktopPublishSourceState -StatusLines @() -StagedPaths @()
+Assert-LatticeDesktopPublishSourceState -StatusLines @(' M HANDOFF.md') -StagedPaths @()
+foreach ($rejectedState in @(
+    @{ Status = @(' M apps/lattice-control/src/server.mjs'); Staged = @(); Error = 'SOURCE_NOT_COMMITTED' },
+    @{ Status = @(' M HANDOFF.md', '?? other.txt'); Staged = @(); Error = 'SOURCE_NOT_COMMITTED' },
+    @{ Status = @('M  HANDOFF.md'); Staged = @('HANDOFF.md'); Error = 'STAGED_CHANGES_PRESENT' },
+    @{ Status = @('MM HANDOFF.md'); Staged = @('HANDOFF.md'); Error = 'STAGED_CHANGES_PRESENT' })) {
+    try {
+        Assert-LatticeDesktopPublishSourceState -StatusLines $rejectedState.Status -StagedPaths $rejectedState.Staged
+        throw 'DESKTOP_PUBLISH_TEST_UNCOMMITTED_SOURCE_ACCEPTED'
+    }
+    catch {
+        if (-not $_.Exception.Message.StartsWith('DESKTOP_CANDIDATE_' + $rejectedState.Error + ':')) {
+            throw
+        }
+    }
+}
 
 $temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) (
     'lattice-desktop-publish-node-test-' + [Guid]::NewGuid().ToString('N'))
 $originalPath = $env:PATH
 try {
+    $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
+    $runtimeRoot = Join-Path $temporaryRoot 'control-runtime'
+    Copy-LatticeControlBackgroundScripts -RepositoryRoot $repositoryRoot -ControlRuntimeDirectory $runtimeRoot
+    $packagedScripts = @(Get-ChildItem -LiteralPath (Join-Path $runtimeRoot 'scripts') -File)
+    if ($packagedScripts.Count -ne 3) {
+        throw 'DESKTOP_PUBLISH_TEST_BACKGROUND_FILE_SET_MISMATCH'
+    }
+    foreach ($scriptFile in $packagedScripts) {
+        $source = Join-Path $PSScriptRoot $scriptFile.Name
+        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne
+            (Get-FileHash -LiteralPath $scriptFile.FullName -Algorithm SHA256).Hash) {
+            throw 'DESKTOP_PUBLISH_TEST_BACKGROUND_FILE_CONTENT_MISMATCH'
+        }
+    }
+    $missingDestination = Join-Path $temporaryRoot 'missing-source-runtime'
+    try {
+        Copy-LatticeControlBackgroundScripts -RepositoryRoot $temporaryRoot -ControlRuntimeDirectory $missingDestination
+        throw 'DESKTOP_PUBLISH_TEST_MISSING_BACKGROUND_SCRIPT_ACCEPTED'
+    }
+    catch {
+        if ($_.Exception.Message -cne 'DESKTOP_CANDIDATE_BACKGROUND_SCRIPT_MISSING:Install-LatticeControlBackgroundTask.ps1') {
+            throw
+        }
+    }
+    if (Test-Path -LiteralPath $missingDestination) {
+        throw 'DESKTOP_PUBLISH_TEST_MISSING_BACKGROUND_SOURCE_CREATED_PAYLOAD'
+    }
+
     $directories = @(
         (Join-Path $temporaryRoot 'first'),
         (Join-Path $temporaryRoot 'second'))
@@ -62,6 +116,7 @@ try {
         }
     }
     Write-Output 'LATTICE_DESKTOP_PUBLISH_NODE_RESOLUTION_TEST_PASS'
+    Write-Output 'LATTICE_DESKTOP_PUBLISH_SOURCE_STATE_AND_BACKGROUND_PAYLOAD_TEST_PASS'
 }
 finally {
     $env:PATH = $originalPath

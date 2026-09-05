@@ -3463,6 +3463,70 @@ test("primary conversation safely interrupts an exact turn that produces no acti
   }
 });
 
+for (const [recovery, activity] of [
+  ["reconnect", { id: "snapshot-reasoning", type: "reasoning", summary: ["Working"] }],
+  ["observation", { id: "snapshot-command", type: "commandExecution", status: "inProgress" }],
+  ["unaccepted", { id: "snapshot-commentary", type: "agentMessage", phase: "commentary", text: "Working" }],
+]) {
+  test(`snapshot activity prevents a false queue timeout during ${recovery}`, async () => {
+    const store = new LatticeStore();
+    const codex = new FakeCodex();
+    const service = new LatticeControlService({
+      store,
+      codex,
+      conversationStartTimeoutMs: 25,
+      conversationObservationIntervalMs: 1,
+    });
+    try {
+      const project = service.createProject({ name: "Recovered activity", rootPath: process.cwd() });
+      if (recovery === "unaccepted") {
+        codex.beforeTurnResult = () => { throw new Error("acceptance response lost"); };
+      }
+      const send = service.sendPrimaryConversationMessage({
+        projectId: project.id,
+        clientMessageId: `snapshot-activity-${recovery}-001`,
+        text: "已在執行的工作不能因漏收活動通知而被中斷。",
+      });
+      if (recovery === "unaccepted") await assert.rejects(send, /acceptance response lost/u);
+      else await send;
+      const { threadId, turnId, text } = codex.lastTurn;
+      const thread = {
+        id: threadId,
+        turns: [{
+          id: turnId,
+          status: "inProgress",
+          items: [
+            { id: "snapshot-input", type: "userMessage", content: [{ type: "text", text }] },
+            activity,
+          ],
+        }],
+      };
+      codex.readResults.set(threadId, thread);
+      codex.resumeResult = thread;
+      codex.activeTurns.set(threadId, turnId);
+      if (recovery === "observation") {
+        service.nextConversationObservationAt = 0;
+        await service.refreshPrimaryConversationObservation();
+      } else {
+        codex.emit("disconnect", { code: 17, signal: null });
+        store.database.prepare(`
+          UPDATE work_events SET created_at = ?
+          WHERE work_item_id = 'primary' AND kind = 'conversation_message_accepted'
+        `).run(new Date(Date.now() - 1_000).toISOString());
+        await service.reconnectPrimaryConversation();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(codex.interruptCalls.length, 0, "persisted provider activity proves this turn has started");
+      assert.equal(codex.turnStarts.length, 1, "the recovered work must not be sent again");
+      assert.equal(service.primaryConversation().status, "running");
+      assert.equal(store.primaryConversationFirstActivity(threadId, turnId)?.payload.type, activity.type);
+    } finally {
+      service.close();
+      store.close();
+    }
+  });
+}
+
 test("a queue deadline waits for reconnect and interrupts its retained exact turn once", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();
@@ -3488,7 +3552,9 @@ test("a queue deadline waits for reconnect and interrupts its retained exact tur
     });
     codex.resumeResult = {
       id: sent.codex_thread_id,
-      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [] }],
+      turns: [{ id: sent.codex_turn_id, status: "inProgress", items: [
+        { id: "queued-input-only", type: "userMessage", content: [{ type: "text", text: codex.lastTurn.text }] },
+      ] }],
     };
     const interrupted = new Promise((resolve) => codex.once("interruptAccepted", resolve));
     codex.once("interruptAccepted", ({ threadId, turnId }) => {

@@ -62,6 +62,37 @@ function Resolve-LatticeDesktopPublishNodeApplication {
     throw 'DESKTOP_CANDIDATE_NODE_APPLICATION_UNAVAILABLE'
 }
 
+function Assert-LatticeDesktopPublishSourceState {
+    param([string[]]$StatusLines = @(), [string[]]$StagedPaths = @())
+
+    if ($StagedPaths.Count -ne 0) {
+        throw ('DESKTOP_CANDIDATE_STAGED_CHANGES_PRESENT: ' + ($StagedPaths -join ', '))
+    }
+    if ($StatusLines.Count -ne 0 -and
+        ($StatusLines.Count -ne 1 -or $StatusLines[0] -cne ' M HANDOFF.md')) {
+        throw ('DESKTOP_CANDIDATE_SOURCE_NOT_COMMITTED: ' + ($StatusLines -join ', '))
+    }
+}
+
+function Copy-LatticeControlBackgroundScripts {
+    param([string]$RepositoryRoot, [string]$ControlRuntimeDirectory)
+
+    $scriptNames = @(
+        'Install-LatticeControlBackgroundTask.ps1',
+        'Run-LatticeControlBackgroundTask.ps1',
+        'Test-LatticeControlBackgroundTask.ps1')
+    foreach ($name in $scriptNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path $RepositoryRoot "scripts\$name") -PathType Leaf)) {
+            throw "DESKTOP_CANDIDATE_BACKGROUND_SCRIPT_MISSING:$name"
+        }
+    }
+    $destination = Join-Path $ControlRuntimeDirectory 'scripts'
+    [IO.Directory]::CreateDirectory($destination) | Out-Null
+    foreach ($name in $scriptNames) {
+        Copy-Item -LiteralPath (Join-Path $RepositoryRoot "scripts\$name") -Destination (Join-Path $destination $name)
+    }
+}
+
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectPath = Join-Path $repositoryRoot 'apps\lattice-control-desktop\Lattice.Control.Desktop.csproj'
 $controlSourceRoot = Join-Path $repositoryRoot 'apps\lattice-control'
@@ -136,14 +167,11 @@ $statusLines = @(& git -C $repositoryRoot status --porcelain --untracked-files=a
 if ($LASTEXITCODE -ne 0) {
     throw 'DESKTOP_CANDIDATE_GIT_STATUS_UNAVAILABLE'
 }
-$expectedProtectedDirtyState = ' M HANDOFF.md'
-if ($statusLines.Count -ne 1 -or $statusLines[0] -cne $expectedProtectedDirtyState) {
-    throw ('DESKTOP_CANDIDATE_SOURCE_NOT_COMMITTED: ' + ($statusLines -join ', '))
-}
 $stagedPaths = @(& git -C $repositoryRoot diff --cached --name-only)
-if ($LASTEXITCODE -ne 0 -or $stagedPaths.Count -ne 0) {
-    throw ('DESKTOP_CANDIDATE_STAGED_CHANGES_PRESENT: ' + ($stagedPaths -join ', '))
+if ($LASTEXITCODE -ne 0) {
+    throw 'DESKTOP_CANDIDATE_GIT_STAGED_STATUS_UNAVAILABLE'
 }
+Assert-LatticeDesktopPublishSourceState -StatusLines $statusLines -StagedPaths $stagedPaths
 
 if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
     $localApplicationData = [Environment]::GetFolderPath(
@@ -205,6 +233,7 @@ Copy-Item -LiteralPath $runtimeIdentityPath -Destination (
     Join-Path $bundledControlRoot 'runtime-identity.json')
 Copy-Item -LiteralPath $dataScopeContractPath -Destination (
     Join-Path $bundledControlRoot 'data-scope-contract.json')
+Copy-LatticeControlBackgroundScripts -RepositoryRoot $repositoryRoot -ControlRuntimeDirectory $controlRuntimeDirectory
 
 $runtimeNodeRelativePath = 'control-runtime/node.exe'
 $runtimeServerRelativePath = 'control-runtime/apps/lattice-control/src/server.mjs'

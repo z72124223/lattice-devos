@@ -2840,6 +2840,16 @@ export class LatticeControlService {
 
   #persistConversationRepliesFromTurn(id, threadId, turn, fence = null) {
     if (id !== primaryConversationId || !Array.isArray(turn?.items)) return;
+    const item = this.store.getWorkItem(id);
+    const activity = turn.items.find((entry) => typeof entry?.id === "string" && entry.id
+      && typeof entry.type === "string" && entry.type && entry.type !== "userMessage");
+    if (turn.status === "inProgress" && activity
+      && item?.codex_thread_id === threadId && item.codex_turn_id === turn.id
+      && this.store.primaryConversationAcceptedForTurn(threadId, turn.id)) {
+      // A snapshot can recover activity whose live notification was missed.
+      // The saved input alone does not prove the provider has started working.
+      this.#recordConversationFirstActivity(threadId, turn.id, activity.type, fence);
+    }
     const replies = this.store.primaryConversationReplyIdentities(threadId, turn.id);
     const identities = new Map(replies.flatMap((reply) =>
       [reply.messageId, ...reply.aliases].map((messageId) => [messageId, reply.messageId])));

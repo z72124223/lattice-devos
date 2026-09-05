@@ -241,7 +241,7 @@ test("the Windows candidate is a repeatable self-contained per-user installable 
   assert.match(publishScript, /Compress-Archive/u);
   assert.match(publishScript, /LocalApplicationData/u);
   assert.match(publishScript, /HANDOFF\.md/u);
-  assert.match(publishScript, /\$expectedProtectedDirtyState = ' M HANDOFF\.md'/u);
+  // Clean and protected-dirty source behavior is exercised by the PowerShell publisher tests.
   assert.match(publishScript, /git -C \$repositoryRoot diff --cached --name-only/u);
   assert.match(publishScript, /files\s*=\s*\$artifactFiles/u);
   assert.match(publishScript, /lattice\.control\.desktop-portable-candidate\.v2/u);
