@@ -91,6 +91,9 @@ internal static class DesktopPolicy
             { Detail: "CONTROL_RECONCILIATION_REQUIRED" } => new(
                 "Control 有未完成工作需要先對帳；LATTICE 已停止接管，避免啟動新的 effect。",
                 false),
+            { Detail: "CONTROL_LISTENER_UNVERIFIED" } => new(
+                "LATTICE 正在等待控制核心回應，會自動重新確認連線。",
+                true),
             { Health: ControlRuntimeHealth.INCOMPATIBLE } => new(
                 "127.0.0.1:4317 已有陌生或不相容的服務；LATTICE 已停止接管，也不會關閉它。",
                 false),

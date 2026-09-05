@@ -3,6 +3,7 @@
 mod aggregate;
 mod external_verified_result;
 mod history;
+mod local_verified_result;
 mod managed_evidence;
 mod quota;
 mod quota_owner;
@@ -15,6 +16,7 @@ mod snapshot_quota;
 pub use aggregate::*;
 pub use external_verified_result::*;
 pub use history::*;
+pub use local_verified_result::*;
 pub use managed_evidence::*;
 pub use quota::*;
 pub use semantics::*;

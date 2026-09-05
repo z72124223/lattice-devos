@@ -237,7 +237,7 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[1]["result"]["tools"].as_array().map(Vec::len),
-        Some(7)
+        Some(9)
     );
 }
 
@@ -246,9 +246,21 @@ fn task_public_output_schema() -> Value {
         "oneOf": [
             task_public_output_variant(false),
             redacted_task_public_output_variant(),
+            completed_task_public_output_variant(),
             managed_task_public_output_variant()
         ]
     })
+}
+
+fn completed_task_public_output_variant() -> Value {
+    let mut schema = redacted_task_public_output_variant();
+    schema["properties"]["schema_version"] =
+        json!({"type":"string","enum":["lattice.task.status.v6"]});
+    schema["properties"]["status"] = json!({"type":"string","enum":["COMPLETED"]});
+    schema["properties"]["task_state"] = json!({"type":"string","enum":["COMPLETED"]});
+    schema["properties"]["result_digest"] =
+        json!({"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$"});
+    schema
 }
 
 fn redacted_task_public_output_variant() -> Value {
@@ -885,7 +897,9 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
-            "lattice_foreman_checkpoint"
+            "lattice_foreman_checkpoint",
+            "lattice_control_snapshot",
+            "lattice_control_update"
         ]
     );
     assert_eq!(
@@ -1263,7 +1277,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(7)
+        Some(9)
     );
 
     for method in ["initialize", "ping"] {
@@ -1281,7 +1295,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
 }
 
 #[test]
-fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
+fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
     let (mut server, _, _) = server();
     initialize(&mut server);
 
@@ -1290,7 +1304,7 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 9);
     assert_eq!(
         tools
             .iter()
@@ -1303,7 +1317,9 @@ fn tool_list_is_exactly_seven_bounded_tools_with_closed_schemas() {
             "lattice_task_status",
             "lattice_runtime_status",
             "lattice_delivery_reconcile",
-            "lattice_foreman_checkpoint"
+            "lattice_foreman_checkpoint",
+            "lattice_control_snapshot",
+            "lattice_control_update"
         ]
     );
     for tool in &tools[..2] {
@@ -3054,7 +3070,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(7));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(9));
 
     let call = server
         .handle(json!({

@@ -437,7 +437,7 @@ impl Error for TaskLifecycleError {}
 /// Replay-verified projection of one pre-specification general-task intake.
 ///
 /// Ordinary intake remains structurally `DRAFT`. The only terminal carve-out
-/// is a digest-bound `COMPLETED` projection from the dedicated external result
+/// is a digest-bound `COMPLETED` projection from a dedicated verified result
 /// adoption path; it still carries no Task Spec, currency, autonomy, approval,
 /// Writer Lease, or execution field.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -482,6 +482,19 @@ impl TaskIntakeLifecycleEvidence {
     ///
     /// Rejects all-zero head or result commitments.
     pub fn externally_adopted(
+        binding: lattice_contracts::TaskIntakeBinding,
+        ledger_head_digest: lattice_contracts::ContentDigest,
+        result_digest: lattice_contracts::ContentDigest,
+    ) -> TaskLifecycleResult<Self> {
+        Self::verified_result(binding, ledger_head_digest, result_digest)
+    }
+
+    /// A replay-verified local or external descriptor was committed by its typed Ledger path.
+    /// Builds a completed intake result from verified durable evidence.
+    ///
+    /// # Errors
+    /// Rejects a zero ledger head or result digest.
+    pub fn verified_result(
         binding: lattice_contracts::TaskIntakeBinding,
         ledger_head_digest: lattice_contracts::ContentDigest,
         result_digest: lattice_contracts::ContentDigest,

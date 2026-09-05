@@ -269,9 +269,28 @@ public partial class MainWindow : Window
         }
     }
 
-    private void Core_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
+    private async void Core_NewWindowRequested(object? sender, CoreWebView2NewWindowRequestedEventArgs e)
     {
         e.Handled = true;
+        if (_isClosing || !e.IsUserInitiated || _webViewEnvironment is null
+            || !Uri.TryCreate(e.Uri, UriKind.Absolute, out Uri? target)
+            || !DesktopPolicy.IsApprovedLoopback(target)) return;
+        using CoreWebView2Deferral deferral = e.GetDeferral();
+        ResultWindow? result = null;
+        try
+        {
+            if (!await ResultWindow.IsRetainedPreviewAsync(_controlUri, target, _lifetimeCancellation.Token) || _isClosing) return;
+            result = new ResultWindow(target) { Owner = this };
+            result.Show();
+            await result.InitializeAsync(_webViewEnvironment);
+            if (_isClosing) { result.Close(); return; }
+            e.NewWindow = result.BrowserCore;
+        }
+        catch (Exception)
+        {
+            result?.Close();
+            if (!_isClosing) MessageBox.Show(this, "成果目前無法開啟，請回到原工作重新試用。", "LATTICE 成果", MessageBoxButton.OK, MessageBoxImage.Information);
+        }
     }
 
     private void Core_NavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)

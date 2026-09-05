@@ -12,6 +12,8 @@ import {
 } from "../src/lattice-runtime-health.mjs";
 
 const expectedTools = [
+  "lattice_control_snapshot",
+  "lattice_control_update",
   "lattice_delivery_reconcile",
   "lattice_delivery_run",
   "lattice_delivery_status",
@@ -291,6 +293,32 @@ test("a missing configured Runtime is reported as stopped", async () => {
     postgresql: "STOPPED",
     detail: "LATTICE_RUNTIME_NOT_CONFIGURED",
   });
+});
+
+test("Control accepts Codex startup settings and honors a disabled Runtime", async () => {
+  const executablePath = path.resolve("runtime", "latticed.exe");
+  const configuration = (settings) => [
+    "[mcp_servers.lattice]",
+    `command = ${JSON.stringify(executablePath)}`,
+    settings,
+    "[mcp_servers.lattice.env]",
+    `LATTICE_DELIVERY_LAUNCHER = ${JSON.stringify(path.resolve("codex.exe"))}`,
+    `LATTICE_DELIVERY_SCHEMA_DIR = ${JSON.stringify(path.resolve("schema"))}`,
+  ].join("\n");
+  const load = (settings) => loadLatticeRuntimeConfiguration({
+    configPath: path.resolve("config.toml"),
+    readText: async () => configuration(settings),
+    verifyExecutable: async () => {},
+  });
+  for (const required of [true, false]) {
+    assert.equal((await load(`required = ${required}\nstartup_timeout_sec = 30 # startup\ntool_timeout_sec = 60.5\nenabled = true`)).executablePath, executablePath);
+  }
+  await assert.rejects(load("enabled = false"), { code: "LATTICE_RUNTIME_NOT_CONFIGURED" });
+  for (const invalid of ["required = 1", "startup_timeout_sec = -1", "startup_timeout_sec = 0",
+    "startup_timeout_sec = 1e999", "required = true\nrequired = false", "enabled = maybe",
+    "command = 'replacement'", "url = 'https://example.com'"]) {
+    await assert.rejects(load(invalid), { code: "LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE" });
+  }
 });
 
 test("a substituted Runtime tool catalog fails closed", async () => {

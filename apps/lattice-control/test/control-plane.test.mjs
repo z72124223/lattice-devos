@@ -2423,6 +2423,248 @@ test("the primary conversation records a verifiable thread handoff when the proj
   }
 });
 
+test("archived conversation recovery survives restart and sends saved input only on explicit retry", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-archive-recovery-"));
+  const databasePath = path.join(directory, "control.db");
+  let codex = new FakeCodex();
+  let application = createLatticeServer({ databasePath, codex });
+  const listen = async () => {
+    await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+    return `http://127.0.0.1:${application.server.address().port}`;
+  };
+  let origin = await listen();
+  const post = (route, body = {}) => fetch(`${origin}/api/conversation/${route}`, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  try {
+    const project = application.service.createProject({ name: "Archive recovery", rootPath: directory });
+    const first = await application.service.sendPrimaryConversationMessage({
+      projectId: project.id, clientMessageId: "archive-first-001", text: "已完成的原訊息",
+    });
+    const turn = { id: first.codex_turn_id, status: "completed", items: [
+      { id: "archive-final-001", type: "agentMessage", phase: "final_answer", text: "原回覆" },
+    ] };
+    codex.emit("notification", { method: "turn/completed", params: { threadId: first.codex_thread_id, turn } });
+    const archivedError = Object.assign(new Error("此對話已在 Codex 封存，請按「重新開啟此對話」。"), {
+      code: "CODEX_THREAD_ARCHIVED", threadId: first.codex_thread_id, status: 409,
+    });
+    codex.resumeError = archivedError;
+    const pending = { projectId: project.id, clientMessageId: "archive-pending-002", text: "保存的下一則訊息" };
+    assert.equal((await post("messages", pending)).status, 409);
+    assert.equal(application.service.primaryConversation().can_reopen, true);
+    assert.equal(application.store.primaryConversationMessage(pending.clientMessageId), null);
+    assert.equal(codex.turnStarts.length, 1);
+    await new Promise((resolve) => application.server.close(resolve));
+
+    codex = new FakeCodex();
+    codex.turns = 1;
+    codex.resumeError = archivedError;
+    codex.resumeResult = { id: first.codex_thread_id, turns: [turn] };
+    let restoreCalls = 0;
+    codex.unarchiveThread = async (threadId) => {
+      assert.equal(threadId, first.codex_thread_id);
+      restoreCalls += 1;
+      codex.resumeError = null;
+      throw Object.assign(new Error("unarchive response lost"), { code: "CODEX_APP_SERVER_TIMEOUT" });
+    };
+    application = createLatticeServer({ databasePath, codex });
+    origin = await listen();
+    const retained = application.service.primaryConversation();
+    assert.equal(retained.can_reopen, true);
+    assert.equal(retained.can_send, false);
+    assert.equal(retained.messages.at(-1).text, "原回覆");
+    assert.equal((await post("reconnect")).status, 409);
+    assert.equal(restoreCalls, 0, "reconnect must respect archival");
+    assert.equal((await post("reopen", { threadId: "stale-thread" })).status, 409);
+    assert.equal(restoreCalls, 0);
+    assert.notEqual((await post("reopen", { threadId: first.codex_thread_id })).status, 200);
+    assert.equal(application.service.primaryConversation().can_reopen, true);
+    const reopened = await post("reopen", { threadId: first.codex_thread_id });
+    assert.equal(reopened.status, 200);
+    assert.equal((await reopened.json()).can_reopen, false);
+    assert.equal(restoreCalls, 1, "resume reconciles an unarchive with a lost response");
+    assert.equal((await post("reopen", { threadId: first.codex_thread_id })).status, 200);
+    assert.equal(codex.turnStarts.length, 0, "reopening cannot dispatch any message");
+    assert.equal((await post("messages", pending)).status, 200);
+    assert.equal((await post("messages", pending)).status, 200);
+    assert.equal(codex.turnStarts.length, 1);
+    assert.equal(codex.turnStarts[0].threadId, first.codex_thread_id);
+    assert.equal(application.service.primaryConversation().messages.filter(({ id }) => id === pending.clientMessageId).length, 1);
+    const page = await (await fetch(`${origin}/`)).text();
+    assert.match(page, /id="reopen"[^>]*hidden>重新開啟此對話/u);
+    assert.match(page, /id="pending-send"[^>]*hidden>送出已保存訊息/u);
+    assert.doesNotMatch(page, /await poll\(\);await resumePending\(\)/u);
+  } finally {
+    if (application.server.listening) await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("archive reopen recovers an unacknowledged provider turn only by its exact saved marker", async () => {
+  const store = new LatticeStore();
+  const project = store.createProject({ name: "Archived unacknowledged turn", rootPath: process.cwd() });
+  const input = { projectId: project.id, clientMessageId: "archive-unacknowledged-001", text: "原訊息只能送一次" };
+  const seedFence = acquirePrimaryConversationFence(store, project.id);
+  const claim = store.claimPrimaryConversationMessage({ ...input, fence: seedFence });
+  store.bindPrimaryConversationThread({ projectId: project.id, threadId: "archive-unacknowledged-thread", reason: "initial", fence: seedFence });
+  store.releasePrimaryConversationLease(seedFence);
+  const threadId = "archive-unacknowledged-thread";
+  const marker = `[LATTICE_CONTROL_MESSAGE id=${input.clientMessageId} digest=${claim.event.payload.promptDigest}]`;
+  const thread = { id: threadId, turns: [{ id: "remote-turn", status: "inProgress", items: [
+    { type: "userMessage", content: [{ type: "text", text: `${marker}\n${input.text}` }] },
+  ] }] };
+  const codex = new FakeCodex();
+  codex.readResults.set(threadId, thread);
+  codex.resumeResult = thread;
+  codex.resumeError = Object.assign(new Error("此對話已在 Codex 封存"), { code: "CODEX_THREAD_ARCHIVED", threadId });
+  let unarchives = 0;
+  codex.unarchiveThread = async () => { unarchives += 1; codex.resumeError = null; return thread; };
+  const service = new LatticeControlService({ store, codex });
+  try {
+    await assert.rejects(service.reconnectPrimaryConversation(), { code: "CODEX_THREAD_ARCHIVED" });
+    assert.equal(store.getWorkItem("primary").codex_turn_id, null);
+    codex.readResults.set(threadId, { ...thread, turns: [{ id: "wrong-turn", status: "inProgress", items: [] }] });
+    await assert.rejects(service.reopenPrimaryConversation({ threadId }), { code: "CONVERSATION_RECONCILIATION_REQUIRED" });
+    assert.equal(unarchives, 0);
+    codex.readResults.set(threadId, thread);
+    const reopened = await service.reopenPrimaryConversation({ threadId });
+    assert.equal(reopened.can_reopen, false);
+    assert.equal(unarchives, 1);
+    assert.equal(codex.emptyResumed.length, 0);
+    assert.equal(codex.turnStarts.length, 0);
+    const recovered = await service.reconnectPrimaryConversation();
+    assert.equal(recovered.codex_turn_id, "remote-turn");
+    assert.equal(recovered.messages[0].delivery_status, "accepted");
+    assert.equal(codex.turnStarts.length, 0);
+  } finally { service.close(); store.close(); }
+});
+
+for (const status of ["inProgress", "completed"]) {
+  test(`archive reopen reconciles a lost second turn acknowledgement when the provider is ${status}`, async () => {
+    const store = new LatticeStore();
+    const codex = new FakeCodex();
+    const service = new LatticeControlService({ store, codex });
+    try {
+      const project = service.createProject({ name: "Archived second turn", rootPath: process.cwd() });
+      const first = await service.sendPrimaryConversationMessage({
+        projectId: project.id, clientMessageId: `archive-stale-first-${status}`, text: "第一回合",
+      });
+      const threadId = first.codex_thread_id;
+      const firstTurn = { id: first.codex_turn_id, status: "completed", items: [
+        { id: "archive-stale-first-final", type: "agentMessage", phase: "final_answer", text: "第一回合完成" },
+      ] };
+      codex.emit("notification", { method: "turn/completed", params: { threadId, turn: firstTurn } });
+      codex.beforeTurnResult = () => { throw new Error("second turn response lost"); };
+      const secondInput = { projectId: project.id, clientMessageId: `archive-stale-second-${status}`, text: "第二回合只能送一次" };
+      await assert.rejects(service.sendPrimaryConversationMessage(secondInput), /second turn response lost/u);
+      assert.equal(store.getWorkItem("primary").codex_turn_id, firstTurn.id);
+      assert.equal(codex.turnStarts.length, 2);
+      const secondTurn = { id: codex.lastTurn.turnId, status, items: [
+        { type: "userMessage", content: [{ type: "text", text: codex.lastTurn.text }] },
+        ...(status === "completed" ? [{ id: "archive-stale-second-final", type: "agentMessage", phase: "final_answer", text: "第二回合完成" }] : []),
+      ] };
+      const thread = { id: threadId, turns: [firstTurn, secondTurn] };
+      codex.readResults.set(threadId, thread);
+      const expectedTurns = [];
+      let archived = true;
+      let unarchives = 0;
+      codex.resumeThread = async (id, { expectedTurnId } = {}) => {
+        assert.equal(id, threadId);
+        expectedTurns.push(expectedTurnId);
+        if (archived) throw Object.assign(new Error("此對話已在 Codex 封存"), { code: "CODEX_THREAD_ARCHIVED", threadId });
+        if (expectedTurnId !== thread.turns.at(-1).id) throw Object.assign(new Error("latest turn identity differs"), { code: "CODEX_THREAD_NOT_RECOVERABLE" });
+        return structuredClone(thread);
+      };
+      codex.unarchiveThread = async (id) => { assert.equal(id, threadId); unarchives += 1; archived = false; return thread; };
+      await assert.rejects(service.reconnectPrimaryConversation(), { code: "CODEX_THREAD_ARCHIVED" });
+      assert.equal(store.getWorkItem("primary").codex_turn_id, firstTurn.id);
+      // An unrelated latest turn cannot replace the current claim, even with an older local turn.
+      codex.readResults.set(threadId, { ...thread, turns: [firstTurn, { ...secondTurn, items: [] }] });
+      await assert.rejects(service.reopenPrimaryConversation({ threadId }), { code: "CONVERSATION_RECONCILIATION_REQUIRED" });
+      assert.equal(unarchives, 0);
+      codex.readResults.set(threadId, thread);
+      assert.equal((await service.reopenPrimaryConversation({ threadId })).can_reopen, false);
+      await service.reopenPrimaryConversation({ threadId });
+      assert.equal(unarchives, 1);
+      assert.equal(codex.turnStarts.length, 2, "reopen and its replay cannot send a third turn");
+      assert.equal(store.getWorkItem("primary").codex_turn_id, firstTurn.id, "reopen leaves delivery reconciliation to explicit reconnect");
+      const recovered = await service.reconnectPrimaryConversation();
+      assert.equal(recovered.codex_turn_id, secondTurn.id);
+      assert.equal(recovered.messages.find(({ id }) => id === secondInput.clientMessageId).delivery_status, "accepted");
+      assert.equal(codex.turnStarts.length, 2);
+      assert.ok(expectedTurns.length >= 3);
+      assert.ok(expectedTurns.every((id) => id === secondTurn.id), "all recovery resumes must use the exact marker-matched second turn");
+    } finally { service.close(); store.close(); }
+  });
+}
+
+test("a new project can start while the completed previous project conversation stays archived", async () => {
+  const store = new LatticeStore();
+  const codex = new FakeCodex();
+  const service = new LatticeControlService({ store, codex });
+  try {
+    const firstProject = service.createProject({ name: "Archived project A", rootPath: process.cwd() });
+    const secondProject = service.createProject({ name: "New project B", rootPath: tmpdir() });
+    const first = await service.sendPrimaryConversationMessage({ projectId: firstProject.id, clientMessageId: "archive-project-a-001", text: "第一專案" });
+    codex.emit("notification", { method: "turn/completed", params: { threadId: first.codex_thread_id, turn: {
+      id: first.codex_turn_id, status: "completed", items: [{ id: "archive-project-a-final", type: "agentMessage", phase: "final_answer", text: "A 已完成" }],
+    } } });
+    codex.resumeError = Object.assign(new Error("此對話已在 Codex 封存"), { code: "CODEX_THREAD_ARCHIVED", threadId: first.codex_thread_id });
+    await assert.rejects(service.reconnectPrimaryConversation(), { code: "CODEX_THREAD_ARCHIVED" });
+    const selected = await service.startPrimaryConversation({ projectId: secondProject.id });
+    assert.equal(selected.can_send, true);
+    assert.equal(selected.can_reopen, false);
+    assert.doesNotMatch(selected.status_text, /已在 Codex 封存/u);
+    const resumes = codex.resumed.length;
+    const second = await service.sendPrimaryConversationMessage({ projectId: secondProject.id, clientMessageId: "archive-project-b-001", text: "第二專案獨立新工作" });
+    assert.equal(codex.resumed.length, resumes, "do not resume the archived first project");
+    assert.notEqual(second.codex_thread_id, first.codex_thread_id);
+    assert.equal(second.project_id, secondProject.id);
+    assert.equal(store.getWorkItem("primary").archived_at, null);
+    assert.equal(second.handoffs.at(-1).from_thread_id, first.codex_thread_id);
+    assert.equal(codex.threadStarts.length, 2);
+  } finally { service.close(); store.close(); }
+});
+
+test("archive-paused queued input survives reopen, terminal replay and restart until explicit retry", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-archive-queued-"));
+  const databasePath = path.join(directory, "control.db");
+  let store = new LatticeStore(databasePath);
+  let codex = new FakeCodex();
+  let service = new LatticeControlService({ store, codex });
+  try {
+    const project = service.createProject({ name: "Archive paused queue", rootPath: directory });
+    const first = await service.sendPrimaryConversationMessage({ projectId: project.id, clientMessageId: "archive-queue-001", text: "第一回合" });
+    const pending = { projectId: project.id, clientMessageId: "archive-queue-002", text: "封存後必須明確續送" };
+    await service.sendPrimaryConversationMessage(pending);
+    codex.resumeError = Object.assign(new Error("此對話已在 Codex 封存"), { code: "CODEX_THREAD_ARCHIVED", threadId: first.codex_thread_id });
+    await assert.rejects(service.reconnectPrimaryConversation(), { code: "CODEX_THREAD_ARCHIVED" });
+    const terminal = { id: first.codex_turn_id, status: "completed", items: [
+      { id: "archive-queue-final", type: "agentMessage", phase: "final_answer", text: "第一回合完成" },
+    ] };
+    codex.resumeResult = { id: first.codex_thread_id, turns: [terminal] };
+    codex.readResults.set(first.codex_thread_id, codex.resumeResult);
+    codex.unarchiveThread = async () => { codex.resumeError = null; return codex.resumeResult; };
+    codex.emit("notification", { method: "turn/completed", params: { threadId: first.codex_thread_id, turn: terminal } });
+    await service.reopenPrimaryConversation({ threadId: first.codex_thread_id });
+    codex.emit("notification", { method: "turn/completed", params: { threadId: first.codex_thread_id, turn: terminal } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(codex.turnStarts.length, 1, "terminal replay after reopen must not release the paused message");
+    service.close(); store.close();
+    store = new LatticeStore(databasePath);
+    codex = new FakeCodex(); codex.turns = 1;
+    codex.resumeResult = { id: first.codex_thread_id, turns: [terminal] };
+    service = new LatticeControlService({ store, codex });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(codex.turnStarts.length, 0, "startup must retain the pause after archive recovery");
+    assert.equal(store.primaryConversationMessageRequiresExplicitRetry(pending.clientMessageId), true);
+    await service.reconnectPrimaryConversation();
+    assert.equal(codex.turnStarts.length, 1, "explicit reconnect releases the exact saved message once");
+    await service.sendPrimaryConversationMessage(pending);
+    assert.equal(codex.turnStarts.length, 1);
+  } finally { service.close(); store.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("reconnect restores an active primary conversation without resending its message", async () => {
   const store = new LatticeStore();
   const codex = new FakeCodex();

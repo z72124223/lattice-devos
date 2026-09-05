@@ -13,6 +13,8 @@ import { LatticeRuntimeHealthMonitor } from "./lattice-runtime-health.mjs";
 import { createRuntimeSurface } from "./runtime-surface.mjs";
 import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
+import { FormalWorkStore } from "./formal-work-store.mjs";
+import { FormalTaskService } from "./formal-task-service.mjs";
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicDirectory = path.resolve(sourceDirectory, "..", "public");
@@ -162,11 +164,15 @@ export function createLatticeServer({
   prewarmCodex = false,
   conversationModel,
   conversationStartTimeoutMs,
+  formalWorkStore = null,
+  formalTaskService = null,
 }) {
   const store = new LatticeStore(databasePath);
+  const formalTasks = formalTaskService ?? (formalWorkStore ? new FormalTaskService({ store: formalWorkStore }) : null);
   const service = new LatticeControlService({
     store,
     codex,
+    formalWorkStore,
     ...(projectInspector ? { projectInspector } : {}),
     ...(conversationModel ? { conversationModel } : {}),
     ...(conversationStartTimeoutMs ? { conversationStartTimeoutMs } : {}),
@@ -182,7 +188,9 @@ export function createLatticeServer({
           decision_mcp: "UNREACHABLE",
         }),
       });
-  const resolvedRuntimeHealth = runtimeHealth ?? new LatticeRuntimeHealthMonitor();
+  const resolvedRuntimeHealth = runtimeHealth ?? new LatticeRuntimeHealthMonitor(
+    formalWorkStore ? { probe: (options) => formalWorkStore.runtimeHealth(options) } : {},
+  );
   let acceptingEffects = true;
   let ownedShutdown = false;
   let ownedShutdownPromise = null;
@@ -191,6 +199,7 @@ export function createLatticeServer({
   const recoveryMutationTarget = (pathname) => {
     if (
       pathname === "/api/conversation/reconnect"
+      || pathname === "/api/conversation/reopen"
       || pathname === "/api/conversation/interrupt"
     ) return "primary";
     const match = pathname.match(/^\/api\/work-items\/([^/]+)\/(?:interrupt|reconcile)$/u);
@@ -253,8 +262,38 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
-        sendJson(response, 200, service.state());
+        sendJson(response, 200, { ...service.state(), formal_work_enabled: Boolean(formalTasks) });
         return;
+      }
+      if (formalTasks && request.method === "POST" && url.pathname === "/api/formal-work") {
+        sendJson(response, 201, await formalTasks.create(await readMutationJson(request, url)));
+        return;
+      }
+      const formalRoute = url.pathname.match(/^\/api\/formal-work\/([a-f0-9]{64})(?:\/([a-z]+))?$/u);
+      if (formalTasks && request.method === "GET" && url.pathname === "/api/result-preview") {
+        sendJson(response, 200, await formalTasks.resultPreviewIdentity(url.searchParams.get("url")));
+        return;
+      }
+      if (formalTasks && formalRoute) {
+        const taskRef = formalRoute[1];
+        if (request.method === "GET" && formalRoute[2] === "conversation") {
+          sendJson(response, 200, await formalTasks.conversation(url.searchParams.get("projectId"), taskRef,
+            url.searchParams.get("phase") ?? "EXECUTION"));
+          return;
+        }
+        if (request.method === "GET" && !formalRoute[2]) {
+          const detail = await formalWorkStore.detail(url.searchParams.get("projectId"), taskRef);
+          sendJson(response, 200, { ...detail, last_error: formalTasks.lastError?.task_ref === taskRef ? formalTasks.lastError : null });
+          return;
+        }
+        if (request.method === "POST" && formalRoute[2]) {
+          const body = await readMutationJson(request, url);
+          const result = formalRoute[2] === "start"
+            ? await formalTasks.requestStart(body.projectId, taskRef)
+            : await formalTasks.action(body.projectId, taskRef, formalRoute[2], body);
+          sendJson(response, 200, result);
+          return;
+        }
       }
       if (request.method === "GET" && url.pathname === "/api/runtime") {
         const [currentMcpHealth, currentRuntimeHealth] = await Promise.all([
@@ -265,6 +304,8 @@ export function createLatticeServer({
           databasePath,
           mcpHealth: currentMcpHealth,
           runtimeHealth: currentRuntimeHealth,
+          formalRuntime: formalTasks ? { codexConnected: Boolean(formalTasks.codex.ready),
+            ...formalWorkStore.dataPresence(service.primaryConversation().project_id) } : null,
         }));
         return;
       }
@@ -282,12 +323,12 @@ export function createLatticeServer({
       }
       if (request.method === "GET" && url.pathname === "/api/four-core") {
         void service.refreshPrimaryConversationObservation();
-        sendJson(response, 200, service.fourCoreSurface());
+        sendJson(response, 200, await service.fourCoreSurface());
         return;
       }
       const fourCoreWorkItemId = fourCoreRouteId(url.pathname, "work");
       if (request.method === "GET" && fourCoreWorkItemId) {
-        sendJson(response, 200, service.fourCoreWorkNode({
+        sendJson(response, 200, await service.fourCoreWorkNode({
           workItemId: fourCoreWorkItemId,
           expectedRevision: url.searchParams.get("revision"),
           expectedDigest: url.searchParams.get("digest"),
@@ -297,9 +338,9 @@ export function createLatticeServer({
       const fourCoreDecisionId = fourCoreRouteId(url.pathname, "decisions");
       if (request.method === "GET" && fourCoreDecisionId) {
         const revision = url.searchParams.get("revision");
-        sendJson(response, 200, service.fourCoreDecisionHistory({
+        sendJson(response, 200, await service.fourCoreDecisionHistory({
           decisionId: fourCoreDecisionId,
-          expectedRevision: revision == null ? null : Number(revision),
+          expectedRevision: revision == null ? null : formalWorkStore ? revision : Number(revision),
           expectedDigest: url.searchParams.get("digest"),
         }));
         return;
@@ -320,6 +361,11 @@ export function createLatticeServer({
       if (request.method === "POST" && url.pathname === "/api/conversation/reconnect") {
         await readMutationJson(request, url);
         sendJson(response, 200, await service.reconnectPrimaryConversation());
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/conversation/reopen") {
+        const body = await readMutationJson(request, url);
+        sendJson(response, 200, await service.reopenPrimaryConversation({ threadId: body.threadId }));
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/conversation/interrupt") {
@@ -383,6 +429,7 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/work-items") {
+        if (formalTasks) throw new HttpRequestError(409, "FORMAL_WORK_ROUTE_REQUIRED", "請透過正式工作入口建立任務。");
         const body = await readMutationJson(request, url);
         sendJson(response, 201, service.createWorkItem({
           projectId: body.projectId,
@@ -421,6 +468,7 @@ export function createLatticeServer({
       ]) {
         const id = routeId(url.pathname, action);
         if (!id || request.method !== "POST") continue;
+        if (formalTasks) throw new HttpRequestError(409, "FORMAL_WORK_ROUTE_REQUIRED", "這是舊版工作入口，請使用正式工作操作。");
         const body = await readMutationJson(request, url);
         let result;
         if (action === "start") result = await service.start(id);
@@ -473,6 +521,8 @@ export function createLatticeServer({
       .catch(() => { process.exitCode = 1; });
     service.close();
     void codex.close();
+    void formalTasks?.close();
+    void formalWorkStore?.close();
     store.close();
   });
   const application = {
@@ -480,6 +530,7 @@ export function createLatticeServer({
     service,
     store,
     codex,
+    formalTasks,
     codexPrewarm,
     stopAcceptingEffects() {
       acceptingEffects = false;
@@ -503,9 +554,17 @@ export function createLatticeServer({
         });
         await drainRequests(deadline);
         service.close();
+        if (formalTasks) {
+          const formalResult = await settleWithin(formalTasks.close(), deadline);
+          if (!formalResult.settled || formalResult.error) throw shutdownDrainTimeoutError();
+        }
         const codexResult = await settleWithin(codex.close(), deadline);
         if (!codexResult.settled) throw shutdownDrainTimeoutError();
         if (codexResult.error) throw codexResult.error;
+        if (formalWorkStore) {
+          const runtimeResult = await settleWithin(formalWorkStore.close(), deadline);
+          if (!runtimeResult.settled || runtimeResult.error) throw shutdownDrainTimeoutError();
+        }
         store.close();
         server.closeIdleConnections?.();
         const listenerResult = await settleWithin(closeListener(), deadline);
@@ -588,13 +647,14 @@ export function attachDesktopShutdownChannel(application, {
 export async function startDefaultServer() {
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
   const databasePath = defaultControlDatabasePath();
-  const application = createLatticeServer({ databasePath });
+  const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore() });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
   application.codexPrewarm = application.service.prewarmCodex()
     .catch((error) => ({ ready: false, error }));
+  application.formalRestore = application.formalTasks.restore(application.service.state().projects.map((project) => project.id));
   process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });

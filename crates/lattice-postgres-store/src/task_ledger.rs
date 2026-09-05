@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
+use lattice_artifact_store::{ExternalVerifiedResultEvidence, LocalVerifiedResultEvidence};
 use lattice_cjson::{CanonicalValue, HashDomain, canonical_sha256};
 use lattice_contracts::{
     CONTRACT_VERSION, ContentDigest, DaemonEpoch, ProjectId, ProjectSnapshotId, ResourceCounters,
@@ -20,8 +21,8 @@ use lattice_foreman_state::{
     Confidence, EpistemicReferences, ForemanSnapshot, ForemanState, RefreshTrigger,
 };
 use lattice_task_ledger::{
-    ActorId, AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, CorrelationId,
-    Diagnostic, ExternalVerifiedResultAdoption, FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan,
+    AppendCommand, AutonomyReceiptAppendPlan, CommandId, CommandReceipt, CorrelationId, Diagnostic,
+    ExternalVerifiedResultAdoption, FOREMAN_RECORD_SCHEMA, ForemanSnapshotAppendPlan,
     LEDGER_CHECKPOINT_SCHEMA_VERSION, LEDGER_SCHEMA_VERSION, LedgerAppendPlan, LedgerCheckpoint,
     LedgerError, LedgerEventKind, OutboxAdmission, TaskCreatedProfile, TaskIngressClaim,
     TaskIngressRequestKind, TaskSubmissionEnvelope, UntrustedAppendRequest,
@@ -34,6 +35,10 @@ use lattice_task_ledger::{
     verify_untrusted_foreman_snapshot_rows, verify_untrusted_snapshot_against_checkpoint,
     verify_untrusted_task_ingress_claim, verify_untrusted_task_ingress_claim_structure,
     verify_untrusted_task_submission,
+};
+use lattice_task_ledger::{
+    LOCAL_RESULT_ADOPTION_ACTION, LOCAL_RESULT_ADOPTION_REASON, LocalVerifiedResultAdoption,
+    is_local_verified_result,
 };
 use postgres::error::SqlState;
 use postgres::types::{FromSqlOwned, ToSql};
@@ -200,6 +205,18 @@ const LEDGER_FINALIZE_GENERAL_V7_SQL: &str = "\
            $37::text,$38::bytea,$39::text,$40::bytea,$41::bytea,$42::text,\
            $43::bytea,$44::text,$45::bytea,$46::bytea,$47::bytea,$48::bytea,\
            $49::bytea,$50::text,$51::text,$52::bytea,$53::text,$54::bytea)";
+
+const LEDGER_FINALIZE_GENERAL_RESULT_SQL: &str = "\
+    SELECT control_product.task_ledger_finalize_general_result_v1(\
+           $1::smallint,$2::text,$3::bytea,$4::text,$5::text,$6::text,\
+           $7::text,$8::text,$9::bytea,$10::text,$11::bytea,$12::text,\
+           $13::bytea,$14::bytea,$15::text,$16::text,$17::text,$18::text,\
+           $19::text,$20::text,$21::text,$22::text,$23::text,$24::bytea,\
+           $25::bytea,$26::text,$27::bytea,$28::text,$29::bytea,$30::text,\
+           $31::bytea,$32::bytea,$33::text,$34::text,$35::text,$36::bytea,\
+           $37::text,$38::bytea,$39::text,$40::bytea,$41::bytea,$42::text,\
+           $43::bytea,$44::text,$45::bytea,$46::bytea,$47::bytea,$48::bytea,\
+           $49::bytea,$50::text,$51::text,$52::bytea,$53::text,$54::bytea,$55::text)";
 
 const LEDGER_PREPARE_V3_SQL: &str = "\
     SELECT stream_found, command_found, retained_request_digest, \
@@ -1166,43 +1183,112 @@ impl PostgresTaskLedger {
                 PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
             ));
         }
-        let retained = self
-            .load_submission_by_task_ref(adoption.task_ref())?
-            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
-        if retained.submission.task_ref() != adoption.task_ref()
-            || retained.ledger.stream().head().head_digest()
-                != adoption.expected_ledger_head_digest()
-        {
-            return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+        // A competing first submission may have used a different server time.
+        // Re-read its canonical command once; never regenerate a retained time.
+        for retry in 0..2 {
+            let retained = self
+                .load_submission_by_task_ref(adoption.task_ref())?
+                .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+            let command = external_adoption_command(
+                &retained.submission,
+                retained.ledger.stream(),
+                adoption,
+                occurred_at,
+            )?;
+            let result = self.execute_with_writer_authority(
+                &command,
+                expected_authority,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(VerifiedResultAdoption::External(adoption)),
+            );
+            if retry == 0
+                && result.as_ref().is_err_and(|failure| {
+                    failure.kind() == PostgresTaskLedgerErrorKind::CommandSubstitution
+                })
+            {
+                continue;
+            }
+            return result;
         }
-        let actor = retained
-            .ledger
-            .stream()
-            .events()
-            .first()
-            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?
-            .actor_id()
-            .as_str();
-        let command = AppendCommand::new_external_verified_result_adopted(
-            retained.ledger.stream().head().clone(),
-            CommandId::new(adoption.command_id()).map_err(|ledger| map_ledger_error(&ledger))?,
-            CorrelationId::new("general-task-intake")
-                .map_err(|ledger| map_ledger_error(&ledger))?,
-            occurred_at,
-            ActorId::new(actor).map_err(|ledger| map_ledger_error(&ledger))?,
-            adoption,
-        )
-        .map_err(|ledger| map_ledger_error(&ledger))?;
-        self.execute_with_writer_authority(
-            &command,
-            expected_authority,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(adoption),
-        )
+        Err(error(PostgresTaskLedgerErrorKind::CommandSubstitution))
+    }
+
+    /// Adopts a local descriptor retained by the trusted fixed verifier CLI.
+    /// Adopts the exact local result after verifying its retained descriptor.
+    ///
+    /// # Errors
+    /// Rejects stale authority, mismatched evidence, or a failed atomic ledger write.
+    pub fn execute_local_verified_result_adoption(
+        &mut self,
+        adoption: &LocalVerifiedResultAdoption,
+        expected_authority: &StoreAuthorityHead,
+        occurred_at: &str,
+    ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
+        if self.sql_profile != TaskLedgerSqlProfile::V8 {
+            return Err(error(
+                PostgresTaskLedgerErrorKind::UnsupportedRetainedSchema,
+            ));
+        }
+        for retry in 0..2 {
+            let retained = self
+                .load_submission_by_task_ref(adoption.task_ref())?
+                .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+            if retained.submission.client_request_id() != adoption.client_request_id() {
+                return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+            }
+            let stream = retained.ledger.stream();
+            let command = if let Some(record) = stream
+                .commands()
+                .iter()
+                .find(|r| r.request().command_id().as_str() == adoption.command_id())
+            {
+                let request = record.request();
+                if !is_local_verified_result(request.kind(), request.action().as_str())
+                    || request.subject_digest() != adoption.result_digest()
+                    || request.expected_head().head_digest()
+                        != adoption.expected_ledger_head_digest()
+                {
+                    return Err(error(PostgresTaskLedgerErrorKind::CommandSubstitution));
+                }
+                request.clone()
+            } else {
+                let actor = stream
+                    .events()
+                    .first()
+                    .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?
+                    .actor_id();
+                AppendCommand::new_local_verified_result_adopted(
+                    stream.head().clone(),
+                    occurred_at,
+                    actor.clone(),
+                    adoption,
+                )
+                .map_err(|e| map_ledger_error(&e))?
+            };
+            let result = self.execute_with_writer_authority(
+                &command,
+                expected_authority,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(VerifiedResultAdoption::Local(adoption)),
+            );
+            if retry == 0
+                && result
+                    .as_ref()
+                    .is_err_and(|e| e.kind() == PostgresTaskLedgerErrorKind::CommandSubstitution)
+            {
+                continue;
+            }
+            return result;
+        }
+        Err(error(PostgresTaskLedgerErrorKind::CommandSubstitution))
     }
 
     /// Loads the fixed foreman stream and verifies every child row against the
@@ -1321,7 +1407,7 @@ impl PostgresTaskLedger {
         foreman_plan: Option<&ForemanSnapshotAppendPlan>,
         submission: Option<&TaskSubmissionEnvelope>,
         ingress_claim: Option<&TaskIngressClaim>,
-        external_adoption: Option<&ExternalVerifiedResultAdoption>,
+        external_adoption: Option<VerifiedResultAdoption<'_>>,
     ) -> PostgresTaskLedgerResult<PostgresTaskLedgerExecution> {
         self.ensure_reconcilable()?;
         if command.expected_head().runtime() != RuntimeKind::Live
@@ -1346,6 +1432,9 @@ impl PostgresTaskLedger {
                 claim.request_kind() == TaskIngressRequestKind::GeneralTask && submission.is_none()
             })
             || ingress_claim.is_some() && (autonomy_plan.is_some() || foreman_plan.is_some())
+            || (external_adoption.is_none()
+                && (command.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
+                    || is_local_verified_result(command.kind(), command.action().as_str())))
             || external_adoption.is_some()
                 && (writer_authority.is_some()
                     || autonomy_plan.is_some()
@@ -1533,6 +1622,30 @@ fn global_ledger_sql_profile(schema_version: u16) -> Option<TaskLedgerSqlProfile
     }
 }
 
+#[derive(Clone, Copy)]
+enum VerifiedResultAdoption<'a> {
+    External(&'a ExternalVerifiedResultAdoption),
+    Local(&'a LocalVerifiedResultAdoption),
+}
+impl<'a> VerifiedResultAdoption<'a> {
+    fn task_ref(self) -> &'a ContentDigest {
+        match self {
+            Self::External(a) => a.task_ref(),
+            Self::Local(a) => a.task_ref(),
+        }
+    }
+    fn is_local(self) -> bool {
+        matches!(self, Self::Local(_))
+    }
+    fn profile(self) -> &'static str {
+        if self.is_local() {
+            "LOCAL_VERIFIED_RESULT_V1"
+        } else {
+            "EXTERNAL_VERIFIED_RESULT_V1"
+        }
+    }
+}
+
 struct LoadedStream {
     stream: VerifiedStream,
     retained_checkpoint: LedgerCheckpoint,
@@ -1574,6 +1687,208 @@ struct LedgerPrepareRow {
 
 /// Transaction-local evidence identity returned only by the security-definer
 /// resolver. Runtime never writes or reconstitutes this catalog row.
+fn external_adoption_command(
+    submission: &TaskSubmissionEnvelope,
+    stream: &VerifiedStream,
+    adoption: &ExternalVerifiedResultAdoption,
+    occurred_at: &str,
+) -> PostgresTaskLedgerResult<AppendCommand> {
+    if submission.task_ref() != adoption.task_ref()
+        || submission.client_request_id() != adoption.client_request_id()
+    {
+        return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+    }
+    if let Some(record) = stream
+        .commands()
+        .iter()
+        .find(|record| record.request().command_id().as_str() == adoption.command_id())
+    {
+        let command = record.request();
+        if command.kind() != LedgerEventKind::ExternalVerifiedResultAdopted
+            || command.subject_digest() != adoption.result_digest()
+            || command.expected_head().head_digest() != adoption.expected_ledger_head_digest()
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::CommandSubstitution));
+        }
+        return Ok(command.clone());
+    }
+    let actor = stream
+        .events()
+        .first()
+        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?
+        .actor_id();
+    AppendCommand::new_external_verified_result_adopted(
+        stream.head().clone(),
+        CommandId::new(adoption.command_id()).map_err(|e| map_ledger_error(&e))?,
+        CorrelationId::new("general-task-intake-v1").map_err(|e| map_ledger_error(&e))?,
+        occurred_at,
+        actor.clone(),
+        adoption,
+    )
+    .map_err(|e| map_ledger_error(&e))
+}
+
+fn read_local_adoption_row<C: GenericClient>(
+    client: &mut C,
+    digest: &ContentDigest,
+) -> PostgresTaskLedgerResult<Row> {
+    client
+        .query_opt(
+            "SELECT * FROM control_product.local_result_read_v1($1::bytea)",
+            &[&digest_bytes(digest)?],
+        )
+        .map_err(|e| map_database_error(&e))?
+        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+}
+fn local_adoption_from_row(row: &Row) -> PostgresTaskLedgerResult<LocalVerifiedResultAdoption> {
+    LocalVerifiedResultAdoption::new(
+        ContentDigest::from_sha256(row_value::<String>(row, 3)?)
+            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+        row_value::<String>(row, 4)?,
+        row_digest(row, 5)?,
+        row_value::<String>(row, 6)?,
+        row_value::<String>(row, 7)?,
+    )
+    .map_err(|e| map_ledger_error(&e))
+}
+fn verify_local_adoption_row(
+    row: &Row,
+    identity: &TaskLedgerStreamIdentity,
+    adoption: &LocalVerifiedResultAdoption,
+) -> PostgresTaskLedgerResult<ResolvedExternalVerifiedResultAdoption> {
+    let evidence = LocalVerifiedResultEvidence::new(
+        identity.project_id().clone(),
+        identity.project_snapshot_id().clone(),
+        adoption,
+        row_digest(row, 8)?,
+        row_digest(row, 9)?,
+        row_value::<String>(row, 10)?,
+        &row_value::<String>(row, 11)?,
+    )
+    .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    if local_adoption_from_row(row)? != *adoption
+        || row_digest(row, 0)? != *adoption.result_digest()
+        || row_value::<String>(row, 1)? != identity.project_id().as_str()
+        || row_value::<String>(row, 2)? != identity.project_snapshot_id().as_str()
+        || row_digest(row, 12)? != *evidence.descriptor_digest()
+    {
+        return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+    }
+    Ok(ResolvedExternalVerifiedResultAdoption {
+        adoption_digest: digest_bytes(adoption.result_digest())?,
+        evidence_descriptor_digest: digest_bytes(evidence.descriptor_digest())?,
+    })
+}
+
+fn read_external_adoption_row<C: GenericClient>(
+    client: &mut C,
+    digest: &ContentDigest,
+) -> PostgresTaskLedgerResult<Row> {
+    client
+        .query_opt(
+            "SELECT * FROM control.external_verified_result_evidence_read_v1($1::bytea)",
+            &[&digest_bytes(digest)?],
+        )
+        .map_err(|e| map_database_error(&e))?
+        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::AuthorityMismatch))
+}
+
+fn adoption_from_evidence_row(
+    row: &Row,
+    command: &AppendCommand,
+) -> PostgresTaskLedgerResult<ExternalVerifiedResultAdoption> {
+    let client_request_id = command
+        .command_id()
+        .as_str()
+        .strip_prefix("external-result-adoption:")
+        .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    ExternalVerifiedResultAdoption::new(
+        ContentDigest::from_sha256(row_value::<String>(row, 2)?)
+            .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?,
+        client_request_id,
+        command.expected_head().head_digest().clone(),
+        row_value::<String>(row, 3)?,
+        row_value::<String>(row, 4)?,
+        row_value::<String>(row, 6)?,
+        row_value::<String>(row, 7)?,
+        row_value::<String>(row, 8)?,
+        row_value::<String>(row, 9)?,
+        row_value::<Vec<String>>(row, 10)?,
+    )
+    .map_err(|e| map_ledger_error(&e))
+}
+
+fn verify_external_adoption_row(
+    row: &Row,
+    identity: &TaskLedgerStreamIdentity,
+    adoption: &ExternalVerifiedResultAdoption,
+) -> PostgresTaskLedgerResult<ResolvedExternalVerifiedResultAdoption> {
+    let matches = row_value::<String>(row, 0)? == identity.project_id().as_str()
+        && row_value::<String>(row, 1)? == identity.project_snapshot_id().as_str()
+        && row_value::<String>(row, 2)? == adoption.task_ref().as_str()
+        && row_value::<String>(row, 3)? == adoption.source_sha()
+        && row_value::<String>(row, 4)? == adoption.target_sha()
+        && row_value::<String>(row, 6)? == adoption.push_merge_receipt_ref()
+        && row_value::<String>(row, 7)? == adoption.deployment_receipt_ref()
+        && row_value::<String>(row, 8)? == adoption.deployment_artifact_ref()
+        && row_value::<String>(row, 9)? == adoption.independent_acceptance_ref()
+        && row_value::<Vec<String>>(row, 10)? == adoption.protected_action_approval_refs();
+    let verified = ExternalVerifiedResultEvidence::new(
+        identity.project_id().clone(),
+        identity.project_snapshot_id().clone(),
+        adoption,
+        row_value::<String>(row, 5)?,
+        row_digest(row, 11)?,
+        row_digest(row, 12)?,
+        row_value::<String>(row, 13)?,
+        row_value::<bool>(row, 14)?,
+    )
+    .map_err(|_| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+    if !matches || verified.descriptor_digest() != &row_digest(row, 15)? {
+        return Err(error(PostgresTaskLedgerErrorKind::AuthorityMismatch));
+    }
+    Ok(ResolvedExternalVerifiedResultAdoption {
+        adoption_digest: digest_bytes(adoption.result_digest())?,
+        evidence_descriptor_digest: digest_bytes(verified.descriptor_digest())?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_result_binding<C: GenericClient>(
+    client: &mut C,
+    local: bool,
+    stream_id: &ContentDigest,
+    sequence: u64,
+    event_digest: &ContentDigest,
+    command_id: &str,
+    request_digest: &ContentDigest,
+    resolved: &ResolvedExternalVerifiedResultAdoption,
+) -> PostgresTaskLedgerResult<()> {
+    let sql = if local {
+        "SELECT control_product.local_result_binding_matches_v1($1::bytea,$2::text,$3::bytea,$4::text,$5::bytea,$6::bytea,$7::bytea)"
+    } else {
+        "SELECT control_product.external_result_binding_matches_v1($1::bytea,$2::text,$3::bytea,$4::text,$5::bytea,$6::bytea,$7::bytea)"
+    };
+    let row = client
+        .query_one(
+            sql,
+            &[
+                &digest_bytes(stream_id)?,
+                &sequence.to_string(),
+                &digest_bytes(event_digest)?,
+                &command_id,
+                &digest_bytes(request_digest)?,
+                &resolved.adoption_digest,
+                &resolved.evidence_descriptor_digest,
+            ],
+        )
+        .map_err(|e| map_database_error(&e))?;
+    if !row_value::<bool>(&row, 0)? {
+        return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+    }
+    Ok(())
+}
+
 struct ResolvedExternalVerifiedResultAdoption {
     adoption_digest: Vec<u8>,
     evidence_descriptor_digest: Vec<u8>,
@@ -1891,6 +2206,65 @@ fn load_verified_stream<C: GenericClient>(
     let stream = verify_untrusted_snapshot_against_checkpoint(&snapshot, &retained_checkpoint)
         .map_err(|ledger| map_ledger_error(&ledger))?;
     validate_store_bindings(&stream, &store_receipts, &record_set_digests)?;
+    // Status/fresh-process replay revalidates the independent immutable facts,
+    // not merely the existence of an adoption-shaped Ledger event.
+    for record in stream
+        .commands()
+        .iter()
+        .filter(|record| record.request().kind() == LedgerEventKind::ExternalVerifiedResultAdopted)
+    {
+        let command = record.request();
+        let row = read_external_adoption_row(client, command.subject_digest())?;
+        let adoption = adoption_from_evidence_row(&row, command)?;
+        let resolved = verify_external_adoption_row(&row, stream.identity(), &adoption)?;
+        let event = stream
+            .events()
+            .iter()
+            .find(|event| event.command_id() == command.command_id())
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        verify_result_binding(
+            client,
+            false,
+            stream.head().stream_id(),
+            event.sequence(),
+            event.event_digest(),
+            command.command_id().as_str(),
+            record.receipt().request_digest(),
+            &resolved,
+        )?;
+        if adoption.result_digest() != command.subject_digest() {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+    }
+    for record in stream.commands().iter().filter(|record| {
+        is_local_verified_result(record.request().kind(), record.request().action().as_str())
+    }) {
+        let command = record.request();
+        let row = read_local_adoption_row(client, command.subject_digest())?;
+        let adoption = local_adoption_from_row(&row)?;
+        if adoption.result_digest() != command.subject_digest()
+            || adoption.command_id() != command.command_id().as_str()
+            || adoption.expected_ledger_head_digest() != command.expected_head().head_digest()
+        {
+            return Err(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt));
+        }
+        let resolved = verify_local_adoption_row(&row, stream.identity(), &adoption)?;
+        let event = stream
+            .events()
+            .iter()
+            .find(|e| e.command_id() == command.command_id())
+            .ok_or_else(|| error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt))?;
+        verify_result_binding(
+            client,
+            true,
+            stream.head().stream_id(),
+            event.sequence(),
+            event.event_digest(),
+            command.command_id().as_str(),
+            record.receipt().request_digest(),
+            &resolved,
+        )?;
+    }
     let autonomy_state =
         load_autonomy_receipt_for_profile(client, stream_id_bytes, &stream, sql_profile)?;
     Ok(LoadedStream {
@@ -3181,7 +3555,7 @@ fn run_execute_attempt(
     foreman_plan: Option<&ForemanSnapshotAppendPlan>,
     submission: Option<&TaskSubmissionEnvelope>,
     ingress_claim: Option<&TaskIngressClaim>,
-    external_adoption: Option<&ExternalVerifiedResultAdoption>,
+    external_adoption: Option<VerifiedResultAdoption<'_>>,
 ) -> Result<PostgresTaskLedgerExecution, AttemptFailure> {
     let Ok(global_schema_version) = i16::try_from(global_persistence.schema_version()) else {
         return Err(AttemptFailure::Terminal(error(
@@ -3197,8 +3571,9 @@ fn run_execute_attempt(
     if let Err(database) = transaction.batch_execute(WRITE_TRANSACTION_SETTINGS) {
         return rollback_attempt(transaction, classify_query_error(&database));
     }
+    let mut external_adoption_preflight_allowed = true;
     let external_adoption_resolution = if let Some(adoption) = external_adoption {
-        if !sql_profile.supports_submission() {
+        if sql_profile != TaskLedgerSqlProfile::V8 {
             return rollback_attempt(
                 transaction,
                 AttemptFailure::Terminal(error(
@@ -3208,79 +3583,29 @@ fn run_execute_attempt(
         }
         let preflight = transaction.query_one(
             "SELECT control.external_verified_result_adoption_preflight_v1($1::text,$2::text,$3::text)",
-            &[
-                &identity.project_id().as_str(),
-                &identity.project_snapshot_id().as_str(),
-                &adoption.task_ref().as_str(),
-            ],
+            &[&identity.project_id().as_str(), &identity.project_snapshot_id().as_str(),
+              &adoption.task_ref().as_str()],
         );
-        match preflight {
-            Ok(row) if row_value::<bool>(&row, 0).unwrap_or(false) => {}
-            Ok(_) => {
-                return rollback_attempt(
-                    transaction,
-                    AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
-                );
-            }
-            Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
-        }
-        let adoption_digest = match digest_bytes(adoption.result_digest()) {
-            Ok(value) => value,
-            Err(error) => return rollback_attempt(transaction, AttemptFailure::Terminal(error)),
-        };
-        let evidence = match transaction.query_opt(
-            "SELECT * FROM control.external_verified_result_evidence_read_v1($1::bytea)",
-            &[&adoption_digest],
-        ) {
-            Ok(Some(row)) => row,
-            Ok(None) => {
-                return rollback_attempt(
-                    transaction,
-                    AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
-                );
-            }
+        external_adoption_preflight_allowed = match preflight {
+            Ok(row) => row_value::<bool>(&row, 0).unwrap_or(false),
             Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
         };
-        let matches = row_value::<String>(&evidence, 0)
-            .is_ok_and(|value| value == identity.project_id().as_str())
-            && row_value::<String>(&evidence, 1)
-                .is_ok_and(|value| value == identity.project_snapshot_id().as_str())
-            && row_value::<String>(&evidence, 2)
-                .is_ok_and(|value| value == adoption.task_ref().as_str())
-            && row_value::<String>(&evidence, 3).is_ok_and(|value| value == adoption.source_sha())
-            && row_value::<String>(&evidence, 4).is_ok_and(|value| value == adoption.target_sha())
-            && row_value::<String>(&evidence, 5).is_ok_and(|value| value == adoption.target_sha())
-            && row_value::<String>(&evidence, 6)
-                .is_ok_and(|value| value == adoption.push_merge_receipt_ref())
-            && row_value::<String>(&evidence, 7)
-                .is_ok_and(|value| value == adoption.deployment_receipt_ref())
-            && row_value::<String>(&evidence, 8)
-                .is_ok_and(|value| value == adoption.deployment_artifact_ref())
-            && row_value::<String>(&evidence, 9)
-                .is_ok_and(|value| value == adoption.independent_acceptance_ref())
-            && row_value::<Vec<String>>(&evidence, 10)
-                .is_ok_and(|value| value == adoption.protected_action_approval_refs());
-        let evidence_descriptor_digest = match row_value::<Vec<u8>>(&evidence, 15) {
-            Ok(value) if value.len() == 32 => value,
-            _ => {
-                return rollback_attempt(
-                    transaction,
-                    AttemptFailure::Terminal(error(
-                        PostgresTaskLedgerErrorKind::RetainedRowCorrupt,
-                    )),
-                );
+        let resolved = match adoption {
+            VerifiedResultAdoption::External(adoption) => {
+                read_external_adoption_row(&mut transaction, adoption.result_digest())
+                    .and_then(|row| verify_external_adoption_row(&row, identity, adoption))
+            }
+            VerifiedResultAdoption::Local(adoption) => {
+                read_local_adoption_row(&mut transaction, adoption.result_digest())
+                    .and_then(|row| verify_local_adoption_row(&row, identity, adoption))
             }
         };
-        if !matches {
-            return rollback_attempt(
-                transaction,
-                AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
-            );
+        match resolved {
+            Ok(resolved) => Some(resolved),
+            Err(failure) => {
+                return rollback_attempt(transaction, AttemptFailure::Terminal(failure));
+            }
         }
-        Some(ResolvedExternalVerifiedResultAdoption {
-            adoption_digest,
-            evidence_descriptor_digest,
-        })
     } else {
         None
     };
@@ -3453,6 +3778,15 @@ fn run_execute_attempt(
             );
         }
     };
+    if external_adoption_resolution.is_some()
+        && !plan.is_exact_retry()
+        && !external_adoption_preflight_allowed
+    {
+        return rollback_attempt(
+            transaction,
+            AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::AuthorityMismatch)),
+        );
+    }
     let autonomy_receipt = autonomy_plan.map(AutonomyReceiptAppendPlan::receipt);
     if autonomy_plan
         .is_some_and(|submitted| !plan.is_exact_retry() && submitted.append_plan() != &plan)
@@ -3546,7 +3880,9 @@ fn run_execute_attempt(
             .iter()
             .find(|outbox| outbox.command_id().as_str() == command_id)
             .cloned();
-        if let Some(resolved) = external_adoption_resolution.as_ref() {
+        if !external_adoption.is_some_and(VerifiedResultAdoption::is_local)
+            && let Some(resolved) = external_adoption_resolution.as_ref()
+        {
             let Some(event) = loaded.stream.events().iter().find(|event| {
                 event.command_id().as_str() == command_id
                     && event.kind() == LedgerEventKind::ExternalVerifiedResultAdopted
@@ -3693,8 +4029,12 @@ fn run_execute_attempt(
             return rollback_attempt(transaction, AttemptFailure::Terminal(finalize_error));
         }
     }
-    let ledger_status = if submission.is_some() {
-        let Some(finalize_sql) = sql_profile.general_ledger_finalize_sql() else {
+    let ledger_status = if submission.is_some() || external_adoption.is_some() {
+        let Some(finalize_sql) = (if external_adoption.is_some() {
+            Some(LEDGER_FINALIZE_GENERAL_RESULT_SQL)
+        } else {
+            sql_profile.general_ledger_finalize_sql()
+        }) else {
             return rollback_attempt(
                 transaction,
                 AttemptFailure::Terminal(error(
@@ -3702,18 +4042,26 @@ fn run_execute_attempt(
                 )),
             );
         };
-        let ledger_values = match GeneralLedgerFinalizeValues::new(&plan, &store_receipt) {
+        let ledger_values = match GeneralLedgerFinalizeValues::new(
+            &plan,
+            &store_receipt,
+            external_adoption.map(VerifiedResultAdoption::profile),
+        ) {
             Ok(values) => values,
             Err(values_error) => {
                 return rollback_attempt(transaction, AttemptFailure::Terminal(values_error));
             }
         };
-        let ledger_finalize_params = global_profile_params(
+        let mut ledger_finalize_params = global_profile_params(
             sql_profile,
             &global_schema_version,
             &global_manifest_sha256,
             ledger_values.params(),
         );
+        let result_profile = external_adoption.map_or("", VerifiedResultAdoption::profile);
+        if external_adoption.is_some() {
+            ledger_finalize_params.push(&result_profile);
+        }
         match transaction.query_one(finalize_sql, &ledger_finalize_params) {
             Ok(row) => match row_value::<String>(&row, 0) {
                 Ok(status) => status,
@@ -3752,7 +4100,9 @@ fn run_execute_attempt(
             AttemptFailure::Terminal(error(PostgresTaskLedgerErrorKind::RetainedRowCorrupt)),
         );
     }
-    if let Some(resolved) = external_adoption_resolution.as_ref() {
+    if !external_adoption.is_some_and(VerifiedResultAdoption::is_local)
+        && let Some(resolved) = external_adoption_resolution.as_ref()
+    {
         let event = match plan.new_event() {
             Some(event) if event.kind() == LedgerEventKind::ExternalVerifiedResultAdopted => event,
             _ => {
@@ -4890,6 +5240,7 @@ impl GeneralLedgerFinalizeValues {
     fn new(
         plan: &LedgerAppendPlan,
         store_receipt: &StoreTransactionReceipt,
+        result_profile: Option<&str>,
     ) -> PostgresTaskLedgerResult<Self> {
         if plan.is_exact_retry() || plan.new_outbox().is_some() {
             return Err(error(PostgresTaskLedgerErrorKind::Malformed));
@@ -4910,13 +5261,33 @@ impl GeneralLedgerFinalizeValues {
             .general_task_intake_digest()
             .ok_or_else(|| error(PostgresTaskLedgerErrorKind::Malformed))?;
 
+        let sequence = if result_profile.is_some() { 2 } else { 1 };
+        let (kind, action, reason) = if result_profile == Some("LOCAL_VERIFIED_RESULT_V1") {
+            (
+                LedgerEventKind::EvidenceRecorded.as_str(),
+                LOCAL_RESULT_ADOPTION_ACTION,
+                LOCAL_RESULT_ADOPTION_REASON,
+            )
+        } else if result_profile == Some("EXTERNAL_VERIFIED_RESULT_V1") {
+            (
+                LedgerEventKind::ExternalVerifiedResultAdopted.as_str(),
+                "ADOPT_VERIFIED_RESULT_V1",
+                "EXTERNAL_VERIFIED_RESULT_ADOPTED",
+            )
+        } else {
+            (
+                LedgerEventKind::TaskCreated.as_str(),
+                TaskCreatedProfile::GeneralTaskIntakeV1.action(),
+                "GENERAL_TASK_INTAKE_RECORDED",
+            )
+        };
         if identity.subject_kind() != TaskLedgerSubjectKind::GeneralTaskIntake
             || identity.task_spec_digest().is_some()
             || identity.accounting_currency().is_some()
-            || next.events().len() != 1
-            || next.commands().len() != 1
+            || next.events().len() != sequence
+            || next.commands().len() != sequence
             || !next.outboxes().is_empty()
-            || head.sequence() != 1
+            || head.sequence() != sequence as u64
             || head.resource_revision() != 0
             || counters.active_agents() != 0
             || counters.active_implementers() != 0
@@ -4924,22 +5295,22 @@ impl GeneralLedgerFinalizeValues {
             || counters.attempt_number() != 0
             || counters.used_model_calls() != 0
             || counters.used_external_cost() != "0"
-            || command.request.kind != LedgerEventKind::TaskCreated.as_str()
-            || command.request.action != TaskCreatedProfile::GeneralTaskIntakeV1.action()
+            || command.request.kind != kind
+            || command.request.action != action
             || command.request.outcome != "RECORDED"
-            || command.request.reason_code != "GENERAL_TASK_INTAKE_RECORDED"
+            || command.request.reason_code != reason
             || command.request.diagnostic.is_some()
             || command.request.resource_snapshot.is_some()
             || command.receipt.outcome != "APPENDED"
             || command.receipt.denial_reason.is_some()
             || command.receipt.event_digest.as_ref() != Some(&event.event_digest)
-            || event.kind != LedgerEventKind::TaskCreated.as_str()
-            || event.action != TaskCreatedProfile::GeneralTaskIntakeV1.action()
+            || event.kind != kind
+            || event.action != action
             || event.outcome != "RECORDED"
-            || event.reason_code != "GENERAL_TASK_INTAKE_RECORDED"
+            || event.reason_code != reason
             || event.diagnostic.is_some()
             || event.resource_snapshot.is_some()
-            || event.sequence != 1
+            || event.sequence != sequence as u64
             || event.resource_revision != 0
             || event.subject_digest != command.request.subject_digest
             || event.command_id != command.command_id
@@ -5605,6 +5976,114 @@ mod tests {
 
     fn fixed_digest(byte: char) -> ContentDigest {
         ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("digest")
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn external_adoption_replays_original_time_and_rejects_changed_result_or_client() {
+        let identity = TaskLedgerStreamIdentity::new_general_task_intake(
+            ProjectId::new("external-result-test").unwrap(),
+            ProjectSnapshotId::new("external-result-test:1").unwrap(),
+            TaskId::new("TASK-EXTERNAL-RESULT-TEST").unwrap(),
+            "1",
+            fixed_digest('a'),
+        )
+        .unwrap();
+        let submission = TaskSubmissionEnvelope::new(
+            "lattice_task_submit.v1",
+            "external-result-test",
+            "Repair the product",
+            "LATTICE",
+            identity.clone(),
+            fixed_digest('b'),
+        )
+        .unwrap();
+        let vacant = VerifiedStream::vacant(identity, RuntimeKind::Live).unwrap();
+        let created = apply_append_plan(
+            &vacant,
+            &plan_append(
+                &vacant,
+                AppendCommand::new_general_task_created(
+                    vacant.head().clone(),
+                    CommandId::new("mcp-submit:external-result-test").unwrap(),
+                    CorrelationId::new("general-task-intake-v1").unwrap(),
+                    "2000-01-01T00:00:00Z",
+                    ActorId::new("lattice-mcp").unwrap(),
+                    &submission,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let reference = |byte: char| format!("evidence:sha256:{}", byte.to_string().repeat(64));
+        let adoption = ExternalVerifiedResultAdoption::new(
+            submission.task_ref().clone(),
+            submission.client_request_id(),
+            created.head().head_digest().clone(),
+            "1".repeat(40),
+            "2".repeat(40),
+            reference('3'),
+            reference('4'),
+            reference('5'),
+            reference('6'),
+            vec![reference('7')],
+        )
+        .unwrap();
+        let command =
+            external_adoption_command(&submission, &created, &adoption, "2026-09-05T00:00:01Z")
+                .unwrap();
+        assert_eq!(command.correlation_id().as_str(), "general-task-intake-v1");
+        let completed =
+            apply_append_plan(&created, &plan_append(&created, command.clone()).unwrap()).unwrap();
+        let reloaded = lattice_task_ledger::verify_untrusted_snapshot_against_checkpoint(
+            &lattice_task_ledger::export_untrusted_snapshot(&completed),
+            completed.checkpoint(),
+        )
+        .unwrap();
+        let replay =
+            external_adoption_command(&submission, &reloaded, &adoption, "2026-09-05T00:00:59Z")
+                .unwrap();
+        assert_eq!(replay, command);
+        assert!(plan_append(&reloaded, replay).unwrap().is_exact_retry());
+        let changed = ExternalVerifiedResultAdoption::new(
+            submission.task_ref().clone(),
+            submission.client_request_id(),
+            created.head().head_digest().clone(),
+            "1".repeat(40),
+            "8".repeat(40),
+            reference('3'),
+            reference('4'),
+            reference('5'),
+            reference('6'),
+            vec![reference('7')],
+        )
+        .unwrap();
+        assert_eq!(
+            external_adoption_command(&submission, &reloaded, &changed, "2026-09-05T00:00:59Z")
+                .unwrap_err()
+                .kind(),
+            PostgresTaskLedgerErrorKind::CommandSubstitution
+        );
+        let wrong_client = ExternalVerifiedResultAdoption::new(
+            submission.task_ref().clone(),
+            "different-client",
+            created.head().head_digest().clone(),
+            "1".repeat(40),
+            "2".repeat(40),
+            reference('3'),
+            reference('4'),
+            reference('5'),
+            reference('6'),
+            vec![reference('7')],
+        )
+        .unwrap();
+        assert_eq!(
+            external_adoption_command(&submission, &created, &wrong_client, "2026-09-05T00:00:59Z")
+                .unwrap_err()
+                .kind(),
+            PostgresTaskLedgerErrorKind::AuthorityMismatch
+        );
     }
 
     #[test]

@@ -1,11 +1,9 @@
-import { existsSync, statSync } from "node:fs";
-import path from "node:path";
 import { performance } from "node:perf_hooks";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
-import { defaultControlDatabasePath } from "./database-path.mjs";
 import { LatticeStore } from "./store.mjs";
 import { ControlWorkService } from "./work-core-service.mjs";
+import { FormalWorkStore } from "./formal-work-store.mjs";
 
 const protocolVersion = "2025-11-25";
 const supportedProtocolVersions = new Set([protocolVersion, "2025-06-18"]);
@@ -18,7 +16,7 @@ const maximumToolCallsPerWindow = 16;
 const snapshotTool = Object.freeze({
   name: "lattice_control_work_snapshot",
   title: "Read bounded Control work snapshot",
-  description: "Read one project-scoped tree and dependency graph from the same LATTICE Control SQLite snapshot.",
+  description: "Read one project-scoped tree and dependency graph from the same authoritative LATTICE Runtime snapshot.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -149,21 +147,6 @@ function validateNodeArguments(value) {
     && (value.max_edges == null || boundedInteger(value.max_edges, 1, 1_024));
 }
 
-function configuredDatabasePath() {
-  const databasePath = process.env.LATTICE_CONTROL_DATABASE_PATH
-    || defaultControlDatabasePath();
-  if (
-    !path.isAbsolute(databasePath)
-    || databasePath.length > 2_048
-    || /[\u0000-\u001f\u007f-\u009f]/u.test(databasePath)
-    || !existsSync(databasePath)
-    || !statSync(databasePath).isFile()
-  ) {
-    throw new Error("LATTICE_CONTROL_DATABASE_UNAVAILABLE");
-  }
-  return path.normalize(databasePath);
-}
-
 function safeError(error) {
   const code = typeof error?.code === "string"
     && /^[A-Z0-9_]{1,128}$/u.test(error.code)
@@ -201,9 +184,10 @@ function toolTextSummary(name, structuredContent) {
 export function runControlWorkMcp({
   input = process.stdin,
   output = process.stdout,
-  databasePath = configuredDatabasePath(),
+  databasePath,
+  formalWorkStore,
 } = {}) {
-  const store = new LatticeStore(databasePath);
+  const store = formalWorkStore ?? (databasePath === undefined ? new FormalWorkStore() : new LatticeStore(databasePath));
   const service = new ControlWorkService({ store });
   let initialized = false;
   let initializeSeen = false;
@@ -211,6 +195,7 @@ export function runControlWorkMcp({
   let closed = false;
   let backpressured = false;
   let inputEnded = false;
+  let handling = false;
   const toolCallTimestamps = [];
 
   const reserveToolCall = () => {
@@ -375,7 +360,7 @@ export function runControlWorkMcp({
       return;
     }
     try {
-      const structuredContent = name === snapshotTool.name
+      const result = name === snapshotTool.name
         ? service.workSnapshot({
             projectId: args.project_id,
             maxNodes: args.max_nodes,
@@ -389,11 +374,16 @@ export function runControlWorkMcp({
             maxNodes: args.max_nodes,
             maxEdges: args.max_edges,
           });
-      success(request.id, {
+      const deliver = (structuredContent) => success(request.id, {
         content: [{ type: "text", text: toolTextSummary(name, structuredContent) }],
         structuredContent,
         isError: false,
       });
+      if (typeof result?.then === "function") return result.then(deliver, (error) => {
+        const { code, message } = safeError(error);
+        toolFailure(request.id, code, message);
+      });
+      deliver(result);
     } catch (error) {
       const { code, message } = safeError(error);
       toolFailure(request.id, code, message);
@@ -410,11 +400,11 @@ export function runControlWorkMcp({
     input.pause();
     buffer = Buffer.alloc(0);
     toolCallTimestamps.length = 0;
-    store.close();
+    void Promise.resolve(store.close()).catch(() => { process.exitCode = 1; });
   };
 
   function processBufferedFrames() {
-    if (closed || backpressured) return;
+    if (closed || backpressured || handling) return;
     while (true) {
       const newline = buffer.indexOf(0x0a);
       if (newline < 0) break;
@@ -427,7 +417,19 @@ export function runControlWorkMcp({
         close();
         return;
       }
-      handle(frame);
+      const result = handle(frame);
+      if (typeof result?.then === "function") {
+        handling = true;
+        input.pause();
+        void result.catch(() => { process.exitCode = 1; close(); }).finally(() => {
+          handling = false;
+          if (closed) return;
+          processBufferedFrames();
+          if (inputEnded) finishInput();
+          else if (!handling && !backpressured) input.resume();
+        });
+        return;
+      }
       if (closed || backpressured) return;
     }
     if (buffer.length > maximumFrameBytes) {
@@ -439,9 +441,9 @@ export function runControlWorkMcp({
   }
 
   function finishInput() {
-    if (closed || backpressured || !inputEnded) return;
+    if (closed || backpressured || handling || !inputEnded) return;
     processBufferedFrames();
-    if (closed || backpressured) return;
+    if (closed || backpressured || handling) return;
     if (buffer.length > 0) {
       failure(null, -32600, "Incomplete MCP frame rejected");
       process.exitCode = 1;

@@ -414,6 +414,7 @@ dependencies = [
 name = "lattice-postgres-store"
 version = "0.1.0"
 dependencies = [
+ "lattice-artifact-store",
  "lattice-cjson",
  "lattice-contracts",
  "lattice-foreman-state",

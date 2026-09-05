@@ -94,6 +94,14 @@ internal static class ControlRuntimeContract
             return new(ControlRuntimeHealth.HEALTHY, ControlRuntimeAction.Reuse, detail);
         }
 
+        if (tcpReachable && !statusCode.HasValue && responseBody is null)
+        {
+            // A slow HTTP health check does not identify a foreign listener.
+            // Recheck without starting or taking ownership of any process.
+            return new(ControlRuntimeHealth.UNREACHABLE, ControlRuntimeAction.FailClosed,
+                "CONTROL_LISTENER_UNVERIFIED");
+        }
+
         if (statusCode.HasValue || responseBody is not null || tcpReachable)
         {
             return new(
@@ -359,8 +367,10 @@ internal static class ControlRuntimeContract
     private static bool ValidCapabilityData(string id, JsonElement capability)
     {
         if (!capability.TryGetProperty("has_data", out JsonElement hasData)) return false;
+        // PostgreSQL-backed work can be unknown while its first snapshot loads
+        // or its cache expires. Null is not a foreign-server identity.
         return id is "work_mcp" or "decision_mcp"
-            ? hasData.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? hasData.ValueKind is JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null
             : hasData.ValueKind == JsonValueKind.Null;
     }
 
@@ -439,7 +449,7 @@ internal sealed class ControlRuntimeManager : IDisposable
         runtimeProbeUri = new Uri(this.controlOrigin, "api/runtime");
         this.launchSpec = launchSpec;
         expectedDataScope = ControlRuntimeContract.DataScopeForDatabasePath(launchSpec.DatabasePath);
-        this.probeTimeout = probeTimeout ?? TimeSpan.FromSeconds(2);
+        this.probeTimeout = probeTimeout ?? TimeSpan.FromSeconds(5);
         this.startupTimeout = startupTimeout ?? TimeSpan.FromSeconds(10);
         this.shutdownTimeout = shutdownTimeout ?? TimeSpan.FromSeconds(8);
         this.killOwnedProcess = killOwnedProcess

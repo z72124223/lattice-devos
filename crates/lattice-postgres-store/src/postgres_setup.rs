@@ -2790,11 +2790,15 @@ fn verify_v7_ingress_ambiguity_profile<C: GenericClient>(
         return Err(PostgresStoreSetupError::new(error_kind));
     }
 
-    let closure = client
-        .query_one("SELECT control.task_ingress_historical_closure_v1()", &[])
-        .map_err(|error| {
-            map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
-        })?;
+    let product = verify_optional_control_product_extension(client)?.is_some();
+    let closure_sql = if product {
+        "SELECT control_product.task_ingress_historical_closure_v1()"
+    } else {
+        "SELECT control.task_ingress_historical_closure_v1()"
+    };
+    let closure = client.query_one(closure_sql, &[]).map_err(|error| {
+        map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
+    })?;
     if !row_value::<bool>(&closure, 0, PostgresStoreSetupErrorKind::HistoryMismatch)? {
         return Err(history_error());
     }
@@ -8568,19 +8572,152 @@ fn verify_exact_principal_database_core<C: GenericClient>(
     Ok(dangerous_functions)
 }
 
+/// SQL for the independently versioned, same-database Control product facts.
+pub const CONTROL_PRODUCT_SQL: &str = include_str!("../../../db/extensions/control-product/v1.sql");
+const CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256: &str =
+    "500622c2dc4cb24ca5bf2ed1b7d3bd537783754c6b8cba17fd1d790f3ec07b4d";
+const CONTROL_PRODUCT_TABLE_CATALOG_SHA256: &str =
+    "28c9a3ae3d9038332ab590ab073ba8385b3c4940d82cf54b097a1e7d087569b8";
+
+struct ControlProductPrincipalProfile {
+    relation_oids: Vec<i64>,
+    function_oids: Vec<i64>,
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_optional_control_product_extension<C: GenericClient>(
+    client: &mut C,
+) -> Result<Option<ControlProductPrincipalProfile>, PostgresStoreSetupError> {
+    let present = client
+        .query_one("SELECT to_regnamespace('control_product') IS NOT NULL", &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .get::<_, bool>(0);
+    if !present {
+        return Ok(None);
+    }
+    // Reuse the existing full catalog model for the second owned extension.
+    // No functions or relation OIDs are exempted before their bytes and ACLs match.
+    let functions = managed_foreman_catalog_digest(
+        client,
+        &MANAGED_FOREMAN_FUNCTION_CATALOG_SQL.replace("foreman_execution", "control_product"),
+        b"LATTICE_CONTROL_PRODUCT_FUNCTION_CATALOG_V1\0",
+    )?;
+    let tables = managed_foreman_catalog_digest(
+        client,
+        &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
+        b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
+    )?;
+    if functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256
+        || tables != CONTROL_PRODUCT_TABLE_CATALOG_SHA256
+    {
+        return Err(catalog_error());
+    }
+    let shape = client.query_one(
+        "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product'), \
+          (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='control_product'), \
+          (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='control_product'), \
+          (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product' AND NOT t.tgisinternal), \
+          (SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product'), \
+          (SELECT count(*) FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product')",
+        &[]).map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    for (index, expected) in [(0, 26_i64), (1, 15), (2, 16), (3, 0), (4, 0), (5, 0)] {
+        if row_value::<i64>(&shape, index, PostgresStoreSetupErrorKind::CorruptCatalog)? != expected
+        {
+            return Err(catalog_error());
+        }
+    }
+    let identity = client
+        .query("SELECT * FROM control_product.identity_read_v1()", &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
+    if identity.len() != 1 {
+        return Err(catalog_error());
+    }
+    let identity = &identity[0];
+    let uuid = row_value::<String>(identity, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let manifest = row_value::<String>(identity, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    let sql_digest = row_value::<String>(identity, 2, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    if uuid != row_value::<String>(identity, 3, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || manifest
+            != row_value::<String>(identity, 4, PostgresStoreSetupErrorKind::CorruptCatalog)?
+        || manifest != CURRENT_V8_MANIFEST_SHA256
+        || sql_digest != hex_digest(&Sha256::digest(CONTROL_PRODUCT_SQL.as_bytes()))
+    {
+        return Err(catalog_error());
+    }
+    let relation_oids = client.query("SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product' ORDER BY c.oid", &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .iter().map(|row| row.get(0)).collect();
+    let function_oids = client.query("SELECT p.oid::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='control_product' ORDER BY p.oid", &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .iter().map(|row| row.get(0)).collect();
+    Ok(Some(ControlProductPrincipalProfile {
+        relation_oids,
+        function_oids,
+    }))
+}
+
+/// Installs Control facts only through an explicitly invoked, verified migrator.
+/// Existing or partially installed extensions are verified rather than overwritten.
+///
+/// # Errors
+/// Rejects incompatible Store state, catalog drift, or unavailable persistence.
+pub fn apply_control_product_extension(
+    client: &mut Client,
+    target: &MigrationTarget,
+) -> Result<(), PostgresStoreSetupError> {
+    let current = verify_postgres_schema(client, target, DatabaseRole::Migrator)?;
+    if current.schema_version() != 8 {
+        return Err(catalog_error());
+    }
+    let mut transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .map_err(|error| {
+            map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+        })?;
+    harden_transaction(&mut transaction)?;
+    let present = transaction
+        .query_one("SELECT to_regnamespace('control_product') IS NOT NULL", &[])
+        .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
+        .get::<_, bool>(0);
+    if !present {
+        transaction
+            .batch_execute(CONTROL_PRODUCT_SQL)
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        let sql_digest = hex_digest(&Sha256::digest(CONTROL_PRODUCT_SQL.as_bytes()));
+        transaction.execute("INSERT INTO control_product.extension_identity(singleton,database_uuid,store_manifest,sql_sha256) VALUES(true,$1::text::uuid,$2,$3)",
+            &[&current.database_uuid(),&current.manifest_sha256().as_str(),&sql_digest])
+            .map_err(|error| map_postgres_error(&error,PostgresStoreSetupErrorKind::TransactionFailed))?;
+    }
+    verify_optional_control_product_extension(&mut transaction)?.ok_or_else(catalog_error)?;
+    transaction.commit().map_err(|error| {
+        map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+    })?;
+    verify_postgres_schema(client, target, DatabaseRole::Migrator)?;
+    Ok(())
+}
+
 fn verify_exact_principal_database_boundary<C: GenericClient>(
     client: &mut C,
     expected_dangerous_functions: i64,
     writer_lease_is_owned: bool,
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
-    if verify_exact_principal_database_core(client)? != expected_dangerous_functions {
+    let product = verify_optional_control_product_extension(client)?;
+    let product_functions = if product.is_some() { 14 } else { 0 };
+    if verify_exact_principal_database_core(client)?
+        != expected_dangerous_functions + product_functions
+    {
         return Err(permission_error());
     }
     verify_cluster_wide_acl_closure_for_owned_extensions(
         client,
         writer_lease_is_owned,
         managed_foreman,
+        product.as_ref(),
     )
 }
 
@@ -8632,13 +8769,14 @@ fn verify_cluster_wide_acl_closure<C: GenericClient>(
             | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2BridgePending
             | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
     );
-    verify_cluster_wide_acl_closure_for_owned_extensions(client, writer_lease_is_owned, None)
+    verify_cluster_wide_acl_closure_for_owned_extensions(client, writer_lease_is_owned, None, None)
 }
 
 fn verify_cluster_wide_acl_closure_for_owned_extensions<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
+    product: Option<&ControlProductPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
         .query_one(
@@ -8691,9 +8829,20 @@ fn verify_cluster_wide_acl_closure_for_owned_extensions<C: GenericClient>(
         client,
         writer_lease_is_owned,
         managed_foreman.is_some(),
+        product.is_some(),
     )?;
-    verify_external_relation_principal_closure(client, writer_lease_is_owned, managed_foreman)?;
-    verify_external_function_principal_closure(client, writer_lease_is_owned, managed_foreman)?;
+    verify_external_relation_principal_closure(
+        client,
+        writer_lease_is_owned,
+        managed_foreman,
+        product,
+    )?;
+    verify_external_function_principal_closure(
+        client,
+        writer_lease_is_owned,
+        managed_foreman,
+        product,
+    )?;
     verify_pre_role_system_function_boundary(client)?;
     verify_large_object_boundary(client)
 }
@@ -8703,6 +8852,7 @@ fn verify_managed_extension_dependency_closure<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
     foreman_is_owned: bool,
+    product_is_owned: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
         .query_one(
@@ -8711,6 +8861,7 @@ fn verify_managed_extension_dependency_closure<C: GenericClient>(
                  WHERE n.nspname IN ('control','memory','readmodel') \
                     OR ($1 AND n.nspname='writer_lease') \
                     OR ($2 AND n.nspname='foreman_execution') \
+                    OR ($3 AND n.nspname='control_product') \
             ), managed_relations(objid) AS ( \
                 SELECT c.oid FROM pg_class c \
                  WHERE c.relnamespace IN (SELECT objid FROM managed_namespaces) \
@@ -8781,7 +8932,7 @@ fn verify_managed_extension_dependency_closure<C: GenericClient>(
               JOIN managed dependent \
                 ON dependent.classid=d.classid AND dependent.objid=d.objid \
              WHERE d.deptype IN ('e','x')",
-            &[&writer_lease_is_owned, &foreman_is_owned],
+            &[&writer_lease_is_owned, &foreman_is_owned, &product_is_owned],
         )
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     if row_value::<i64>(&forbidden, 0, PostgresStoreSetupErrorKind::CorruptCatalog)? != 0 {
@@ -8794,10 +8945,14 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
+    product: Option<&ControlProductPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
-    let foreman_relation_oids = managed_foreman
+    let mut foreman_relation_oids = managed_foreman
         .map(|profile| profile.relation_oids.clone())
         .unwrap_or_default();
+    if let Some(product) = product {
+        foreman_relation_oids.extend_from_slice(&product.relation_oids);
+    }
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -8854,10 +9009,14 @@ fn verify_external_function_principal_closure<C: GenericClient>(
     client: &mut C,
     writer_lease_is_owned: bool,
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
+    product: Option<&ControlProductPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
-    let foreman_function_oids = managed_foreman
+    let mut foreman_function_oids = managed_foreman
         .map(|profile| profile.function_oids.clone())
         .unwrap_or_default();
+    if let Some(product) = product {
+        foreman_function_oids.extend_from_slice(&product.function_oids);
+    }
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \

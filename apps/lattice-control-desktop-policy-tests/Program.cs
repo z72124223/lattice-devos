@@ -271,6 +271,15 @@ ControlRuntimeEvaluation compatible = ControlRuntimeContract.EvaluateProbe(
     expectedScope: expectedScope);
 Require(compatible.Health == ControlRuntimeHealth.HEALTHY, "compatible Control was not healthy");
 Require(compatible.Action == ControlRuntimeAction.Reuse, "compatible Control was not reused");
+ControlRuntimeEvaluation loadingWork = ControlRuntimeContract.EvaluateProbe(
+    tcpReachable: true,
+    statusCode: 200,
+    responseBody: compatibleSurface.Replace("\"has_data\":false", "\"has_data\":null", StringComparison.Ordinal),
+    expectedScope: expectedScope);
+Require(loadingWork.Health == ControlRuntimeHealth.HEALTHY,
+    "unknown PostgreSQL work presence incorrectly rejected the installed Control listener");
+Require(loadingWork.Action == ControlRuntimeAction.Reuse,
+    "loading work must allow the desktop to open its existing Control UI");
 foreach (string runtimeStatus in new[] { "STOPPED", "UNREACHABLE", "INCOMPATIBLE", "NO_DATA" })
 {
     ControlRuntimeEvaluation degradedRuntime = ControlRuntimeContract.EvaluateProbe(
@@ -318,8 +327,11 @@ Require(absent.Health == ControlRuntimeHealth.UNREACHABLE, "absent Control was n
 Require(absent.Action == ControlRuntimeAction.StartOwned, "absent Control did not permit owned start");
 
 ControlRuntimeEvaluation unknownListener = ControlRuntimeContract.EvaluateProbe(true, null, null, expectedScope);
-Require(unknownListener.Health == ControlRuntimeHealth.INCOMPATIBLE, "unknown listener was not incompatible");
+Require(unknownListener.Health == ControlRuntimeHealth.UNREACHABLE, "an unanswered health check was incorrectly identified as foreign");
 Require(unknownListener.Action == ControlRuntimeAction.FailClosed, "unknown listener did not fail closed");
+Require(unknownListener.Detail == "CONTROL_LISTENER_UNVERIFIED", "unverified listener detail was lost");
+Require(DesktopPolicy.DescribeRuntimeFailure(unknownListener).AutoReconnect,
+    "a slow health response permanently blocked the desktop instead of rechecking");
 
 foreach (string incompatibleSurface in new[]
 {
@@ -329,7 +341,8 @@ foreach (string incompatibleSurface in new[]
     compatibleSurface.Replace(expectedScope.Digest, new string('0', 64), StringComparison.Ordinal),
     compatibleSurface.Replace("\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"HEALTHY\"", "\"postgresql\",\"label\":\"正式 PostgreSQL\",\"status\":\"NOT_IMPLEMENTED\"", StringComparison.Ordinal),
     compatibleSurface.Replace("\"work_mcp\",\"label\":\"Work MCP\",\"status\":\"HEALTHY\"", "\"work_mcp\",\"label\":\"Work MCP\",\"status\":\"NO_DATA\"", StringComparison.Ordinal),
-    compatibleSurface.Replace("\"has_data\":false", "\"has_data\":null", StringComparison.Ordinal),
+    compatibleSurface.Replace("\"has_data\":false", "\"has_data\":\"unknown\"", StringComparison.Ordinal),
+    compatibleSurface.Replace("\"has_data\":null", "\"has_data\":true", StringComparison.Ordinal),
     compatibleSurface.Replace("\"HEALTHY\"", "\"UNKNOWN\"", StringComparison.Ordinal),
     "not-json",
 })

@@ -6,6 +6,7 @@ publish.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lattice-artifact-store = { path = "../lattice-artifact-store" }
 lattice-cjson = { path = "../lattice-cjson" }
 lattice-contracts = { path = "../lattice-contracts" }
 lattice-foreman-state = { path = "../lattice-foreman-state" }

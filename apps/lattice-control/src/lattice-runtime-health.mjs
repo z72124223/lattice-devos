@@ -12,6 +12,8 @@ const defaultProbeCleanupTimeoutMs = 2_000;
 const defaultCacheTtlMs = 60_000;
 
 export const latticeRuntimeTools = Object.freeze([
+  "lattice_control_snapshot",
+  "lattice_control_update",
   "lattice_delivery_reconcile",
   "lattice_delivery_run",
   "lattice_delivery_status",
@@ -95,6 +97,8 @@ function parseLatticeConfiguration(text) {
   let command = null;
   let latticeSectionSeen = false;
   let environmentSectionSeen = false;
+  const serverKeys = new Set();
+  let enabled = true;
   const environment = Object.create(null);
   for (const sourceLine of text.replaceAll("\r\n", "\n").split("\n")) {
     const line = sourceLine.trim();
@@ -124,10 +128,24 @@ function parseLatticeConfiguration(text) {
     }
     const [, key, rawValue] = assignment;
     if (section === "mcp_servers.lattice") {
-      if (key !== "command" || command !== null) {
+      if (serverKeys.has(key)) {
         throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
       }
-      command = parseTomlString(rawValue);
+      serverKeys.add(key);
+      // Codex owns startup policy. Its standard lifecycle settings must not
+      // prevent Control from using the same configured stdio Runtime.
+      const scalar = rawValue.split("#", 1)[0].trim();
+      if (key === "command") {
+        command = parseTomlString(rawValue);
+      } else if (["required", "enabled"].includes(key) && /^(true|false)$/u.test(scalar)) {
+        if (key === "enabled") enabled = scalar === "true";
+      } else if (["startup_timeout_sec", "tool_timeout_sec"].includes(key)
+        && /^\d+(?:\.\d+)?$/u.test(scalar)
+        && Number.isFinite(Number(scalar)) && Number(scalar) > 0) {
+        // These limits belong to Codex; Control has its own bounded timeouts.
+      } else {
+        throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
+      }
       continue;
     }
     if (!/^LATTICE_[A-Z0-9_]+$/u.test(key) || Object.hasOwn(environment, key)) {
@@ -135,7 +153,7 @@ function parseLatticeConfiguration(text) {
     }
     environment[key] = parseTomlString(rawValue);
   }
-  if (!latticeSectionSeen || !environmentSectionSeen || !command) {
+  if (!enabled || !latticeSectionSeen || !environmentSectionSeen || !command) {
     throw configurationError("LATTICE_RUNTIME_NOT_CONFIGURED");
   }
   return { command, environment };
@@ -211,7 +229,7 @@ const inheritedChildEnvironmentNames = new Set([
   "WINDIR",
 ]);
 
-function closedChildEnvironment(configuredEnvironment) {
+export function closedChildEnvironment(configuredEnvironment) {
   const environment = Object.create(null);
   for (const [name, value] of Object.entries(process.env)) {
     if (value !== undefined && inheritedChildEnvironmentNames.has(name.toUpperCase())) {
@@ -334,6 +352,10 @@ function validRuntimeStatus(value) {
     && ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"]
       .includes(value.hermes_activation_status)
     && validForemanProjection(value.foreman);
+}
+
+export function runtimeHealthFromValue(value) {
+  return { ...(validRuntimeStatus(value) ? healthy : incompatible) };
 }
 
 function validToolResultEnvelope(result) {
