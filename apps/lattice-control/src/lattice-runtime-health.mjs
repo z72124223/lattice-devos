@@ -97,6 +97,8 @@ function parseLatticeConfiguration(text) {
   let command = null;
   let latticeSectionSeen = false;
   let environmentSectionSeen = false;
+  const serverKeys = new Set();
+  let enabled = true;
   const environment = Object.create(null);
   for (const sourceLine of text.replaceAll("\r\n", "\n").split("\n")) {
     const line = sourceLine.trim();
@@ -126,10 +128,24 @@ function parseLatticeConfiguration(text) {
     }
     const [, key, rawValue] = assignment;
     if (section === "mcp_servers.lattice") {
-      if (key !== "command" || command !== null) {
+      if (serverKeys.has(key)) {
         throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
       }
-      command = parseTomlString(rawValue);
+      serverKeys.add(key);
+      // Codex owns startup policy. Its standard lifecycle settings must not
+      // prevent Control from using the same configured stdio Runtime.
+      const scalar = rawValue.split("#", 1)[0].trim();
+      if (key === "command") {
+        command = parseTomlString(rawValue);
+      } else if (["required", "enabled"].includes(key) && /^(true|false)$/u.test(scalar)) {
+        if (key === "enabled") enabled = scalar === "true";
+      } else if (["startup_timeout_sec", "tool_timeout_sec"].includes(key)
+        && /^\d+(?:\.\d+)?$/u.test(scalar)
+        && Number.isFinite(Number(scalar)) && Number(scalar) > 0) {
+        // These limits belong to Codex; Control has its own bounded timeouts.
+      } else {
+        throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
+      }
       continue;
     }
     if (!/^LATTICE_[A-Z0-9_]+$/u.test(key) || Object.hasOwn(environment, key)) {
@@ -137,7 +153,7 @@ function parseLatticeConfiguration(text) {
     }
     environment[key] = parseTomlString(rawValue);
   }
-  if (!latticeSectionSeen || !environmentSectionSeen || !command) {
+  if (!enabled || !latticeSectionSeen || !environmentSectionSeen || !command) {
     throw configurationError("LATTICE_RUNTIME_NOT_CONFIGURED");
   }
   return { command, environment };
