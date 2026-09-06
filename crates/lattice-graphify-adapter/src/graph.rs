@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashSet};
 
 use serde_json::{Map, Value};
@@ -289,6 +290,13 @@ fn parse_graph_mode(
                 "GRAPHIFY_GRAPH_NODE_NOT_OBJECT",
             )
         })?;
+        let display_node;
+        let node = if partial_display {
+            display_node = display_attributes(node, false)?;
+            &display_node
+        } else {
+            node
+        };
         require_allowed_keys(
             node,
             &[
@@ -398,6 +406,13 @@ fn parse_graph_mode(
                 "GRAPHIFY_GRAPH_EDGE_NOT_OBJECT",
             )
         })?;
+        let display_edge;
+        let edge = if partial_display {
+            display_edge = display_attributes(edge, true)?;
+            &display_edge
+        } else {
+            edge
+        };
         require_allowed_keys(
             edge,
             &[
@@ -512,6 +527,53 @@ fn parse_graph_mode(
         dropped_source_less_nodes,
         dropped_unbound_edges,
     })
+}
+
+// C# namespace-resolution metadata is internal to pinned Graphify. The UI
+// consumes only the normal source-bound fields. Unresolved edges stay uncertain.
+fn display_attributes(
+    record: &Map<String, Value>,
+    edge: bool,
+) -> GraphifyAdapterResult<Cow<'_, Map<String, Value>>> {
+    if !record.contains_key("metadata") && !record.contains_key("deferred") {
+        return Ok(Cow::Borrowed(record));
+    }
+    let reject = || {
+        error(
+            GraphifyAdapterErrorKind::MalformedOutput,
+            "GRAPHIFY_DISPLAY_ATTRIBUTES_REJECTED",
+        )
+    };
+    if record.contains_key("metadata")
+        && !record
+            .get("source_file")
+            .and_then(Value::as_str)
+            .is_some_and(|file| file.ends_with(".cs"))
+    {
+        return Err(reject());
+    }
+    if let Some(metadata) = record.get("metadata") {
+        if !metadata.is_object() || metadata.to_string().len() > 16384 {
+            return Err(reject());
+        }
+    }
+    let mut projected = record.clone();
+    projected.remove("metadata");
+    if let Some(deferred) = projected.remove("deferred") {
+        if !edge || !deferred.is_boolean() {
+            return Err(reject());
+        }
+        if deferred == Value::Bool(true) {
+            if !matches!(
+                projected.get("confidence").and_then(Value::as_str),
+                Some("EXTRACTED" | "INFERRED" | "AMBIGUOUS")
+            ) {
+                return Err(reject());
+            }
+            projected.insert("confidence".into(), Value::String("AMBIGUOUS".into()));
+        }
+    }
+    Ok(Cow::Owned(projected))
 }
 
 fn validate_optional_scalar_fields(
@@ -872,6 +934,32 @@ mod tests {
         assert!(
             parse_graph_for_display(&serde_json::to_vec(&data).unwrap(), &snapshot, limits())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn display_retains_uncertainty_for_csharp_deferred_edges() {
+        let mut record =
+            serde_json::json!({"source_file":"src/app.cs", "metadata":{"namespace":"App"},
+            "deferred":true,"confidence":"EXTRACTED"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let display = display_attributes(&record, true).unwrap();
+        assert_eq!(display["confidence"], "AMBIGUOUS");
+        assert!(!display.contains_key("metadata"));
+        record.insert("deferred".into(), Value::String("true".into()));
+        assert!(display_attributes(&record, true).is_err());
+        record.insert("source_file".into(), Value::String("src/app.rs".into()));
+        assert!(display_attributes(&record, true).is_err());
+        let indirect = serde_json::json!({"source_file":"src/app.mjs", "deferred":true,
+            "confidence":"EXTRACTED"})
+        .as_object()
+        .unwrap()
+        .clone();
+        assert_eq!(
+            display_attributes(&indirect, true).unwrap()["confidence"],
+            "AMBIGUOUS"
         );
     }
 
