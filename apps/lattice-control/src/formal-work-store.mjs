@@ -18,6 +18,15 @@ function assertIdentity(snapshot, revision, expectedDigest) {
 function pendingCount(claim) {
   return claim?.pending_questions?.length ?? claim?.pending_questions_count ?? 0;
 }
+function snapshotProgress(value) {
+  let result = "", bytes = 0;
+  for (const character of value.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim()) {
+    bytes += Buffer.byteLength(character);
+    if (bytes > 4096) break;
+    result += character;
+  }
+  return result || "進度已保存；請查看工作詳情。";
+}
 function taskProjection(task, facts) {
   const metadata = facts.metadata.find((row) => row.task_ref === task.task_ref);
   const claims = facts.claims.filter((row) => row.task_ref === task.task_ref);
@@ -78,7 +87,8 @@ export function projectFormalWork(pages, { maxNodes = 256, maxEdges = 1024 } = {
   if (dependencies.length + relations.filter((row) => row.parent_work_item_id).length > maxEdges) {
     throw formalWorkError("CONTROL_WORK_EDGE_LIMIT_EXCEEDED", "工作關聯超過這次快照的範圍。");
   }
-  const snapshot = projectControlWorkSnapshot({ projectId: first.project.id, nodes: rows,
+  const snapshot = projectControlWorkSnapshot({ projectId: first.project.id,
+    nodes: rows.map((row) => ({ ...row, progress: snapshotProgress(row.progress) })),
     relations, dependencies, source, sourceIdentity: pages.map((page) => page.revision) });
   return { project: first.project, snapshot, rows, facts,
     decisionsTruncated: pages.some((page) => page.product.truncation?.decisions === true) };

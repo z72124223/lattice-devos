@@ -65,6 +65,24 @@ test("Runtime failure after invalidation cannot fall back to old local facts", a
   await assert.rejects(store.getWorkSnapshot({ projectId: "project-a" }), { code: "RUNTIME_UNAVAILABLE" });
 });
 
+test("native multiline and long Unicode progress cannot break the work tree or imply completion", () => {
+  for (const summary of [JSON.stringify({ summary: "檢查通過\n等待獨立驗收", artifact_path: "acceptance.mjs" }, null, 2),
+    "檢查\r\n" + "進度✅".repeat(1400), "\u001b\u0000\u007f"]) {
+    const input = page();
+    input.product.claims.push({ claim_id: "claim-a", task_ref: taskA, phase: "EXECUTION", turn_status: "TURN_COMPLETED" });
+    input.product.observations.push({ claim_id: "claim-a", kind: "TURN_COMPLETED", summary,
+      observed_at: "2026-09-06T05:11:00Z" });
+    const { snapshot, rows, facts } = projectFormalWork([input]);
+    const work = snapshot.tree.nodes.find((node) => node.id === taskA);
+    assert.equal(work.status, "codex_done");
+    assert.equal(work.completion_verified, false);
+    assert.ok(work.progress.length > 0 && Buffer.byteLength(work.progress) <= 4096);
+    assert.doesNotMatch(work.progress, /[\u0000-\u001f\u007f-\u009f\ufffd]/u);
+    assert.equal(rows[0].progress, summary.slice(0, 4096));
+    assert.equal(facts.observations[0].summary, summary);
+  }
+});
+
 test("node selection is bound to the same tree and graph identity", async () => {
   const store = new FormalWorkStore({ runtime: { call: async () => page() } });
   const snapshot = await store.getWorkSnapshot({ projectId: "project-a" });
