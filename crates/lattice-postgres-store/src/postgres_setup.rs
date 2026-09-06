@@ -2500,6 +2500,22 @@ const SCHEMA_V8_OWNED_CATALOG_SIGNATURES: [&str; 9] = [
     "2369d531b85167613fdf006db26419b1cb092f7d33d4b325e359f428c30e3186",
     "093efdae2f43f0f5adfdb1296010e990fed1120e54401537939454a2952e7d8e",
 ];
+// Exact combined catalog after the Memory-owned v3 Store-v8 successor. No
+// relation, constraint, identity, history or privilege signature changes.
+const SCHEMA_V8_MEMORY_SUCCESSOR_FUNCTION_SIGNATURE: &str =
+    "d5e57eec40a54db06189d0bb98c0026b64de9da3b25bb1c1ed1b807f64f7c4ab";
+
+fn store_v8_catalog_signatures(
+    function_signature: &str,
+) -> Result<[&'static str; 9], PostgresStoreSetupError> {
+    let mut signatures = SCHEMA_V8_OWNED_CATALOG_SIGNATURES;
+    if function_signature == SCHEMA_V8_MEMORY_SUCCESSOR_FUNCTION_SIGNATURE {
+        signatures[4] = SCHEMA_V8_MEMORY_SUCCESSOR_FUNCTION_SIGNATURE;
+    } else if function_signature != signatures[4] {
+        return Err(catalog_error());
+    }
+    Ok(signatures)
+}
 const SCHEMA_V6_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [61, 0, 0, 0, 0, 0, 0, 74, 0, 0];
 const SCHEMA_V7_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [71, 0, 0, 0, 0, 0, 0, 114, 0, 0];
 const SCHEMA_V8_FORBIDDEN_SCHEMA_OBJECT_COUNTS: [i64; 10] = [74, 0, 0, 0, 0, 0, 0, 126, 0, 0];
@@ -3714,7 +3730,15 @@ fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
     }
     verify_schema_v8_forbidden_object_profile(client, managed_foreman.is_some())?;
     if manifest.entry_count() == migration_manifest().len() {
-        verify_owned_catalog_signature_profile(client, &SCHEMA_V8_OWNED_CATALOG_SIGNATURES)?;
+        let function_signature = catalog_signature(
+            client,
+            FUNCTION_SIGNATURE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?;
+        verify_owned_catalog_signature_profile(
+            client,
+            &store_v8_catalog_signatures(&function_signature)?,
+        )?;
         verify_store_v8_runtime_successor_functions(client)?;
         verify_writer_lease_v5_store_v8_successor(client)?;
         verify_exact_default_acl_signature(client)?;
@@ -9732,6 +9756,20 @@ fn permission_error() -> PostgresStoreSetupError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn store_v8_accepts_only_the_exact_memory_successor_catalog() {
+        let old = super::SCHEMA_V8_OWNED_CATALOG_SIGNATURES;
+        assert_eq!(super::store_v8_catalog_signatures(old[4]).unwrap(), old);
+        let next = super::store_v8_catalog_signatures(
+            super::SCHEMA_V8_MEMORY_SUCCESSOR_FUNCTION_SIGNATURE,
+        )
+        .unwrap();
+        for index in [0, 1, 2, 3, 5, 6, 7, 8] {
+            assert_eq!(old[index], next[index]);
+        }
+        assert!(super::store_v8_catalog_signatures(&"1".repeat(64)).is_err());
+    }
+
     use super::{
         AUTONOMY_PROFILE_SIGNATURE_SQL, CODEBASE_MEMORY_EXTENSION_ID,
         CODEBASE_MEMORY_V3_GLOBAL_SCHEMA_VERSION, CODEBASE_MEMORY_V3_MANIFEST_SHA256,
