@@ -285,7 +285,6 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, 
   const detailButton = document.querySelector('#work-selected-detail');
   const childButton = document.querySelector('#work-add-child');
   const selectionLabel = document.querySelector('#work-selection');
-  const lineagePanel = document.querySelector('#work-lineage');
   const actualWork = (id) => snapshot?.tree.nodes.some(work => work.id === id)
     ? { ...snapshot.graph.nodes.find(work => work.id === id), ...snapshot.tree.nodes.find(work => work.id === id) } : null;
 
@@ -329,26 +328,13 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, 
       ? `已選：${work.title}${branchCount ? '' : filter === 'all' ? ' · 沒有下層分支' : ' · 沒有符合篩選的下層分支'}`
       : '直接點節點，展開或收合它下面的分支';
     selectionLabel.title = selectionLabel.textContent;
-    if (lineagePanel) {
-      lineagePanel.replaceChildren();
-      lineagePanel.hidden = example || !work || work.id === '__project__';
-      if (!lineagePanel.hidden && snapshot) {
-        const lineage = workLineage(snapshot.tree, work.id);
-        const trail = html('nav', 'work-lineage-path'); trail.setAttribute('aria-label', '已保存的工作路徑');
-        for (const [index, ancestor] of lineage.path.entries()) {
-          if (index) trail.append(document.createTextNode(' → '));
-          const link = html('button', '', ancestor.title); link.type = 'button';
-          link.addEventListener('click', () => { selected = ancestor.id; updateSelection(ancestor, ancestor.children?.length); onSelect?.(ancestor); render(); });
-          trail.append(link);
-        }
-        lineagePanel.append(trail, html('p', '', lineage.description), html('p', 'muted', lineage.continuation));
-        if (lineage.parent) {
-          const back = html('button', '', '回到上層工作：' + lineage.parent.title); back.type = 'button';
-          back.addEventListener('click', () => onOpen?.(lineage.parent.id)); lineagePanel.append(back);
-        }
-      }
+    if (!example && snapshot && work && work.id !== '__project__') {
+      const lineage = workLineage(snapshot.tree, work.id);
+      selectionLabel.textContent = lineage.path.map(node => node.title).join(' → ');
+      selectionLabel.title = lineage.description + '\n' + lineage.continuation + '\n點「查看詳情」可回到上層工作。';
     }
   }
+
   function showExampleDetail(work) {
     const dialog = document.querySelector('#work-example-detail');
     dialog.querySelector('h2').textContent = work.title;
