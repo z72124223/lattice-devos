@@ -344,6 +344,18 @@ fn parse_graph_mode(
         }
         validate_optional_scalar_fields(node, limits.max_text_bytes)?;
         let source_file = required_text_allow_empty(node, "source_file", limits.max_text_bytes)?;
+        // The pinned SQL grammar emits file-container nodes without a source
+        // line. Exclude only these containers; retain located SQL entities and
+        // their edges, and never invent a line number for the container.
+        if source_file.ends_with(".sql")
+            && node.get("source_location") == Some(&Value::Null)
+            && !node.contains_key("type")
+            && !node.contains_key("kind")
+        {
+            validate_manifest_path(source_file, &manifest_paths)?;
+            dropped_source_less_nodes += 1;
+            continue;
+        }
         // Pinned Graphify emits null locations for .NET project metadata.
         // The display excludes those records; it never fabricates a source line.
         if partial_display
@@ -426,6 +438,7 @@ fn parse_graph_mode(
                 "source_location",
                 "weight",
                 "_origin",
+                "deferred",
             ],
             "GRAPHIFY_GRAPH_EDGE_SCHEMA_REJECTED",
         )?;
@@ -438,7 +451,7 @@ fn parse_graph_mode(
                 "GRAPHIFY_GRAPH_EDGE_RELATION_UNKNOWN",
             ));
         }
-        let confidence = match required_text(edge, "confidence", 32)? {
+        let mut confidence = match required_text(edge, "confidence", 32)? {
             "EXTRACTED" => GraphConfidence::Extracted,
             "INFERRED" => GraphConfidence::Inferred,
             "AMBIGUOUS" => GraphConfidence::Ambiguous,
@@ -449,6 +462,16 @@ fn parse_graph_mode(
                 ));
             }
         };
+        match edge.get("deferred") {
+            Some(Value::Bool(true)) => confidence = GraphConfidence::Ambiguous,
+            Some(Value::Bool(false)) | None => {}
+            _ => {
+                return Err(error(
+                    GraphifyAdapterErrorKind::MalformedOutput,
+                    "GRAPHIFY_GRAPH_EDGE_DEFERRED_MALFORMED",
+                ));
+            }
+        }
         if required_text(edge, "_origin", 32)? != "ast" {
             return Err(error(
                 GraphifyAdapterErrorKind::PartialOutput,
@@ -787,6 +810,7 @@ fn is_known_relation(relation: &str) -> bool {
             | "method"
             | "overrides"
             | "rationale_for"
+            | "reads_from"
             | "re_exports"
             | "references"
             | "references_constant"
@@ -1036,5 +1060,94 @@ mod tests {
         let second = parse_graph(&valid_graph(), &snapshot, limits()).expect("second");
         assert_eq!(first.record_set_sha256, second.record_set_sha256);
         assert_eq!(first.raw_graph_sha256, second.raw_graph_sha256);
+    }
+
+    #[test]
+    fn durable_graph_keeps_dynamic_imports_as_uncertain() {
+        let mut raw: Value = serde_json::from_slice(&valid_graph()).unwrap();
+        raw["edges"][0]["deferred"] = true.into();
+        let graph = parse_graph(&serde_json::to_vec(&raw).unwrap(), &snapshot(), limits()).unwrap();
+        assert_eq!(graph.edges[0].confidence, GraphConfidence::Ambiguous);
+        raw["edges"][0]["deferred"] = "true".into();
+        assert!(parse_graph(&serde_json::to_vec(&raw).unwrap(), &snapshot(), limits()).is_err());
+    }
+
+    #[test]
+    fn sql_read_dependencies_remain_queryable() {
+        let mut raw: Value = serde_json::from_slice(&valid_graph()).unwrap();
+        raw["edges"][0]["relation"] = "reads_from".into();
+        let graph = parse_graph(&serde_json::to_vec(&raw).unwrap(), &snapshot(), limits()).unwrap();
+        assert_eq!(graph.edges[0].relation, "reads_from");
+    }
+
+    #[test]
+    fn sql_file_containers_without_lines_do_not_discard_located_entities() {
+        let mut raw: Value = serde_json::from_slice(&valid_graph()).unwrap();
+        let root = snapshot().root().to_path_buf();
+        let sql = b"CREATE TABLE customers (id INTEGER);\n";
+        fs::write(root.join("schema.sql"), sql).unwrap();
+        let snapshot = MaterializedSnapshot::for_test(root, vec![("schema.sql", sql)]);
+        for node in raw["nodes"].as_array_mut().unwrap() {
+            if node["source_file"] == "src/lib.rs" {
+                node["source_file"] = "schema.sql".into();
+            }
+        }
+        for edge in raw["edges"].as_array_mut().unwrap() {
+            edge["source_file"] = "schema.sql".into();
+        }
+        raw["nodes"][0]["source_location"] = Value::Null;
+        let parsed = parse_graph(&serde_json::to_vec(&raw).unwrap(), &snapshot, limits()).unwrap();
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "src_lib_main");
+        assert_eq!(parsed.dropped_source_less_nodes, 2);
+        raw["nodes"][0]["source_file"] = "foreign.sql".into();
+        assert!(parse_graph(&serde_json::to_vec(&raw).unwrap(), &snapshot, limits()).is_err());
+    }
+
+    #[test]
+    #[ignore = "offline diagnostic of a retained real Graphify payload and its materialized source"]
+    fn retained_graph_parses_without_rerunning_extraction() {
+        let file = std::env::var("LATTICE_TEST_RETAINED_GRAPH").unwrap();
+        let root = std::path::PathBuf::from(std::env::var("LATTICE_TEST_RETAINED_SOURCE").unwrap())
+            .canonicalize()
+            .unwrap();
+        let bytes = fs::read(file).unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let paths: BTreeSet<_> = raw["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(raw["edges"].as_array().unwrap())
+            .filter_map(|item| item["source_file"].as_str())
+            .filter(|path| !path.is_empty())
+            .collect();
+        let sources: Vec<_> = paths
+            .iter()
+            .map(|path| {
+                let file = root.join(path).canonicalize().unwrap();
+                assert!(file.starts_with(&root));
+                (*path, fs::read(file).unwrap())
+            })
+            .collect();
+        let snapshot = MaterializedSnapshot::for_test(
+            root,
+            sources.iter().map(|(p, b)| (*p, b.as_slice())).collect(),
+        );
+        let graph = parse_graph(
+            &bytes,
+            &snapshot,
+            GraphParseLimits {
+                max_nodes: 100_000,
+                max_edges: 250_000,
+                max_text_bytes: 1024,
+            },
+        )
+        .unwrap();
+        println!(
+            "retained real graph: {} nodes, {} edges, {} unlocated nodes excluded",
+            graph.nodes.len(),
+            graph.edges.len(),
+            graph.dropped_source_less_nodes
+        );
     }
 }
