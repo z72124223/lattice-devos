@@ -1363,12 +1363,19 @@ impl VerifiedCodexProxyConfig {
             ));
         }
         CodexProxyInvocation::parse(["app-server", "--strict-config"])?;
-        let environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
+        let mut environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
         if digest_environment(&environment)? != self.child_environment_sha256 {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::CrossBinding,
                 "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
             ));
+        }
+        // The Codex host owns renewal. Read its current access token at launch,
+        // without copying refresh credentials or persisting authentication.
+        // Secret bytes never participate in receipts or configuration hashes.
+        if let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE") {
+            let token = read_host_access_token(Path::new(&source))?;
+            environment.insert(OsString::from("CODEX_ACCESS_TOKEN"), OsString::from(token));
         }
         Ok(crate::windows_job::WindowsJobCommandPlan {
             executable: self.launcher.clone(),
@@ -1440,6 +1447,66 @@ impl VerifiedCodexProxyConfig {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(windows)]
+fn read_host_access_token(source: &Path) -> HermesAdapterResult<String> {
+    let rejected = || configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
+    if !source.is_absolute() || source.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
+        return Err(rejected());
+    }
+    crate::reject_link_or_reparse_ancestors(source).map_err(|_| rejected())?;
+    let bytes = bounded_file_bytes(source, MAX_CODEX_AUTH_BYTES).map_err(|_| rejected())?;
+    access_token_from_host_auth(&bytes)
+}
+
+#[cfg(any(windows, test))]
+fn access_token_from_host_auth(bytes: &[u8]) -> HermesAdapterResult<String> {
+    let rejected = || configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
+    let auth: Value = serde_json::from_slice(bytes).map_err(|_| rejected())?;
+    if auth.get("auth_mode").and_then(Value::as_str) != Some("chatgpt") {
+        return Err(rejected());
+    }
+    auth.pointer("/tokens/access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty() && token.len() <= 32_768
+            && token.bytes().all(|byte| byte.is_ascii_graphic()))
+        .map(ToOwned::to_owned)
+        .ok_or_else(rejected)
+}
+
+#[cfg(all(windows, test))]
+mod host_auth_tests {
+    use super::*;
+
+    #[test]
+    fn host_access_is_read_fresh_without_writing_or_exporting_refresh_credentials() {
+        let root = std::env::temp_dir().join(format!("lattice-host-auth-{}-{}",
+            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("auth.json");
+        for token in ["fixture-first-access", "fixture-renewed-access"] {
+            let bytes = serde_json::to_vec(&json!({"auth_mode":"chatgpt",
+                "tokens":{"access_token":token,"refresh_token":"fixture-refresh-never-export"}})).unwrap();
+            fs::write(&source, &bytes).unwrap();
+            assert_eq!(read_host_access_token(&source).unwrap(), token);
+            assert_eq!(fs::read(&source).unwrap(), bytes);
+            assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        }
+        fs::remove_file(source).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn unavailable_host_auth_never_falls_back_to_a_stale_copy() {
+        for bytes in [b"{}".as_slice(), br#"{"auth_mode":"apikey","tokens":{"access_token":"fixture"}}"#,
+            br#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"fixture"}}"#,
+            br#"{"auth_mode":"chatgpt","tokens":{"access_token":"bad\ntoken"}}"#] {
+            let failure = access_token_from_host_auth(bytes).unwrap_err();
+            assert_eq!(failure.code(), "HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
+        }
+        assert!(read_host_access_token(Path::new("auth.json")).is_err());
     }
 }
 
@@ -2565,6 +2632,14 @@ fn direct_protocol_error(code: i32) -> HermesAdapterError {
             HermesAdapterErrorKind::Malformed,
             "HERMES_CODEX_DIRECT_DUPLICATE_TERMINAL_REJECTED",
         ),
+        89 => (
+            HermesAdapterErrorKind::Failed,
+            "HERMES_CODEX_AUTHENTICATION_REQUIRED",
+        ),
+        90 => (
+            HermesAdapterErrorKind::Failed,
+            "HERMES_CODEX_UPSTREAM_FAILED",
+        ),
         79 => (HermesAdapterErrorKind::Transport, "HERMES_CODEX_DIRECT_EOF"),
         80 => (
             HermesAdapterErrorKind::Transport,
@@ -2931,6 +3006,21 @@ impl CodexBrokerProtocol {
         match &frame.kind {
             CodexAppServerFrameKind::Response { id } => self.ingest_response(*id, &frame.value)?,
             CodexAppServerFrameKind::ServerRequest { .. } => return Err(74),
+            CodexAppServerFrameKind::Lifecycle { method } if method == "error" => {
+                self.require_turn_request()?;
+                let params = frame.value.get("params").and_then(Value::as_object).ok_or(76)?;
+                self.validate_thread_binding(params, 76)?;
+                let turn_id = required_nonempty_string(params, "turnId").map_err(|_| 76)?;
+                self.bind_turn_id(&turn_id, 76)?;
+                // Report a bounded reason, never echo provider text or retry
+                // credentials. An error notification cannot become success.
+                let error = params.get("error").and_then(Value::as_object).ok_or(76)?;
+                let authentication = error.get("codexErrorInfo").and_then(Value::as_str)
+                    == Some("unauthorized")
+                    || error.get("message").and_then(Value::as_str).is_some_and(|message|
+                        message.contains("refresh token was revoked"));
+                return Err(if authentication { 89 } else { 90 });
+            }
             CodexAppServerFrameKind::Lifecycle { method } if method == "thread/started" => {
                 if !self.requests_sent[CodexBrokerRequest::ThreadStart.index()]
                     || self.lifecycle_starts_seen[0]
@@ -4065,6 +4155,7 @@ fn classify_notification_envelope(
             matches!(
                 *method,
                 "thread/started"
+                    | "error"
                     | "warning"
                     | "remoteControl/status/changed"
                     | "mcpServer/startupStatus/updated"
@@ -4122,6 +4213,21 @@ fn classify_notification(
         .and_then(Value::as_object)
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     match method {
+        "error" => {
+            require_control_keys(params, &["error", "threadId", "turnId", "willRetry"])?;
+            let error = params.get("error").and_then(Value::as_object)
+                .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
+            if !params.get("threadId").is_some_and(Value::is_string)
+                || !params.get("turnId").is_some_and(Value::is_string)
+                || !params.get("willRetry").is_some_and(Value::is_boolean)
+                || !error.get("message").is_some_and(Value::is_string)
+                || error.keys().any(|key| !["message", "codexErrorInfo", "additionalDetails"].contains(&key.as_str()))
+                || error.get("additionalDetails").is_some_and(|value| !value.is_null() && !value.is_string())
+                || error.get("codexErrorInfo").is_some_and(|value| !value.is_null() && !value.is_string() && !value.is_object())
+            {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
         "remoteControl/status/changed" => {
             require_control_keys(
                 params,

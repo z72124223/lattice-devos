@@ -792,6 +792,28 @@ fn new_codex_protocol_fixture() -> (CodexBrokerProtocol, std::path::PathBuf) {
     (protocol, fixture_root)
 }
 
+#[test]
+fn upstream_error_reports_authentication_without_accepting_success_or_foreign_turns() {
+    for (thread_id, error, expected) in [
+        ("thread-1", serde_json::json!({"message":"Sign in again", "codexErrorInfo":"unauthorized"}), 89),
+        ("thread-1", serde_json::json!({"message":"Your refresh token was revoked. Please log out and sign in again.", "codexErrorInfo":"other"}), 89),
+        ("thread-1", serde_json::json!({"message":"Provider failed", "codexErrorInfo":"other"}), 90),
+        ("wrong-thread", serde_json::json!({"message":"Sign in again", "codexErrorInfo":"unauthorized"}), 76),
+    ] {
+        let (mut protocol, root) = new_codex_protocol_fixture();
+        admit_valid_initialize(&mut protocol, &root.join("codex-home"));
+        admit_valid_thread(&mut protocol, &root.join("empty-cwd"));
+        protocol.mark_request_sent(CodexBrokerRequest::TurnStart).expect("turn sent");
+        let notification = serde_json::json!({
+            "emittedAtMs": 1788685648000u64,
+            "method": "error",
+            "params": {"threadId":thread_id, "turnId":"turn-1", "willRetry":false, "error":error}
+        });
+        assert_eq!(protocol.ingest_json_line(notification.to_string().as_bytes()), Err(expected));
+        std::fs::remove_dir_all(root).expect("remove owned protocol fixture");
+    }
+}
+
 fn admit_valid_initialize(protocol: &mut CodexBrokerProtocol, codex_home: &std::path::Path) {
     protocol
         .mark_request_sent(CodexBrokerRequest::Initialize)
