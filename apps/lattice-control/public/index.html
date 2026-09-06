@@ -315,6 +315,7 @@
     }
   </style>
   <link rel="stylesheet" href="/work-view.css">
+  <link rel="stylesheet" href="/code-graph.css">
 </head>
 <body>
 <main class="app" data-lattice-shell="desktop-cockpit">
@@ -351,13 +352,14 @@
         </section>
         <section id="work-views" class="work-views" aria-label="工作視圖">
           <header class="work-view-header">
-            <h1><span>LATTICE</span><i aria-hidden="true"></i>工作視圖</h1>
+            <h1><span>LATTICE</span><i aria-hidden="true"></i>工作樹</h1>
             <div class="work-view-tools">
               <button id="work-back" type="button">對話</button>
               <button id="work-decisions" type="button">決策記憶</button>
               <div class="work-source-wrap"><span id="work-source-label">我的工作</span><button id="work-source" type="button" aria-pressed="false">我的工作 · 查看設計示例</button></div>
             </div>
           </header>
+          <nav class="view-switch" aria-label="切換工作視圖"><button type="button" data-work-nav="work-tree" aria-current="page">工作樹 · 看進度</button><button type="button" data-work-nav="work-graph">工作圖譜 · 查程式影響</button></nav>
           <div class="work-controls">
             <label class="work-project-label">查看專案 <select id="work-project" aria-label="查看專案"><option value="">正在讀取專案…</option></select></label>
             <div id="work-filters" class="work-filters" role="group" aria-label="依工作狀態篩選"></div>
@@ -366,11 +368,6 @@
           </div>
           <p id="work-empty" role="status">正在讀取工作…</p>
           <div id="work-diagrams" class="work-diagrams" hidden>
-            <section id="core-work-graph" class="work-view-card" aria-labelledby="graph-heading">
-              <header><h2 id="graph-heading">工作圖譜</h2><p>哪些工作互相影響？</p></header>
-              <div class="work-diagram-scroll" tabindex="0" aria-label="工作圖譜，可捲動查看所有節點"><div class="work-graph-canvas"><svg id="graph-edge-layer" aria-hidden="true"></svg><svg id="graph-list" aria-label="工作與依賴關係"></svg></div></div>
-              <p id="graph-note" class="work-note"></p>
-            </section>
             <section id="core-work-tree" class="work-view-card" aria-labelledby="tree-heading">
               <header><h2 id="tree-heading">工作樹</h2><p>一個目標，拆成哪些工作？</p></header>
               <div class="work-diagram-scroll" tabindex="0" aria-label="工作樹，可捲動查看所有分支"><div id="tree-list"></div></div>
@@ -383,6 +380,24 @@
             <span style="--legend-color:#aebdca"><i aria-hidden="true"></i>待開始</span>
             <span style="--legend-color:#ffc43d"><i aria-hidden="true"></i>等你決定</span>
           </footer>
+        </section>
+        <section id="code-views" class="code-views" aria-label="程式影響圖譜" hidden>
+          <header class="work-view-header"><h1><span>LATTICE</span><i aria-hidden="true"></i>工作圖譜</h1><div class="work-view-tools"><button type="button" data-code-nav="conversation">對話</button><button type="button" data-code-nav="decisions">決策記憶</button></div></header>
+          <nav class="view-switch" aria-label="切換工作視圖"><button type="button" data-code-nav="work-tree">工作樹 · 看進度</button><button type="button" data-code-nav="work-graph" aria-current="page">工作圖譜 · 查程式影響</button></nav>
+          <p>改這段程式，可能影響哪裡？搜尋程式後，點節點展開相連的呼叫與引用。</p>
+          <div class="code-controls">
+            <label>查看專案 <select id="code-project" aria-label="圖譜專案"></select></label>
+            <label>追查方向 <select id="code-direction"><option value="incoming">反向 · 哪些地方使用它</option><option value="outgoing">正向 · 它使用哪些程式</option><option value="both">雙向 · 所有相連關係</option></select></label>
+            <label>關係 <select id="code-relation"><option value="all">全部關係</option><option value="calls">函式呼叫</option><option value="imports_from">程式引用</option><option value="contains">包含關係</option><option value="references">參照關係</option></select></label>
+            <button id="code-analyze" type="button">分析目前版本</button><button id="code-reload" type="button">重新讀取</button>
+          </div>
+          <p id="code-notice" role="status">正在讀取程式圖譜…</p><p id="code-summary"></p>
+          <details class="code-source"><summary>分析來源與程式版本</summary><label>程式來源 <select id="code-checkout" aria-label="程式來源版本"></select></label><p id="code-source-path"></p></details>
+          <section id="core-work-graph" class="code-layout" aria-label="程式與呼叫關係">
+            <aside class="code-search-panel"><label for="code-search">搜尋程式、函式或檔案</label><input id="code-search" type="search" placeholder="例如：付款函式或檔案名稱" maxlength="160"><p id="code-search-count">分析完成後可搜尋</p><div id="code-results"></div></aside>
+            <div class="code-map-panel"><div class="code-map-toolbar"><button id="code-expand" type="button">再展開一層</button><button id="code-collapse" type="button">收合分支</button><button id="code-zoom-in" type="button" aria-label="放大程式圖譜">＋</button><button id="code-zoom-out" type="button" aria-label="縮小程式圖譜">－</button></div><div class="code-scroll" tabindex="0" aria-label="程式圖譜，可捲動查看分支"><svg id="code-canvas" aria-label="程式呼叫圖"></svg></div><p id="code-canvas-note">分析資料尚未載入。</p></div>
+          </section>
+          <section id="code-detail" aria-label="程式節點詳情"></section>
         </section>
         <section id="core-decisions" class="core-panel" role="tabpanel" aria-labelledby="tab-decisions" data-core-panel="decisions" hidden>
           <div class="panel"><div class="panel-heading"><div><h2>決策記憶</h2><p>只保存明確決策、來源與取代關係。</p></div><span id="decision-identity" class="identity">尚未載入</span></div><div class="scroll-body"><div id="decision-list" class="decision-list"><div class="empty">目前沒有已確認的決策。</div></div></div></div>
@@ -413,6 +428,7 @@
 <dialog id="work-example-detail" aria-labelledby="work-example-title"><div class="dialog-head"><h2 id="work-example-title">設計示例</h2><button class="dialog-close" type="button" data-close-dialog="work-example-detail" aria-label="關閉">×</button></div><div class="dialog-body"><p></p></div></dialog>
 <script type="module">
   import { createWorkView } from '/work-view.mjs';
+  import { createCodeGraphView } from '/code-graph-view.mjs';
   const pendingKey = "lattice.control.pending-message.v1";
   const textSizeKey = "lattice.control.text-size.v1";
   const textSizes = new Set(["standard","comfortable","large"]);
@@ -445,6 +461,8 @@
   };
   state.viewProjectId=new URLSearchParams(location.search).get("project");state.workRequest=0;state.viewPacket=null;state.projects=[];
   const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore,onProjectChange:changeWorkProject});
+  const codeGraphView = createCodeGraphView({api,onNavigate:activateCore,onProjectChange:changeWorkProject});
+  for(const button of document.querySelectorAll('[data-work-nav]'))button.addEventListener('click',()=>activateCore(button.dataset.workNav));
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
   function showError(error,source="action") { nodes.error.textContent=error.message; nodes.error.dataset.source=source; }
   async function api(path,options={}) {
@@ -478,7 +496,9 @@
   }
   function activateCore(core){
     state.activeCore=core;
-    if(core==="work-graph"||core==="work-tree")workView.show();else workView.hide();
+    if(core==="work-tree")workView.show();else workView.hide();
+    if(core==="work-graph")codeGraphView.show();else codeGraphView.hide();
+    const url=new URL(location.href);url.searchParams.set('view',core);history.replaceState(null,'',url);
     document.body.dataset.activeCore=core;
     for(const tab of document.querySelectorAll("[data-core-target]")){const active=tab.dataset.coreTarget===core;tab.classList.toggle("is-active",active);tab.setAttribute("aria-selected",String(active));tab.tabIndex=active?0:-1;}
     for(const panel of document.querySelectorAll("[data-core-panel]"))panel.hidden=panel.dataset.corePanel!==core;
@@ -562,7 +582,7 @@
     nodes.recentList.replaceChildren(...graph.nodes.slice(0,3).map((work)=>{
       const button=element("button",undefined,"recent-item");button.type="button";
       const dot=element("span",undefined,"recent-dot "+(work.blocker.status==="blocked"||work.status==="failed"?"amber":work.status==="verified"||work.status==="archived"?"green":"cyan"));
-      button.append(dot,document.createTextNode(work.title));button.addEventListener("click",()=>{activateCore("work-graph");selectWork(work);});return button;
+      button.append(dot,document.createTextNode(work.title));button.addEventListener("click",()=>{activateCore("work-tree");selectWork(work);});return button;
     }));
   }
   function renderWorkGraph(graph){renderRecentWork(graph);}
@@ -599,7 +619,7 @@
     }
     try{state.surface=await api("/api/four-core");renderSurface();}catch(error){showError(error,"conversation-poll");}
     if(!state.viewProjectId)state.viewProjectId=state.surface?.context?.project_id;
-    workView.setProjects(state.projects,state.viewProjectId);
+    workView.setProjects(state.projects,state.viewProjectId);codeGraphView.setProjects(state.projects,state.viewProjectId);
     await refreshWorkView();
     if(nodes.workDialog.open&&nodes.workDialog.dataset.formalTask&&Date.now()-(state.formalRefreshedAt||0)>10000
       &&![...nodes.workDetail.querySelectorAll("input,textarea")].some((input)=>input.value)){
@@ -609,6 +629,9 @@
   function currentWorkProjectId(){return state.viewProjectId;}
   async function changeWorkProject(projectId){
     state.viewProjectId=projectId;state.viewPacket=null;state.workRequest++;
+    const url=new URL(location.href);url.searchParams.set('project',projectId);url.searchParams.delete('workExample');history.replaceState(null,'',url);
+    workView.selectLiveProject();workView.setProjects(state.projects,projectId);
+    codeGraphView.setProjects(state.projects,projectId);
     if(nodes.workDialog.open)nodes.workDialog.close();
     workView.update(null,{project_id:projectId,project_name:state.projects.find((project)=>project.id===projectId)?.name,status_text:"正在讀取這個專案的工作…"});
     await refreshWorkView();
@@ -807,7 +830,7 @@
     }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}finally{button.disabled=false;}
   });
 
-  applyTextSize(document.documentElement.dataset.textSize,{persist:false});resizeMessageInput();activateCore("work-graph");await poll();setInterval(()=>void poll(),2_000);
+  applyTextSize(document.documentElement.dataset.textSize,{persist:false});resizeMessageInput();activateCore(new URLSearchParams(location.search).get("view")==="work-graph"?"work-graph":"work-tree");await poll();setInterval(()=>void poll(),2_000);
 </script>
 </body>
 </html>

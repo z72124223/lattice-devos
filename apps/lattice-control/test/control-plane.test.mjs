@@ -6678,7 +6678,8 @@ test("local HTTP API persists projects and work items without starting Codex", a
     assert.match(pageHtml, /class="side-rail"/u);
     assert.match(pageHtml, /class="workspace-canvas"/u);
     assert.match(pageHtml, /id="desktop-inspector"/u);
-    assert.match(pageHtml, /id="graph-edge-layer"/u);
+    assert.match(pageHtml, /id="code-canvas"/u);
+    assert.doesNotMatch(pageHtml, /id="graph-edge-layer"/u);
     assert.match(pageHtml, /id="recent-work-list"/u);
     assert.match(pageHtml, /class="composer command-dock"/u);
     assert.doesNotMatch(pageHtml, /Long-lived workspace/u);

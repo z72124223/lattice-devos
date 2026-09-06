@@ -15,6 +15,7 @@ import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
 import { FormalWorkStore } from "./formal-work-store.mjs";
 import { FormalTaskService } from "./formal-task-service.mjs";
+import { CodeGraphStore } from './code-graph.mjs';
 
 const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
 const publicDirectory = path.resolve(sourceDirectory, "..", "public");
@@ -22,6 +23,9 @@ const publicAssets = new Map([
   ["/", ["index.html", "text/html; charset=utf-8"]],
   ["/work-view.mjs", ["work-view.mjs", "text/javascript; charset=utf-8"]],
   ["/work-view.css", ["work-view.css", "text/css; charset=utf-8"]],
+  ['/code-graph-view.mjs', ['code-graph-view.mjs', 'text/javascript; charset=utf-8']],
+  ['/code-graph-model.mjs', ['code-graph-model.mjs', 'text/javascript; charset=utf-8']],
+  ['/code-graph.css', ['code-graph.css', 'text/css; charset=utf-8']],
 ]);
 const maximumDesktopShutdownFrameBytes = 4_096;
 const desktopShutdownSchemaVersion = "lattice.control.desktop-shutdown.v1";
@@ -178,6 +182,7 @@ export function createLatticeServer({
     store,
     codex,
     formalWorkStore,
+    codeGraphStore: new CodeGraphStore(),
     ...(projectInspector ? { projectInspector } : {}),
     ...(conversationModel ? { conversationModel } : {}),
     ...(conversationStartTimeoutMs ? { conversationStartTimeoutMs } : {}),
@@ -334,6 +339,18 @@ export function createLatticeServer({
       }
       if (request.method === "GET" && url.pathname === "/api/work-view") {
         sendJson(response, 200, await service.workViewSurface(url.searchParams.get("projectId")));
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/code-graph') {
+        sendJson(response, 200, await service.codeGraphSurface(url.searchParams.get('projectId'),
+          Object.fromEntries(['node','q','direction','depth','checkout'].filter(k => url.searchParams.has(k))
+            .map(k => [k, url.searchParams.get(k)]))));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/code-graph/analyze') {
+        const body = await readMutationJson(request, url);
+        if (Object.keys(body).some(k => !['projectId','checkout'].includes(k))) throw new TypeError('Invalid code graph request');
+        sendJson(response, 202, await service.codeGraphSurface(body.projectId, {checkout:body.checkout}, true));
         return;
       }
       const fourCoreWorkItemId = fourCoreRouteId(url.pathname, "work");
@@ -531,6 +548,7 @@ export function createLatticeServer({
       .then(() => resolvedRuntimeHealth.close?.())
       .catch(() => { process.exitCode = 1; });
     service.close();
+    void service.codeGraphStore?.close();
     void codex.close();
     void formalTasks?.close();
     void formalWorkStore?.close();
@@ -565,6 +583,8 @@ export function createLatticeServer({
         });
         await drainRequests(deadline);
         service.close();
+        const graphResult = await settleWithin(service.codeGraphStore?.close(), deadline);
+        if (!graphResult.settled || graphResult.error) throw shutdownDrainTimeoutError();
         if (formalTasks) {
           const formalResult = await settleWithin(formalTasks.close(), deadline);
           if (!formalResult.settled || formalResult.error) throw shutdownDrainTimeoutError();

@@ -288,6 +288,7 @@ export class LatticeControlService {
     store,
     codex,
     formalWorkStore = null,
+    codeGraphStore = null,
     model = DEFAULT_CODEX_MODEL,
     conversationModel = DEFAULT_CODEX_MODEL,
     threadOptions = {},
@@ -301,6 +302,7 @@ export class LatticeControlService {
     this.store = store;
     this.codex = codex;
     this.formalWorkStore = formalWorkStore;
+    this.codeGraphStore = codeGraphStore;
     this.model = model;
     this.conversationModel = conversationModel;
     this.threadOptions = { ...threadOptions };
@@ -949,6 +951,14 @@ export class LatticeControlService {
         status_text: "這個專案已列在清單，但尚未接上正式工作紀錄；目前無法確認進度。" },
         work_snapshot: null, formal_work_enabled: true };
     }
+  }
+
+  codeGraphSurface(projectId, query = {}, refresh = false) {
+    const context = this.#workViewContext(projectId);
+    const project = this.store.getProject(context.project_id);
+    if (!this.codeGraphStore) return { status: 'unavailable', project_id: project.id,
+      message: '程式圖譜分析器尚未啟用。' };
+    return refresh ? this.codeGraphStore.start(project, query.checkout) : this.codeGraphStore.read(project, query);
   }
 
   fourCoreWorkNode({ workItemId, expectedRevision, expectedDigest, projectId = null }) {

@@ -14,7 +14,7 @@ use std::process::{Child, Command, Stdio};
 use lattice_contracts::GRAPHIFY_VERSION;
 
 use crate::error::{GraphifyAdapterError, GraphifyAdapterErrorKind, GraphifyAdapterResult};
-use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph};
+use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph, parse_graph_for_display};
 use crate::identity::{
     GRAPHIFY_PRIVATE_RUNNER_SHA256, GRAPHIFY_WSL_BWRAP_HELP_SHA256, GRAPHIFY_WSL_BWRAP_PATH,
     GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256, GRAPHIFY_WSL_DISTRO,
@@ -332,9 +332,15 @@ pub struct GraphifyAnalysis {
     capability_sha256: String,
     raw_process_sha256: String,
     evidence_sha256: String,
+    coverage_warnings: Vec<(&'static str, usize)>,
 }
 
 impl GraphifyAnalysis {
+    /// Known extraction gaps, allowed only by the explicitly partial display path.
+    #[must_use]
+    pub fn coverage_warnings(&self) -> &[(&'static str, usize)] {
+        &self.coverage_warnings
+    }
     #[must_use]
     pub const fn graph(&self) -> &NormalizedGraph {
         &self.graph
@@ -418,9 +424,35 @@ impl PinnedGraphifyAdapter {
     // This intentionally remains a linear ownership protocol: preflight,
     // execute, validate, re-bind. Splitting it would obscure teardown order.
     #[allow(clippy::too_many_lines)]
+    /// Analyze an exact snapshot using the same verified execution boundary as Runtime.
+    /// The result is derived structural evidence and never changes durable task state.
+    ///
+    /// # Errors
+    /// Rejects changed snapshots, mismatched runtime identity, or incomplete output.
     pub(crate) fn analyze_materialized(
         &mut self,
         snapshot: &MaterializedSnapshot,
+    ) -> GraphifyAdapterResult<GraphifyAnalysis> {
+        self.analyze_with_coverage(snapshot, false)
+    }
+
+    /// Read-only display observations may expose known coverage gaps explicitly.
+    /// This path is never used by the durable GraphifyAnalysisPort.
+    ///
+    /// # Errors
+    /// Rejects all execution/provenance failures and unknown extraction warnings.
+    pub fn analyze_for_display(
+        &mut self,
+        snapshot: &MaterializedSnapshot,
+    ) -> GraphifyAdapterResult<GraphifyAnalysis> {
+        self.analyze_with_coverage(snapshot, true)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn analyze_with_coverage(
+        &mut self,
+        snapshot: &MaterializedSnapshot,
+        partial_display: bool,
     ) -> GraphifyAdapterResult<GraphifyAnalysis> {
         verify_snapshot_binding(snapshot)?;
         fs::create_dir_all(&self.config.staging_root).map_err(|_| {
@@ -503,6 +535,7 @@ impl PinnedGraphifyAdapter {
             )?;
         }
         let production = self.config.expected_payload_manifest_sha256.is_some();
+        let mut coverage_warnings = Vec::new();
         let graph_path = sandbox_output.join("graphify-out").join("graph.json");
         let (help_sha256, extract_stdout, extract_stderr, extract_exit_code, graph_bytes) =
             if production {
@@ -514,7 +547,11 @@ impl PinnedGraphifyAdapter {
                 validate_graphify_version(frame.version_stdout, frame.version_stderr)?;
                 let help_sha256 =
                     validate_graphify_help(&self.config, frame.help_stdout, frame.help_stderr)?;
-                validate_graphify_extract_stderr(frame.extract_stderr)?;
+                if partial_display {
+                    coverage_warnings = display_coverage_warnings(frame.extract_stderr)?;
+                } else {
+                    validate_graphify_extract_stderr(frame.extract_stderr)?;
+                }
                 (
                     help_sha256,
                     frame.extract_stdout.to_vec(),
@@ -596,7 +633,12 @@ impl PinnedGraphifyAdapter {
         }
         verify_runtime(&self.config)?;
 
-        let graph = parse_graph(
+        let parse = if partial_display {
+            parse_graph_for_display
+        } else {
+            parse_graph
+        };
+        let graph = parse(
             &graph_bytes,
             snapshot,
             GraphParseLimits {
@@ -634,6 +676,7 @@ impl PinnedGraphifyAdapter {
             capability_sha256,
             raw_process_sha256,
             evidence_sha256,
+            coverage_warnings,
         })
     }
 
@@ -1544,6 +1587,44 @@ fn validate_graphify_extract_stderr(stderr: &[u8]) -> GraphifyAdapterResult<()> 
     ))
 }
 
+// Only these two observed upstream coverage diagnostics are displayable.
+// Their source-list text is neither executed nor returned to the product UI.
+fn display_coverage_warnings(stderr: &[u8]) -> GraphifyAdapterResult<Vec<(&'static str, usize)>> {
+    let reject = || {
+        error(
+            GraphifyAdapterErrorKind::PartialOutput,
+            "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
+        )
+    };
+    if stderr.is_empty() {
+        return Ok(Vec::new());
+    }
+    if stderr.len() > 8192 {
+        return Err(reject());
+    }
+    let text = std::str::from_utf8(stderr).map_err(|_| reject())?;
+    let mut warnings = Vec::new();
+    for line in text.lines() {
+        let remainder = line.strip_prefix("  warning: ").ok_or_else(reject)?;
+        let (count, message) = remainder.split_once(' ').ok_or_else(reject)?;
+        let count: usize = count.parse().map_err(|_| reject())?;
+        if count == 0 || count > 50000 {
+            return Err(reject());
+        }
+        let code = if message.starts_with("source file(s) produced zero nodes and are absent from the graph: ")
+            && message.ends_with("A re-run will retry them (empties are no longer cached); if it persists, please report the file(s) (#1666).") {
+            "EMPTY_SOURCE_FILES"
+        } else if message == ".sql file(s) contributed nothing to the graph because a dependency is missing: tree_sitter_sql not installed. Install it with: pip install \"graphifyy[sql]\" (#1745)" {
+            "SQL_PARSER_UNAVAILABLE"
+        } else { return Err(reject()); };
+        warnings.push((code, count));
+    }
+    if warnings.is_empty() || warnings.len() > 2 {
+        return Err(reject());
+    }
+    Ok(warnings)
+}
+
 #[derive(Debug)]
 struct PrivateGraphifyFrame<'a> {
     version_stdout: &'a [u8],
@@ -1992,5 +2073,19 @@ mod tests {
             .expect_err("unreviewed stderr must not become a warning allowance");
         assert_eq!(error.kind(), GraphifyAdapterErrorKind::PartialOutput);
         assert_eq!(error.code(), "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED");
+    }
+
+    #[test]
+    fn display_path_reports_known_gaps_without_weakening_durable_acceptance() {
+        let warning = b"  warning: 24 .sql file(s) contributed nothing to the graph because a dependency is missing: tree_sitter_sql not installed. Install it with: pip install \"graphifyy[sql]\" (#1745)\n";
+        assert!(validate_graphify_extract_stderr(warning).is_err());
+        assert_eq!(
+            display_coverage_warnings(warning).unwrap(),
+            vec![("SQL_PARSER_UNAVAILABLE", 24)]
+        );
+        assert!(display_coverage_warnings(b"  warning: 1 unexpected parser failure\n").is_err());
+        let mut injected = warning.to_vec();
+        injected.extend_from_slice(b"unreviewed diagnostic\n");
+        assert!(display_coverage_warnings(&injected).is_err());
     }
 }

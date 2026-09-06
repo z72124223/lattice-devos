@@ -1,4 +1,4 @@
-// Both views consume the same read-only snapshot. Example data never enters the store.
+// Work hierarchy and progress only. Code relationships use a separate view and data source.
 const palette = {
   complete: { color: '#7ed46b', label: '已完成' },
   active: { color: '#39d5e7', label: '進行中' },
@@ -37,7 +37,7 @@ export function workCategory(work) {
 }
 
 export function workScope(data, focusId = null, filter = 'all') {
-  const all = new Map([...data.graph.nodes, ...data.tree.nodes].map((work) => [work.id, work]));
+  const all = new Map(data.tree.nodes.map((work) => [work.id, work]));
   const treeById = new Map(data.tree.nodes.map((work) => [work.id, work]));
   const lineage = [], visited = new Set();
   let cursor = focusId && treeById.get(focusId);
@@ -249,11 +249,8 @@ function icon(name) {
 
 export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }) {
   const host = document.querySelector('#work-views');
-  const graphLayer = document.querySelector('#graph-edge-layer');
-  const graphList = document.querySelector('#graph-list');
   const treeList = document.querySelector('#tree-list');
   const sourceButton = document.querySelector('#work-source');
-  const graphNote = document.querySelector('#graph-note');
   const treeNote = document.querySelector('#tree-current');
   let snapshot = null, projectName = '', message = '正在讀取工作…';
   let example = new URLSearchParams(location.search).get('workExample') === '1';
@@ -310,62 +307,6 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     dialog.querySelector('h2').textContent = work.title;
     dialog.querySelector('p').textContent = `${workAppearance(work).label}。這是外觀示例，不是你的實際工作，也不會修改工作紀錄。`;
     dialog.showModal();
-  }
-  function drawGraph(graph, isExample) {
-    const layout = isExample && filter === 'all' ? { positions: examplePositions, width: 760, height: 540 } : layoutGraph(graph.nodes);
-    const branches = graphBranches(graph, graphChoices, filter !== 'all');
-    const { positions, width, height } = layout;
-    for (const layer of [graphLayer, graphList]) layer.setAttribute('viewBox', `0 0 ${width} ${height}`);
-    graphLayer.parentElement.style.setProperty('--diagram-ratio', `${width} / ${height}`);
-    graphLayer.parentElement.style.setProperty('--diagram-width', `${Math.max(520, width * .72)}px`);
-    const definitions = svg('defs'); graphLayer.replaceChildren(definitions); graphList.replaceChildren();
-    for (const [index, work] of graph.nodes.entries()) {
-      if (!branches.visible.has(work.id)) continue;
-      const end = positions.get(work.id);
-      for (const [dependencyIndex, id] of (work.depends_on || []).entries()) {
-        if (!branches.visible.has(id) || !branches.expanded.get(id)) continue;
-        const start = positions.get(id); if (!start) continue;
-        const dependency = graph.nodes.find((item) => item.id === id), color = workAppearance(dependency).color;
-        const markerId = `work-arrow-${index}-${dependencyIndex}`;
-        const marker = svg('marker', { id: markerId, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 5, markerHeight: 5, orient: 'auto' });
-        marker.append(svg('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: color })); definitions.append(marker);
-        let path;
-        if (Math.abs(start.x - end.x) < 10) {
-          const x = start.x + start.width / 2;
-          path = `M ${x} ${start.y + start.height} V ${end.y - 6}`;
-        } else if (end.y > start.y + start.height && (dependency.reverse_dependents?.length > 1 || end.x < start.x + start.width)) {
-          const x = start.x + start.width / 2, y = start.y + start.height, endY = end.y + end.height / 2;
-          path = `M ${x} ${y} V ${endY - 58} Q ${x} ${endY} ${x + 64} ${endY} H ${end.x - 6}`;
-        } else if (end.y > start.y + start.height && end.x - start.x - start.width < 70) {
-          const x = start.x + start.width, y = start.y + start.height / 2, endX = end.x + end.width / 2;
-          path = `M ${x} ${y} H ${endX - 54} Q ${endX} ${y} ${endX} ${y + 54} V ${end.y - 6}`;
-        } else {
-          const x = start.x + start.width, y = start.y + start.height / 2, endX = end.x - 6, endY = end.y + end.height / 2;
-          const bend = Math.max(42, (endX - x) * .55);
-          path = `M ${x} ${y} C ${x + bend} ${y} ${endX - bend} ${endY} ${endX} ${endY}`;
-        }
-        graphLayer.append(svg('path', { class: 'work-dependency', d: path, stroke: color, 'marker-end': `url(#${markerId})`, 'data-from': id, 'data-to': work.id }));
-      }
-      const children = branches.children.get(work.id), expanded = branches.expanded.get(work.id);
-      graphList.append(nodeButton(work, end, { isExample, branchCount: children.length, expanded,
-        onActivate: children.length ? () => {
-          graphChoices.set(work.id, !expanded); drawGraph(graph, isExample);
-          graphList.querySelector(`[data-node-id="${CSS.escape(work.id)}"]`)?.focus({ preventScroll: true });
-        } : undefined,
-      }));
-    }
-    graphNote.replaceChildren();
-    const waiting = graph.nodes.find((work) => work.status === 'waiting_approval');
-    const blocker = graph.nodes.find((work) => work.blocker?.status === 'blocked' || work.status === 'failed');
-    const focus = waiting || blocker;
-    if (focus) {
-      const affected = graph.nodes.filter((work) => (work.depends_on || []).includes(focus.id));
-      graphNote.classList.add('attention'); graphNote.append(icon('alert'));
-      graphNote.append(html('span', '', `${focus.title}${waiting ? '等你決定' : '遇到阻礙'}${affected.length ? `，會影響${affected.map((work) => work.title).join('、')}` : ''}`));
-    } else {
-      graphNote.classList.remove('attention'); graphNote.append(icon('bulb'));
-      graphNote.append(html('span', '', graph.nodes.some((work) => work.depends_on?.length) ? '點節點展開後續工作；共用的工作只顯示一次' : '尚未記錄依賴關係；選取工作後可按「查看詳情」'));
-    }
   }
   function drawTree(tree, isExample) {
     const collapsed = treeBranches(tree, treeChoices, filter !== 'all');
@@ -441,7 +382,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
         : `這個專案沒有「${workFilters.find(([key]) => key === filter)[1]}」的工作紀錄。可切回「全部」或查看其他專案。`
       : message;
     document.querySelector('#work-diagrams').hidden = empty;
-    if (!empty) { drawGraph(currentScope.graph, example); drawTree(currentScope.tree, example); }
+    if (!empty) drawTree(currentScope.tree, example);
   }
   for (const [key] of workFilters) {
     const button = html('button', 'work-filter'); button.type = 'button'; button.dataset.filter = key;
@@ -482,6 +423,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   document.querySelector('#work-back').addEventListener('click', () => onNavigate('conversation'));
   document.querySelector('#work-decisions').addEventListener('click', () => onNavigate('decisions'));
   return {
+    selectLiveProject() { example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear(); },
     update(data, context = {}) {
       if (!example && projectId !== context.project_id) { selected = null; treeChoices.clear(); graphChoices.clear(); filter = 'all'; }
       projectId = context.project_id;

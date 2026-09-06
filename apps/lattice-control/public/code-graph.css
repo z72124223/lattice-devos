@@ -1,0 +1,53 @@
+.code-views[hidden], .work-view-card[hidden] { display:none!important; }
+.code-views { padding:24px; color:#e7f2f8; --work-cyan:#3bd7e7; }
+.view-switch { display:flex; gap:10px; margin:16px 0; }
+.view-switch button, .code-views button, .code-views select, .code-views input { border:1px solid #315b70; border-radius:9px; color:#e0edf4; background:#082437; padding:9px 13px; font:inherit; }
+.view-switch button[aria-current="page"] { border-color:#43d9e7; background:#164354; color:#75f0f9; }
+.code-views button { cursor:pointer; }
+.code-views button:disabled { opacity:.5; cursor:default; }
+.code-views button:hover { border-color:#43d9e7; }
+.code-views button:focus-visible { outline:2px solid white; outline-offset:2px; }
+.code-controls { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:20px 0; }
+.code-controls label { display:flex; align-items:center; gap:8px; }
+.code-controls select { max-width:280px; }
+.code-controls option { background:#082437; }
+#code-notice { padding:14px 18px; border:1px solid #31586e; border-radius:12px; background:#082236; line-height:1.65; color:#b9d9e5; }
+#code-notice[data-state="warning"] { color:#ffd78a; border-color:#85703c; }
+#code-summary { color:#a4c4d3; font-size:.86rem; overflow-wrap:anywhere; }
+.code-source { margin-top:14px; color:#a4c4d3; font-size:.85rem; }
+.code-source label { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-top:14px; }
+.code-source select { max-width:100%; }
+#code-source-path { overflow-wrap:anywhere; }
+.code-layout { display:grid; grid-template-columns:265px minmax(0,1fr); gap:18px; margin-top:20px; }
+.code-search-panel, .code-map-panel, #code-detail { border:2px solid #2c5870; border-radius:18px; background:#031b2e; min-width:0; }
+.code-search-panel { padding:16px; }
+.code-search-panel label { display:block; margin-bottom:12px; color:#53dce9; font-weight:700; }
+#code-search { width:100%; min-width:0; padding:10px; }
+#code-search-count { color:#a4c4d3; font-size:.8rem; }
+#code-results { max-height:540px; overflow:auto; display:grid; gap:8px; }
+.code-search-result { display:grid; gap:6px; text-align:left; min-width:0; }
+.code-search-result strong, .code-search-result small { overflow-wrap:anywhere; }
+.code-search-result small { color:#9bbccc; font-size:.72rem; }
+.code-map-panel { overflow:hidden; }
+.code-map-toolbar { padding:12px 16px; display:flex; gap:8px; flex-wrap:wrap; border-bottom:1px solid #2c5870; }
+.code-map-toolbar button { font-size:.85rem; }
+.code-scroll { overflow:auto; max-height:620px; min-height:350px; scrollbar-color:#38627a #031b2e; }
+#code-canvas { display:block; }
+.code-node { width:100%; height:100%; display:grid; gap:3px; text-align:center; padding:7px!important; border:2px solid #45c9dc!important; background:linear-gradient(125deg,#083d4c,#062334)!important; }
+.code-node strong { font-size:16px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.code-node small { font-size:12px; color:#b2dbe4; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+.code-node.code-root { border-color:#a9f5fd!important; box-shadow:inset 0 0 0 2px #a9f5fd55; }
+.code-edge { fill:none; stroke:#52d8e8; stroke-width:2; }
+.code-edge:not([data-confidence="EXTRACTED"]) { stroke-dasharray:7 5; opacity:.65; }
+#code-canvas-note { padding:12px 18px; color:#9edee8; line-height:1.6; font-size:.86rem; }
+#code-detail { margin-top:18px; padding:18px; }
+#code-detail:empty { display:none; }
+#code-detail h3 { color:#5fe2f1; margin-top:0; overflow-wrap:anywhere; }
+.code-location { font-family:monospace; overflow-wrap:anywhere; color:#c6dce8; }
+.code-help { font-size:.85rem; color:#a4c4d3; }
+.code-relation-row { display:grid; text-align:left; gap:5px; margin:7px 0; max-width:100%; }
+.code-relation-row span, .code-relation-row small { overflow-wrap:anywhere; }
+.code-relation-row small { font-size:.76rem; color:#a4c4d3; }
+.work-diagrams { grid-template-columns:minmax(0,1fr); }
+#core-work-tree .work-diagram-scroll { max-height:70vh; }
+@media(max-width:850px) { .code-views { padding:16px 12px; } .code-layout { grid-template-columns:minmax(0,1fr); } #code-results { max-height:200px; } }

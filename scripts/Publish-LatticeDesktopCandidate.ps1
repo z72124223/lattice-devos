@@ -226,6 +226,18 @@ if ($LASTEXITCODE -ne 0) {
 $controlRuntimeDirectory = Join-Path $candidateDirectory 'control-runtime'
 $bundledControlRoot = Join-Path $controlRuntimeDirectory 'apps\lattice-control'
 [IO.Directory]::CreateDirectory($bundledControlRoot) | Out-Null
+# Build the read-only graph helper from this same source checkpoint.
+$graphCargo = Join-Path $env:USERPROFILE '.rustup\toolchains\1.97.1-x86_64-pc-windows-msvc\bin\cargo.exe'
+if (-not (Test-Path -LiteralPath $graphCargo -PathType Leaf)) { throw 'DESKTOP_GRAPH_TOOLCHAIN_UNAVAILABLE' }
+$graphTarget = Join-Path $repositoryRoot 'target\desktop-code-graph'
+Push-Location -LiteralPath $repositoryRoot
+try {
+    & $graphCargo build --release --locked -p lattice-graphify-adapter --bin lattice-code-graph --target-dir $graphTarget
+    if ($LASTEXITCODE -ne 0) { throw 'DESKTOP_GRAPH_BUILD_FAILED' }
+} finally { Pop-Location }
+$graphBin = Join-Path $bundledControlRoot 'bin'
+[IO.Directory]::CreateDirectory($graphBin) | Out-Null
+Copy-Item -LiteralPath (Join-Path $graphTarget 'release\lattice-code-graph.exe') -Destination (Join-Path $graphBin 'lattice-code-graph.exe')
 Copy-Item -LiteralPath $nodePath -Destination (Join-Path $controlRuntimeDirectory 'node.exe')
 Copy-Item -LiteralPath (Join-Path $controlSourceRoot 'src') -Destination $bundledControlRoot -Recurse
 Copy-Item -LiteralPath (Join-Path $controlSourceRoot 'public') -Destination $bundledControlRoot -Recurse

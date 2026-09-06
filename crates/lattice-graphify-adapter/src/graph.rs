@@ -196,6 +196,24 @@ pub(crate) fn parse_graph(
     snapshot: &MaterializedSnapshot,
     limits: GraphParseLimits,
 ) -> GraphifyAdapterResult<NormalizedGraph> {
+    parse_graph_mode(bytes, snapshot, limits, false)
+}
+
+pub(crate) fn parse_graph_for_display(
+    bytes: &[u8],
+    snapshot: &MaterializedSnapshot,
+    limits: GraphParseLimits,
+) -> GraphifyAdapterResult<NormalizedGraph> {
+    parse_graph_mode(bytes, snapshot, limits, true)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_graph_mode(
+    bytes: &[u8],
+    snapshot: &MaterializedSnapshot,
+    limits: GraphParseLimits,
+    partial_display: bool,
+) -> GraphifyAdapterResult<NormalizedGraph> {
     let root: Value = serde_json::from_slice(bytes).map_err(|_| {
         error(
             GraphifyAdapterErrorKind::MalformedOutput,
@@ -318,6 +336,16 @@ pub(crate) fn parse_graph(
         }
         validate_optional_scalar_fields(node, limits.max_text_bytes)?;
         let source_file = required_text_allow_empty(node, "source_file", limits.max_text_bytes)?;
+        // Pinned Graphify emits null locations for .NET project metadata.
+        // The display excludes those records; it never fabricates a source line.
+        if partial_display
+            && source_file.ends_with(".csproj")
+            && node.get("source_location").is_none_or(Value::is_null)
+        {
+            validate_manifest_path(source_file, &manifest_paths)?;
+            dropped_source_less_nodes += 1;
+            continue;
+        }
         let source_location =
             required_text_allow_empty(node, "source_location", limits.max_text_bytes)?;
         if source_file.is_empty() {
@@ -413,6 +441,14 @@ pub(crate) fn parse_graph(
             ));
         }
         let source_file = required_text_allow_empty(edge, "source_file", limits.max_text_bytes)?;
+        if partial_display
+            && source_file.ends_with(".csproj")
+            && edge.get("source_location").is_none_or(Value::is_null)
+        {
+            validate_manifest_path(source_file, &manifest_paths)?;
+            dropped_unbound_edges += 1;
+            continue;
+        }
         let source_location =
             required_text_allow_empty(edge, "source_location", limits.max_text_bytes)?;
         if !source_file.is_empty() {
@@ -806,6 +842,37 @@ mod tests {
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.dropped_source_less_nodes, 1);
         assert_eq!(graph.dropped_unbound_edges, 2);
+    }
+
+    #[test]
+    fn display_excludes_unlocated_project_metadata_but_rejects_foreign_sources() {
+        let mut data: Value = serde_json::from_slice(&valid_graph()).unwrap();
+        let base = snapshot();
+        fs::write(base.root().join("app.csproj"), b"<Project />").unwrap();
+        let snapshot = MaterializedSnapshot::for_test(
+            base.root().to_path_buf(),
+            vec![
+                ("src/lib.rs", b"fn main() {}\n"),
+                ("app.csproj", b"<Project />"),
+            ],
+        );
+        data["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({
+                "id":"project", "label":"Project", "file_type":"code", "source_file":"app.csproj",
+                "source_location":null, "_origin":"ast"
+            }));
+        let bytes = serde_json::to_vec(&data).unwrap();
+        assert!(parse_graph(&bytes, &snapshot, limits()).is_err());
+        let display = parse_graph_for_display(&bytes, &snapshot, limits()).unwrap();
+        assert_eq!(display.nodes.len(), 2);
+        assert_eq!(display.dropped_source_less_nodes, 2);
+        data["nodes"][3]["source_file"] = Value::String("foreign.csproj".into());
+        assert!(
+            parse_graph_for_display(&serde_json::to_vec(&data).unwrap(), &snapshot, limits())
+                .is_err()
+        );
     }
 
     #[test]

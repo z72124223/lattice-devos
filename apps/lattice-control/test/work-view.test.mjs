@@ -37,9 +37,9 @@ test('graph folding preserves shared downstream work reached by a different open
 
 test('status filters retain ancestors and count only actual verified completion', () => {
   const filtered = workScope(exampleSnapshot, null, 'complete');
-  assert.equal(filtered.counts.complete, 2);
+  assert.equal(filtered.counts.complete, 1);
   assert.equal(filtered.counts.active, 3);
-  assert.deepEqual([...filtered.matches].sort(), ['login', 'requirements']);
+  assert.deepEqual([...filtered.matches].sort(), ['login']);
   assert.deepEqual(filtered.tree.nodes.map((work) => work.id).sort(), ['goal', 'login', 'website']);
   assert.deepEqual(filtered.tree.nodes.find((work) => work.id === 'website').children, ['login']);
   const nodes = [
@@ -64,7 +64,7 @@ test('next and previous levels follow stored parents and isolate sibling branche
   assert.equal(leaf.lineage.at(-2).id, 'website');
   assert.equal(leaf.children.length, 0);
   assert.equal(leaf.counts.all, 1);
-  assert.equal(workScope(exampleSnapshot, 'removed-node').counts.all, 11);
+  assert.equal(workScope(exampleSnapshot, 'removed-node').counts.all, 10);
   assert.equal(workScope(exampleSnapshot, 'delivery', 'complete').matches.size, 0);
 });
 
