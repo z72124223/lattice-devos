@@ -358,6 +358,12 @@
               <div class="work-source-wrap"><span id="work-source-label">我的工作</span><button id="work-source" type="button" aria-pressed="false">我的工作 · 查看設計示例</button></div>
             </div>
           </header>
+          <div class="work-controls">
+            <label class="work-project-label">查看專案 <select id="work-project" aria-label="查看專案"><option value="">正在讀取專案…</option></select></label>
+            <div id="work-filters" class="work-filters" role="group" aria-label="依工作狀態篩選"></div>
+            <div class="work-level-controls"><button id="work-previous-level" type="button" disabled>← 上一層</button><nav id="work-breadcrumb" aria-label="目前工作層級"></nav><select id="work-next-level" aria-label="下一層" disabled><option>沒有下一層</option></select></div>
+            <p id="work-data-note" class="work-data-note"></p>
+          </div>
           <p id="work-empty" role="status">正在讀取工作…</p>
           <div id="work-diagrams" class="work-diagrams" hidden>
             <section id="core-work-graph" class="work-view-card" aria-labelledby="graph-heading">
@@ -437,7 +443,8 @@
     runtimeCapabilities:document.querySelector("#runtime-capabilities"), error:document.querySelector("#error"),
     textSize:document.querySelector("#text-size"),
   };
-  const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore});
+  state.viewProjectId=new URLSearchParams(location.search).get("project");state.workRequest=0;state.viewPacket=null;state.projects=[];
+  const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore,onProjectChange:changeWorkProject});
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
   function showError(error,source="action") { nodes.error.textContent=error.message; nodes.error.dataset.source=source; }
   async function api(path,options={}) {
@@ -532,7 +539,7 @@
   function assertSharedWorkSnapshot(workSnapshot){
     if(!workSnapshot||workSnapshot.revision!==workSnapshot.tree?.revision||workSnapshot.revision!==workSnapshot.graph?.revision||workSnapshot.digest!==workSnapshot.tree?.digest||workSnapshot.digest!==workSnapshot.graph?.digest)throw new Error("工作圖譜與工作樹不是同一次快照，已停止顯示。");
   }
-  function workLabel(id){const work=state.surface?.work_snapshot?.graph?.nodes?.find((candidate)=>candidate.id===id);return work?(work.title+" · "+id.slice(0,8)):id;}
+  function workLabel(id){const work=state.viewPacket?.work_snapshot?.graph?.nodes?.find((candidate)=>candidate.id===id);return work?(work.title+" · "+id.slice(0,8)):id;}
   function relationText(ids){return ids.length?ids.map(workLabel).join("、"):"無";}
   function blockerText(blocker){
     if(!blocker||blocker.status==="clear")return "目前無阻塞";
@@ -559,7 +566,6 @@
     }));
   }
   function renderWorkGraph(graph){renderRecentWork(graph);}
-  function renderWorkTree(tree){workView.update(state.surface.work_snapshot,state.surface.context);}
   function displayDate(value){const date=new Date(value);return Number.isFinite(date.getTime())?new Intl.DateTimeFormat("zh-TW",{dateStyle:"medium",timeStyle:"short"}).format(date):value;}
   function renderDecisions(packet){
     nodes.decisionIdentity.textContent="rev "+packet.revision+" · "+packet.digest;
@@ -574,7 +580,6 @@
   }
   function renderEmptyCores(){
     nodes.decisionIdentity.textContent="not ready";
-    workView.update(null,state.surface.context);
     nodes.decisionList.replaceChildren(element("div",state.surface.context.status_text,"empty"));nodes.recentList.replaceChildren(element("p","目前沒有工作。","empty"));
   }
   function renderSurface(){
@@ -583,16 +588,43 @@
     assertSharedWorkSnapshot(workSnapshot);
     const workKey=state.surface.context.project_id+":"+workSnapshot.revision+":"+workSnapshot.digest;
     const decisionKey=state.surface.context.project_id+":"+state.surface.decisions.revision+":"+state.surface.decisions.digest;
-    if(state.rendered.work!==workKey){renderWorkGraph(workSnapshot.graph);renderWorkTree(workSnapshot.tree);state.rendered.work=workKey;}
+    if(state.rendered.work!==workKey){renderWorkGraph(workSnapshot.graph);state.rendered.work=workKey;}
     if(state.rendered.decisions!==decisionKey){renderDecisions(state.surface.decisions);state.rendered.decisions=decisionKey;}
     state.rendered.empty=null;
   }
   async function refresh(){
     if(!state.runtimePromise)state.runtimePromise=api("/api/runtime").then((runtime)=>{state.runtime=runtime;renderRuntime();}).catch(()=>{}).finally(()=>{state.runtimePromise=null;});
-    state.surface=await api("/api/four-core");renderSurface();
+    if(!state.projectsLoadedAt||Date.now()-state.projectsLoadedAt>30000){
+      const catalog=await api("/api/state");state.projects=catalog.projects;state.projectsLoadedAt=Date.now();
+    }
+    try{state.surface=await api("/api/four-core");renderSurface();}catch(error){showError(error,"conversation-poll");}
+    if(!state.viewProjectId)state.viewProjectId=state.surface?.context?.project_id;
+    workView.setProjects(state.projects,state.viewProjectId);
+    await refreshWorkView();
     if(nodes.workDialog.open&&nodes.workDialog.dataset.formalTask&&Date.now()-(state.formalRefreshedAt||0)>10000
       &&![...nodes.workDetail.querySelectorAll("input,textarea")].some((input)=>input.value)){
       state.formalRefreshedAt=Date.now();void openFormalDetail(nodes.workDialog.dataset.formalTask,{refresh:true});
+    }
+  }
+  function currentWorkProjectId(){return state.viewProjectId;}
+  async function changeWorkProject(projectId){
+    state.viewProjectId=projectId;state.viewPacket=null;state.workRequest++;
+    if(nodes.workDialog.open)nodes.workDialog.close();
+    workView.update(null,{project_id:projectId,project_name:state.projects.find((project)=>project.id===projectId)?.name,status_text:"正在讀取這個專案的工作…"});
+    await refreshWorkView();
+  }
+  async function refreshWorkView(){
+    const projectId=currentWorkProjectId();if(!projectId){workView.update(null,{status_text:"請先選擇要查看的專案。"});return;}
+    const request=++state.workRequest;
+    try{
+      const packet=await api("/api/work-view?projectId="+encodeURIComponent(projectId));
+      if(request!==state.workRequest||projectId!==currentWorkProjectId())return;
+      if(packet.context.project_id!==projectId)throw new Error("工作資料不屬於所選專案，已停止顯示。");
+      if(packet.work_snapshot)assertSharedWorkSnapshot(packet.work_snapshot);
+      state.viewPacket=packet;workView.update(packet.work_snapshot,packet.context);
+    }catch(error){
+      if(request!==state.workRequest||projectId!==currentWorkProjectId())return;
+      state.viewPacket=null;workView.update(null,{project_id:projectId,project_name:state.projects.find((project)=>project.id===projectId)?.name,status_text:"目前無法讀取這個專案的工作紀錄。"+error.message});
     }
   }
   async function poll() {
@@ -652,10 +684,12 @@
     }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}
   }
   async function openWorkDetail(workItemId){
-    const snapshot=state.surface?.work_snapshot;if(!snapshot)return;
-    if(state.surface.formal_work_enabled)return openFormalDetail(workItemId);
+    const snapshot=state.viewPacket?.work_snapshot;if(!snapshot)return;
+    const projectId=currentWorkProjectId();
+    if(state.viewPacket.formal_work_enabled)return openFormalDetail(workItemId,{projectId});
     try{
-      const detail=await api("/api/four-core/work/"+encodeURIComponent(workItemId)+"?revision="+encodeURIComponent(snapshot.revision)+"&digest="+encodeURIComponent(snapshot.digest));
+      const detail=await api("/api/four-core/work/"+encodeURIComponent(workItemId)+"?revision="+encodeURIComponent(snapshot.revision)+"&digest="+encodeURIComponent(snapshot.digest)+"&projectId="+encodeURIComponent(projectId));
+      if(projectId!==currentWorkProjectId())return;
       if(detail.revision!==snapshot.revision||detail.digest!==snapshot.digest)throw new Error("工作詳情已變更，請重新載入。");
       const fields=[["工作",detail.tree_node.title],["狀態",statusLabels.get(detail.tree_node.status)||detail.tree_node.status],["目標",detail.tree_node.objective],["進度",detail.tree_node.progress||"尚未記錄"],["父工作",detail.tree_node.parent_id?workLabel(detail.tree_node.parent_id):"最上層目標"],["子工作",relationText(detail.tree_node.children)],["依賴",relationText(detail.graph_node.depends_on)],["反向依賴",relationText(detail.graph_node.reverse_dependents)],["阻塞原因",blockerText(detail.graph_node.blocker)],["快照",detail.revision.slice(0,12)+" · "+detail.digest.slice(0,12)]];
       const grid=element("div",undefined,"detail-grid");for(const [label,value] of fields){const cell=element("div",undefined,"detail-cell");cell.append(element("small",label),element("p",value));grid.append(cell);}
@@ -663,16 +697,18 @@
     }catch(error){showError(error);await poll();}
   }
   async function formalAction(taskRef,action,values={}){
-    try{await api("/api/formal-work/"+taskRef+"/"+action,{method:"POST",body:JSON.stringify({projectId:currentProjectId(),...values})});await poll();await openFormalDetail(taskRef);}
+    const projectId=nodes.workDialog.dataset.projectId||currentWorkProjectId();
+    try{await api("/api/formal-work/"+taskRef+"/"+action,{method:"POST",body:JSON.stringify({projectId,...values})});await poll();await openFormalDetail(taskRef,{projectId});}
     catch(error){showError(error);await openFormalDetail(taskRef);}
   }
-  async function openFormalDetail(taskRef,{refresh=false}={}){
+  async function openFormalDetail(taskRef,{refresh=false,projectId=nodes.workDialog.dataset.projectId||currentWorkProjectId()}={}){
     try{
-      const detail=await api("/api/formal-work/"+taskRef+"?projectId="+encodeURIComponent(currentProjectId()));
+      const detail=await api("/api/formal-work/"+taskRef+"?projectId="+encodeURIComponent(projectId));
+      if(projectId!==currentWorkProjectId())return;
       if(refresh&&(!nodes.workDialog.open||nodes.workDialog.dataset.formalTask!==taskRef))return;
       const detailKey=JSON.stringify([detail.status,detail.result_digest,detail.claims.map((claim)=>claim.last_sequence),detail.last_error]);
       if(refresh&&state.formalDetailKey===detailKey)return;
-      state.formalDetailKey=detailKey;state.formalRefreshedAt=Date.now();nodes.workDialog.dataset.formalTask=taskRef;
+      state.formalDetailKey=detailKey;state.formalRefreshedAt=Date.now();nodes.workDialog.dataset.formalTask=taskRef;nodes.workDialog.dataset.projectId=projectId;
       const content=element("div",undefined,"detail-grid");
       for(const [label,value]of [["工作",detail.title],["狀態",statusLabels.get(detail.status)||detail.status],["需求",detail.objective],["驗收條件",detail.success_criteria||"尚未保存"],["進度",detail.progress],["正式工作身份",detail.id],["成果證據",detail.result_digest||"尚未完成實際驗收"]]){const cell=element("div",undefined,"detail-cell");cell.append(element("small",label),element("p",value));content.append(cell);}
       if(detail.last_error)content.append(element("p",detail.last_error.message,"error"));
@@ -687,7 +723,7 @@
         button.addEventListener("click",async()=>{
           button.disabled=true;notice.textContent="正在核對並開啟成果…";
           try{
-            const preview=await api("/api/formal-work/"+taskRef+"/preview",{method:"POST",body:JSON.stringify({projectId:currentProjectId()})});
+            const preview=await api("/api/formal-work/"+taskRef+"/preview",{method:"POST",body:JSON.stringify({projectId})});
             if(preview.task_ref!==taskRef||preview.result_digest!==detail.result_digest||!/^http:\/\/127\.0\.0\.1:[0-9]{1,5}$/.test(preview.url))throw new Error("成果入口無法核對。");
             const link=element("a","開啟成果","project-choice");link.href=preview.url;link.target="_blank";link.rel="noopener noreferrer";
             notice.textContent="成果已準備好，點選「開啟成果」即可操作。";button.remove();resultBox.append(link);
@@ -715,7 +751,7 @@
       }
       const messages=element("div",undefined,"detail-cell");messages.append(element("small","Codex 的成果與使用說明"));content.append(messages);
       nodes.workDetail.replaceChildren(content);if(!nodes.workDialog.open)nodes.workDialog.showModal();
-      void api("/api/formal-work/"+taskRef+"/conversation?projectId="+encodeURIComponent(currentProjectId())).then((conversation)=>{
+      void api("/api/formal-work/"+taskRef+"/conversation?projectId="+encodeURIComponent(projectId)).then((conversation)=>{
         if(!messages.isConnected)return;
         for(const message of conversation.messages.slice(-4))messages.append(element("p",message.text));
         if(!conversation.messages.length)messages.append(element("p","執行對話尚未回覆。"));
@@ -767,7 +803,7 @@
       const result=await api("/api/formal-work",{method:"POST",body:JSON.stringify(pending)});
       nodes.newWorkStatus.textContent="需求已保存，正在開始執行…";
       await api("/api/formal-work/"+result.id+"/start",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});localStorage.removeItem(pendingName);
-      await api("/api/conversation",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});await poll();nodes.newWorkDialog.close();await openFormalDetail(result.id);
+      await api("/api/conversation",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});await changeWorkProject(pending.projectId);await poll();nodes.newWorkDialog.close();await openFormalDetail(result.id,{projectId:pending.projectId});
     }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}finally{button.disabled=false;}
   });
 

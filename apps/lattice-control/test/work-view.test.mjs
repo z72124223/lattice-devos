@@ -1,6 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutGraph, layoutTree, workAppearance, exampleSnapshot } from '../public/work-view.mjs';
+import { layoutGraph, layoutTree, workAppearance, exampleSnapshot, workScope } from '../public/work-view.mjs';
+
+test('status filters retain ancestors and count only actual verified completion', () => {
+  const filtered = workScope(exampleSnapshot, null, 'complete');
+  assert.equal(filtered.counts.complete, 2);
+  assert.equal(filtered.counts.active, 3);
+  assert.deepEqual([...filtered.matches].sort(), ['login', 'requirements']);
+  assert.deepEqual(filtered.tree.nodes.map((work) => work.id).sort(), ['goal', 'login', 'website']);
+  assert.deepEqual(filtered.tree.nodes.find((work) => work.id === 'website').children, ['login']);
+  const nodes = [
+    { id: 'archived', status: 'archived', completion_verified: false, children: [] },
+    { id: 'finished', status: 'archived', completion_verified: true, children: [] },
+    { id: 'replied', status: 'codex_done', children: [] },
+  ];
+  const state = workScope({ graph: { nodes }, tree: { nodes, roots: nodes.map((work) => work.id) } });
+  assert.equal(state.counts.complete, 1);
+  assert.equal(state.counts.archived, 1);
+  assert.equal(state.counts.review, 1);
+});
+
+test('next and previous levels follow stored parents and isolate sibling branches', () => {
+  const branch = workScope(exampleSnapshot, 'website');
+  assert.deepEqual(branch.lineage.map((work) => work.id), ['goal', 'website']);
+  assert.deepEqual(branch.children.map((work) => work.id), ['login', 'list', 'booking']);
+  assert.equal(branch.counts.all, 4);
+  assert.equal(branch.tree.nodes.some((work) => work.id === 'payment'), false);
+  assert.deepEqual(branch.tree.roots, ['website']);
+  const leaf = workScope(exampleSnapshot, 'login');
+  assert.equal(leaf.lineage.at(-2).id, 'website');
+  assert.equal(leaf.children.length, 0);
+  assert.equal(leaf.counts.all, 1);
+  assert.equal(workScope(exampleSnapshot, 'removed-node').counts.all, 11);
+  assert.equal(workScope(exampleSnapshot, 'delivery', 'complete').matches.size, 0);
+});
 
 function assertVisibleWithoutOverlap(layout) {
   const boxes = [...layout.positions.values()];

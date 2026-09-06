@@ -6199,6 +6199,41 @@ test("schema v6 upgrades transactionally to v7 conversation read indexes", async
   }
 });
 
+test("work view browses another project without moving the conversation or mixing work identities", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), 'lattice-work-view-http-'));
+  const codex = new FakeCodex();
+  const application = createLatticeServer({ databasePath: path.join(directory, 'control.db'), codex });
+  try {
+    await new Promise((resolve) => application.server.listen(0, '127.0.0.1', resolve));
+    const origin = `http://127.0.0.1:${application.server.address().port}`;
+    const a = application.service.createProject({ name: 'A', rootPath: directory });
+    const b = application.service.createProject({ name: 'B', rootPath: directory });
+    application.store.ensurePrimaryConversation(a.id);
+    const first = application.service.createWorkItem({ projectId: a.id, title: 'A work', objective: 'A goal', priority: 'normal' });
+    const second = application.service.createWorkItem({ projectId: b.id, title: 'B work', objective: 'B goal', priority: 'normal' });
+    const before = application.service.primaryConversation();
+    const selected = await (await fetch(`${origin}/api/work-view?projectId=${b.id}`)).json();
+    assert.equal(selected.context.project_id, b.id);
+    assert.deepEqual(selected.work_snapshot.graph.nodes.map((work) => work.id), [second.id]);
+    assert.equal(selected.work_snapshot.graph.digest, selected.work_snapshot.tree.digest);
+    const query = `?projectId=${b.id}&revision=${selected.work_snapshot.revision}&digest=${selected.work_snapshot.digest}`;
+    assert.equal((await fetch(`${origin}/api/four-core/work/${second.id}${query}`)).status, 200);
+    assert.notEqual((await fetch(`${origin}/api/four-core/work/${first.id}${query}`)).status, 200);
+    assert.equal((await fetch(`${origin}/api/work-view?projectId=missing-project`)).status, 404);
+    assert.deepEqual(application.service.primaryConversation(), before);
+    assert.equal(codex.threadStarts.length, 0);
+    assert.equal(codex.turnStarts.length, 0);
+    application.service.formalWorkStore = { getWorkSnapshot: async () => { throw Object.assign(new Error('not registered'), { code: 'PROJECT_IS_NOT_REGISTERED' }); } };
+    const disconnected = await (await fetch(`${origin}/api/work-view?projectId=${b.id}`)).json();
+    assert.equal(disconnected.context.status, 'not_connected');
+    assert.equal(disconnected.work_snapshot, null, 'unavailable progress must not appear as an empty project');
+  } finally {
+    application.service.formalWorkStore = null;
+    await new Promise((resolve) => application.server.close(resolve));
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("the four-core product API resolves one proven context and shares work projection identity", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-four-core-http-"));
   const application = createLatticeServer({

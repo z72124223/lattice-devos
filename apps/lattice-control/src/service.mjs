@@ -926,8 +926,33 @@ export class LatticeControlService {
     return packet;
   }
 
-  fourCoreWorkNode({ workItemId, expectedRevision, expectedDigest }) {
-    const context = this.#requireFourCoreProjectContext();
+  #workViewContext(projectId) {
+    if (projectId == null) return this.#requireFourCoreProjectContext();
+    const project = typeof projectId === "string" && projectId.length <= 256
+      ? this.store.getProject(projectId) : null;
+    if (!project) throw conversationError("CONTROL_PROJECT_NOT_FOUND", "找不到這個專案，請重新選擇。", 404);
+    return { status: "ready", reason: null, source: "work_view_selection",
+      project_id: project.id, project_name: project.name, status_text: `目前查看：${project.name}` };
+  }
+
+  // Browsing another project never changes the conversation or starts work.
+  async workViewSurface(projectId) {
+    const context = this.#workViewContext(projectId);
+    try {
+      const workSnapshot = await (this.formalWorkStore ?? this.store).getWorkSnapshot({
+        projectId: context.project_id, maxNodes: 256, maxEdges: 1024,
+      });
+      return { context, work_snapshot: workSnapshot, formal_work_enabled: Boolean(this.formalWorkStore) };
+    } catch (error) {
+      if (error.code !== "PROJECT_IS_NOT_REGISTERED") throw error;
+      return { context: { ...context, status: "not_connected", reason: error.code,
+        status_text: "這個專案已列在清單，但尚未接上正式工作紀錄；目前無法確認進度。" },
+        work_snapshot: null, formal_work_enabled: true };
+    }
+  }
+
+  fourCoreWorkNode({ workItemId, expectedRevision, expectedDigest, projectId = null }) {
+    const context = this.#workViewContext(projectId);
     if (this.formalWorkStore) return this.formalWorkStore.getWorkNode({
       projectId: context.project_id, workItemId, expectedRevision, expectedDigest,
     });

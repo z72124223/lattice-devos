@@ -332,10 +332,15 @@ export function createLatticeServer({
         sendJson(response, 200, await service.fourCoreSurface());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/work-view") {
+        sendJson(response, 200, await service.workViewSurface(url.searchParams.get("projectId")));
+        return;
+      }
       const fourCoreWorkItemId = fourCoreRouteId(url.pathname, "work");
       if (request.method === "GET" && fourCoreWorkItemId) {
         sendJson(response, 200, await service.fourCoreWorkNode({
           workItemId: fourCoreWorkItemId,
+          projectId: url.searchParams.get("projectId"),
           expectedRevision: url.searchParams.get("revision"),
           expectedDigest: url.searchParams.get("digest"),
         }));

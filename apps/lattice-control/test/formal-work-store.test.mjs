@@ -4,6 +4,12 @@ import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs
 import { openCircuitSummary } from "../src/execution-recovery.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
+test("a response for another project cannot populate the selected project's graph or details", async () => {
+  const store = new FormalWorkStore({ runtime: { call: async () => page() } });
+  await assert.rejects(store.readProject('project-b'), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });
+  await assert.rejects(store.detail('project-b', taskA), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });
+  assert.equal(store.cache.size, 0);
+});
 function page() {
   return { schema_version: "lattice.control.product-snapshot.v1", source: { authority: "POSTGRESQL_TASK_LEDGER" },
     project: { id: "project-a" }, revision: "1".repeat(64), next_task_ref: null,

@@ -12,6 +12,7 @@ const palette = {
 };
 
 export function workAppearance(work) {
+  if (work.completion_verified === true) return palette.complete;
   if (work.status === 'failed') return palette.failed;
   if (work.status === 'waiting_approval') return palette.approval;
   if (work.blocker?.status === 'blocked') return palette.blocked;
@@ -21,6 +22,59 @@ export function workAppearance(work) {
   if (work.status === 'codex_done') return palette.review;
   if (work.status === 'archived') return palette.archived;
   return palette.unknown;
+}
+
+export const workFilters = [
+  ['all', '全部'], ['complete', '已完成'], ['active', '進行中'], ['pending', '待開始'],
+  ['review', '等待驗收'], ['approval', '等你決定'], ['blocked', '遇到阻礙'],
+  ['failed', '執行失敗'], ['archived', '已封存'], ['unknown', '狀態待確認'],
+];
+
+export function workCategory(work) {
+  // Completion remains discoverable after archival; archival alone is not completion.
+  if (work.completion_verified === true) return 'complete';
+  return Object.keys(palette).find((key) => palette[key] === workAppearance(work)) || 'unknown';
+}
+
+export function workScope(data, focusId = null, filter = 'all') {
+  const all = new Map([...data.graph.nodes, ...data.tree.nodes].map((work) => [work.id, work]));
+  const treeById = new Map(data.tree.nodes.map((work) => [work.id, work]));
+  const lineage = [], visited = new Set();
+  let cursor = focusId && treeById.get(focusId);
+  while (cursor) {
+    if (visited.has(cursor.id)) throw new Error('工作階層形成循環，請確認工作關係。');
+    visited.add(cursor.id); lineage.unshift(cursor); cursor = treeById.get(cursor.parent_id);
+  }
+  const scope = new Set();
+  function descend(id) {
+    if (scope.has(id) || !all.has(id)) return;
+    scope.add(id); (treeById.get(id)?.children || []).forEach(descend);
+  }
+  if (lineage.length) descend(focusId); else all.forEach((_, id) => scope.add(id));
+  const counts = Object.fromEntries(workFilters.map(([key]) => [key, 0]));
+  const matches = new Set();
+  for (const id of scope) {
+    const category = workCategory(all.get(id)); counts.all++; counts[category]++;
+    if (filter === 'all' || category === filter) matches.add(id);
+  }
+  // Keep the paths to matching work, so a filter cannot invent a new hierarchy.
+  const retained = new Set(matches);
+  for (const id of matches) {
+    let parent = treeById.get(id)?.parent_id;
+    const seen = new Set();
+    while (parent && scope.has(parent) && !seen.has(parent)) {
+      seen.add(parent); retained.add(parent); parent = treeById.get(parent)?.parent_id;
+    }
+  }
+  const treeNodes = data.tree.nodes.filter((work) => retained.has(work.id)).map((work) => ({ ...work,
+    children: (work.children || []).filter((id) => retained.has(id)),
+  }));
+  const graphNodes = data.graph.nodes.filter((work) => retained.has(work.id));
+  return { counts, matches, lineage,
+    children: (lineage.length ? treeById.get(focusId).children || [] : data.tree.roots).map((id) => treeById.get(id)).filter(Boolean),
+    graph: { ...data.graph, nodes: graphNodes },
+    tree: { ...data.tree, nodes: treeNodes, roots: treeNodes.filter((work) => !retained.has(work.parent_id)).map((work) => work.id) },
+  };
 }
 
 // Layer real dependencies, rather than recycling six fixed positions as work grows.
@@ -169,7 +223,7 @@ function icon(name) {
   return node;
 }
 
-export function createWorkView({ onSelect, onOpen, onNavigate }) {
+export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }) {
   const host = document.querySelector('#work-views');
   const graphLayer = document.querySelector('#graph-edge-layer');
   const graphList = document.querySelector('#graph-list');
@@ -179,7 +233,13 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
   const treeNote = document.querySelector('#tree-current');
   let snapshot = null, projectName = '', message = '正在讀取工作…';
   let example = new URLSearchParams(location.search).get('workExample') === '1';
-  let selected = null, collapsed = new Set(), lastKey = null;
+  let selected = null, collapsed = new Set(), lastKey = null, projectId = null;
+  let focusId = null, filter = 'all', currentScope = null;
+  const projectSelect = document.querySelector('#work-project');
+  const filters = document.querySelector('#work-filters');
+  const breadcrumb = document.querySelector('#work-breadcrumb');
+  const nextLevel = document.querySelector('#work-next-level');
+  const previousLevel = document.querySelector('#work-previous-level');
   const actualWork = (id) => snapshot?.graph.nodes.find((work) => work.id === id);
 
   function nodeButton(work, box, { isExample, structural = false, iconName, onActivate } = {}) {
@@ -193,7 +253,12 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
     button.classList.toggle('is-selected', selected === work.id);
     if (structural) button.append(icon(iconName || 'screen'));
     else button.append(html('span', 'work-dot'));
-    const title = html('span', 'work-chip-title', work.title); button.append(title);
+    const title = html('span', 'work-chip-title', work.title);
+    const copy = html('span', 'work-chip-copy'); copy.append(title);
+    if (!isExample && work.id !== '__project__') copy.append(html('small', 'work-chip-status',
+      work.completion_verified && work.status === 'archived' ? '已完成 · 已封存' : appearance.label));
+    button.append(copy);
+    button.classList.toggle('context-only', filter !== 'all' && !currentScope?.matches.has(work.id));
     button.addEventListener('click', () => {
       selected = work.id;
       for (const item of host.querySelectorAll('[data-node-id]')) item.classList.toggle('is-selected', item.dataset.nodeId === selected);
@@ -210,7 +275,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
     dialog.showModal();
   }
   function drawGraph(graph, isExample) {
-    const layout = isExample ? { positions: examplePositions, width: 760, height: 540 } : layoutGraph(graph.nodes);
+    const layout = isExample && !focusId && filter === 'all' ? { positions: examplePositions, width: 760, height: 540 } : layoutGraph(graph.nodes);
     const { positions, width, height } = layout;
     for (const layer of [graphLayer, graphList]) layer.setAttribute('viewBox', `0 0 ${width} ${height}`);
     graphLayer.parentElement.style.setProperty('--diagram-ratio', `${width} / ${height}`);
@@ -300,7 +365,44 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
       }
     }
     treeList.replaceChildren(canvas);
-    treeNote.replaceChildren(icon('bulb'), html('span', '', '展開大目標，就能看到每一層工作'));
+    const hasHierarchy = tree.nodes.some((work) => work.parent_id);
+    treeNote.replaceChildren(icon('bulb'), html('span', '', hasHierarchy
+      ? '用「下一層」深入工作，用「上一層」回到目標'
+      : '尚未記錄上下層關係；目前工作並列在專案下'));
+  }
+  function focusWork(id) {
+    focusId = id; selected = null; collapsed.clear(); render();
+  }
+  function renderNavigation(data) {
+    currentScope = data ? workScope(data, focusId, filter) : null;
+    const counts = currentScope?.counts;
+    for (const button of filters.querySelectorAll('button')) {
+      const [key, label] = workFilters.find(([key]) => key === button.dataset.filter);
+      button.textContent = `${label} ${counts ? counts[key] : '—'}`;
+      button.setAttribute('aria-pressed', String(key === filter));
+      button.hidden = !['all', 'complete', 'active', 'pending', 'review', 'approval'].includes(key) && !counts?.[key] && filter !== key;
+      button.disabled = !data;
+    }
+    breadcrumb.replaceChildren();
+    const root = html('button', '', example ? '示例專案' : projectName || '專案總覽');
+    root.type = 'button'; root.addEventListener('click', () => focusWork(null)); breadcrumb.append(root);
+    for (const work of currentScope?.lineage || []) {
+      breadcrumb.append(html('span', '', '›'));
+      const button = html('button', '', work.title); button.type = 'button';
+      button.addEventListener('click', () => focusWork(work.id)); breadcrumb.append(button);
+    }
+    breadcrumb.lastElementChild?.setAttribute('aria-current', 'location');
+    previousLevel.disabled = !currentScope?.lineage.length;
+    const placeholder = html('option', '', currentScope?.children.length ? '下一層：選擇工作…' : '沒有下一層'); placeholder.value = '';
+    nextLevel.replaceChildren(placeholder, ...(currentScope?.children || []).map((work) => {
+      const option = html('option', '', `${work.title} · ${workAppearance(work).label}`); option.value = work.id; return option;
+    }));
+    nextLevel.disabled = !currentScope?.children.length;
+    const notice = document.querySelector('#work-data-note');
+    notice.textContent = example ? '示意資料：用來示範外觀與操作，不代表實際進度。'
+      : '這裡顯示已登記的工作紀錄。尚未接上的 Codex 對話與驗收結果，不會自動變成圖中的進度。';
+    if (data && data.graph.nodes.length && data.graph.nodes.every((work) => work.status === 'draft'))
+      notice.textContent += ` 目前 ${data.graph.nodes.length} 項都記錄為待開始。`;
   }
   function render() {
     host.dataset.source = example ? 'example' : 'live';
@@ -308,14 +410,30 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
     sourceButton.setAttribute('aria-pressed', String(example));
     document.querySelector('#work-source-label').textContent = example ? '概念預覽・示意資料' : projectName || '我的工作';
     const data = example ? exampleSnapshot : snapshot;
-    const empty = !data?.graph.nodes.length;
+    renderNavigation(data);
+    const empty = !currentScope?.matches.size;
     document.querySelector('#work-empty').hidden = !empty;
-    document.querySelector('#work-empty').textContent = message;
+    document.querySelector('#work-empty').textContent = data
+      ? !currentScope.counts.all ? '這個專案還沒有已登記的工作。'
+        : `這一層沒有「${workFilters.find(([key]) => key === filter)[1]}」的工作紀錄。可切回「全部」或查看其他專案。`
+      : message;
     document.querySelector('#work-diagrams').hidden = empty;
-    if (!empty) { drawGraph(data.graph, example); drawTree(data.tree, example); }
+    if (!empty) { drawGraph(currentScope.graph, example); drawTree(currentScope.tree, example); }
   }
+  for (const [key] of workFilters) {
+    const button = html('button', 'work-filter'); button.type = 'button'; button.dataset.filter = key;
+    button.style.setProperty('--filter-color', palette[key]?.color || '#e3eaf2');
+    button.addEventListener('click', () => { filter = key; collapsed.clear(); render(); }); filters.append(button);
+  }
+  previousLevel.addEventListener('click', () => focusWork(currentScope?.lineage.at(-2)?.id || null));
+  nextLevel.addEventListener('change', () => { if (nextLevel.value) focusWork(nextLevel.value); });
+  projectSelect.addEventListener('change', () => {
+    example = false; focusId = null; filter = 'all'; collapsed.clear();
+    const url = new URL(location.href); url.searchParams.delete('workExample'); url.searchParams.set('project', projectSelect.value);
+    history.replaceState(null, '', url); onProjectChange?.(projectSelect.value);
+  });
   sourceButton.addEventListener('click', () => {
-    example = !example; selected = null; collapsed.clear();
+    example = !example; selected = null; focusId = null; filter = 'all'; collapsed.clear();
     const url = new URL(location.href);
     if (example) url.searchParams.set('workExample', '1'); else url.searchParams.delete('workExample');
     history.replaceState(null, '', url); render();
@@ -324,9 +442,23 @@ export function createWorkView({ onSelect, onOpen, onNavigate }) {
   document.querySelector('#work-decisions').addEventListener('click', () => onNavigate('decisions'));
   return {
     update(data, context = {}) {
+      if (projectId !== context.project_id) { focusId = null; selected = null; collapsed.clear(); filter = 'all'; }
+      projectId = context.project_id;
       snapshot = data; projectName = context.project_name || ''; message = context.status_text || '這個專案還沒有工作。';
+      if (!example && focusId && !data?.tree.nodes.some((work) => work.id === focusId)) focusId = null;
       const key = `${context.project_id}:${data?.revision}:${data?.digest}:${message}`;
       if (key !== lastKey) { lastKey = key; render(); }
+    },
+    setProjects(projects, selectedId) {
+      const value = JSON.stringify(projects.map(({ id, name }) => [id, name]));
+      if (projectSelect.dataset.catalog !== value) {
+        projectSelect.dataset.catalog = value;
+        const prompt = html('option', '', '選擇專案'); prompt.value = ''; prompt.disabled = true;
+        projectSelect.replaceChildren(prompt, ...projects.map((project) => {
+          const option = html('option', '', project.name); option.value = project.id; return option;
+        }));
+      }
+      projectSelect.value = selectedId || '';
     },
     show() { host.hidden = false; render(); },
     hide() { host.hidden = true; },
