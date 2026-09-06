@@ -1049,6 +1049,10 @@ impl CodexReflectionBrokerConfig {
                 &plan.initialized_notification(),
                 &mut transcript,
             )?;
+            if let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE") {
+                authenticate_codex_host(&mut duplex, &receiver, &mut transcript,
+                    Path::new(&source), deadline)?;
+            }
             protocol
                 .mark_request_sent(CodexBrokerRequest::ThreadStart)
                 .map_err(direct_protocol_error)?;
@@ -1363,19 +1367,12 @@ impl VerifiedCodexProxyConfig {
             ));
         }
         CodexProxyInvocation::parse(["app-server", "--strict-config"])?;
-        let mut environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
+        let environment = codex_child_environment(&self.launcher, &self.codex_home, &self.temp)?;
         if digest_environment(&environment)? != self.child_environment_sha256 {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::CrossBinding,
                 "HERMES_CODEX_PROXY_FACTORY_BINDING_REJECTED",
             ));
-        }
-        // The Codex host owns renewal. Read its current access token at launch,
-        // without copying refresh credentials or persisting authentication.
-        // Secret bytes never participate in receipts or configuration hashes.
-        if let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE") {
-            let token = read_host_access_token(Path::new(&source))?;
-            environment.insert(OsString::from("CODEX_ACCESS_TOKEN"), OsString::from(token));
         }
         Ok(crate::windows_job::WindowsJobCommandPlan {
             executable: self.launcher.clone(),
@@ -1451,7 +1448,7 @@ impl VerifiedCodexProxyConfig {
 }
 
 #[cfg(windows)]
-fn read_host_access_token(source: &Path) -> HermesAdapterResult<String> {
+fn read_host_access_token(source: &Path) -> HermesAdapterResult<Value> {
     let rejected = || configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
     if !source.is_absolute() || source.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
         return Err(rejected());
@@ -1462,18 +1459,66 @@ fn read_host_access_token(source: &Path) -> HermesAdapterResult<String> {
 }
 
 #[cfg(any(windows, test))]
-fn access_token_from_host_auth(bytes: &[u8]) -> HermesAdapterResult<String> {
+fn access_token_from_host_auth(bytes: &[u8]) -> HermesAdapterResult<Value> {
     let rejected = || configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
     let auth: Value = serde_json::from_slice(bytes).map_err(|_| rejected())?;
     if auth.get("auth_mode").and_then(Value::as_str) != Some("chatgpt") {
         return Err(rejected());
     }
-    auth.pointer("/tokens/access_token")
+    let access = auth.pointer("/tokens/access_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty() && token.len() <= 32_768
             && token.bytes().all(|byte| byte.is_ascii_graphic()))
-        .map(ToOwned::to_owned)
-        .ok_or_else(rejected)
+        .ok_or_else(rejected)?;
+    let account = auth.pointer("/tokens/account_id").and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 256
+            && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_:".contains(&byte)))
+        .ok_or_else(rejected)?;
+    Ok(json!({"type":"chatgptAuthTokens", "accessToken":access, "chatgptAccountId":account}))
+}
+
+#[cfg(windows)]
+fn authenticate_codex_host(
+    duplex: &mut ProductionCodexProxyDuplex,
+    receiver: &Receiver<CodexReaderEvent>,
+    transcript: &mut Sha256,
+    source: &Path,
+    deadline: Instant,
+) -> HermesAdapterResult<()> {
+    let params = read_host_access_token(source)?;
+    let mut encoded = serde_json::to_vec(&json!({"id":3,"method":"account/login/start","params":params}))
+        .map_err(|_| configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE"))?;
+    encoded.push(b'\n');
+    // External ChatGPT tokens live only in this one App Server process.
+    // Neither token nor account identifier is logged, hashed or saved.
+    let sent = duplex.write_all(&encoded);
+    encoded.fill(0);
+    sent.map_err(|_| configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE"))?;
+    transcript.update(b"HOST_CHATGPT_AUTH_REQUEST\0");
+    let mut seen = [false; 3];
+    while !seen.iter().all(|value| *value) {
+        let frame = receive_codex_frame(receiver, transcript, deadline).map_err(direct_protocol_error)?;
+        match &frame.kind {
+            CodexAppServerFrameKind::Response { id: 3 }
+                if frame.value.get("result") == Some(&json!({"type":"chatgptAuthTokens"})) && !seen[0] => seen[0] = true,
+            CodexAppServerFrameKind::Lifecycle { method } if method == "account/login/completed" => {
+                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
+                if seen[1] { return Err(direct_protocol_error(89)); }
+                seen[1] = true;
+            }
+            CodexAppServerFrameKind::Lifecycle { method } if method == "account/updated" => {
+                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
+                if seen[2] { return Err(direct_protocol_error(89)); }
+                seen[2] = true;
+            }
+            CodexAppServerFrameKind::Lifecycle { method } if matches!(method.as_str(),
+                "warning" | "remoteControl/status/changed" | "mcpServer/startupStatus/updated") => {
+                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
+            }
+            _ => return Err(direct_protocol_error(89)),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(all(windows, test))]
@@ -1488,9 +1533,9 @@ mod host_auth_tests {
         let source = root.join("auth.json");
         for token in ["fixture-first-access", "fixture-renewed-access"] {
             let bytes = serde_json::to_vec(&json!({"auth_mode":"chatgpt",
-                "tokens":{"access_token":token,"refresh_token":"fixture-refresh-never-export"}})).unwrap();
+                "tokens":{"access_token":token,"account_id":"fixture-account","refresh_token":"fixture-refresh-never-export"}})).unwrap();
             fs::write(&source, &bytes).unwrap();
-            assert_eq!(read_host_access_token(&source).unwrap(), token);
+            assert_eq!(read_host_access_token(&source).unwrap(), json!({"type":"chatgptAuthTokens", "accessToken":token, "chatgptAccountId":"fixture-account"}));
             assert_eq!(fs::read(&source).unwrap(), bytes);
             assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         }
@@ -3684,7 +3729,7 @@ impl CodexDirectReflectionPlan {
                     "version": "1.0.0"
                 },
                 "capabilities": {
-                    "experimentalApi": false,
+                    "experimentalApi": std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE").is_some(),
                     "requestAttestation": false,
                     "mcpServerOpenaiFormElicitation": false
                 }
@@ -4156,6 +4201,8 @@ fn classify_notification_envelope(
                 *method,
                 "thread/started"
                     | "error"
+                    | "account/login/completed"
+                    | "account/updated"
                     | "warning"
                     | "remoteControl/status/changed"
                     | "mcpServer/startupStatus/updated"
@@ -4188,7 +4235,7 @@ fn classify_response(object: &Map<String, Value>) -> HermesAdapterResult<CodexAp
     let id = object
         .get("id")
         .and_then(Value::as_i64)
-        .filter(|id| (0..=2).contains(id))
+        .filter(|id| (0..=3).contains(id))
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     Ok(CodexAppServerFrameKind::Response { id })
 }
@@ -4213,6 +4260,18 @@ fn classify_notification(
         .and_then(Value::as_object)
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     match method {
+        "account/login/completed" => {
+            if params != json!({"loginId":null,"success":true,"error":null}).as_object().unwrap() {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
+        "account/updated" => {
+            require_control_keys(params, &["authMode", "planType"])?;
+            if params.get("authMode").and_then(Value::as_str) != Some("chatgptAuthTokens")
+                || !params.get("planType").is_some_and(|value| value.is_null() || value.is_string()) {
+                return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
+            }
+        }
         "error" => {
             require_control_keys(params, &["error", "threadId", "turnId", "willRetry"])?;
             let error = params.get("error").and_then(Value::as_object)
