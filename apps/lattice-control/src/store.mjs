@@ -2318,6 +2318,8 @@ export function projectControlWorkSnapshot({
     objective: node.objective,
     priority: node.priority,
     status: node.status,
+    ...(source.authority === "POSTGRESQL_TASK_LEDGER"
+      ? { completion_verified: node.completion_verified } : {}),
     progress: node.progress,
     parent_id: parentByChild.get(node.id) ?? null,
     children: childrenByParent.get(node.id),
@@ -2327,6 +2329,8 @@ export function projectControlWorkSnapshot({
     id: node.id,
     title: node.title,
     status: node.status,
+    ...(source.authority === "POSTGRESQL_TASK_LEDGER"
+      ? { completion_verified: node.completion_verified } : {}),
     depends_on: dependsOnByNode.get(node.id),
     reverse_dependents: reverseByNode.get(node.id),
     blocker: blockerFor(node.id),
