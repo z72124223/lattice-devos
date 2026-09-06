@@ -9,10 +9,13 @@ smallest workflow and verification that can prove the requested result.
   do not restore the retired browser dashboard, visual work tree/code graph,
   separate conversation UI, or Windows desktop shell. Keep their durable data
   and the backend task, relationship, decision, and evidence APIs.
-- LATTICE is one local Runtime with four core functions: LATTICE control,
-  PostgreSQL durable facts, Graphify derived relationship memory, and Hermes
-  reflection. They share one fact/event contract, not one fragile all-or-nothing
-  acceptance run.
+- LATTICE is one local Runtime with three core functions: LATTICE control,
+  PostgreSQL durable facts, and Graphify derived relationship memory. Use the
+  `GRAPHIFY` integration mode for the main product. Hermes is a suspended,
+  optional reflection module; retain its code and historical data, but do not
+  require its login or reflection for normal work or three-core acceptance.
+  Codex owns reasoning and review. Resume Hermes development only for an
+  explicitly approved use case with measurable additional value.
 - PostgreSQL is the only authoritative durable truth. Graphify is rebuilt from
   that truth when necessary. Hermes may create observations or suggestions, but
   never overwrites authoritative facts by itself.

@@ -4143,8 +4143,14 @@ impl HermesRuntimePreflight {
     }
 }
 
-fn hermes_activation_status(preflight: HermesProductionPreflight) -> &'static str {
-    match preflight {
+fn hermes_activation_status(
+    enabled: bool,
+    preflight: impl FnOnce() -> HermesProductionPreflight,
+) -> &'static str {
+    if !enabled {
+        return "DEFERRED";
+    }
+    match preflight() {
         HermesProductionPreflight::MissingConfiguration(_) => "CONFIGURATION_REQUIRED",
         HermesProductionPreflight::ConfigurationRejected => "CONFIGURATION_REJECTED",
         HermesProductionPreflight::ConfigurationPresentUnverified => "PREPARED",
@@ -4158,6 +4164,19 @@ pub enum GraphifyRuntimePreflight {
     MissingConfiguration(Vec<&'static str>),
     ConfigurationRejected,
     IdentityVerified,
+}
+
+// A status request is not an execution preflight. Hashing the whole optional
+// runtime here can exceed the MCP call deadline and hide healthy durable work.
+// Real Graphify execution still verifies its complete pinned identity.
+fn graphify_configuration_status(root: Option<&Path>, launcher: Option<&Path>) -> &'static str {
+    if root.is_some_and(|path| path.is_absolute() && path.is_dir())
+        && launcher.is_some_and(|path| path.is_absolute() && path.is_file())
+    {
+        "PREPARED"
+    } else {
+        "DEGRADED"
+    }
 }
 
 impl GraphifyRuntimePreflight {
@@ -5403,11 +5422,9 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             ),
         );
         let graphify_status = if self.integration_mode.uses_graphify() {
-            match graphify_runtime_preflight_from_environment() {
-                GraphifyRuntimePreflight::IdentityVerified => "READY",
-                GraphifyRuntimePreflight::MissingConfiguration(_)
-                | GraphifyRuntimePreflight::ConfigurationRejected => "DEGRADED",
-            }
+            let root = env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT").map(PathBuf::from);
+            let launcher = env::var_os("LATTICE_GRAPHIFY_WSL_EXE").map(PathBuf::from);
+            graphify_configuration_status(root.as_deref(), launcher.as_deref())
         } else {
             "DEFERRED"
         };
@@ -5431,7 +5448,10 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         object.insert(
             "hermes_activation_status".to_owned(),
             Value::String(
-                hermes_activation_status(hermes_production_preflight_from_environment()).to_owned(),
+                hermes_activation_status(
+                    self.integration_mode.uses_hermes(),
+                    hermes_production_preflight_from_environment,
+                ).to_owned(),
             ),
         );
         // Writer readiness is observed only after the Task Ledger replay has
@@ -17459,21 +17479,37 @@ mod tests {
     #[test]
     fn hermes_activation_status_requires_only_real_configuration() {
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(vec![
                 "LATTICE_HERMES_CODEX_HOME",
             ])),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(vec![
                 "LATTICE_HERMES_CODEX_HOME",
             ])),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::ConfigurationPresentUnverified),
+            hermes_activation_status(true, || HermesProductionPreflight::ConfigurationPresentUnverified),
             "PREPARED"
         );
+    }
+
+    #[test]
+    fn suspended_hermes_activation_never_reads_its_configuration() {
+        assert_eq!(hermes_activation_status(false, || panic!("Hermes must stay inactive")), "DEFERRED");
+    }
+
+    #[test]
+    fn graphify_configuration_status_does_not_claim_identity_verification() {
+        let launcher = std::env::current_exe().unwrap();
+        let root = launcher.parent().unwrap();
+        // An ordinary directory and executable suffice for PREPARED, never READY.
+        assert_eq!(graphify_configuration_status(Some(root), Some(&launcher)), "PREPARED");
+        assert_eq!(graphify_configuration_status(None, Some(&launcher)), "DEGRADED");
+        assert_eq!(graphify_configuration_status(Some(root), None), "DEGRADED");
+        assert_eq!(graphify_configuration_status(Some(Path::new("relative")), Some(&launcher)), "DEGRADED");
     }
 
     #[cfg(windows)]

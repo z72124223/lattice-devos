@@ -441,6 +441,16 @@ test("optional Runtime module degradation does not mask verified PostgreSQL", as
   assert.equal(status.postgresql, "HEALTHY");
 });
 
+test("three-core health accepts prepared Graphify and suspended Hermes without claiming execution", async () => {
+  const runtimeStatus = { ...validRuntimeStatus(), runtime_integration: "GRAPHIFY",
+    graphify_runtime_status: "PREPARED", hermes_runtime_status: "DEFERRED", hermes_activation_status: "DEFERRED" };
+  const probe = () => probeLatticeRuntimeEndpoint({ executablePath: path.resolve("latticed.exe"),
+    environment: {}, timeoutMs: 500, spawnProcess: fakeRuntimeSpawn({ runtimeStatus }) });
+  assert.equal((await probe()).postgresql, "HEALTHY");
+  runtimeStatus.runtime_integration = "GRAPHIFY_HERMES";
+  assert.equal((await probe()).postgresql, "INCOMPATIBLE");
+});
+
 test("a Runtime tool failure is unreachable without leaking raw output", async () => {
   const status = await probeLatticeRuntimeEndpoint({
     executablePath: path.resolve("latticed.exe"),

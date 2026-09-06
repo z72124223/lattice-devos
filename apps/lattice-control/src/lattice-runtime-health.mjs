@@ -343,14 +343,15 @@ function validRuntimeStatus(value) {
   }
   const graphifyStatuses = value.runtime_integration === "CORE_ONLY"
     ? ["DEFERRED"]
-    : ["READY", "DEGRADED"];
+    : ["READY", "PREPARED", "DEGRADED"];
   const hermesStatuses = value.runtime_integration === "GRAPHIFY_HERMES"
     ? ["PREPARED", "DEGRADED"]
     : ["DEFERRED"];
+  const hermesActivationStatuses = ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"];
+  if (value.runtime_integration !== "GRAPHIFY_HERMES") hermesActivationStatuses.push("DEFERRED");
   return graphifyStatuses.includes(value.graphify_runtime_status)
     && hermesStatuses.includes(value.hermes_runtime_status)
-    && ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"]
-      .includes(value.hermes_activation_status)
+    && hermesActivationStatuses.includes(value.hermes_activation_status)
     && validForemanProjection(value.foreman);
 }
 
