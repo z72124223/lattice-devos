@@ -108,6 +108,29 @@ export function layoutGraph(nodes) {
   return { positions, width: Math.max(760, columns.size * 254 + 24), height: Math.max(540, rows * 116 + 28) };
 }
 
+// Each node owns its open/closed state. Shared downstream work remains visible
+// while another open branch still reaches it.
+export function graphBranches(graph, choices = new Map(), revealAll = false) {
+  const children = new Map(graph.nodes.map((work) => [work.id, []]));
+  const roots = graph.nodes.filter((work) => !(work.depends_on || []).some((id) => children.has(id)));
+  const rootIds = new Set(roots.map((work) => work.id));
+  for (const work of graph.nodes) for (const id of work.depends_on || []) children.get(id)?.push(work.id);
+  const expanded = new Map(graph.nodes.map((work) => [work.id, choices.get(work.id) ?? (revealAll || rootIds.has(work.id))]));
+  const visible = new Set();
+  function visit(id) {
+    if (visible.has(id)) return;
+    visible.add(id); if (expanded.get(id)) children.get(id).forEach(visit);
+  }
+  roots.forEach((work) => visit(work.id));
+  return { children, expanded, visible };
+}
+
+export function treeBranches(tree, choices = new Map(), revealAll = false) {
+  const rootId = tree.roots.length === 1 ? tree.roots[0] : '__project__';
+  return new Set([...tree.nodes.map((work) => work.id), '__project__']
+    .filter((id) => !(choices.get(id) ?? (revealAll || id === rootId))));
+}
+
 // The first two levels spread horizontally. Deeper work forms connected branches.
 export function layoutTree(tree, collapsed = new Set()) {
   const byId = new Map(tree.nodes.map((node) => [node.id, node]));
@@ -116,10 +139,11 @@ export function layoutTree(tree, collapsed = new Set()) {
   const singleRoot = roots.length === 1 ? byId.get(roots[0]) : null;
   const rootId = singleRoot?.id ?? '__project__';
   const firstLevel = singleRoot ? (singleRoot.children || []) : roots;
-  const columns = collapsed.has(rootId) ? [] : firstLevel.filter((id) => byId.has(id));
+  const columns = firstLevel.filter((id) => byId.has(id));
   const branchWidth = (id, ancestors = new Set(), depth = 1) => {
     if (ancestors.has(id)) throw new Error('工作階層形成循環，請確認工作關係。');
-    const children = collapsed.has(id) ? [] : (byId.get(id)?.children || []).filter((child) => byId.has(child));
+    // Reserve the branch width while folded, keeping parent cards in place.
+    const children = (byId.get(id)?.children || []).filter((child) => byId.has(child));
     return Math.max(depth === 1 ? 204 : 178, ...children.map((child) => 52 + branchWidth(child, new Set([...ancestors, id]), depth + 1)));
   };
   const laneCount = Math.min(3, columns.length);
@@ -149,7 +173,7 @@ export function layoutTree(tree, collapsed = new Set()) {
     maxY = Math.max(maxY, cursor); return cursor;
   };
   const cursors = widths.map(() => 174);
-  columns.forEach((id, index) => {
+  if (!collapsed.has(rootId)) columns.forEach((id, index) => {
     const lane = index % laneCount;
     const x = (width - totalWidth) / 2 + 8 + widths.slice(0, lane).reduce((sum, value) => sum + value, 0);
     cursors[lane] = placeBranch(id, x, cursors[lane], 1, new Set([rootId])) + 20;
@@ -233,16 +257,16 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   const treeNote = document.querySelector('#tree-current');
   let snapshot = null, projectName = '', message = '正在讀取工作…';
   let example = new URLSearchParams(location.search).get('workExample') === '1';
-  let selected = null, collapsed = new Set(), lastKey = null, projectId = null;
-  let focusId = null, filter = 'all', currentScope = null;
+  let selected = null, lastKey = null, projectId = null;
+  let filter = 'all', currentScope = null;
+  const treeChoices = new Map(), graphChoices = new Map();
   const projectSelect = document.querySelector('#work-project');
   const filters = document.querySelector('#work-filters');
-  const breadcrumb = document.querySelector('#work-breadcrumb');
-  const nextLevel = document.querySelector('#work-next-level');
-  const previousLevel = document.querySelector('#work-previous-level');
+  const detailButton = document.querySelector('#work-selected-detail');
+  const selectionLabel = document.querySelector('#work-selection');
   const actualWork = (id) => snapshot?.graph.nodes.find((work) => work.id === id);
 
-  function nodeButton(work, box, { isExample, structural = false, iconName, onActivate } = {}) {
+  function nodeButton(work, box, { isExample, structural = false, iconName, onActivate, branchCount = 0, expanded = false } = {}) {
     const foreign = svg('foreignObject', { x: box.x, y: box.y, width: box.width, height: box.height });
     const appearance = workAppearance(work);
     const button = html('button', `work-chip${structural ? ' structural' : ''}${box.kind === 'root' ? ' root-chip' : ''}`);
@@ -250,23 +274,36 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     button.dataset.status = work.status; button.style.setProperty('--node-color', structural ? '#45d5e5' : appearance.color);
     button.setAttribute('aria-label', `${work.title}，${appearance.label}`);
     button.title = `${work.title} · ${appearance.label}`;
+    if (branchCount) {
+      button.classList.add('has-branches'); button.setAttribute('aria-expanded', String(expanded));
+      button.setAttribute('aria-label', `${expanded ? '收合' : '展開'}${work.title}的分支`);
+      button.title += ` · 點一下${expanded ? '收合' : '展開'} ${branchCount} 個分支`;
+    }
     button.classList.toggle('is-selected', selected === work.id);
     if (structural) button.append(icon(iconName || 'screen'));
     else button.append(html('span', 'work-dot'));
     const title = html('span', 'work-chip-title', work.title);
     const copy = html('span', 'work-chip-copy'); copy.append(title);
-    if (!isExample && work.id !== '__project__') copy.append(html('small', 'work-chip-status',
+    if (branchCount) copy.append(html('small', 'work-branch-hint', `${expanded ? '▾ 收合' : '▸ 展開'} ${branchCount} 個分支`));
+    else if (!isExample && work.id !== '__project__') copy.append(html('small', 'work-chip-status',
       work.completion_verified && work.status === 'archived' ? '已完成 · 已封存' : appearance.label));
     button.append(copy);
     button.classList.toggle('context-only', filter !== 'all' && !currentScope?.matches.has(work.id));
     button.addEventListener('click', () => {
       selected = work.id;
       for (const item of host.querySelectorAll('[data-node-id]')) item.classList.toggle('is-selected', item.dataset.nodeId === selected);
+      if (!isExample && work.id !== '__project__') onSelect?.(actualWork(work.id) || work);
+      updateSelection(work, branchCount);
       if (onActivate) onActivate();
-      else if (isExample) showExampleDetail(work);
-      else { onSelect?.(actualWork(work.id) || work); onOpen?.(work.id); }
     });
     foreign.append(button); return foreign;
+  }
+  function updateSelection(work, branchCount = 0) {
+    detailButton.disabled = !work || work.id === '__project__';
+    selectionLabel.textContent = work
+      ? `已選：${work.title}${branchCount ? '' : filter === 'all' ? ' · 沒有下層分支' : ' · 沒有符合篩選的下層分支'}`
+      : '直接點節點，展開或收合它下面的分支';
+    selectionLabel.title = selectionLabel.textContent;
   }
   function showExampleDetail(work) {
     const dialog = document.querySelector('#work-example-detail');
@@ -275,15 +312,18 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     dialog.showModal();
   }
   function drawGraph(graph, isExample) {
-    const layout = isExample && !focusId && filter === 'all' ? { positions: examplePositions, width: 760, height: 540 } : layoutGraph(graph.nodes);
+    const layout = isExample && filter === 'all' ? { positions: examplePositions, width: 760, height: 540 } : layoutGraph(graph.nodes);
+    const branches = graphBranches(graph, graphChoices, filter !== 'all');
     const { positions, width, height } = layout;
     for (const layer of [graphLayer, graphList]) layer.setAttribute('viewBox', `0 0 ${width} ${height}`);
     graphLayer.parentElement.style.setProperty('--diagram-ratio', `${width} / ${height}`);
     graphLayer.parentElement.style.setProperty('--diagram-width', `${Math.max(520, width * .72)}px`);
     const definitions = svg('defs'); graphLayer.replaceChildren(definitions); graphList.replaceChildren();
     for (const [index, work] of graph.nodes.entries()) {
+      if (!branches.visible.has(work.id)) continue;
       const end = positions.get(work.id);
       for (const [dependencyIndex, id] of (work.depends_on || []).entries()) {
+        if (!branches.visible.has(id) || !branches.expanded.get(id)) continue;
         const start = positions.get(id); if (!start) continue;
         const dependency = graph.nodes.find((item) => item.id === id), color = workAppearance(dependency).color;
         const markerId = `work-arrow-${index}-${dependencyIndex}`;
@@ -306,7 +346,13 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
         }
         graphLayer.append(svg('path', { class: 'work-dependency', d: path, stroke: color, 'marker-end': `url(#${markerId})`, 'data-from': id, 'data-to': work.id }));
       }
-      graphList.append(nodeButton(work, end, { isExample }));
+      const children = branches.children.get(work.id), expanded = branches.expanded.get(work.id);
+      graphList.append(nodeButton(work, end, { isExample, branchCount: children.length, expanded,
+        onActivate: children.length ? () => {
+          graphChoices.set(work.id, !expanded); drawGraph(graph, isExample);
+          graphList.querySelector(`[data-node-id="${CSS.escape(work.id)}"]`)?.focus({ preventScroll: true });
+        } : undefined,
+      }));
     }
     graphNote.replaceChildren();
     const waiting = graph.nodes.find((work) => work.status === 'waiting_approval');
@@ -318,10 +364,11 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
       graphNote.append(html('span', '', `${focus.title}${waiting ? '等你決定' : '遇到阻礙'}${affected.length ? `，會影響${affected.map((work) => work.title).join('、')}` : ''}`));
     } else {
       graphNote.classList.remove('attention'); graphNote.append(icon('bulb'));
-      graphNote.append(html('span', '', graphLayer.querySelector('.work-dependency') ? '沿著箭頭，就能看懂工作先後與影響' : '尚未記錄依賴關係；點選工作可查看詳情'));
+      graphNote.append(html('span', '', graph.nodes.some((work) => work.depends_on?.length) ? '點節點展開後續工作；共用的工作只顯示一次' : '尚未記錄依賴關係；選取工作後可按「查看詳情」'));
     }
   }
   function drawTree(tree, isExample) {
+    const collapsed = treeBranches(tree, treeChoices, filter !== 'all');
     const layout = layoutTree(tree, collapsed);
     const { positions, edges, width, height, rootId } = layout;
     const canvas = svg('svg', { viewBox: `0 0 ${width} ${height}`, class: 'work-tree-svg', 'aria-label': '目標與子工作階層' });
@@ -348,33 +395,22 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
       const structural = hasChildren || box.kind === 'root';
       const iconName = box.kind === 'root' ? 'goal' : /付款|收款|金流/.test(work.title) ? 'wallet' : /驗收|交付/.test(work.title) ? 'shield' : 'screen';
       const group = nodeButton(work, box, { isExample, structural, iconName,
-        onActivate: id === '__project__' ? () => { collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); drawTree(tree, isExample); } : undefined,
+        branchCount: children.length, expanded: !collapsed.has(id),
+        onActivate: hasChildren ? () => {
+          treeChoices.set(id, collapsed.has(id)); drawTree(tree, isExample);
+          treeList.querySelector(`[data-node-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+        } : undefined,
       });
       canvas.append(group);
-      if (hasChildren) {
-        const control = svg('foreignObject', { x: box.x + box.width - 25, y: box.y + box.height - 24, width: 24, height: 24 });
-        const button = html('button', 'work-collapse', collapsed.has(id) ? '+' : '−');
-        button.type = 'button'; button.title = `${collapsed.has(id) ? '展開' : '收合'}${work.title}`;
-        button.setAttribute('aria-label', button.title); button.setAttribute('aria-expanded', String(!collapsed.has(id)));
-        button.dataset.branchId = id;
-        button.addEventListener('click', () => {
-          collapsed.has(id) ? collapsed.delete(id) : collapsed.add(id); drawTree(tree, isExample);
-          treeList.querySelector(`[data-branch-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
-        });
-        control.append(button); canvas.append(control);
-      }
     }
     treeList.replaceChildren(canvas);
     const hasHierarchy = tree.nodes.some((work) => work.parent_id);
     treeNote.replaceChildren(icon('bulb'), html('span', '', hasHierarchy
-      ? '用「下一層」深入工作，用「上一層」回到目標'
+      ? '直接點節點展開分支，再點一次收合；父目標會留在原處'
       : '尚未記錄上下層關係；目前工作並列在專案下'));
   }
-  function focusWork(id) {
-    focusId = id; selected = null; collapsed.clear(); render();
-  }
   function renderNavigation(data) {
-    currentScope = data ? workScope(data, focusId, filter) : null;
+    currentScope = data ? workScope(data, null, filter) : null;
     const counts = currentScope?.counts;
     for (const button of filters.querySelectorAll('button')) {
       const [key, label] = workFilters.find(([key]) => key === button.dataset.filter);
@@ -383,21 +419,8 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
       button.hidden = !['all', 'complete', 'active', 'pending', 'review', 'approval'].includes(key) && !counts?.[key] && filter !== key;
       button.disabled = !data;
     }
-    breadcrumb.replaceChildren();
-    const root = html('button', '', example ? '示例專案' : projectName || '專案總覽');
-    root.type = 'button'; root.addEventListener('click', () => focusWork(null)); breadcrumb.append(root);
-    for (const work of currentScope?.lineage || []) {
-      breadcrumb.append(html('span', '', '›'));
-      const button = html('button', '', work.title); button.type = 'button';
-      button.addEventListener('click', () => focusWork(work.id)); breadcrumb.append(button);
-    }
-    breadcrumb.lastElementChild?.setAttribute('aria-current', 'location');
-    previousLevel.disabled = !currentScope?.lineage.length;
-    const placeholder = html('option', '', currentScope?.children.length ? '下一層：選擇工作…' : '沒有下一層'); placeholder.value = '';
-    nextLevel.replaceChildren(placeholder, ...(currentScope?.children || []).map((work) => {
-      const option = html('option', '', `${work.title} · ${workAppearance(work).label}`); option.value = work.id; return option;
-    }));
-    nextLevel.disabled = !currentScope?.children.length;
+    const selectedWork = [...(data?.tree.nodes || []), ...(data?.graph.nodes || [])].find((work) => work.id === selected);
+    updateSelection(selectedWork, (selectedWork?.children?.length || selectedWork?.reverse_dependents?.length || 0));
     const notice = document.querySelector('#work-data-note');
     notice.textContent = example ? '示意資料：用來示範外觀與操作，不代表實際進度。'
       : '這裡顯示已登記的工作紀錄。尚未接上的 Codex 對話與驗收結果，不會自動變成圖中的進度。';
@@ -415,7 +438,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     document.querySelector('#work-empty').hidden = !empty;
     document.querySelector('#work-empty').textContent = data
       ? !currentScope.counts.all ? '這個專案還沒有已登記的工作。'
-        : `這一層沒有「${workFilters.find(([key]) => key === filter)[1]}」的工作紀錄。可切回「全部」或查看其他專案。`
+        : `這個專案沒有「${workFilters.find(([key]) => key === filter)[1]}」的工作紀錄。可切回「全部」或查看其他專案。`
       : message;
     document.querySelector('#work-diagrams').hidden = empty;
     if (!empty) { drawGraph(currentScope.graph, example); drawTree(currentScope.tree, example); }
@@ -423,17 +446,35 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   for (const [key] of workFilters) {
     const button = html('button', 'work-filter'); button.type = 'button'; button.dataset.filter = key;
     button.style.setProperty('--filter-color', palette[key]?.color || '#e3eaf2');
-    button.addEventListener('click', () => { filter = key; collapsed.clear(); render(); }); filters.append(button);
+    button.addEventListener('click', () => { filter = key; treeChoices.clear(); graphChoices.clear(); render(); }); filters.append(button);
   }
-  previousLevel.addEventListener('click', () => focusWork(currentScope?.lineage.at(-2)?.id || null));
-  nextLevel.addEventListener('change', () => { if (nextLevel.value) focusWork(nextLevel.value); });
+  detailButton.addEventListener('click', () => {
+    const data = example ? exampleSnapshot : snapshot;
+    const work = [...(data?.tree.nodes || []), ...(data?.graph.nodes || [])].find((work) => work.id === selected);
+    if (!work) return;
+    if (example) showExampleDetail(work); else onOpen?.(work.id);
+  });
+  for (const [id, expand] of [['work-expand-all', true], ['work-collapse-all', false]]) {
+    document.querySelector(`#${id}`).addEventListener('click', () => {
+      const data = example ? exampleSnapshot : snapshot;
+      treeChoices.clear(); graphChoices.clear();
+      if (data) {
+        const treeRoot = data.tree.roots.length === 1 ? data.tree.roots[0] : '__project__';
+        data.tree.nodes.forEach((work) => treeChoices.set(work.id, expand || work.id === treeRoot));
+        treeChoices.set('__project__', true);
+        const roots = new Set(data.graph.nodes.filter((work) => !(work.depends_on || []).some((id) => data.graph.nodes.some((node) => node.id === id))).map((work) => work.id));
+        data.graph.nodes.forEach((work) => graphChoices.set(work.id, expand || roots.has(work.id)));
+      }
+      render();
+    });
+  }
   projectSelect.addEventListener('change', () => {
-    example = false; focusId = null; filter = 'all'; collapsed.clear();
+    example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear();
     const url = new URL(location.href); url.searchParams.delete('workExample'); url.searchParams.set('project', projectSelect.value);
     history.replaceState(null, '', url); onProjectChange?.(projectSelect.value);
   });
   sourceButton.addEventListener('click', () => {
-    example = !example; selected = null; focusId = null; filter = 'all'; collapsed.clear();
+    example = !example; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear();
     const url = new URL(location.href);
     if (example) url.searchParams.set('workExample', '1'); else url.searchParams.delete('workExample');
     history.replaceState(null, '', url); render();
@@ -442,10 +483,9 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   document.querySelector('#work-decisions').addEventListener('click', () => onNavigate('decisions'));
   return {
     update(data, context = {}) {
-      if (!example && projectId !== context.project_id) { focusId = null; selected = null; collapsed.clear(); filter = 'all'; }
+      if (!example && projectId !== context.project_id) { selected = null; treeChoices.clear(); graphChoices.clear(); filter = 'all'; }
       projectId = context.project_id;
       snapshot = data; projectName = context.project_name || ''; message = context.status_text || '這個專案還沒有工作。';
-      if (!example && focusId && !data?.tree.nodes.some((work) => work.id === focusId)) focusId = null;
       const key = `${context.project_id}:${data?.revision}:${data?.digest}:${message}`;
       if (key !== lastKey) { lastKey = key; render(); }
     },

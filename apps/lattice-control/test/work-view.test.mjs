@@ -1,6 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { layoutGraph, layoutTree, workAppearance, exampleSnapshot, workScope } from '../public/work-view.mjs';
+import { layoutGraph, layoutTree, workAppearance, exampleSnapshot, workScope, graphBranches, treeBranches } from '../public/work-view.mjs';
+
+test('branches open progressively and remember their state when a parent closes and reopens', () => {
+  const choices = new Map(), tree = exampleSnapshot.tree;
+  const initial = layoutTree(tree, treeBranches(tree, choices));
+  assert.deepEqual([...initial.positions.keys()], ['goal', 'website', 'payments', 'delivery']);
+  choices.set('website', true);
+  const opened = layoutTree(tree, treeBranches(tree, choices));
+  for (const id of ['login', 'list', 'booking']) assert.ok(opened.positions.has(id));
+  assert.equal(opened.positions.has('payment'), false, 'other branches remain folded');
+  for (const id of ['goal', 'website', 'payments', 'delivery']) assert.deepEqual(opened.positions.get(id), initial.positions.get(id));
+  choices.set('goal', false);
+  assert.equal(layoutTree(tree, treeBranches(tree, choices)).positions.size, 1);
+  choices.set('goal', true);
+  assert.ok(layoutTree(tree, treeBranches(tree, choices)).positions.has('booking'));
+  choices.set('website', false);
+  assert.equal(layoutTree(tree, treeBranches(tree, choices)).positions.has('booking'), false);
+  assert.equal(tree.nodes.length, 10, 'folding never deletes work');
+  assert.ok(layoutTree(tree, treeBranches(tree, new Map(), true)).positions.has('launch'), 'status search can reveal matching paths');
+});
+
+test('graph folding preserves shared downstream work reached by a different open branch', () => {
+  const choices = new Map(), graph = exampleSnapshot.graph;
+  assert.deepEqual([...graphBranches(graph, choices).visible].sort(), ['requirements', 'login', 'list', 'payment'].sort());
+  choices.set('login', true); choices.set('list', true);
+  assert.ok(graphBranches(graph, choices).visible.has('booking'));
+  choices.set('login', false);
+  assert.ok(graphBranches(graph, choices).visible.has('booking'));
+  choices.set('list', false);
+  assert.equal(graphBranches(graph, choices).visible.has('booking'), false);
+  choices.set('requirements', false);
+  assert.deepEqual([...graphBranches(graph, choices).visible], ['requirements']);
+  assert.equal(graphBranches(graph, new Map(), true).visible.size, graph.nodes.length);
+});
 
 test('status filters retain ancestors and count only actual verified completion', () => {
   const filtered = workScope(exampleSnapshot, null, 'complete');

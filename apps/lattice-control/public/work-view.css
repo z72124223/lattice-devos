@@ -33,10 +33,8 @@ body[data-active-core^="work-"] .core-stage { overflow:visible; min-height:0; }
 .work-controls .work-filter[aria-pressed="true"] { outline:2px solid var(--filter-color); outline-offset:1px; background:#163e50; }
 .work-controls button:disabled, .work-controls select:disabled { opacity:.5; cursor:default; }
 .work-level-controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; }
-#work-breadcrumb { flex:1; display:flex; flex-wrap:wrap; align-items:center; gap:5px; min-width:160px; }
-#work-breadcrumb button { border:0; background:transparent; padding:4px 6px; min-height:34px; font-size:.85rem; text-align:left; max-width:280px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-#work-breadcrumb button[aria-current] { color:#46d5e6; font-weight:700; }
-#work-next-level { max-width:min(360px,100%); font-size:.85rem; }
+#work-selection { flex:1; min-width:160px; color:#ace1e9; font-size:.85rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.work-level-controls button { font-size:.85rem; }
 .work-data-note { color:#a5c2d0; margin:0; font-size:.82rem; line-height:1.6; }
 .work-chip-copy { display:grid; gap:3px; min-width:0; }
 .work-chip-status { font-size:14px; font-weight:500; color:var(--node-color); }
@@ -68,8 +66,9 @@ body[data-active-core^="work-"] .core-stage { overflow:visible; min-height:0; }
 #tree-list { display:block; min-width:var(--diagram-width,520px); }
 .work-tree-svg { display:block; width:100%; height:auto; overflow:visible; }
 .work-tree-branch { fill:none; stroke:#e0e5ed; stroke-width:3.6; stroke-linejoin:round; stroke-linecap:round; }
-.work-collapse { display:grid; place-items:center; width:22px; height:22px; min-height:22px; border:1px solid #498793; border-radius:6px; background:#082d3c; color:#97eaf0; font-size:17px; line-height:1; opacity:.55; }
-.work-collapse:hover,.work-collapse:focus-visible { opacity:1; }
+.work-branch-hint { display:block; font-size:14px; line-height:1.2; font-weight:500; color:#a7e9ef; }
+.work-chip.has-branches:hover .work-branch-hint { color:#fff; }
+.work-views[data-source="live"] .has-branches .work-chip-title { -webkit-line-clamp:1; }
 .work-note, #tree-current.work-note { display:flex; align-items:center; justify-content:center; gap:14px; padding:18px 24px 5px; margin:0; border:0; border-radius:0; background:none; color:#47d8e8; font-size:clamp(.9rem,1.7vw,1.5rem); font-weight:650; line-height:1.55; }
 .work-note svg { flex:0 0 auto; width:40px; height:44px; }
 .work-note.attention { color:#ffc133; }

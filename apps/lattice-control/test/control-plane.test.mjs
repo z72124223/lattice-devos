@@ -5689,7 +5689,7 @@ test("the loopback conversation API serves one responsive chat entry and durable
     assert.doesNotMatch(pageHtml, /readyForFirstMessage/u);
     assert.match(pageHtml, /assertSharedWorkSnapshot/u);
     assert.match(pageHtml, /renderWorkGraph\(workSnapshot\.graph\)/u);
-    assert.match(pageHtml, /renderWorkTree\(workSnapshot\.tree\)/u);
+    assert.match(pageHtml, /workView\.update\(packet\.work_snapshot,packet\.context\)/u);
     for (const [asset, contentType] of [["work-view.mjs", "text/javascript"], ["work-view.css", "text/css"]]) {
       const assetResponse = await fetch(`${origin}/${asset}`);
       assert.equal(assetResponse.status, 200);
