@@ -127,8 +127,10 @@ export function graphBranches(graph, choices = new Map(), revealAll = false) {
 
 export function treeBranches(tree, choices = new Map(), revealAll = false) {
   const rootId = tree.roots.length === 1 ? tree.roots[0] : '__project__';
+  const firstLevel = rootId === '__project__' ? tree.roots
+    : tree.nodes.find(work => work.id === rootId)?.children || [];
   return new Set([...tree.nodes.map((work) => work.id), '__project__']
-    .filter((id) => !(choices.get(id) ?? (revealAll || id === rootId))));
+    .filter((id) => !(choices.get(id) ?? (revealAll || id === rootId || firstLevel.includes(id)))));
 }
 
 // The first two levels spread horizontally. Deeper work forms connected branches.
@@ -251,6 +253,8 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   const host = document.querySelector('#work-views');
   const treeList = document.querySelector('#tree-list');
   const sourceButton = document.querySelector('#work-source');
+  const viewport = treeList.parentElement;
+  let zoom = null, diagramLayout = null, frame = 0;
   const treeNote = document.querySelector('#tree-current');
   let snapshot = null, projectName = '', message = '正在讀取工作…';
   let example = new URLSearchParams(location.search).get('workExample') === '1';
@@ -279,7 +283,8 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     button.classList.toggle('is-selected', selected === work.id);
     if (structural) button.append(icon(iconName || 'screen'));
     else button.append(html('span', 'work-dot'));
-    const title = html('span', 'work-chip-title', work.title);
+    const shortTitle = work.title.split(/[。；;\n]/u)[0];
+    const title = html('span', 'work-chip-title', [...shortTitle].length > 28 ? [...shortTitle].slice(0, 27).join('') + '…' : shortTitle);
     const copy = html('span', 'work-chip-copy'); copy.append(title);
     if (branchCount) copy.append(html('small', 'work-branch-hint', `${expanded ? '▾ 收合' : '▸ 展開'} ${branchCount} 個分支`));
     else if (!isExample && work.id !== '__project__') copy.append(html('small', 'work-chip-status',
@@ -308,12 +313,33 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     dialog.querySelector('p').textContent = `${workAppearance(work).label}。這是外觀示例，不是你的實際工作，也不會修改工作紀錄。`;
     dialog.showModal();
   }
-  function drawTree(tree, isExample) {
+  function positionDiagram({ fit = false, anchor = null } = {}) {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(() => {
+      if (!diagramLayout || host.hidden) return;
+      const { width, height } = diagramLayout;
+      if (fit || zoom === null) zoom = Math.max(.35, Math.min(1, (viewport.clientWidth - 28) / width, (viewport.clientHeight - 20) / height));
+      treeList.style.width = Math.round(width * zoom) + 'px';
+      treeList.style.height = Math.round(height * zoom) + 'px';
+      document.querySelector('#work-zoom-label').textContent = Math.round(zoom * 100) + '%';
+      if (anchor) {
+        const node = treeList.querySelector('[data-node-id="' + CSS.escape(anchor.id) + '"]');
+        if (node) {
+          const rect = node.getBoundingClientRect();
+          viewport.scrollLeft += rect.left - anchor.left;
+          viewport.scrollTop += rect.top - anchor.top;
+          node.focus({ preventScroll: true });
+        }
+      } else if (fit) { viewport.scrollTop = 0; viewport.scrollLeft = Math.max(0, (treeList.offsetWidth - viewport.clientWidth) / 2); }
+    });
+  }
+  function drawTree(tree, isExample, anchor = null) {
     const collapsed = treeBranches(tree, treeChoices, filter !== 'all');
     const layout = layoutTree(tree, collapsed);
+    diagramLayout = layout;
     const { positions, edges, width, height, rootId } = layout;
     const canvas = svg('svg', { viewBox: `0 0 ${width} ${height}`, class: 'work-tree-svg', 'aria-label': '目標與子工作階層' });
-    treeList.style.setProperty('--diagram-width', `${Math.max(520, width * .72)}px`);
+    treeList.style.removeProperty('--diagram-width');
     const byId = new Map(tree.nodes.map((work) => [work.id, work]));
     for (const edge of edges) {
       const start = positions.get(edge.from), end = positions.get(edge.to);
@@ -338,13 +364,14 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
       const group = nodeButton(work, box, { isExample, structural, iconName,
         branchCount: children.length, expanded: !collapsed.has(id),
         onActivate: hasChildren ? () => {
-          treeChoices.set(id, collapsed.has(id)); drawTree(tree, isExample);
-          treeList.querySelector(`[data-node-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true });
+          const rect = treeList.querySelector(`[data-node-id="${CSS.escape(id)}"]`).getBoundingClientRect();
+          treeChoices.set(id, collapsed.has(id)); drawTree(tree, isExample, { id, left: rect.left, top: rect.top });
         } : undefined,
       });
       canvas.append(group);
     }
     treeList.replaceChildren(canvas);
+    positionDiagram({ fit: zoom === null, anchor });
     const hasHierarchy = tree.nodes.some((work) => work.parent_id);
     treeNote.replaceChildren(icon('bulb'), html('span', '', hasHierarchy
       ? '直接點節點展開分支，再點一次收合；父目標會留在原處'
@@ -387,7 +414,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   for (const [key] of workFilters) {
     const button = html('button', 'work-filter'); button.type = 'button'; button.dataset.filter = key;
     button.style.setProperty('--filter-color', palette[key]?.color || '#e3eaf2');
-    button.addEventListener('click', () => { filter = key; treeChoices.clear(); graphChoices.clear(); render(); }); filters.append(button);
+    button.addEventListener('click', () => { filter = key; treeChoices.clear(); graphChoices.clear(); zoom = null; render(); }); filters.append(button);
   }
   detailButton.addEventListener('click', () => {
     const data = example ? exampleSnapshot : snapshot;
@@ -398,7 +425,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   for (const [id, expand] of [['work-expand-all', true], ['work-collapse-all', false]]) {
     document.querySelector(`#${id}`).addEventListener('click', () => {
       const data = example ? exampleSnapshot : snapshot;
-      treeChoices.clear(); graphChoices.clear();
+      treeChoices.clear(); graphChoices.clear(); zoom = null;
       if (data) {
         const treeRoot = data.tree.roots.length === 1 ? data.tree.roots[0] : '__project__';
         data.tree.nodes.forEach((work) => treeChoices.set(work.id, expand || work.id === treeRoot));
@@ -410,22 +437,27 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     });
   }
   projectSelect.addEventListener('change', () => {
-    example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear();
+    example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear(); zoom = null;
     const url = new URL(location.href); url.searchParams.delete('workExample'); url.searchParams.set('project', projectSelect.value);
     history.replaceState(null, '', url); onProjectChange?.(projectSelect.value);
   });
   sourceButton.addEventListener('click', () => {
-    example = !example; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear();
+    example = !example; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear(); zoom = null;
     const url = new URL(location.href);
     if (example) url.searchParams.set('workExample', '1'); else url.searchParams.delete('workExample');
     history.replaceState(null, '', url); render();
   });
+  document.querySelector('#work-fit').addEventListener('click', () => positionDiagram({ fit: true }));
+  for (const [id, amount] of [['work-zoom-in', .15], ['work-zoom-out', -.15]]) {
+    document.querySelector('#' + id).addEventListener('click', () => { zoom = Math.max(.35, Math.min(1.8, (zoom || 1) + amount)); positionDiagram(); });
+  }
+  new ResizeObserver(() => { if (!host.hidden) positionDiagram({ fit: true }); }).observe(viewport);
   document.querySelector('#work-back').addEventListener('click', () => onNavigate('conversation'));
   document.querySelector('#work-decisions').addEventListener('click', () => onNavigate('decisions'));
   return {
-    selectLiveProject() { example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear(); },
+    selectLiveProject() { example = false; selected = null; filter = 'all'; treeChoices.clear(); graphChoices.clear(); zoom = null; },
     update(data, context = {}) {
-      if (!example && projectId !== context.project_id) { selected = null; treeChoices.clear(); graphChoices.clear(); filter = 'all'; }
+      if (!example && projectId !== context.project_id) { selected = null; treeChoices.clear(); graphChoices.clear(); zoom = null; filter = 'all'; }
       projectId = context.project_id;
       snapshot = data; projectName = context.project_name || ''; message = context.status_text || '這個專案還沒有工作。';
       const key = `${context.project_id}:${data?.revision}:${data?.digest}:${message}`;
@@ -442,7 +474,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
       }
       projectSelect.value = selectedId || '';
     },
-    show() { host.hidden = false; render(); },
+    show() { host.hidden = false; zoom = null; render(); },
     hide() { host.hidden = true; },
   };
 }

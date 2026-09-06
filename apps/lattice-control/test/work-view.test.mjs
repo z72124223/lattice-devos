@@ -5,7 +5,12 @@ import { layoutGraph, layoutTree, workAppearance, exampleSnapshot, workScope, gr
 test('branches open progressively and remember their state when a parent closes and reopens', () => {
   const choices = new Map(), tree = exampleSnapshot.tree;
   const initial = layoutTree(tree, treeBranches(tree, choices));
-  assert.deepEqual([...initial.positions.keys()], ['goal', 'website', 'payments', 'delivery']);
+  assert.equal(initial.positions.size, tree.nodes.length, 'the first two levels start visible like the approved reference');
+  choices.set('website', false); choices.set('payments', false);
+  const folded = layoutTree(tree, treeBranches(tree, choices));
+  assert.equal(folded.positions.has('login'), false);
+  assert.equal(folded.positions.has('payment'), false);
+  assert.ok(folded.positions.has('acceptance'), 'an unrelated branch stays open');
   choices.set('website', true);
   const opened = layoutTree(tree, treeBranches(tree, choices));
   for (const id of ['login', 'list', 'booking']) assert.ok(opened.positions.has(id));

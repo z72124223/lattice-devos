@@ -1,4 +1,4 @@
-/* The approved reference: two equal diagrams, cyan titles, semantic status colors. */
+/* The approved reference: cyan headings, branching cards, semantic status colors. */
 body[data-active-core="work-graph"], body[data-active-core="work-tree"] { overflow:auto; background:#001024; }
 body[data-active-core^="work-"] .app { display:block; width:100%; height:auto; min-height:100dvh; background:radial-gradient(ellipse at 48% 55%,#00192c 0%,#000c1c 78%); }
 body[data-active-core^="work-"] .side-rail,
@@ -101,3 +101,62 @@ body[data-active-core^="work-"] .error { position:fixed; left:20px; right:20px; 
   .work-legend i { width:19px; height:19px; }
   .work-note svg { width:30px; height:34px; }
 }
+/* Keep the work tree itself on screen, with one scrollable diagram. */
+body[data-active-core="work-tree"] { overflow:hidden; }
+body[data-active-core="work-tree"] .app,
+body[data-active-core="work-tree"] .workspace,
+body[data-active-core="work-tree"] .workspace-canvas,
+body[data-active-core="work-tree"] .core-stage { height:100dvh; min-height:0; padding:0; overflow:hidden; }
+body[data-active-core="work-tree"] .work-views { display:flex; flex-direction:column; height:100dvh; min-height:0; padding:16px 20px 10px; }
+.work-views .work-view-header { flex:0 0 auto; margin-bottom:10px; padding-bottom:12px; }
+.work-views .work-view-header h1 { font-size:1.8rem; gap:14px; }
+.work-views #work-source-label { font-size:1rem; padding:5px 14px; border-width:1px; border-radius:10px; }
+.work-views .view-switch { margin:0 0 10px; gap:8px; }
+.work-views .view-switch button { min-height:34px; padding:5px 12px; font-size:.8rem; }
+.work-views .work-controls { position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; padding:0 0 10px; }
+.work-views .work-project-label { gap:8px; font-size:.78rem; }
+.work-views #work-project { min-width:175px; max-width:260px; }
+.work-views .work-filters { flex:1; gap:6px; }
+.work-views .work-controls select, .work-views .work-controls button { min-height:32px; padding:4px 9px; font-size:.75rem; border-radius:7px; }
+.work-views .work-level-controls { flex:1 0 100%; gap:7px; }
+.work-views #work-selection { font-size:.72rem; }
+.work-data-disclosure { font-size:.7rem; color:#9fbfce; }
+.work-data-disclosure summary { cursor:pointer; }
+.work-data-disclosure[open] { flex-basis:100%; }
+.work-data-disclosure p { margin:6px 0 0; }
+.work-zoom { display:flex; align-items:center; gap:4px; color:#abcbd7; }
+.work-zoom output { min-width:38px; text-align:center; font-size:.7rem; }
+.work-views .work-diagrams { flex:1; min-height:0; display:flex; }
+.work-views .work-view-card { flex:1; min-height:0; padding:12px 0 10px; border-width:2px; border-radius:18px; }
+.work-views .work-view-card header { flex:0 0 auto; padding:0 16px 8px; }
+.work-views .work-view-card h2 { font-size:1.65rem; margin:0; }
+.work-views .work-view-card header p { font-size:.9rem; }
+.work-views .work-diagram-scroll { flex:1 1 0; min-height:0; max-height:none; overflow:auto; padding:10px 14px; overflow-anchor:none; scrollbar-gutter:stable; }
+.work-views #tree-list { min-width:0; margin:0 auto; flex:none; }
+.work-views .work-tree-svg { width:100%; height:100%; }
+.work-views #tree-current.work-note { flex:0 0 auto; font-size:.75rem; padding:8px 14px 0; gap:8px; }
+.work-views #tree-current.work-note svg { width:23px; height:25px; }
+.work-views .work-legend { flex:0 0 auto; gap:0; padding:10px 0 0; }
+.work-views .work-legend span { font-size:.85rem; gap:9px; padding:0 22px; }
+.work-views .work-legend i { width:18px; height:18px; }
+.work-views #work-empty { flex:1; min-height:0; margin:0; }
+@media(max-width:750px), (max-height:620px) {
+  body[data-active-core="work-tree"] { overflow:auto; }
+  body[data-active-core="work-tree"] .app,
+  body[data-active-core="work-tree"] .workspace,
+  body[data-active-core="work-tree"] .workspace-canvas,
+  body[data-active-core="work-tree"] .core-stage { height:auto; min-height:100dvh; overflow:visible; }
+  body[data-active-core="work-tree"] .work-views { height:auto; min-height:100dvh; padding:12px; }
+  .work-views .work-view-header { gap:8px; }
+  .work-views .work-view-header h1 { font-size:1.45rem; }
+  .work-views .work-view-tools { width:auto; }
+  .work-views .work-diagram-scroll { flex:auto; height:430px; }
+  .work-views .work-legend span { font-size:.75rem; padding:0 10px; }
+}
+.work-views .work-view-header { gap:16px; }
+.work-views .work-view-header .view-switch { flex:1; margin:0; }
+.work-views .work-view-header h1 { font-size:1.7rem; }
+.work-views .work-view-card header { display:flex; align-items:center; justify-content:center; gap:14px; padding:0 16px 8px; }
+.work-views .work-view-card header h2 { font-size:1.35rem; line-height:1.3; }
+.work-views .work-view-card header p { font-size:.85rem; line-height:1.3; }
+@media(max-width:900px) { .work-views .work-view-header { flex-wrap:wrap; } .work-views .work-view-header .view-switch { order:3; flex-basis:100%; } }

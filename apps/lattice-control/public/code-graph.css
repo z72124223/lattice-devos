@@ -49,5 +49,5 @@
 .code-relation-row span, .code-relation-row small { overflow-wrap:anywhere; }
 .code-relation-row small { font-size:.76rem; color:#a4c4d3; }
 .work-diagrams { grid-template-columns:minmax(0,1fr); }
-#core-work-tree .work-diagram-scroll { max-height:70vh; }
+
 @media(max-width:850px) { .code-views { padding:16px 12px; } .code-layout { grid-template-columns:minmax(0,1fr); } #code-results { max-height:200px; } }

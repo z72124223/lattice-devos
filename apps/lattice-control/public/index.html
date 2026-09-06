@@ -352,19 +352,19 @@
         </section>
         <section id="work-views" class="work-views" aria-label="工作視圖">
           <header class="work-view-header">
-            <h1><span>LATTICE</span><i aria-hidden="true"></i>工作樹</h1>
+            <h1><span>LATTICE</span></h1><nav class="view-switch" aria-label="切換工作視圖"><button type="button" data-work-nav="work-tree" aria-current="page">工作樹 · 看進度</button><button type="button" data-work-nav="work-graph">工作圖譜 · 查程式影響</button></nav>
             <div class="work-view-tools">
               <button id="work-back" type="button">對話</button>
               <button id="work-decisions" type="button">決策記憶</button>
               <div class="work-source-wrap"><span id="work-source-label">我的工作</span><button id="work-source" type="button" aria-pressed="false">我的工作 · 查看設計示例</button></div>
             </div>
           </header>
-          <nav class="view-switch" aria-label="切換工作視圖"><button type="button" data-work-nav="work-tree" aria-current="page">工作樹 · 看進度</button><button type="button" data-work-nav="work-graph">工作圖譜 · 查程式影響</button></nav>
+
           <div class="work-controls">
             <label class="work-project-label">查看專案 <select id="work-project" aria-label="查看專案"><option value="">正在讀取專案…</option></select></label>
             <div id="work-filters" class="work-filters" role="group" aria-label="依工作狀態篩選"></div>
-            <div class="work-level-controls"><button id="work-expand-all" type="button">展開全部分支</button><button id="work-collapse-all" type="button">收合到第一層</button><span id="work-selection" aria-live="polite">直接點節點，展開或收合它下面的分支</span><button id="work-selected-detail" type="button" disabled>查看詳情</button></div>
-            <p id="work-data-note" class="work-data-note"></p>
+            <div class="work-level-controls"><button id="work-fit" type="button">回到全貌</button><button id="work-expand-all" type="button">展開全部分支</button><button id="work-collapse-all" type="button">收合到第一層</button><span class="work-zoom"><button id="work-zoom-out" type="button" aria-label="縮小工作樹">−</button><output id="work-zoom-label" aria-label="工作樹縮放比例">100%</output><button id="work-zoom-in" type="button" aria-label="放大工作樹">＋</button></span><span id="work-selection" aria-live="polite">直接點節點，展開或收合它下面的分支</span><button id="work-selected-detail" type="button" disabled>查看詳情</button></div>
+            <details class="work-data-disclosure"><summary>工作資料說明</summary><p id="work-data-note" class="work-data-note"></p></details>
           </div>
           <p id="work-empty" role="status">正在讀取工作…</p>
           <div id="work-diagrams" class="work-diagrams" hidden>
