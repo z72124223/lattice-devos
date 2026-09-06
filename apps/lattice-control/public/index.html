@@ -736,13 +736,16 @@
       if(refresh&&state.formalDetailKey===detailKey)return;
       state.formalDetailKey=detailKey;state.formalRefreshedAt=Date.now();nodes.workDialog.dataset.formalTask=taskRef;nodes.workDialog.dataset.projectId=projectId;
       const content=element("div",undefined,"detail-grid");
-      for(const [label,value]of [["工作",detail.title],["狀態",statusLabels.get(detail.status)||detail.status],["需求",detail.objective],["驗收條件",detail.success_criteria||"尚未保存"],["進度",detail.progress],["正式工作身份",detail.id],["成果證據",detail.result_digest||"尚未完成實際驗收"]]){const cell=element("div",undefined,"detail-cell");cell.append(element("small",label),element("p",value));content.append(cell);}
+      for(const [label,value]of [["工作",detail.title],["狀態",statusLabels.get(detail.status)||detail.status],["需求",detail.objective],["進度",detail.progress]]){const cell=element("div",undefined,"detail-cell");cell.append(element("small",label),element("p",value));content.append(cell);}
+      const evidence=element("details",undefined,"detail-cell");evidence.style.gridColumn="1 / -1";evidence.append(element("summary","查看驗收條件與技術紀錄"));
+      for(const [label,value]of [["驗收條件",detail.success_criteria||"尚未保存"],["正式工作身份",detail.id],["成果證據",detail.result_digest||"尚未完成實際驗收"]]){evidence.append(element("small",label),element("p",value));}
+      content.append(evidence);
       if(detail.last_error)content.append(element("p",detail.last_error.message,"error"));
       const actions=element("div",undefined,"dialog-actions");
       if(detail.metadata?.parent_ref){
         const parentId=detail.metadata.parent_ref,cell=element("div",undefined,"detail-cell"),back=element("button","回到上層工作","project-choice");
         cell.append(element("small","分支來源與續接"),element("p",detail.completion_verified?"這條分支已驗收；回到上層核對主線能否繼續。上層目標尚需自己的驗收。":"這項工作從上層分出；處理並驗收後，回到上層繼續。"));
-        back.type="button";back.addEventListener("click",()=>void openFormalDetail(parentId,{projectId}));cell.append(back);content.append(cell);
+        back.type="button";back.addEventListener("click",()=>void openFormalDetail(parentId,{projectId}));cell.append(back);cell.style.gridColumn="1 / -1";content.prepend(cell);
         void api("/api/formal-work/"+parentId+"?projectId="+encodeURIComponent(projectId)).then(parent=>{back.textContent="回到上層工作："+parent.title;}).catch(()=>{back.textContent="重試讀取上層工作";});
       }
       const addAction=(label,action)=>{const button=element("button",label,"project-choice");button.type="button";button.addEventListener("click",()=>{button.disabled=true;void formalAction(taskRef,action);});actions.append(button);};
@@ -783,7 +786,7 @@
         const form=element("form"),input=element("textarea"),button=element("button","在原工作補正並執行","project-choice");input.required=true;input.maxLength=2048;input.rows=3;input.style.width="100%";input.placeholder="描述需要補充或修正的內容";button.type="submit";form.append(input,button);form.addEventListener("submit",(event)=>{event.preventDefault();void formalAction(taskRef,"continue",{text:input.value,inputId:crypto.randomUUID()});});content.append(form);
       }
       const messages=element("div",undefined,"detail-cell");messages.append(element("small","Codex 的成果與使用說明"));content.append(messages);
-      nodes.workDetail.replaceChildren(content);if(!nodes.workDialog.open)nodes.workDialog.showModal();
+      nodes.workDetail.replaceChildren(content);if(!refresh)nodes.workDetail.scrollTop=0;if(!nodes.workDialog.open)nodes.workDialog.showModal();
       void api("/api/formal-work/"+taskRef+"/conversation?projectId="+encodeURIComponent(projectId)).then((conversation)=>{
         if(!messages.isConnected)return;
         for(const message of conversation.messages.slice(-4))messages.append(element("p",message.text));
