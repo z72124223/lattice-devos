@@ -26,6 +26,7 @@ export function createCodeGraphView({ api, onNavigate, onProjectChange }) {
     canvas.replaceChildren(); results.replaceChildren(); detail.replaceChildren();
     host.querySelector('#code-summary').textContent = '';
     host.querySelector('#code-canvas-note').textContent = '分析資料尚未載入。';
+    host.querySelector('#code-search-count').textContent = '分析完成後可搜尋';
     host.querySelector('#code-source-path').textContent = '';
     checkoutSelect.replaceChildren();
   }
@@ -68,7 +69,12 @@ export function createCodeGraphView({ api, onNavigate, onProjectChange }) {
         host.querySelector('#code-summary').textContent = `Graphify · ${graph.nodes.length} 個節點 · ${graph.edges.length} 條關係 · 版本 ${graph.commit.slice(0, 8)} · ${new Date(graph.generated_at).toLocaleString('zh-TW')}`;
         if (changed || !index) {
           index = codeIndex(graph); root = null; placements.clear(); expanded.clear();
-          renderSearch(); const first = searchCode(index, search.value)[0]; if (first) chooseRoot(first.id);
+          renderSearch();
+          const first = search.value.trim() ? searchCode(index, search.value)[0]
+            : [...index.nodes.values()].find(n => n.label.endsWith('()') && index.incoming.get(n.id).length >= 2
+              && index.incoming.get(n.id).length <= 5 && index.outgoing.get(n.id).length > 0)
+              || searchCode(index)[0];
+          if (first) chooseRoot(first.id);
         }
       }
       clearTimeout(timer);
@@ -151,7 +157,7 @@ export function createCodeGraphView({ api, onNavigate, onProjectChange }) {
       const foreign = svg('foreignObject', {x:p.x, y:p.y, width:235, height:76});
       const button = html('button', null, `code-node${node.id === root ? ' code-root' : ''}`); button.type = 'button';
       button.dataset.codeNode = node.id; button.title = `${node.label}\n${node.file} ${node.location}`;
-      button.setAttribute('aria-label', `${expanded.has(node.id) ? '收合' : '展開'}程式節點 ${node.label}`);
+      button.setAttribute('aria-label', `${neighbors.length ? expanded.has(node.id) ? '收合' : '展開' : '查看'}程式節點 ${node.label}`);
       if (neighbors.length) button.setAttribute('aria-expanded', String(expanded.has(node.id)));
       button.append(html('strong', node.label), html('small', node.file.split('/').at(-1)),
         html('small', neighbors.length ? `${expanded.has(node.id) ? '▾ 收合' : '▸ 展開'} ${neighbors.length} 條關係` : '沒有此方向的關係'));
@@ -161,7 +167,7 @@ export function createCodeGraphView({ api, onNavigate, onProjectChange }) {
         canvas.querySelector(`[data-code-node="${CSS.escape(node.id)}"]`)?.focus({preventScroll:true});
       }); foreign.append(button); canvas.append(foreign);
     }
-    host.querySelector('#code-canvas-note').textContent = `箭頭由使用者指向被使用的程式。顯示 ${branch.nodes.length} 個節點、${branch.edges.length} 條關係。`
+    host.querySelector('#code-canvas-note').textContent = `箭頭表示「哪段程式使用哪段程式」。顯示 ${branch.nodes.length} 個節點、${branch.edges.length} 條關係。`
       + (branch.truncated ? ' 此分支超過 80 個節點，請搜尋更具體的程式或縮小關係範圍。' : ' 點節點展開，再點一次收合。');
     if (anchorX != null) {
       const nextAnchor = canvas.querySelector(`[data-code-node="${CSS.escape(root)}"]`);
@@ -205,7 +211,8 @@ export function createCodeGraphView({ api, onNavigate, onProjectChange }) {
         projectSelect.replaceChildren(...projects.map(p => { const option = html('option',p.name); option.value=p.id; return option; }));
       }
       if (projectId !== selectedId) {
-        projectId = selectedId; checkout = null; loadedProject = null; requestId++; clearTimeout(timer); resetGraph(); search.value = '';
+        if (projectId) search.value = '';
+        projectId = selectedId; checkout = null; loadedProject = null; requestId++; clearTimeout(timer); resetGraph();
         status(projectId ? '正在讀取這個專案的程式圖譜…' : '請先選擇專案。');
         if (!host.hidden) void load();
       }

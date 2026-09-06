@@ -1,6 +1,10 @@
 // Code relationships only. This model accepts no work-item status or hierarchy.
 export const relationLabels = { calls:'呼叫', imports_from:'引用', contains:'包含', references:'參照',
-  inherits:'繼承', implements:'實作', depends_on:'依賴', exports:'匯出', overrides:'覆寫' };
+  inherits:'繼承', implements:'實作', depends_on:'依賴', exports:'匯出', overrides:'覆寫',
+  imports:'引用', indirect_call:'間接呼叫', method:'方法', extends:'擴充', re_exports:'再次匯出',
+  uses:'使用', defines:'定義', includes:'引入', instantiates:'建立實例', binds_method:'綁定方法',
+  bound_to:'綁定到', crate_depends_on:'套件依賴', listened_by:'被監聽', references_constant:'參照常數',
+  uses_component:'使用元件', uses_static_prop:'使用靜態屬性', cites:'引用出處', rationale_for:'相關依據' };
 export function codeIndex(graph) {
   const nodes = new Map(graph.nodes.map(node => [node.id, node]));
   const incoming = new Map(), outgoing = new Map();
