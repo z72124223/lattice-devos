@@ -377,35 +377,17 @@ test("an unowned server close contains a Runtime child cleanup rejection", async
   }
 });
 
-test("the four-core page renders the runtime capability list without adding a fifth core", async () => {
-  const directory = await mkdtemp(path.join(tmpdir(), "lattice-runtime-page-"));
-  const application = createLatticeServer({
-    databasePath: path.join(directory, "control.db"),
-    codex: new QuietCodex(),
-    runtimeHealth: healthyRuntimeHealth,
-  });
+test("runtime health stays queryable after the visual platform is removed", async () => {
+  const directory = await mkdtemp(path.join(tmpdir(), "lattice-headless-runtime-"));
+  const application = createLatticeServer({ databasePath: path.join(directory, "control.db"),
+    codex: new QuietCodex(), runtimeHealth: healthyRuntimeHealth });
   try {
     const origin = await listen(application);
-    const page = await (await fetch(`${origin}/`)).text();
-    assert.equal(page.match(/data-core-target=/gu)?.length, 4);
-    assert.match(page, /id="runtime-capabilities"/u);
-    assert.match(page, /api\("\/api\/runtime"\)/u);
-    for (const status of [
-      "HEALTHY",
-      "NOT_IMPLEMENTED",
-      "STOPPED",
-      "UNREACHABLE",
-      "INCOMPATIBLE",
-      "NO_DATA",
-    ]) {
-      assert.match(page, new RegExp(`\\["${status}"`, "u"));
-      assert.match(page, new RegExp(`data-runtime-status="${status}"`, "u"));
-    }
-    assert.match(page, /capability\.has_data===false/u);
-    assert.match(page, /runtimeDataStatus="NO_DATA"/u);
-    assert.match(page, /element\("em","NO_DATA","runtime-data"\)/u);
-    assert.match(page, /reconciliation_required!==true/u);
-    assert.match(page, /reconciliation required/u);
+    assert.equal((await fetch(origin + '/')).status, 410);
+    const response = await fetch(origin + '/api/runtime');
+    assert.equal(response.status, 200);
+    const runtime = await response.json();
+    assert.equal(runtime.capabilities.find(item => item.id === 'postgresql').status, 'HEALTHY');
   } finally {
     await close(application);
     await rm(directory, { recursive: true, force: true });

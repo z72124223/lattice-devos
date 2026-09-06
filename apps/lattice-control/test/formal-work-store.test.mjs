@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs";
 import { openCircuitSummary } from "../src/execution-recovery.mjs";
-import { workScope } from "../public/work-view.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
 test("a response for another project cannot populate the selected project's graph or details", async () => {
@@ -37,7 +36,7 @@ test("archive and model completion cannot satisfy a formal dependency", () => {
   const first = projectFormalWork([input]).snapshot;
   assert.equal(first.tree.nodes[0].status, "archived");
   assert.equal(first.tree.nodes[0].completion_verified, false);
-  assert.equal(workScope(first, null, "complete").counts.complete, 0);
+  assert.equal(first.tree.nodes.filter(node => node.completion_verified).length, 0);
   assert.equal(first.graph.nodes[1].blocker.status, "blocked");
   input.tasks[0].ledger.status = "COMPLETED";
   input.tasks[0].ledger.result_digest = "3".repeat(64);
@@ -45,9 +44,9 @@ test("archive and model completion cannot satisfy a formal dependency", () => {
   assert.equal(verified.tree.nodes[0].status, "archived");
   assert.equal(verified.tree.nodes[0].completion_verified, true);
   assert.equal(verified.graph.nodes[0].completion_verified, true);
-  const completedView = workScope(verified, null, "complete");
-  assert.equal(completedView.counts.complete, 1);
-  assert.equal(completedView.tree.nodes[0].id, taskA);
+  const completed = verified.tree.nodes.filter(node => node.completion_verified);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].id, taskA);
   assert.equal(verified.graph.nodes[1].blocker.status, "clear");
   assert.equal(verified.tree.revision, verified.graph.revision);
   assert.equal(verified.tree.digest, verified.graph.digest);

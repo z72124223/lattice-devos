@@ -5,7 +5,7 @@ import { readFile, writeFile, mkdir, rename, realpath, stat } from 'node:fs/prom
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadLatticeRuntimeConfiguration } from './lattice-runtime-health.mjs';
-import { codeIndex, codeBranches, searchCode } from '../public/code-graph-model.mjs';
+import { codeIndex, codeBranches, searchCode } from './code-graph-model.mjs';
 
 const exec = promisify(execFile), maxBytes = 64 * 1024 * 1024;
 const digest = value => createHash('sha256').update(value).digest('hex');
@@ -74,7 +74,7 @@ export class CodeGraphStore {
   async read(project, query = {}) {
     let source;
     try { source = await this.inspect(project, query.checkout); } catch { return { status:'unavailable', project_id:project.id,
-      message:'目前無法讀取這個專案的已保存程式版本。工作樹仍可使用。' }; }
+      message:'目前無法讀取這個專案的已保存程式版本。正式工作紀錄不受影響。' }; }
     const job = this.jobs.get(source.key);
     let graph = this.cache.get(source.key);
     if (!graph) {

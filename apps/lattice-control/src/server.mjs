@@ -1,7 +1,5 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import path from "node:path";
+import { pathToFileURL } from "node:url";
 import process from "node:process";
 import { CodexAppServer } from "./codex-app-server.mjs";
 import {
@@ -17,15 +15,9 @@ import { FormalWorkStore } from "./formal-work-store.mjs";
 import { FormalTaskService } from "./formal-task-service.mjs";
 import { CodeGraphStore } from './code-graph.mjs';
 
-const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
-const publicDirectory = path.resolve(sourceDirectory, "..", "public");
-const publicAssets = new Map([
-  ["/", ["index.html", "text/html; charset=utf-8"]],
-  ["/work-view.mjs", ["work-view.mjs", "text/javascript; charset=utf-8"]],
-  ["/work-view.css", ["work-view.css", "text/css; charset=utf-8"]],
-  ['/code-graph-view.mjs', ['code-graph-view.mjs', 'text/javascript; charset=utf-8']],
-  ['/code-graph-model.mjs', ['code-graph-model.mjs', 'text/javascript; charset=utf-8']],
-  ['/code-graph.css', ['code-graph.css', 'text/css; charset=utf-8']],
+const retiredVisualRoutes = new Set([
+  "/", "/index.html", "/work-view.mjs", "/work-view.css",
+  "/code-graph-view.mjs", "/code-graph-model.mjs", "/code-graph.css",
 ]);
 const maximumDesktopShutdownFrameBytes = 4_096;
 const desktopShutdownSchemaVersion = "lattice.control.desktop-shutdown.v1";
@@ -261,15 +253,12 @@ export function createLatticeServer({
       inFlightRequests.add(trackedRequest);
       const url = new URL(request.url, "http://127.0.0.1");
       assertMutationAdmission(request, url);
-      if (request.method === "GET" && publicAssets.has(url.pathname)) {
-        const [fileName, contentType] = publicAssets.get(url.pathname);
-        const body = await readFile(path.join(publicDirectory, fileName));
-        response.writeHead(200, {
-          "content-type": contentType,
-          "content-length": body.length,
-          "cache-control": "no-store",
+      if (request.method === "GET" && retiredVisualRoutes.has(url.pathname)) {
+        sendJson(response, 410, {
+          code: "LATTICE_VISUAL_PLATFORM_REMOVED",
+          message: "LATTICE 已改為後台服務，請從 Codex App 使用。",
+          interface: "CODEX_APP",
         });
-        response.end(body);
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
@@ -683,10 +672,8 @@ export async function startDefaultServer() {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
-  application.codexPrewarm = application.service.prewarmCodex()
-    .catch((error) => ({ ready: false, error }));
   application.formalRestore = application.formalTasks.restore(application.service.state().projects.map((project) => project.id));
-  process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
+  process.stdout.write(`LATTICE background API: http://127.0.0.1:${port} (use Codex App)\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });
   }

@@ -4,6 +4,11 @@ coverage/
 target/
 apps/lattice-control-desktop/bin/
 apps/lattice-control-desktop/obj/
+# Retired desktop test build output may remain on developer machines.
+apps/lattice-control-desktop-lifecycle-tests/bin/
+apps/lattice-control-desktop-lifecycle-tests/obj/
+apps/lattice-control-desktop-policy-tests/bin/
+apps/lattice-control-desktop-policy-tests/obj/
 .lattice/
 *.log
 *.tmp

@@ -14,8 +14,7 @@ test("public GitHub surface reflects the current local product", async () => {
     read(".github/workflows/ci.yml"),
   ]);
 
-  assert.match(readme, /本機優先的 AI 開發工作控制台與耐久執行環境/u);
-  assert.match(readme, /product\/lattice-control-mvp/u);
+  assert.match(readme, /Codex App 的四核心後台/u);
   assert.match(readme, /目前尚未選定 `LICENSE`/u);
   assert.match(readme, /公開可見性與 `git clone` 功能不等於開源授權/u);
   assert.match(readme, /沒有公開雲端服務/u);

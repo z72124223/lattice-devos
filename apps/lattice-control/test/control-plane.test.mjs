@@ -2490,10 +2490,6 @@ test("archived conversation recovery survives restart and sends saved input only
     assert.equal(codex.turnStarts.length, 1);
     assert.equal(codex.turnStarts[0].threadId, first.codex_thread_id);
     assert.equal(application.service.primaryConversation().messages.filter(({ id }) => id === pending.clientMessageId).length, 1);
-    const page = await (await fetch(`${origin}/`)).text();
-    assert.match(page, /id="reopen"[^>]*hidden>重新開啟此對話/u);
-    assert.match(page, /id="pending-send"[^>]*hidden>送出已保存訊息/u);
-    assert.doesNotMatch(page, /await poll\(\);await resumePending\(\)/u);
   } finally {
     if (application.server.listening) await new Promise((resolve) => application.server.close(resolve));
     await rm(directory, { recursive: true, force: true });
@@ -5642,7 +5638,7 @@ test("a later message retries one proven pre-dispatch rejection after exact term
   }
 });
 
-test("the loopback conversation API serves one responsive chat entry and durable final replies", async () => {
+test("headless APIs preserve durable replies while all former visual entries are removed", async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-conversation-http-"));
   const codex = new FakeCodex();
   const application = createLatticeServer({
@@ -5654,52 +5650,13 @@ test("the loopback conversation API serves one responsive chat entry and durable
     const address = application.server.address();
     const origin = `http://127.0.0.1:${address.port}`;
 
-    const pageHtml = await (await fetch(`${origin}/`)).text();
-    assert.equal(pageHtml.match(/id="conversation-form"/gu)?.length, 1);
-    assert.equal(pageHtml.match(/data-core-target=/gu)?.length, 4);
-    assert.match(pageHtml, /id="core-conversation"/u);
-    assert.match(pageHtml, /id="core-work-graph"/u);
-    assert.match(pageHtml, /id="core-work-tree"/u);
-    assert.match(pageHtml, /id="core-decisions"/u);
-    assert.doesNotMatch(pageHtml, /id="work-form"|id="items"|id="project-form"/u);
-    assert.doesNotMatch(pageHtml, /id="conversation-project"/u);
-    assert.match(pageHtml, /@media\s*\(max-width:/u);
-    assert.match(pageHtml, /localStorage/u);
-    assert.match(pageHtml, /conversation\?\.can_send === true/u);
-    assert.match(pageHtml, /pendingForCurrentContext=pending\?\.projectId===currentProjectId\(\)/u);
-    assert.match(pageHtml, /!pendingForCurrentContext/u);
-    assert.match(pageHtml, /typeof parsed\.projectId === "string"/u);
-    assert.match(pageHtml, /typeof parsed\.text === "string"/u);
-    assert.match(pageHtml, /safeMessageId\.test\(parsed\.clientMessageId\)/u);
-    assert.match(pageHtml, /id="text-size"[^>]*aria-label="文字大小"/u);
-    assert.match(pageHtml, /<html lang="zh-Hant" data-text-size="comfortable">/u);
-    assert.match(pageHtml, /<option value="standard">標準<\/option>/u);
-    assert.match(pageHtml, /<option value="comfortable"[^>]*>Codex（預設）<\/option>/u);
-    assert.match(pageHtml, /<option value="large">大<\/option>/u);
-    assert.match(pageHtml, /lattice\.control\.text-size\.v1/u);
-    assert.match(pageHtml, /document\.documentElement\.dataset\.textSize=/u);
-    assert.match(pageHtml, /<textarea id="message"[^>]*rows="5"[^>]*enterkeyhint="send"/u);
-    assert.match(pageHtml, /\.command-dock textarea \{[^}]*min-height:132px;[^}]*max-height:min\(42dvh,420px\);[^}]*resize:vertical;/u);
-    assert.match(pageHtml, /function resizeMessageInput\(\)/u);
-    assert.match(pageHtml, /nodes\.message\.addEventListener\("input",resizeMessageInput\)/u);
-    assert.match(pageHtml, /event\.key!=="Enter"\|\|event\.shiftKey\|\|event\.isComposing\|\|event\.keyCode===229/u);
-    assert.match(pageHtml, /nodes\.form\.requestSubmit\(\)/u);
-    assert.match(pageHtml, /conversation\?\.can_send === true/u);
-    assert.doesNotMatch(pageHtml, /conversation\?\.status==="not_started"\|\|/u);
-    assert.doesNotMatch(pageHtml, /readyForFirstMessage/u);
-    assert.match(pageHtml, /assertSharedWorkSnapshot/u);
-    assert.match(pageHtml, /renderWorkGraph\(workSnapshot\.graph\)/u);
-    assert.match(pageHtml, /workView\.update\(packet\.work_snapshot,packet\.context\)/u);
-    for (const [asset, contentType] of [["work-view.mjs", "text/javascript"], ["work-view.css", "text/css"]]) {
-      const assetResponse = await fetch(`${origin}/${asset}`);
-      assert.equal(assetResponse.status, 200);
-      assert.ok(assetResponse.headers.get("content-type").startsWith(contentType));
-      assert.equal(assetResponse.headers.get("cache-control"), "no-store");
-      assert.ok((await assetResponse.text()).length > 100);
+    for (const route of ['/', '/?view=work-tree', '/index.html', '/work-view.mjs', '/work-view.css', '/code-graph-view.mjs']) {
+      const response = await fetch(origin + route);
+      assert.equal(response.status, 410);
+      assert.ok(response.headers.get('content-type').startsWith('application/json'));
+      assert.equal((await response.json()).code, 'LATTICE_VISUAL_PLATFORM_REMOVED');
     }
-    assert.equal((await fetch(`${origin}/unknown-asset.mjs`)).status, 404);
-    assert.match(pageHtml, /if\(state\.pollPromise\)return state\.pollPromise/u);
-    assert.doesNotMatch(pageHtml, /api\("\/api\/work-snapshot"/u);
+    assert.equal((await fetch(origin + '/unknown-asset.mjs')).status, 404);
 
     const projectResponse = await fetch(`${origin}/api/projects`, {
       method: "POST",
@@ -5850,10 +5807,6 @@ test("new work selects a proven project, readies Codex, and enables the primary 
     const ambiguous = await (await fetch(`${origin}/api/four-core`)).json();
     assert.equal(ambiguous.context.reason, "ambiguous_project_context");
     assert.equal(ambiguous.conversation.can_send, false);
-
-    const pageHtml = await (await fetch(`${origin}/`)).text();
-    assert.match(pageHtml, /id="new-work-dialog"/u);
-    assert.match(pageHtml, /api\("\/api\/conversation",\{method:"POST"/u);
 
     const response = await fetch(`${origin}/api/conversation`, {
       method: "POST",
@@ -6668,29 +6621,6 @@ test("local HTTP API persists projects and work items without starting Codex", a
     await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
     const address = application.server.address();
     const origin = `http://127.0.0.1:${address.port}`;
-
-    const page = await fetch(`${origin}/`);
-    assert.equal(page.status, 200);
-    const pageHtml = await page.text();
-    assert.match(pageHtml, /LATTICE Control/u);
-    assert.match(pageHtml, /對話.*工作圖譜.*工作樹.*決策記憶/su);
-    assert.match(pageHtml, /data-lattice-shell="desktop-cockpit"/u);
-    assert.match(pageHtml, /class="side-rail"/u);
-    assert.match(pageHtml, /class="workspace-canvas"/u);
-    assert.match(pageHtml, /id="desktop-inspector"/u);
-    assert.match(pageHtml, /id="code-canvas"/u);
-    assert.doesNotMatch(pageHtml, /id="graph-edge-layer"/u);
-    assert.match(pageHtml, /id="recent-work-list"/u);
-    assert.match(pageHtml, /class="composer command-dock"/u);
-    assert.doesNotMatch(pageHtml, /Long-lived workspace/u);
-    assert.doesNotMatch(pageHtml, /Codex 用量 68%/u);
-    assert.doesNotMatch(pageHtml, /id="receipt-form"/u);
-    assert.doesNotMatch(pageHtml, /\/api\/installation-receipts/u);
-    assert.doesNotMatch(pageHtml, /來源 commit|安裝位置|產物 SHA-256|收據指紋/u);
-    assert.match(pageHtml, /async function poll/u);
-    assert.match(pageHtml, /if\(state\.pollPromise\)return state\.pollPromise/u);
-    assert.match(pageHtml, /state\.pollPromise=\(async\(\)=>\{try\{\s*await refresh\(\);/u);
-    assert.equal(pageHtml.match(/await refresh\(\);/gu)?.length, 1);
 
     const projectResponse = await fetch(`${origin}/api/projects`, {
       method: "POST",

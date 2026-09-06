@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { CodeGraphStore, validateCodeGraph } from '../src/code-graph.mjs';
-import { codeIndex, codeBranches, searchCode } from '../public/code-graph-model.mjs';
+import { codeIndex, codeBranches, searchCode } from '../src/code-graph-model.mjs';
 
 const node = (id, file = 'src/main.js') => ({id,label:id,file,location:'L1',kind:'function'});
 const edge = (source,target,relation='calls') => ({source,target,relation,confidence:'EXTRACTED',file:'src/main.js',location:'L1'});
@@ -103,5 +103,5 @@ test('HTTP code graph uses the selected project and rejects source paths and for
     body:JSON.stringify({projectId:project.id})});assert.equal(foreign.status,403);assert.equal(calls.length,1);
   const started=await fetch(origin+'/api/code-graph/analyze',{method:'POST',headers:{'content-type':'application/json'},
     body:JSON.stringify({projectId:project.id})});assert.equal(started.status,202);assert.equal(calls[1][0],'start');
-  for(const asset of ['/code-graph-view.mjs','/code-graph-model.mjs','/code-graph.css'])assert.equal((await fetch(origin+asset)).status,200);
+  for(const asset of ['/code-graph-view.mjs','/code-graph-model.mjs','/code-graph.css'])assert.equal((await fetch(origin+asset)).status,410);
 });
