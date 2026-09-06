@@ -442,7 +442,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   document.querySelector('#work-decisions').addEventListener('click', () => onNavigate('decisions'));
   return {
     update(data, context = {}) {
-      if (projectId !== context.project_id) { focusId = null; selected = null; collapsed.clear(); filter = 'all'; }
+      if (!example && projectId !== context.project_id) { focusId = null; selected = null; collapsed.clear(); filter = 'all'; }
       projectId = context.project_id;
       snapshot = data; projectName = context.project_name || ''; message = context.status_text || '這個專案還沒有工作。';
       if (!example && focusId && !data?.tree.nodes.some((work) => work.id === focusId)) focusId = null;
