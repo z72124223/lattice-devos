@@ -142,21 +142,32 @@ export class FormalTaskService {
     else await this.codex.request("turn/steer", { threadId: claim.thread_id,
       expectedTurnId: turnId, input: [{ type: "text", text: recoveryPrompt }] });
   }
-  create({ projectId, objective, clientRequestId }) {
+  create({ projectId, objective, clientRequestId, parentTaskRef = null, title, successCriteria, priority = 2 }) {
     if (typeof objective !== "string" || !objective.trim() || [...objective].length > 512
       || !/^[A-Za-z0-9._:-]{1,64}$/u.test(clientRequestId ?? "")) {
       throw new TypeError("請用 512 字以內描述想完成的工作。");
     }
+    if (parentTaskRef !== null && !/^[a-f0-9]{64}$/u.test(parentTaskRef)
+      || title !== undefined && (typeof title !== 'string' || !title.trim() || Buffer.byteLength(title.trim()) > 240)
+      || successCriteria !== undefined && (typeof successCriteria !== 'string' || !successCriteria.trim() || Buffer.byteLength(successCriteria.trim()) > 8192)
+      || !Number.isInteger(priority) || priority < 0 || priority > 3) throw new TypeError('工作名稱、驗收條件或父工作格式不正確。');
     return this.serial(`create:${clientRequestId}`, async () => {
+      if (parentTaskRef) await this.store.detail(projectId, parentTaskRef);
       const registered = await this.store.submit({ client_request_id: clientRequestId,
         project_id: projectId, objective: objective.trim() });
       let detail = await this.store.detail(projectId, registered.task_ref);
       if (!detail.metadata) {
         await this.store.update({ action: "METADATA", task_ref: detail.id,
           request_id: `metadata:${clientRequestId}`, expected_revision: 0,
-          title: byteBounded(objective.trim().split(/\r?\n/u)[0], 240), priority: 2,
-          success_criteria: `完成需求：${objective.trim()}\n提供可執行的成果與使用方式。\n實際測試主要操作、錯誤輸入與需求中的資料保存行為。\n由獨立 Codex 回合核對需求，並由固定測試程序驗證後保存成果。` });
+          title: title?.trim() || byteBounded(objective.trim().split(/\r?\n/u)[0], 240), priority,
+          parent_ref: parentTaskRef, dependency_refs: [],
+          success_criteria: successCriteria?.trim() || `完成需求：${objective.trim()}\n提供可核對的成果與使用或驗證方式。\n實際測試主要操作、錯誤輸入與需求中的資料保存行為。\n由獨立 Codex 回合核對需求，並由固定測試程序驗證後保存成果。` });
         detail = await this.store.detail(projectId, detail.id);
+      }
+      if ((detail.metadata.parent_ref ?? null) !== parentTaskRef
+        || title !== undefined && detail.metadata.title !== title.trim()
+        || successCriteria !== undefined && detail.metadata.success_criteria !== successCriteria.trim()) {
+        throw formalWorkError('CONTROL_WORK_INTAKE_CHANGED', '這項已保存工作的父工作或驗收條件不同，請核對原工作。');
       }
       // A repeated submission returns its existing identity. Starting/recovering
       // it is a separate explicit action, so a lost response cannot send a turn twice.
@@ -179,9 +190,9 @@ export class FormalTaskService {
     return target;
   }
   executionPrompt(detail) {
-    const preview = "網頁成果請匯出 async startServer({port,host})，只綁定 127.0.0.1，回傳已監聽的 node:http Server，允許 port=0；匯入模組時不要自行監聽。這讓使用者完成後可在 App 直接試用，無須輸入命令。";
+    const preview = "若這項需求的主要成果本身是可試用網頁，才需要匯出 async startServer({port,host})，只綁定 127.0.0.1，回傳已監聽的 node:http Server，允許 port=0；匯入模組時不要自行監聽。這讓使用者完成後可在 App 直接試用，無須輸入命令。";
     detail = { ...detail, success_criteria: `${detail.success_criteria}\n${preview}` };
-    return `你正在執行已正式登記的 LATTICE 工作。task_ref=${detail.id}。此工作身份已由 Runtime 保存，不要另建任務或改動 LATTICE 任務狀態。\n需求：${detail.objective}\n驗收條件：${detail.success_criteria}\n在目前隔離工作目錄完成可操作的小型軟體。優先沿用專案；若無相關功能，使用 Node.js 標準函式庫完成。產出真正可執行的成果以及 node --test 可執行的實質測試，涵蓋需求主要操作與錯誤情境。不要因測試通過而省略使用介面或使用說明。所有產物留在工作目錄，保留原有檔案。除非需求明確授權，不做 push、merge、發布、付款、帳戶變更或外部訊息。必要產品資訊才透過 request_user_input 詢問。不要要求使用者審查程式碼。完成後回傳指定 JSON：summary 用繁體中文解釋成果與啟動方式，artifact_path 是主要可執行成果的相對檔案路徑，test_path 是實際 Node 測試檔相對路徑。`;
+    return `你正在執行已正式登記的 LATTICE 工作。task_ref=${detail.id}。此工作身份已由 Runtime 保存，不要另建任務或改動 LATTICE 任務狀態。\n需求：${detail.objective}\n驗收條件：${detail.success_criteria}\n在目前隔離工作目錄完成這項具體需求，先檢查並沿用既有成果。修復就修復原功能；驗收就檢查指定成果，不能把它改做新網站或無關範例。只有需求本身要求開發介面時才新增介面。提供可核對的成果檔案，以及 node --test 可執行的實質測試，涵蓋需求主要行為與錯誤情境；保留實際檢查結果和使用或驗證方式。所有產物留在工作目錄，保留原有檔案。除非需求明確授權，不做 push、merge、發布、付款、帳戶變更或外部訊息。必要產品資訊才透過 request_user_input 詢問。不要要求使用者審查程式碼。完成後回傳指定 JSON：summary 用繁體中文解釋成果與啟動方式，artifact_path 是主要可執行成果的相對檔案路徑，test_path 是實際 Node 測試檔相對路徑。`;
   }
   start(projectId, taskRef) {
     return this.serial(taskRef, async () => {

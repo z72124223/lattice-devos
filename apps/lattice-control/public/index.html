@@ -363,7 +363,7 @@
           <div class="work-controls">
             <label class="work-project-label">查看專案 <select id="work-project" aria-label="查看專案"><option value="">正在讀取專案…</option></select></label>
             <div id="work-filters" class="work-filters" role="group" aria-label="依工作狀態篩選"></div>
-            <div class="work-level-controls"><button id="work-fit" type="button">回到全貌</button><button id="work-expand-all" type="button">展開全部分支</button><button id="work-collapse-all" type="button">收合到第一層</button><span class="work-zoom"><button id="work-zoom-out" type="button" aria-label="縮小工作樹">−</button><output id="work-zoom-label" aria-label="工作樹縮放比例">100%</output><button id="work-zoom-in" type="button" aria-label="放大工作樹">＋</button></span><span id="work-selection" aria-live="polite">直接點節點，展開或收合它下面的分支</span><button id="work-selected-detail" type="button" disabled>查看詳情</button></div>
+            <div class="work-level-controls"><button id="work-new" type="button">新增目標</button><button id="work-fit" type="button">回到全貌</button><button id="work-expand-all" type="button">展開全部分支</button><button id="work-collapse-all" type="button">收合到第一層</button><span class="work-zoom"><button id="work-zoom-out" type="button" aria-label="縮小工作樹">−</button><output id="work-zoom-label" aria-label="工作樹縮放比例">100%</output><button id="work-zoom-in" type="button" aria-label="放大工作樹">＋</button></span><span id="work-selection" aria-live="polite">直接點節點，展開或收合它下面的分支</span><button id="work-add-child" type="button" disabled>新增子工作</button><button id="work-selected-detail" type="button" disabled>查看詳情</button></div>
             <details class="work-data-disclosure"><summary>工作資料說明</summary><p id="work-data-note" class="work-data-note"></p></details>
           </div>
           <p id="work-empty" role="status">正在讀取工作…</p>
@@ -422,7 +422,7 @@
     <p class="local-note">目前只在這台電腦的 127.0.0.1 提供服務；未啟用實體手機網路、登入、多租戶或部署。</p>
   </section>
 </main>
-<dialog id="new-work-dialog" aria-labelledby="new-work-title"><div class="dialog-head"><h2 id="new-work-title">開始新工作</h2><button class="dialog-close" type="button" data-close-dialog="new-work-dialog" aria-label="關閉">×</button></div><div class="dialog-body"><p>選擇專案，再用自己的話描述想完成的成果。</p><div id="new-work-projects" class="project-choice-list"></div><form id="formal-work-form" hidden><label for="formal-objective">你想完成什麼？</label><textarea id="formal-objective" maxlength="512" required rows="5" style="width:100%;margin:12px 0" placeholder="例如：做一個能新增、完成和保存待辦事項的小工具。"></textarea><button type="submit" class="primary-button">建立並開始</button></form><p id="new-work-status" class="new-work-status" aria-live="polite"></p></div></dialog>
+<dialog id="new-work-dialog" aria-labelledby="new-work-title"><div class="dialog-head"><h2 id="new-work-title">開始新工作</h2><button class="dialog-close" type="button" data-close-dialog="new-work-dialog" aria-label="關閉">×</button></div><div class="dialog-body"><p>選擇專案，再用自己的話描述想完成的成果。</p><div id="new-work-projects" class="project-choice-list"></div><form id="formal-work-form" hidden><label for="formal-objective">你想完成什麼？</label><textarea id="formal-objective" maxlength="512" required rows="5" style="width:100%;margin:12px 0" placeholder="例如：做一個能新增、完成和保存待辦事項的小工具。"></textarea><label for="formal-criteria">怎樣算完成？（可留空）</label><textarea id="formal-criteria" maxlength="2000" rows="3" style="width:100%;margin:12px 0" placeholder="例如：關閉再開啟後，工作與驗收結果仍然存在。"></textarea><button type="submit" value="save" class="project-choice">先保存工作</button><button type="submit" value="start" class="primary-button">建立並開始</button></form><p id="new-work-status" class="new-work-status" aria-live="polite"></p></div></dialog>
 <dialog id="work-detail-dialog" aria-labelledby="work-detail-title"><div class="dialog-head"><h2 id="work-detail-title">工作詳情</h2><button class="dialog-close" type="button" data-close-dialog="work-detail-dialog" aria-label="關閉">×</button></div><div id="work-detail-body" class="dialog-body"></div></dialog>
 <dialog id="decision-detail-dialog" aria-labelledby="decision-detail-title"><div class="dialog-head"><h2 id="decision-detail-title">決策歷史</h2><button class="dialog-close" type="button" data-close-dialog="decision-detail-dialog" aria-label="關閉">×</button></div><div id="decision-detail-body" class="dialog-body"></div></dialog>
 <dialog id="work-example-detail" aria-labelledby="work-example-title"><div class="dialog-head"><h2 id="work-example-title">設計示例</h2><button class="dialog-close" type="button" data-close-dialog="work-example-detail" aria-label="關閉">×</button></div><div class="dialog-body"><p></p></div></dialog>
@@ -460,7 +460,7 @@
     textSize:document.querySelector("#text-size"),
   };
   state.viewProjectId=new URLSearchParams(location.search).get("project");state.workRequest=0;state.viewPacket=null;state.projects=[];
-  const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore,onProjectChange:changeWorkProject});
+  const workView = createWorkView({onSelect:selectWork,onOpen:openWorkDetail,onNavigate:activateCore,onProjectChange:changeWorkProject,onAddChild:openChildWork});
   const codeGraphView = createCodeGraphView({api,onNavigate:activateCore,onProjectChange:changeWorkProject});
   for(const button of document.querySelectorAll('[data-work-nav]'))button.addEventListener('click',()=>activateCore(button.dataset.workNav));
   function element(tag,text,className) { const node=document.createElement(tag); if(text!==undefined)node.textContent=text; if(className)node.className=className; return node; }
@@ -689,15 +689,18 @@
       await poll();nodes.newWorkDialog.close();nodes.newWorkStatus.textContent="";activateCore("conversation");nodes.message.focus();
     }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;for(const button of nodes.newWorkProjects.querySelectorAll("button"))button.disabled=false;await poll();}
   }
-  async function openNewWork(){
-    activateCore("conversation");nodes.error.textContent="";nodes.newWorkProjects.replaceChildren();nodes.newWorkStatus.textContent="正在讀取可用專案…";nodes.newWorkDialog.showModal();
+  async function openChildWork(taskRef){
+    try{const projectId=currentWorkProjectId();const parent=await api('/api/formal-work/'+taskRef+'?projectId='+encodeURIComponent(projectId));nodes.workDialog.close();await openNewWork({parent,projectId});}catch(error){showError(error);}
+  }
+  async function openNewWork({parent=null,projectId=null}={}){
+    nodes.error.textContent="";nodes.newWorkProjects.replaceChildren();nodes.newWorkStatus.textContent="正在讀取可用專案…";nodes.newWorkDialog.showModal();
     try{
       const controlState=await api("/api/state"),projects=Array.isArray(controlState.projects)?controlState.projects:[];
       if(controlState.formal_work_enabled){
-        const form=document.querySelector("#formal-work-form");form.hidden=true;
-        const choose=(project)=>{form.dataset.projectId=project.id;form.hidden=false;nodes.newWorkStatus.textContent="工作專案："+project.name;document.querySelector("#formal-objective").focus();};
-        nodes.newWorkProjects.replaceChildren(...projects.map((project)=>{const button=element("button",project.name,"project-choice");button.type="button";button.addEventListener("click",()=>choose(project));return button;}));
-        if(projects.length===1)choose(projects[0]);else nodes.newWorkStatus.textContent="請選擇工作的專案。";
+        const form=document.querySelector("#formal-work-form");form.hidden=true;form.dataset.parentTaskRef=parent?.id||"";document.querySelector("#formal-objective").value="";document.querySelector("#formal-criteria").value="";document.querySelector("#new-work-title").textContent=parent?"新增子工作":"開始新工作";
+        const choose=(project)=>{form.dataset.projectId=project.id;form.hidden=false;nodes.newWorkStatus.textContent=parent?"上層目標："+parent.title:"工作專案："+project.name;document.querySelector("#formal-objective").focus();};
+        nodes.newWorkProjects.replaceChildren(...projects.filter(project=>!parent||project.id===parent.project_id).map((project)=>{const button=element("button",project.name,"project-choice");button.type="button";button.addEventListener("click",()=>choose(project));return button;}));
+        const selectedProject=projects.find(project=>project.id===(parent?.project_id||projectId));if(selectedProject)choose(selectedProject);else if(projects.length===1)choose(projects[0]);else nodes.newWorkStatus.textContent="請選擇工作的專案。";
         return;
       }
       if(projects.length===0){nodes.newWorkStatus.textContent="目前沒有可用專案；請先在 Control 登錄專案。";return;}
@@ -737,6 +740,7 @@
       if(detail.last_error)content.append(element("p",detail.last_error.message,"error"));
       const actions=element("div",undefined,"dialog-actions");
       const addAction=(label,action)=>{const button=element("button",label,"project-choice");button.type="button";button.addEventListener("click",()=>{button.disabled=true;void formalAction(taskRef,action);});actions.append(button);};
+      const childButton=element("button","新增子工作","project-choice");childButton.type="button";childButton.addEventListener("click",()=>void openChildWork(taskRef));actions.append(childButton);
       if(!detail.claims.length&&!detail.completion_verified)addAction("開始執行","start");
       if(detail.claims.length){addAction("核對目前回合","reconcile");if(!detail.completion_verified)addAction("執行獨立驗收","verify");addAction(detail.claims.some((claim)=>claim.archived)?"重開原工作":"封存工作",detail.claims.some((claim)=>claim.archived)?"reopen":"archive");}
       content.append(actions);
@@ -816,18 +820,20 @@
   nodes.pendingSend.addEventListener("click",()=>void resumePending());
   nodes.inspectorOpen.addEventListener("click",()=>{if(nodes.inspectorOpen.dataset.workItemId)void openWorkDetail(nodes.inspectorOpen.dataset.workItemId);});
   nodes.newWork.addEventListener("click",()=>void openNewWork());
+  document.querySelector("#work-new").addEventListener("click",()=>void openNewWork({projectId:currentWorkProjectId()}));
   document.querySelector("#formal-work-form").addEventListener("submit",async(event)=>{
-    event.preventDefault();const form=event.currentTarget,input=document.querySelector("#formal-objective"),button=form.querySelector("button");button.disabled=true;
+    event.preventDefault();const form=event.currentTarget,input=document.querySelector("#formal-objective"),buttons=[...form.querySelectorAll("button")],start=event.submitter?.value==="start";buttons.forEach(button=>button.disabled=true);
+    const parentTaskRef=form.dataset.parentTaskRef||null,successCriteria=document.querySelector("#formal-criteria").value.trim()||undefined;
     const pendingName="lattice.control.pending-formal-work.v1";
     try{
       let pending;try{pending=JSON.parse(localStorage.getItem(pendingName)||"null");}catch{}
-      if(!pending||pending.projectId!==form.dataset.projectId||pending.objective!==input.value.trim())pending={projectId:form.dataset.projectId,objective:input.value.trim(),clientRequestId:crypto.randomUUID()};
+      if(!pending||pending.projectId!==form.dataset.projectId||pending.objective!==input.value.trim()||(pending.parentTaskRef||null)!==parentTaskRef||pending.successCriteria!==successCriteria)pending={projectId:form.dataset.projectId,objective:input.value.trim(),parentTaskRef,successCriteria,clientRequestId:crypto.randomUUID()};
       localStorage.setItem(pendingName,JSON.stringify(pending));nodes.newWorkStatus.textContent="正在正式登記需求與驗收條件…";
       const result=await api("/api/formal-work",{method:"POST",body:JSON.stringify(pending)});
-      nodes.newWorkStatus.textContent="需求已保存，正在開始執行…";
-      await api("/api/formal-work/"+result.id+"/start",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});localStorage.removeItem(pendingName);
-      await api("/api/conversation",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});await changeWorkProject(pending.projectId);await poll();nodes.newWorkDialog.close();await openFormalDetail(result.id,{projectId:pending.projectId});
-    }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}finally{button.disabled=false;}
+      nodes.newWorkStatus.textContent=start?"需求已保存，正在開始執行…":"工作與上下層關係已保存。";
+      if(start)await api("/api/formal-work/"+result.id+"/start",{method:"POST",body:JSON.stringify({projectId:pending.projectId})});localStorage.removeItem(pendingName);
+      await changeWorkProject(pending.projectId);await poll();nodes.newWorkDialog.close();activateCore("work-tree");await openFormalDetail(result.id,{projectId:pending.projectId});
+    }catch(error){showError(error);nodes.newWorkStatus.textContent=error.message;}finally{buttons.forEach(button=>button.disabled=false);}
   });
 
   applyTextSize(document.documentElement.dataset.textSize,{persist:false});resizeMessageInput();activateCore(new URLSearchParams(location.search).get("view")==="work-graph"?"work-graph":"work-tree");await poll();setInterval(()=>void poll(),2_000);

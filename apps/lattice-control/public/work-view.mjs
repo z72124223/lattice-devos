@@ -249,7 +249,7 @@ function icon(name) {
   return node;
 }
 
-export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }) {
+export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, onAddChild }) {
   const host = document.querySelector('#work-views');
   const treeList = document.querySelector('#tree-list');
   const sourceButton = document.querySelector('#work-source');
@@ -264,6 +264,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   const projectSelect = document.querySelector('#work-project');
   const filters = document.querySelector('#work-filters');
   const detailButton = document.querySelector('#work-selected-detail');
+  const childButton = document.querySelector('#work-add-child');
   const selectionLabel = document.querySelector('#work-selection');
   const actualWork = (id) => snapshot?.graph.nodes.find((work) => work.id === id);
 
@@ -302,6 +303,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
   }
   function updateSelection(work, branchCount = 0) {
     detailButton.disabled = !work || work.id === '__project__';
+    childButton.disabled = example || detailButton.disabled;
     selectionLabel.textContent = work
       ? `已選：${work.title}${branchCount ? '' : filter === 'all' ? ' · 沒有下層分支' : ' · 沒有符合篩選的下層分支'}`
       : '直接點節點，展開或收合它下面的分支';
@@ -416,6 +418,7 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange }
     button.style.setProperty('--filter-color', palette[key]?.color || '#e3eaf2');
     button.addEventListener('click', () => { filter = key; treeChoices.clear(); graphChoices.clear(); zoom = null; render(); }); filters.append(button);
   }
+  childButton.addEventListener('click', () => { if (selected && !example) onAddChild?.(selected); });
   detailButton.addEventListener('click', () => {
     const data = example ? exampleSnapshot : snapshot;
     const work = [...(data?.tree.nodes || []), ...(data?.graph.nodes || [])].find((work) => work.id === selected);
