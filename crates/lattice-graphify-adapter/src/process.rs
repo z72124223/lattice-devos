@@ -1581,6 +1581,20 @@ fn validate_graphify_extract_stderr(stderr: &[u8]) -> GraphifyAdapterResult<()> 
     {
         return Ok(());
     }
+    // Data/config files can legitimately have no structural nodes. Preserve
+    // the pinned upstream warning in the evidence digest and report its count;
+    // missing parsers and every unknown diagnostic remain hard failures.
+    if let Ok(warnings) = display_coverage_warnings(stderr) {
+        if warnings
+            .iter()
+            .all(|(code, _)| *code == "EMPTY_SOURCE_FILES")
+        {
+            for (_, count) in warnings {
+                eprintln!("GRAPHIFY_EMPTY_SOURCE_FILES:{count}");
+            }
+            return Ok(());
+        }
+    }
     Err(error(
         GraphifyAdapterErrorKind::PartialOutput,
         "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
@@ -2073,6 +2087,8 @@ mod tests {
             .expect_err("unreviewed stderr must not become a warning allowance");
         assert_eq!(error.kind(), GraphifyAdapterErrorKind::PartialOutput);
         assert_eq!(error.code(), "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED");
+        let empty = b"  warning: 1 source file(s) produced zero nodes and are absent from the graph: empty.json. A re-run will retry them (empties are no longer cached); if it persists, please report the file(s) (#1666).\n";
+        validate_graphify_extract_stderr(empty).expect("bounded empty-file observation");
     }
 
     #[test]

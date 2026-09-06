@@ -69,14 +69,14 @@ pub const GRAPHIFY_WSL_REQUIRED_BWRAP_OPTIONS: &[&str] = &[
 
 /// Canonical manifest of the complete LATTICE-owned WSL Python package payload.
 pub const GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256: &str =
-    "8e21411001d9f44e90ae4cf13f5e5fc1e15604bd868a75def47ad17bd31cb9d3";
+    "fa16e31315563f07e1383455ec6032e77a3414a27109089abb0e9941982fa261";
 /// Number of reviewed payload files, including all dependencies and the install report.
-pub const GRAPHIFY_WSL_RUNTIME_FILE_COUNT: usize = 2_184;
+pub const GRAPHIFY_WSL_RUNTIME_FILE_COUNT: usize = 2196;
 /// Total reviewed bytes across all identity-bearing payload files.
-pub const GRAPHIFY_WSL_RUNTIME_BYTE_COUNT: u64 = 159_411_927;
+pub const GRAPHIFY_WSL_RUNTIME_BYTE_COUNT: u64 = 162138065;
 /// SHA-256 of the pip install report that binds package provenance and wheel hashes.
 pub const GRAPHIFY_WSL_INSTALL_REPORT_SHA256: &str =
-    "9901209d4cf415c16b030b8e1adeea6b216953df61115e3d9d32686ddd25a45e";
+    "dbf2f75e450c9efb12661dbacde7e089d2099a4852a579a7e560d7010677554e";
 /// SHA-256 of pinned Graphify's help under the cleared WSL production environment.
 pub const GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256: &str =
     "8574a189c8f0621b684b2d3378b4f4e8b2f22816a497e2dfd2af38d5506c004b";
@@ -92,7 +92,7 @@ pub const GRAPHIFY_PRIVATE_RUNNER_SHA256: &str =
     "98d0411709927a5687315f64efc6673a77f2241e2db6df8bd17c34886e3c2ad9";
 /// Digest binding the reviewed system trust boundary and LATTICE-owned payload.
 pub const GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256: &str =
-    "344488198ac2855077a382180d516df6183d7e4e7f05efb4b7d884904733a547";
+    "a8a720dae32ac408dfee545726c88457876672d6eed55a7c3a2469daebabc4fc";
 
 const SITE_PACKAGES_RELATIVE: &str = "site-packages";
 const INSTALL_REPORT_RELATIVE: &str = "install-report.json";

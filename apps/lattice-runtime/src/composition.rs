@@ -12191,6 +12191,14 @@ fn run_runtime_graph_memory_request(
 /// error code.  The underlying adapter diagnostic stays out of the CLI/MCP
 /// boundary, while recovery logic can still tell where to look.
 fn graph_memory_execution_error(error: GraphMemoryOrchestratorError) -> LatticedError {
+    match &error {
+        GraphMemoryOrchestratorError::Graphify(failure)
+        | GraphMemoryOrchestratorError::Snapshot(failure)
+        | GraphMemoryOrchestratorError::Persistence(failure)
+        | GraphMemoryOrchestratorError::Retrieval(failure)
+        | GraphMemoryOrchestratorError::Receipt(failure) => eprintln!("{}", failure.code()),
+        _ => {}
+    }
     let kind = match error {
         GraphMemoryOrchestratorError::Snapshot(_) => LatticedErrorKind::GraphSnapshotExecution,
         GraphMemoryOrchestratorError::Graphify(_) => LatticedErrorKind::GraphifyExecution,
