@@ -1042,7 +1042,7 @@ impl CodexReflectionBrokerConfig {
             while !protocol.responses_seen[CodexBrokerRequest::Initialize.index()] {
                 let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
                     .map_err(direct_protocol_error)?;
-                ingest_direct_codex_frame(&mut protocol, &frame, &control)?;
+                ingest_direct_codex_frame(&mut protocol, &frame, &control, &mut duplex)?;
             }
             send_codex_proxy_json(
                 &mut duplex,
@@ -1060,7 +1060,7 @@ impl CodexReflectionBrokerConfig {
             while protocol.thread_id.is_none() {
                 let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
                     .map_err(direct_protocol_error)?;
-                ingest_direct_codex_frame(&mut protocol, &frame, &control)?;
+                ingest_direct_codex_frame(&mut protocol, &frame, &control, &mut duplex)?;
             }
             let thread_id = protocol.thread_id.clone().ok_or_else(|| {
                 HermesAdapterError::new(
@@ -1080,7 +1080,7 @@ impl CodexReflectionBrokerConfig {
                 control.ensure_running()?;
                 let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
                     .map_err(direct_protocol_error)?;
-                if let Some(terminal) = ingest_direct_codex_frame(&mut protocol, &frame, &control)?
+                if let Some(terminal) = ingest_direct_codex_frame(&mut protocol, &frame, &control, &mut duplex)?
                 {
                     break terminal;
                 }
@@ -1552,6 +1552,17 @@ mod host_auth_tests {
             assert_eq!(failure.code(), "HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
         }
         assert!(read_host_access_token(Path::new("auth.json")).is_err());
+    }
+
+    #[test]
+    fn host_refresh_is_limited_to_the_current_account() {
+        let auth = json!({"chatgptAccountId":"fixture-account"});
+        assert!(host_refresh_matches(&json!({"reason":"unauthorized"}), &auth));
+        assert!(host_refresh_matches(&json!({"reason":"unauthorized","previousAccountId":"fixture-account"}), &auth));
+        for params in [json!({"reason":"unauthorized","previousAccountId":"other-account"}),
+            json!({"reason":"other"}), json!({"reason":"unauthorized","command":"ignored"})] {
+            assert!(!host_refresh_matches(&params, &auth));
+        }
     }
 }
 
@@ -2627,15 +2638,47 @@ fn ingest_direct_codex_frame(
     protocol: &mut CodexBrokerProtocol,
     frame: &ReceivedCodexFrame,
     control: &Arc<dyn ProductionCodexProxyControl>,
+    duplex: &mut ProductionCodexProxyDuplex,
 ) -> HermesAdapterResult<Option<CodexBrokerTerminal>> {
+    if let CodexAppServerFrameKind::ServerRequest { id, method } = &frame.kind
+        && method == "account/chatgptAuthTokens/refresh"
+        && !protocol.host_auth_refresh_used
+        && let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE")
+    {
+        let mut auth = read_host_access_token(Path::new(&source))?;
+        let params = frame.value.get("params").ok_or_else(|| direct_protocol_error(89))?;
+        if !host_refresh_matches(params, &auth) { return Err(direct_protocol_error(89)); }
+        protocol.host_auth_refresh_used = true;
+        auth.as_object_mut().unwrap().remove("type");
+        let mut encoded = serde_json::to_vec(&json!({"id":id,"result":auth}))
+            .map_err(|_| direct_protocol_error(89))?;
+        encoded.push(b'\n');
+        let sent = duplex.write_all(&encoded);
+        encoded.fill(0);
+        sent?;
+        return Ok(None);
+    }
     if matches!(frame.kind, CodexAppServerFrameKind::ServerRequest { .. }) {
         let _ = control.terminate();
+        if matches!(&frame.kind, CodexAppServerFrameKind::ServerRequest { method, .. }
+            if method == "account/chatgptAuthTokens/refresh") {
+            return Err(direct_protocol_error(89));
+        }
         return Err(HermesAdapterError::new(
             HermesAdapterErrorKind::Cancelled,
             "HERMES_CODEX_DIRECT_TOOL_REQUEST_DENIED",
         ));
     }
     protocol.ingest_frame(frame).map_err(direct_protocol_error)
+}
+
+#[cfg(any(windows, test))]
+fn host_refresh_matches(params: &Value, auth: &Value) -> bool {
+    params.as_object().is_some_and(|fields| fields.len() <= 2
+        && fields.keys().all(|key| ["reason", "previousAccountId"].contains(&key.as_str()))
+        && fields.get("reason").and_then(Value::as_str) == Some("unauthorized")
+        && fields.get("previousAccountId").is_none_or(|previous|
+            previous.is_null() || previous == &auth["chatgptAccountId"]))
 }
 
 #[cfg(windows)]
@@ -2975,6 +3018,7 @@ pub(crate) struct CodexBrokerProtocol {
     lifecycle_starts_seen: [bool; 2],
     pending_terminal: Option<(String, CodexBrokerTerminal)>,
     terminal_emitted: bool,
+    host_auth_refresh_used: bool,
 }
 
 #[cfg(windows)]
@@ -3007,6 +3051,7 @@ impl CodexBrokerProtocol {
             lifecycle_starts_seen: [false; 2],
             pending_terminal: None,
             terminal_emitted: false,
+            host_auth_refresh_used: false,
         })
     }
 
