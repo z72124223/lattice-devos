@@ -104,7 +104,17 @@ fn main() -> ExitCode {
         }
         if argument == "--graphify-refresh" && arguments.next().is_none() {
             return match lattice_runtime::composition::refresh_runtime_graphify_from_environment() {
-                Ok(_) => {
+                Ok(receipt) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": "graphify", "status": "PERSISTED",
+                            "commit": receipt.persistence().request().commit_id().as_str(),
+                            "record_count": receipt.persistence().record_count(),
+                            "retrieved_count": receipt.retrieval().results().len(),
+                            "receipt_digest": receipt.receipt_digest().as_str(),
+                        })
+                    );
                     eprintln!("LATTICE_GRAPHIFY_REFRESH_READY");
                     ExitCode::SUCCESS
                 }
@@ -116,7 +126,16 @@ fn main() -> ExitCode {
         }
         if argument == "--hermes-reflect" && arguments.next().is_none() {
             return match lattice_runtime::composition::reflect_runtime_hermes_from_environment() {
-                Ok(_) => {
+                Ok(receipt) => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": "hermes", "status": "INFERENCE_CANDIDATE",
+                            "summary": receipt.content().summary(),
+                            "graph_receipt_digest": receipt.graph_receipt_digest().as_str(),
+                            "receipt_digest": receipt.receipt_digest().as_str(),
+                        })
+                    );
                     eprintln!("LATTICE_HERMES_REFLECTION_READY");
                     ExitCode::SUCCESS
                 }

@@ -1865,6 +1865,26 @@ fn failed_run_details_are_bounded_and_reduced_to_fixed_safe_hints() {
 }
 
 #[test]
+fn observations_are_bound_to_the_job_and_prompt_requests_real_reflection() {
+    let make = |observation: &str| HermesReflectionJob::new(
+        request(), "lattice-task-034-session", "hermes-agent",
+        vec![ReflectionEvidence::new(ReflectionEvidenceKind::Graphify, digest(GRAPH_DIGEST))
+            .unwrap().with_observation(observation).unwrap()],
+    ).unwrap();
+    let first = make("The saved analysis contains 42 records; no test results were supplied.");
+    let changed = make("The saved analysis contains 43 records; no test results were supplied.");
+    assert_ne!(first.input_digest(), changed.input_digest());
+    assert!(first.prompt().contains("42 records"));
+    assert!(first.prompt().contains("write your own summary"));
+    assert!(!first.prompt().contains("Evidence-bound LATTICE reflection completed."));
+    assert!(!first.prompt().contains("Return exactly this compact JSON object"));
+    for bad in ["password=example", "", "line one\nline two"] {
+        assert!(ReflectionEvidence::new(ReflectionEvidenceKind::Graphify, digest(GRAPH_DIGEST))
+            .unwrap().with_observation(bad).is_err());
+    }
+}
+
+#[test]
 fn evidence_and_reflection_text_reject_sensitive_values_but_accept_digest_only_binding() {
     let secret = "Authorization: Bearer sk-example-secret-value-123456";
     let sensitive_digest =

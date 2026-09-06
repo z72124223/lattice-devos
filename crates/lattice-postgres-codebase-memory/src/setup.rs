@@ -5,6 +5,9 @@ use lattice_contracts::{CodebaseMemoryPersistenceIdentity, ContentDigest};
 use postgres::{Client, GenericClient, IsolationLevel};
 use sha2::{Digest, Sha256};
 
+mod store_v8;
+pub use store_v8::{apply_store_v8_compatibility, verify_store_v8_compatibility};
+
 use crate::{
     CODEBASE_MEMORY_EXTENSION_ID, CODEBASE_MEMORY_EXTENSION_PATH,
     CODEBASE_MEMORY_EXTENSION_SCHEMA_VERSION, CODEBASE_MEMORY_V2_EXTENSION_PATH,
@@ -701,6 +704,7 @@ fn memory_pre_state_error(state: ExtensionPreState) -> Option<ExtensionSetupErro
 enum ExactCatalogProfile {
     V2,
     V3,
+    V3StoreV8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -896,7 +900,12 @@ pub fn inspect_bootstrap_profile(
             ExtensionBootstrapProfile::V2
         }
         ExtensionPreState::ExactV3 => {
-            verify_exact_catalog_profile(&mut transaction, ExactCatalogProfile::V3)?;
+            let catalog = if global == ExtensionBootstrapGlobalProfile::V8 {
+                store_v8::catalog_profile(&mut transaction)?
+            } else {
+                ExactCatalogProfile::V3
+            };
+            verify_exact_catalog_profile(&mut transaction, catalog)?;
             verify_catalog_closure(&mut transaction)?;
             verify_namespace_auxiliary_closure(&mut transaction, 16, schema_comment)?;
             read_identity(
@@ -2302,12 +2311,16 @@ fn verify_exact_catalog_profile(
             V2_EXPECTED_FUNCTION_ACL_SIGNATURE,
             V2_EXPECTED_SCHEMA_ACL_SIGNATURE,
         ],
-        ExactCatalogProfile::V3 => [
+        ExactCatalogProfile::V3 | ExactCatalogProfile::V3StoreV8 => [
             V3_EXPECTED_RELATION_SIGNATURE,
             V3_EXPECTED_COLUMN_SIGNATURE,
             V3_EXPECTED_CONSTRAINT_SIGNATURE,
             V3_EXPECTED_INDEX_SIGNATURE,
-            V3_EXPECTED_FUNCTION_SIGNATURE,
+            if profile == ExactCatalogProfile::V3StoreV8 {
+                store_v8::function_signature()
+            } else {
+                V3_EXPECTED_FUNCTION_SIGNATURE
+            },
             V3_EXPECTED_TABLE_ACL_SIGNATURE,
             V3_EXPECTED_FUNCTION_ACL_SIGNATURE,
             V3_EXPECTED_SCHEMA_ACL_SIGNATURE,

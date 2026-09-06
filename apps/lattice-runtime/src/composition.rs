@@ -2447,12 +2447,17 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         ForemanExtensionTarget::new(database.database_name(), database.run_id())
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     let terminal_current = if action == PostgresBootstrapAction::V8VerifyOnly {
-        verify_postgres_foreman_extension(
+        lattice_postgres_codebase_memory::verify_store_v8_compatibility(
             &mut migrator,
-            &foreman_target,
-            ForemanExtensionDatabaseRole::Migrator,
+            &memory_target,
         )
         .is_ok()
+            && verify_postgres_foreman_extension(
+                &mut migrator,
+                &foreman_target,
+                ForemanExtensionDatabaseRole::Migrator,
+            )
+            .is_ok()
             && migrator
                 .query_one(
                     "SELECT pg_catalog.to_regnamespace('control_product') IS NOT NULL",
@@ -2707,6 +2712,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     }
     lattice_postgres_store::apply_control_product_extension(&mut migrator, &store_target)
         .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+    lattice_postgres_codebase_memory::apply_store_v8_compatibility(&mut migrator, &memory_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let final_store =
         verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
@@ -10910,6 +10917,12 @@ fn hermes_job_evidence(
         graph_receipt.receipt_digest().clone(),
         graph_details,
     )
+    .and_then(|evidence| evidence.with_observation(format!(
+        "Graphify analysis was persisted for project {} at Git commit {}. It contains {} derived records. The bound query retrieved {} records with a limit of {}. These are derived observations; no test results, code excerpts or completed-task verification are supplied by this receipt.",
+        graph_request.project_id().as_str(), graph_request.commit_id().as_str(),
+        graph_receipt.persistence().record_count(), graph_receipt.retrieval().results().len(),
+        graph_receipt.retrieval().limit(),
+    )))
     .map_err(|failure| map_hermes_adapter_error(&failure))?;
 
     let git_context = CanonicalValue::Object(vec![
