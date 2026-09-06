@@ -36,6 +36,25 @@ export function workCategory(work) {
   return Object.keys(palette).find((key) => palette[key] === workAppearance(work)) || 'unknown';
 }
 
+export function workLineage(tree, id) {
+  const byId = new Map(tree.nodes.map(node => [node.id, node]));
+  const selected = byId.get(id), path = [], seen = new Set();
+  let node = selected, missingParent = false;
+  while (node) {
+    if (seen.has(node.id)) throw new Error('工作來源形成循環，無法確認續接位置。');
+    seen.add(node.id); path.unshift(node);
+    missingParent = Boolean(node.parent_id && !byId.has(node.parent_id));
+    node = byId.get(node.parent_id);
+  }
+  const parent = byId.get(selected?.parent_id) ?? null;
+  return { path, parent, missingParent,
+    description: selected?.objective || '當時沒有保存工作需求。',
+    continuation: !selected?.parent_id ? '這項工作未連到上層；不能據此判定它就是最初目標。'
+      : !parent ? '上層工作不在目前資料中，無法確認續接位置。'
+      : selected.completion_verified === true ? '分支成果已驗收；回到上層核對主線能否繼續。上層目標仍依自己的驗收結果判定。'
+      : '處理並驗收這條分支後，回到上層工作繼續。' };
+}
+
 export function workScope(data, focusId = null, filter = 'all') {
   const all = new Map(data.tree.nodes.map((work) => [work.id, work]));
   const treeById = new Map(data.tree.nodes.map((work) => [work.id, work]));
@@ -266,7 +285,9 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, 
   const detailButton = document.querySelector('#work-selected-detail');
   const childButton = document.querySelector('#work-add-child');
   const selectionLabel = document.querySelector('#work-selection');
-  const actualWork = (id) => snapshot?.graph.nodes.find((work) => work.id === id);
+  const lineagePanel = document.querySelector('#work-lineage');
+  const actualWork = (id) => snapshot?.tree.nodes.some(work => work.id === id)
+    ? { ...snapshot.graph.nodes.find(work => work.id === id), ...snapshot.tree.nodes.find(work => work.id === id) } : null;
 
   function nodeButton(work, box, { isExample, structural = false, iconName, onActivate, branchCount = 0, expanded = false } = {}) {
     const foreign = svg('foreignObject', { x: box.x, y: box.y, width: box.width, height: box.height });
@@ -308,6 +329,25 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, 
       ? `已選：${work.title}${branchCount ? '' : filter === 'all' ? ' · 沒有下層分支' : ' · 沒有符合篩選的下層分支'}`
       : '直接點節點，展開或收合它下面的分支';
     selectionLabel.title = selectionLabel.textContent;
+    if (lineagePanel) {
+      lineagePanel.replaceChildren();
+      lineagePanel.hidden = example || !work || work.id === '__project__';
+      if (!lineagePanel.hidden && snapshot) {
+        const lineage = workLineage(snapshot.tree, work.id);
+        const trail = html('nav', 'work-lineage-path'); trail.setAttribute('aria-label', '已保存的工作路徑');
+        for (const [index, ancestor] of lineage.path.entries()) {
+          if (index) trail.append(document.createTextNode(' → '));
+          const link = html('button', '', ancestor.title); link.type = 'button';
+          link.addEventListener('click', () => { selected = ancestor.id; updateSelection(ancestor, ancestor.children?.length); onSelect?.(ancestor); render(); });
+          trail.append(link);
+        }
+        lineagePanel.append(trail, html('p', '', lineage.description), html('p', 'muted', lineage.continuation));
+        if (lineage.parent) {
+          const back = html('button', '', '回到上層工作：' + lineage.parent.title); back.type = 'button';
+          back.addEventListener('click', () => onOpen?.(lineage.parent.id)); lineagePanel.append(back);
+        }
+      }
+    }
   }
   function showExampleDetail(work) {
     const dialog = document.querySelector('#work-example-detail');
@@ -392,8 +432,8 @@ export function createWorkView({ onSelect, onOpen, onNavigate, onProjectChange, 
     const selectedWork = [...(data?.tree.nodes || []), ...(data?.graph.nodes || [])].find((work) => work.id === selected);
     updateSelection(selectedWork, (selectedWork?.children?.length || selectedWork?.reverse_dependents?.length || 0));
     const notice = document.querySelector('#work-data-note');
-    notice.textContent = example ? '示意資料：用來示範外觀與操作，不代表實際進度。'
-      : '這裡顯示已登記的工作紀錄。尚未接上的 Codex 對話與驗收結果，不會自動變成圖中的進度。';
+    notice.textContent = example ? '示意資料：用來示範外觀與操作，不代表實際進度。' : !data ? '正在核對已保存的工作關係。'
+      : `已保存 ${data.tree.nodes.filter(node => node.parent_id).length} 條上下層連線；${data.tree.roots.length} 項工作未連到上層。未連到上層不代表它就是最初目標。舊對話若沒有保存來源，無法自動推定；分支驗收通過也不代表主目標完成。`;
     if (data && data.graph.nodes.length && data.graph.nodes.every((work) => work.status === 'draft'))
       notice.textContent += ` 目前 ${data.graph.nodes.length} 項都記錄為待開始。`;
   }

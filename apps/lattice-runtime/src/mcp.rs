@@ -1195,7 +1195,7 @@ pub(crate) fn task_ingress_schema_digest() -> Option<ContentDigest> {
         (
             "task_submit_schema".to_owned(),
             CanonicalValue::String(format!(
-                "closed:v3:client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};legacy-intent:{CONTROLLED_CODEX_CANARY_INTENT}|general-objective-or-intent:nfc-no-control-no-secret:chars:1..={MAX_TASK_OBJECTIVE_CHARS}:utf8-bytes:1..={MAX_TASK_OBJECTIVE_BYTES};optional-selector:zero-or-one:project_id:canonical:bytes:2..={MAX_PROJECT_ID_BYTES}|project_name:chars:1..={MAX_PROJECT_NAME_CHARS}:utf8-bytes:1..={MAX_PROJECT_NAME_BYTES}|external-verified-adoption:{ADOPT_VERIFIED_RESULT_INTENT}:task_ref+expected_head+source_sha+target_sha+four-evidence-refs+approval-refs:1..=8"
+                "closed:v4:client_request_id:ascii-control-id:no-secret:1..={MAX_CLIENT_REQUEST_ID_BYTES};legacy-intent:{CONTROLLED_CODEX_CANARY_INTENT}|general-objective-or-intent:nfc-no-control-no-secret:chars:1..={MAX_TASK_OBJECTIVE_CHARS}:utf8-bytes:1..={MAX_TASK_OBJECTIVE_BYTES};optional-parent:parent_task_ref:lowercase-sha256:64:same-project:retained-before-schedule;optional-selector:zero-or-one:project_id:canonical:bytes:2..={MAX_PROJECT_ID_BYTES}|project_name:chars:1..={MAX_PROJECT_NAME_CHARS}:utf8-bytes:1..={MAX_PROJECT_NAME_BYTES}|external-verified-adoption:{ADOPT_VERIFIED_RESULT_INTENT}:task_ref+expected_head+source_sha+target_sha+four-evidence-refs+approval-refs:1..=8"
             )),
         ),
         (
@@ -1274,6 +1274,7 @@ pub struct TaskSubmitArguments {
     objective: Option<String>,
     project_id: Option<String>,
     project_name: Option<String>,
+    parent_task_ref: Option<String>,
     verified_result_adoption: Option<VerifiedResultAdoptionArguments>,
 }
 
@@ -1371,6 +1372,7 @@ impl TaskSubmitArguments {
                 objective: None,
                 project_id: None,
                 project_name: None,
+                parent_task_ref: None,
                 verified_result_adoption: None,
             });
         }
@@ -1441,6 +1443,7 @@ impl TaskSubmitArguments {
                 objective: None,
                 project_id: None,
                 project_name: None,
+                parent_task_ref: None,
                 verified_result_adoption: Some(VerifiedResultAdoptionArguments {
                     task_ref: task_ref.to_owned(),
                     expected_ledger_head_digest: expected_ledger_head_digest.to_owned(),
@@ -1460,11 +1463,16 @@ impl TaskSubmitArguments {
 
         let objective = objective_value.or(intent_value)?;
         if !valid_task_objective(objective)
-            || arguments.len() > 3
+            || arguments.len() > 4
             || arguments.keys().any(|key| {
                 !matches!(
                     key.as_str(),
-                    "client_request_id" | "intent" | "objective" | "project_id" | "project_name"
+                    "client_request_id"
+                        | "intent"
+                        | "objective"
+                        | "project_id"
+                        | "project_name"
+                        | "parent_task_ref"
                 )
             })
         {
@@ -1472,11 +1480,14 @@ impl TaskSubmitArguments {
         }
         let project_id = arguments.get("project_id").and_then(Value::as_str);
         let project_name = arguments.get("project_name").and_then(Value::as_str);
+        let parent_task_ref = arguments.get("parent_task_ref").and_then(Value::as_str);
         if arguments.contains_key("project_id") != project_id.is_some()
             || arguments.contains_key("project_name") != project_name.is_some()
             || (project_id.is_some() && project_name.is_some())
             || project_id.is_some_and(|value| !valid_project_id(value))
             || project_name.is_some_and(|value| !valid_project_name(value))
+            || arguments.contains_key("parent_task_ref") != parent_task_ref.is_some()
+            || parent_task_ref.is_some_and(|value| ContentDigest::from_sha256(value).is_err())
         {
             return None;
         }
@@ -1486,6 +1497,7 @@ impl TaskSubmitArguments {
             objective: Some(objective.to_owned()),
             project_id: project_id.map(ToOwned::to_owned),
             project_name: project_name.map(ToOwned::to_owned),
+            parent_task_ref: parent_task_ref.map(ToOwned::to_owned),
             verified_result_adoption: None,
         })
     }
@@ -1525,6 +1537,12 @@ impl TaskSubmitArguments {
     #[must_use]
     pub fn project_name(&self) -> Option<&str> {
         self.project_name.as_deref()
+    }
+
+    /// The existing task from which this problem branch was discovered.
+    #[must_use]
+    pub fn parent_task_ref(&self) -> Option<&str> {
+        self.parent_task_ref.as_deref()
     }
 
     /// Returns the typed externally verified-result adoption payload, if selected.
@@ -3151,6 +3169,10 @@ fn general_task_submit_schema(objective_field: &str, excludes_canary: bool) -> V
                 "minLength": 1,
                 "maxLength": MAX_PROJECT_NAME_CHARS,
                 "description": "Exact NFC Control catalog display name."
+            },
+            "parent_task_ref": {
+                "type": "string", "pattern": "^[a-f0-9]{64}$",
+                "description": "For a problem discovered while pursuing an existing task, retain that task here. Describe the encountered problem and intended solution in objective. Runtime saves the parent link before returning; this does not complete or resume the parent."
             }
         },
         "required": ["client_request_id", objective_field],
@@ -4166,6 +4188,38 @@ mod acceptance_evidence_tests {
     use serde_json::{Value, json};
     use std::fs::File;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn branch_intake_preserves_parent_and_rejects_invalid_or_privileged_inputs() {
+        let input = json!({"client_request_id":"branch-one","project_id":"project-a",
+            "objective":"Fix the problem discovered during the parent task", "parent_task_ref":"a".repeat(64)});
+        let parsed = super::TaskSubmitArguments::from_value(Some(&input)).expect("branch input");
+        assert_eq!(parsed.parent_task_ref(), Some("a".repeat(64).as_str()));
+        for invalid in [Value::Null, json!("bad"), json!("A".repeat(64)), json!(17)] {
+            let mut changed = input.clone();
+            changed["parent_task_ref"] = invalid;
+            assert!(super::TaskSubmitArguments::from_value(Some(&changed)).is_none());
+        }
+        let mut changed = input.clone();
+        changed["project_name"] = json!("other");
+        assert!(super::TaskSubmitArguments::from_value(Some(&changed)).is_none());
+        let mut privileged = input.clone();
+        privileged["complete_parent"] = json!(true);
+        assert!(super::TaskSubmitArguments::from_value(Some(&privileged)).is_none());
+        let canary = json!({"client_request_id":"branch-one","intent":"CONTROLLED_CODEX_CANARY", "parent_task_ref":"a".repeat(64)});
+        assert!(super::TaskSubmitArguments::from_value(Some(&canary)).is_none());
+        let mut legacy = input;
+        legacy
+            .as_object_mut()
+            .expect("object")
+            .remove("parent_task_ref");
+        assert!(
+            super::TaskSubmitArguments::from_value(Some(&legacy))
+                .expect("legacy")
+                .parent_task_ref()
+                .is_none()
+        );
+    }
 
     fn fresh_sink(label: &str) -> std::path::PathBuf {
         let unique = SystemTime::now()

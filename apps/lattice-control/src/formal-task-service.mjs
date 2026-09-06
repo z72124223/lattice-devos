@@ -154,11 +154,14 @@ export class FormalTaskService {
     return this.serial(`create:${clientRequestId}`, async () => {
       if (parentTaskRef) await this.store.detail(projectId, parentTaskRef);
       const registered = await this.store.submit({ client_request_id: clientRequestId,
-        project_id: projectId, objective: objective.trim() });
+        project_id: projectId, objective: objective.trim(), ...(parentTaskRef ? { parent_task_ref: parentTaskRef } : {}) });
       let detail = await this.store.detail(projectId, registered.task_ref);
-      if (!detail.metadata) {
+      if (detail.metadata && (detail.metadata.parent_ref ?? null) !== parentTaskRef) {
+        throw formalWorkError('CONTROL_WORK_INTAKE_CHANGED', '這項工作已有不同的來源，已保留原分支關係。');
+      }
+      if (!detail.metadata || detail.metadata.request_id === `branch-intake:${clientRequestId}`) {
         await this.store.update({ action: "METADATA", task_ref: detail.id,
-          request_id: `metadata:${clientRequestId}`, expected_revision: 0,
+          request_id: `metadata:${clientRequestId}`, expected_revision: detail.metadata?.revision ?? 0,
           title: title?.trim() || byteBounded(objective.trim().split(/\r?\n/u)[0], 240), priority,
           parent_ref: parentTaskRef, dependency_refs: [],
           success_criteria: successCriteria?.trim() || `完成需求：${objective.trim()}\n提供可核對的成果與使用或驗證方式。\n實際測試主要操作、錯誤輸入與需求中的資料保存行為。\n由獨立 Codex 回合核對需求，並由固定測試程序驗證後保存成果。` });
@@ -191,8 +194,12 @@ export class FormalTaskService {
   }
   executionPrompt(detail) {
     const preview = "若這項需求的主要成果本身是可試用網頁，才需要匯出 async startServer({port,host})，只綁定 127.0.0.1，回傳已監聽的 node:http Server，允許 port=0；匯入模組時不要自行監聽。這讓使用者完成後可在 App 直接試用，無須輸入命令。";
-    detail = { ...detail, success_criteria: `${detail.success_criteria}\n${preview}` };
-    return `你正在執行已正式登記的 LATTICE 工作。task_ref=${detail.id}。此工作身份已由 Runtime 保存，不要另建任務或改動 LATTICE 任務狀態。\n需求：${detail.objective}\n驗收條件：${detail.success_criteria}\n在目前隔離工作目錄完成這項具體需求，先檢查並沿用既有成果。修復就修復原功能；驗收就檢查指定成果，不能把它改做新網站或無關範例。只有需求本身要求開發介面時才新增介面。提供可核對的成果檔案，以及 node --test 可執行的實質測試，涵蓋需求主要行為與錯誤情境；保留實際檢查結果和使用或驗證方式。所有產物留在工作目錄，保留原有檔案。除非需求明確授權，不做 push、merge、發布、付款、帳戶變更或外部訊息。必要產品資訊才透過 request_user_input 詢問。不要要求使用者審查程式碼。完成後回傳指定 JSON：summary 用繁體中文解釋成果與啟動方式，artifact_path 是主要可執行成果的相對檔案路徑，test_path 是實際 Node 測試檔相對路徑。`;
+    const lineage = detail.metadata?.parent_ref
+      ? `這是原工作 ${detail.metadata.parent_ref} 衍生的分支。完成後交代解決了什麼、哪些仍待核對，以及回到原工作應接著做什麼；不可把分支完成當成原目標全部完成。`
+      : "保持原始目標，遇到問題時先確認是否需要另立可追蹤的分支。";
+    const branching = `若遇到必須獨立追蹤的新問題，先查找已有工作，確定沒有重複後，使用 lattice_task_submit 的 parent_task_ref=${detail.id} 登記分支；objective 寫明遇到的問題和要解決的事。保留回傳身份，不要建立沒有來源的平行目標，不要把一般操作步驟逐項開成工作。登記不代表已執行或已驗收。`;
+    detail = { ...detail, success_criteria: `${detail.success_criteria}\n${lineage}\n${branching}\n${preview}` };
+    return `你正在執行已正式登記的 LATTICE 工作。task_ref=${detail.id}。此工作身份已由 Runtime 保存，不要重複登記本工作或自行改動其完成狀態。\n需求：${detail.objective}\n驗收條件：${detail.success_criteria}\n在目前隔離工作目錄完成這項具體需求，先檢查並沿用既有成果。修復就修復原功能；驗收就檢查指定成果，不能把它改做新網站或無關範例。只有需求本身要求開發介面時才新增介面。提供可核對的成果檔案，以及 node --test 可執行的實質測試，涵蓋需求主要行為與錯誤情境；保留實際檢查結果和使用或驗證方式。所有產物留在工作目錄，保留原有檔案。除非需求明確授權，不做 push、merge、發布、付款、帳戶變更或外部訊息。必要產品資訊才透過 request_user_input 詢問。不要要求使用者審查程式碼。完成後回傳指定 JSON：summary 用繁體中文解釋成果與啟動方式，artifact_path 是主要可執行成果的相對檔案路徑，test_path 是實際 Node 測試檔相對路徑。`;
   }
   start(projectId, taskRef) {
     return this.serial(taskRef, async () => {

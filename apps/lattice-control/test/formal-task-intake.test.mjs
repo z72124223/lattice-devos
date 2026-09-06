@@ -8,7 +8,7 @@ function fixture(t){
   const tasks=new Map([[parent,{id:parent,project_id:projectId,metadata:null}]]);let submitted=0,started=0;
   const store={
     async detail(project,id){const task=tasks.get(id);if(!task||task.project_id!==project)throw Object.assign(new Error('wrong project'),{code:'CONTROL_WORK_PROJECT_MISMATCH'});return structuredClone(task);},
-    async submit({objective}){submitted++;if(!tasks.has(child))tasks.set(child,{id:child,project_id:projectId,objective,metadata:null});return {task_ref:child};},
+    async submit({objective,parent_task_ref,client_request_id}){submitted++;if(!tasks.has(child))tasks.set(child,{id:child,project_id:projectId,objective,metadata:parent_task_ref?{parent_ref:parent_task_ref,revision:1,request_id:`branch-intake:${client_request_id}`,success_criteria:"Runtime criteria"}:null});return {task_ref:child};},
     async update(command){assert.equal(command.action,'METADATA');const task=tasks.get(command.task_ref);task.metadata={...command,revision:1};return {record:structuredClone(task.metadata)};},
     invalidate(){},async close(){}
   };
@@ -38,4 +38,13 @@ test('the same durable child remains under its parent through execution and veri
   page.product.claims[0].turn_status='TURN_COMPLETED';assert.equal(project().tree.nodes.find(n=>n.id===child).status,'codex_done');
   page.tasks[1].ledger.status='COMPLETED';page.tasks[1].ledger.result_digest='c'.repeat(64);
   const complete=project();assert.equal(complete.tree.nodes.find(n=>n.id===child).status,'verified');assert.equal(complete.tree.nodes.find(n=>n.id===parent).status,'draft');assert.deepEqual(complete.tree.nodes.find(n=>n.id===parent).children,[child]);
+});
+
+test('a branch execution keeps its parent and instructs Codex to retain newly discovered branches',async t=>{
+  const {service}=fixture(t);
+  const detail=await service.create({projectId,objective:'因付款後沒有訂單而修復保存流程',parentTaskRef:parent,successCriteria:'付款成功後能讀回訂單',clientRequestId:'branch-prompt'});
+  const prompt=service.executionPrompt({...detail,success_criteria:detail.metadata.success_criteria});
+  assert.ok(prompt.includes(parent));assert.ok(prompt.includes('parent_task_ref='+child));
+  assert.match(prompt,/不可把分支完成當成原目標全部完成/);
+  assert.doesNotMatch(prompt,/不要另建任務或改動/);
 });

@@ -140,3 +140,17 @@ test('invalid cycles fail visibly instead of hanging the browser', () => {
   assert.throws(() => layoutGraph([{ id: 'a', depends_on: ['b'] }, { id: 'b', depends_on: ['a'] }]), /循環/u);
   assert.throws(() => layoutTree({ roots: ['a'], nodes: [{ id: 'a', children: ['b'] }, { id: 'b', children: ['a'] }] }), /循環/u);
 });
+
+
+test('lineage follows saved parents, never dependency edges, and completion does not claim parent resumed', async () => {
+  const {workLineage}=await import('../public/work-view.mjs');
+  const tree={nodes:[{id:'goal',title:'原目標',parent_id:null},{id:'problem',title:'遇到問題',objective:'付款後沒有訂單',parent_id:'goal'},
+    {id:'fix',title:'修復',parent_id:'problem',completion_verified:true,status:'archived',depends_on:['other']},{id:'other',title:'其他工作',parent_id:null}]};
+  const result=workLineage(tree,'fix');
+  assert.deepEqual(result.path.map(node=>node.id),['goal','problem','fix']);
+  assert.equal(result.parent.id,'problem');assert.match(result.continuation,/核對主線能否繼續/);
+  assert.match(workLineage(tree,'goal').continuation,/不能據此判定/);
+  assert.equal(workLineage(tree,'problem').description,'付款後沒有訂單');
+  tree.nodes[1].parent_id='missing';assert.equal(workLineage(tree,'fix').missingParent,true);
+  tree.nodes[1].parent_id='fix';assert.throws(()=>workLineage(tree,'fix'),/循環/);
+});

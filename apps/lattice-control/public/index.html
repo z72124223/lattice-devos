@@ -369,11 +369,12 @@
           <p id="work-empty" role="status">正在讀取工作…</p>
           <div id="work-diagrams" class="work-diagrams" hidden>
             <section id="core-work-tree" class="work-view-card" aria-labelledby="tree-heading">
-              <header><h2 id="tree-heading">工作樹</h2><p>一個目標，拆成哪些工作？</p></header>
+              <header><h2 id="tree-heading">工作樹</h2><p>原本要做什麼，遇到什麼問題，解決後回到哪裡？</p></header>
               <div class="work-diagram-scroll" tabindex="0" aria-label="工作樹，可捲動查看所有分支"><div id="tree-list"></div></div>
               <p id="tree-current" class="work-note"></p>
             </section>
           </div>
+          <section id="work-lineage" class="detail-cell" aria-label="分支來源與續接" style="margin:12px 0;max-height:240px;overflow:auto" hidden></section>
           <footer class="work-legend" aria-label="工作狀態圖例">
             <span style="--legend-color:#7ed46b"><i aria-hidden="true"></i>已完成</span>
             <span style="--legend-color:#39d5e7"><i aria-hidden="true"></i>進行中</span>
@@ -697,7 +698,7 @@
     try{
       const controlState=await api("/api/state"),projects=Array.isArray(controlState.projects)?controlState.projects:[];
       if(controlState.formal_work_enabled){
-        const form=document.querySelector("#formal-work-form");form.hidden=true;form.dataset.parentTaskRef=parent?.id||"";document.querySelector("#formal-objective").value="";document.querySelector("#formal-criteria").value="";document.querySelector("#new-work-title").textContent=parent?"新增子工作":"開始新工作";
+        const form=document.querySelector("#formal-work-form");form.hidden=true;form.dataset.parentTaskRef=parent?.id||"";document.querySelector("#formal-objective").value="";document.querySelector("#formal-criteria").value="";document.querySelector("#new-work-title").textContent=parent?"從這個工作分支處理問題":"開始新工作";document.querySelector("label[for=formal-objective]").textContent=parent?"遇到什麼問題？這條分支要解決什麼？":"你想完成什麼？";document.querySelector("#formal-objective").placeholder=parent?"說明遇到的問題與預期解法，保存後會自動連回上層工作。":"用自己的話描述想完成的成果。";
         const choose=(project)=>{form.dataset.projectId=project.id;form.hidden=false;nodes.newWorkStatus.textContent=parent?"上層目標："+parent.title:"工作專案："+project.name;document.querySelector("#formal-objective").focus();};
         nodes.newWorkProjects.replaceChildren(...projects.filter(project=>!parent||project.id===parent.project_id).map((project)=>{const button=element("button",project.name,"project-choice");button.type="button";button.addEventListener("click",()=>choose(project));return button;}));
         const selectedProject=projects.find(project=>project.id===(parent?.project_id||projectId));if(selectedProject)choose(selectedProject);else if(projects.length===1)choose(projects[0]);else nodes.newWorkStatus.textContent="請選擇工作的專案。";
@@ -732,13 +733,19 @@
       const detail=await api("/api/formal-work/"+taskRef+"?projectId="+encodeURIComponent(projectId));
       if(projectId!==currentWorkProjectId())return;
       if(refresh&&(!nodes.workDialog.open||nodes.workDialog.dataset.formalTask!==taskRef))return;
-      const detailKey=JSON.stringify([detail.status,detail.result_digest,detail.claims.map((claim)=>claim.last_sequence),detail.last_error]);
+      const detailKey=JSON.stringify([detail.metadata?.revision,detail.status,detail.result_digest,detail.claims.map((claim)=>claim.last_sequence),detail.last_error]);
       if(refresh&&state.formalDetailKey===detailKey)return;
       state.formalDetailKey=detailKey;state.formalRefreshedAt=Date.now();nodes.workDialog.dataset.formalTask=taskRef;nodes.workDialog.dataset.projectId=projectId;
       const content=element("div",undefined,"detail-grid");
       for(const [label,value]of [["工作",detail.title],["狀態",statusLabels.get(detail.status)||detail.status],["需求",detail.objective],["驗收條件",detail.success_criteria||"尚未保存"],["進度",detail.progress],["正式工作身份",detail.id],["成果證據",detail.result_digest||"尚未完成實際驗收"]]){const cell=element("div",undefined,"detail-cell");cell.append(element("small",label),element("p",value));content.append(cell);}
       if(detail.last_error)content.append(element("p",detail.last_error.message,"error"));
       const actions=element("div",undefined,"dialog-actions");
+      if(detail.metadata?.parent_ref){
+        const parentId=detail.metadata.parent_ref,cell=element("div",undefined,"detail-cell"),back=element("button","回到上層工作","project-choice");
+        cell.append(element("small","分支來源與續接"),element("p",detail.completion_verified?"這條分支已驗收；回到上層核對主線能否繼續。上層目標尚需自己的驗收。":"這項工作從上層分出；處理並驗收後，回到上層繼續。"));
+        back.type="button";back.addEventListener("click",()=>void openFormalDetail(parentId,{projectId}));cell.append(back);content.append(cell);
+        void api("/api/formal-work/"+parentId+"?projectId="+encodeURIComponent(projectId)).then(parent=>{back.textContent="回到上層工作："+parent.title;}).catch(()=>{back.textContent="重試讀取上層工作";});
+      }
       const addAction=(label,action)=>{const button=element("button",label,"project-choice");button.type="button";button.addEventListener("click",()=>{button.disabled=true;void formalAction(taskRef,action);});actions.append(button);};
       const childButton=element("button","新增子工作","project-choice");childButton.type="button";childButton.addEventListener("click",()=>void openChildWork(taskRef));actions.append(childButton);
       if(!detail.claims.length&&!detail.completion_verified)addAction("開始執行","start");

@@ -7081,6 +7081,7 @@ fn replay_general_submission<H: FullChainHermesPort>(
         .map_err(|error| ToolExecutionError::new(error.code()))?;
     let admission = create_general_task(&request, &mut lifecycle)
         .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    retain_general_branch(core, arguments, existing)?;
     general_task_public_status(admission.evidence(), existing)
         .map_err(|error| ToolExecutionError::new(error.code()))
 }
@@ -7137,6 +7138,7 @@ fn admit_general_submission<H: FullChainHermesPort>(
         resolved.authority(),
     )
     .map_err(|error| ToolExecutionError::new(error.code()))?;
+    validate_general_branch_parent(core, arguments, &submission)?;
     let binding =
         general_task_binding(&submission).map_err(|error| ToolExecutionError::new(error.code()))?;
     let request = GeneralTaskIntakeRequest::new(binding, arguments.client_request_id())
@@ -7145,8 +7147,83 @@ fn admit_general_submission<H: FullChainHermesPort>(
         .map_err(|error| ToolExecutionError::new(error.code()))?;
     let admission = create_general_task(&request, &mut lifecycle)
         .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    retain_general_branch(core, arguments, &submission)?;
     general_task_public_status(admission.evidence(), &submission)
         .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+fn validate_general_branch_parent<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<(), ToolExecutionError> {
+    let Some(parent) = arguments.parent_task_ref() else {
+        return Ok(());
+    };
+    let parent_ref = ContentDigest::from_sha256(parent)
+        .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_RELATION_REJECTED"))?;
+    let parent = load_general_submission_by_task_ref(core, &parent_ref)?
+        .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING"))?;
+    if parent.identity().project_id() != submission.identity().project_id()
+        || parent.task_ref() == submission.task_ref()
+    {
+        return Err(ToolExecutionError::new("CONTROL_PRODUCT_RELATION_REJECTED"));
+    }
+    Ok(())
+}
+
+// Use the existing durable metadata contract. A failed write returns an error
+// before scheduling; retrying the same intake repairs an interrupted save.
+// Never infer parents from dependencies, file names, or conversation recency.
+fn retain_general_branch<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<(), ToolExecutionError> {
+    let Some(parent) = arguments.parent_task_ref() else {
+        return Ok(());
+    };
+    validate_general_branch_parent(core, arguments, submission)?;
+    let mut product = connect_control_product(core)?;
+    let facts = product
+        .snapshot(
+            submission.identity().project_id().as_str(),
+            &[submission.task_ref().as_str().to_owned()],
+        )
+        .map_err(ToolExecutionError::new)?;
+    let metadata = facts["metadata"]
+        .as_array()
+        .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_RESPONSE_REJECTED"))?;
+    if let Some(saved) = metadata
+        .iter()
+        .find(|row| row["task_ref"].as_str() == Some(submission.task_ref().as_str()))
+    {
+        return check_retained_branch_parent(saved, parent);
+    }
+    product
+        .execute(&ControlProductCommand::Metadata {
+            task_ref: submission.task_ref().clone(),
+            request_id: format!("branch-intake:{}", arguments.client_request_id()),
+            expected_revision: 0,
+            title: submission.objective().chars().take(60).collect(),
+            success_criteria: format!(
+                "完成分支需求：{}\n驗證成果後回到原工作 {} 繼續；分支完成不代表原目標完成。",
+                submission.objective(),
+                parent
+            ),
+            priority: 2,
+            parent_ref: Some(parent.to_owned()),
+            dependency_refs: Vec::new(),
+        })
+        .map_err(ToolExecutionError::new)?;
+    Ok(())
+}
+
+fn check_retained_branch_parent(saved: &Value, parent: &str) -> Result<(), ToolExecutionError> {
+    if saved["parent_ref"].as_str() != Some(parent) {
+        return Err(ToolExecutionError::new("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+    }
+    Ok(())
 }
 
 fn general_task_public_status(
@@ -12737,6 +12814,22 @@ mod tests {
     use postgres::{Client, Config, NoTls};
 
     const TASK050_PROFILE_MARKER_PREFIX: &str = "TASK050_LATTICED_PROFILE_INPUT=";
+
+    #[test]
+    fn branch_intake_retry_preserves_saved_parent_instead_of_reparenting() {
+        let saved = json!({"parent_ref":"a".repeat(64)});
+        assert!(super::check_retained_branch_parent(&saved, &"a".repeat(64)).is_ok());
+        assert_eq!(
+            super::check_retained_branch_parent(&saved, &"b".repeat(64))
+                .unwrap_err()
+                .code(),
+            "LATTICE_TASK_IDEMPOTENCY_CONFLICT"
+        );
+        assert!(
+            super::check_retained_branch_parent(&json!({"parent_ref":null}), &"a".repeat(64))
+                .is_err()
+        );
+    }
 
     fn task050_test_digest(value: char) -> ContentDigest {
         ContentDigest::from_sha256(value.to_string().repeat(64)).expect("TASK050 digest")
