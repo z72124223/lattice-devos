@@ -57,6 +57,11 @@ const DELIVERY_PROMPT: &str = concat!(
 /// Closed command surface for the first delivery node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeCommand {
+    BotLifecycle {
+        port: u16,
+        run_id: String,
+        install: bool,
+    },
     ProjectRegistryInspect {
         database: DeliveryDatabaseBinding,
         project_id: lattice_contracts::ProjectId,
@@ -96,6 +101,7 @@ pub enum RuntimeCommand {
 /// Stable command-line failures without sensitive process output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    BotLifecycle(&'static str),
     ProjectRecovery(&'static str),
     Usage,
     InvalidDigest,
@@ -122,6 +128,7 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::BotLifecycle(code) => code,
             Self::ProjectRecovery(code) => code,
             Self::Usage => "LATTICE_RUNTIME_USAGE",
             Self::InvalidDigest => "LATTICE_RUNTIME_INVALID_DIGEST",
@@ -144,6 +151,7 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BotLifecycle(code) => formatter.write_str(code),
             Self::ProjectRecovery(code) => formatter.write_str(code),
             Self::Usage => formatter.write_str(USAGE),
             Self::InvalidDigest => formatter.write_str("expected one lowercase SHA-256 digest"),
@@ -178,6 +186,18 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
         return Err(RuntimeError::Usage);
     };
     match command.as_str() {
+        "bot-lifecycle" | "bot-lifecycle-install" => {
+            let values = parse_options(
+                options,
+                &["--postgres-host", "--postgres-port", "--postgres-run-id"],
+            )?;
+            let binding = parse_database_binding(&values[0], &values[1], &values[2])?;
+            Ok(RuntimeCommand::BotLifecycle {
+                port: values[1].parse().map_err(|_| RuntimeError::Usage)?,
+                run_id: binding.run_id().to_owned(),
+                install: command == "bot-lifecycle-install",
+            })
+        }
         "project-registry-inspect" | "project-registry-reconcile" => {
             let mut names = vec![
                 "--postgres-host",
@@ -319,6 +339,31 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
 #[allow(clippy::too_many_lines)]
 pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
     match command {
+        RuntimeCommand::BotLifecycle {
+            port,
+            run_id,
+            install,
+        } => {
+            let password = delivery_database_password()?;
+            if install {
+                lattice_postgres_store::install_bot_lifecycle(port, &run_id, &password)
+                    .map_err(RuntimeError::BotLifecycle)
+            } else {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::io::stdin()
+                    .take(65537)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
+                if bytes.len() > 65536 {
+                    return Err(RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"));
+                }
+                let request: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
+                lattice_postgres_store::execute_bot_lifecycle(port, &run_id, &password, &request)
+                    .map_err(RuntimeError::BotLifecycle)
+            }
+        }
         RuntimeCommand::ProjectRegistryInspect {
             database,
             project_id,

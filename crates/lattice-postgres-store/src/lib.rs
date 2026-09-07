@@ -1,6 +1,8 @@
 //! Typed Store conformance fake plus exact live `PostgreSQL` adapter for LATTICE.
 
 mod control_product;
+mod bot_lifecycle;
+pub use bot_lifecycle::{BOT_LIFECYCLE_SQL, execute_bot_lifecycle, install_bot_lifecycle};
 mod foreman_coordination;
 mod live;
 mod migrations;
