@@ -57,6 +57,14 @@ const DELIVERY_PROMPT: &str = concat!(
 /// Closed command surface for the first delivery node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeCommand {
+    ProjectRegistryInspect {
+        database: DeliveryDatabaseBinding,
+        project_id: lattice_contracts::ProjectId,
+    },
+    ProjectRegistryReconcile {
+        database: DeliveryDatabaseBinding,
+        request: project_bridge::recovery::RecoveryRequest,
+    },
     CodexPreflight {
         launcher: PathBuf,
         version: String,
@@ -88,6 +96,7 @@ pub enum RuntimeCommand {
 /// Stable command-line failures without sensitive process output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    ProjectRecovery(&'static str),
     Usage,
     InvalidDigest,
     InvalidTimeout,
@@ -113,6 +122,7 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::ProjectRecovery(code) => code,
             Self::Usage => "LATTICE_RUNTIME_USAGE",
             Self::InvalidDigest => "LATTICE_RUNTIME_INVALID_DIGEST",
             Self::InvalidTimeout => "LATTICE_RUNTIME_INVALID_TIMEOUT",
@@ -134,6 +144,7 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::ProjectRecovery(code) => formatter.write_str(code),
             Self::Usage => formatter.write_str(USAGE),
             Self::InvalidDigest => formatter.write_str("expected one lowercase SHA-256 digest"),
             Self::InvalidTimeout => {
@@ -167,6 +178,49 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
         return Err(RuntimeError::Usage);
     };
     match command.as_str() {
+        "project-registry-inspect" | "project-registry-reconcile" => {
+            let mut names = vec![
+                "--postgres-host",
+                "--postgres-port",
+                "--postgres-run-id",
+                "--project-id",
+            ];
+            if command == "project-registry-reconcile" {
+                names.extend([
+                    "--expected-revision",
+                    "--expected-receipt-digest",
+                    "--pending-observation-digest",
+                ]);
+            }
+            let values = parse_options(options, &names)?;
+            let database = parse_database_binding(&values[0], &values[1], &values[2])?;
+            let project_id = lattice_contracts::ProjectId::new(values[3].clone())
+                .map_err(|_| RuntimeError::Usage)?;
+            if command == "project-registry-inspect" {
+                return Ok(RuntimeCommand::ProjectRegistryInspect {
+                    database,
+                    project_id,
+                });
+            }
+            let revision = values[4]
+                .parse::<u64>()
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or(RuntimeError::Usage)?;
+            let digest = |v: &str| {
+                lattice_contracts::ContentDigest::from_sha256(v)
+                    .map_err(|_| RuntimeError::InvalidDigest)
+            };
+            Ok(RuntimeCommand::ProjectRegistryReconcile {
+                database,
+                request: project_bridge::recovery::RecoveryRequest {
+                    project_id,
+                    revision,
+                    receipt_digest: digest(&values[5])?,
+                    pending_digest: digest(&values[6])?,
+                },
+            })
+        }
         "codex-preflight" => {
             let values = parse_options(
                 options,
@@ -265,6 +319,25 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
 #[allow(clippy::too_many_lines)]
 pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
     match command {
+        RuntimeCommand::ProjectRegistryInspect {
+            database,
+            project_id,
+        } => project_bridge::recovery::run(
+            &database,
+            &delivery_database_password()?,
+            &project_id,
+            None,
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
+        RuntimeCommand::ProjectRegistryReconcile { database, request } => {
+            project_bridge::recovery::run(
+                &database,
+                &delivery_database_password()?,
+                &request.project_id,
+                Some(&request),
+            )
+            .map_err(|e| RuntimeError::ProjectRecovery(e.code()))
+        }
         RuntimeCommand::CodexPreflight {
             launcher,
             version,

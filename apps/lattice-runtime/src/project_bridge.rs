@@ -6,6 +6,8 @@
 //! Registry command. It never accepts a path, Git executable, database target,
 //! or Registry identity from MCP request bytes.
 
+pub(crate) mod recovery;
+
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};

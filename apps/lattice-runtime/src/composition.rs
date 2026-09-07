@@ -5923,7 +5923,7 @@ fn load_general_submission_by_task_ref_at<H: FullChainHermesPort>(
     .map_err(|error| ToolExecutionError::new(error.code()))
 }
 
-fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
+pub(crate) fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::LedgerConfiguration);
     let daemon_instance_id = StoreDaemonInstanceId::new(
         required_environment(STORE_DAEMON_INSTANCE_ID_ENV).map_err(|_| rejected())?,
