@@ -33,6 +33,24 @@ class ConfigTests(unittest.TestCase):
     def install(self):
         return M.change(self.config, "install", self.runtime, self.sha)
 
+    def test_customer_launcher_arguments_survive_update_rollback_and_remove(self):
+        before = b'model = "customer-model"\n'
+        self.config.write_bytes(before)
+        arguments = ["-I", str(self.root / "customer launcher.py"), "serve", "--state", str(self.root / "customer data")]
+        M.change(self.config, "install", self.runtime, self.sha, arguments)
+        first = self.config.read_bytes()
+        self.assertEqual(M.parse(first)["mcp_servers"]["lattice"]["args"], arguments)
+        M.change(self.config, "update", self.runtime2, M.digest(self.runtime2.read_bytes()), arguments + ["version-two"])
+        M.change(self.config, "rollback")
+        self.assertEqual(self.config.read_bytes(), first)
+        M.change(self.config, "remove")
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_runtime_arguments_reject_control_characters_before_config_write(self):
+        with self.assertRaisesRegex(M.Rejected, "RUNTIME_ARGUMENTS_REJECTED"):
+            M.change(self.config, "install", self.runtime, self.sha, ["x\ny"])
+        self.assertFalse(self.config.exists())
+
     def test_clean_customer_lifecycle_across_process_restart(self):
         def run(operation, runtime=None):
             args = [sys.executable, str(SCRIPT), operation, "--config", str(self.config)]

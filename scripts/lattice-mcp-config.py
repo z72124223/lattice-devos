@@ -159,7 +159,7 @@ def read_json(path: Path) -> dict | None:
     return value
 
 
-def make_block(runtime: Path, expected_digest: str) -> str:
+def make_block(runtime: Path, expected_digest: str, arguments: list[str] | None = None) -> str:
     if not runtime.is_absolute():
         raise Rejected("RUNTIME_ABSOLUTE_PATH_REQUIRED")
     regular_path(runtime)
@@ -169,7 +169,11 @@ def make_block(runtime: Path, expected_digest: str) -> str:
         raise Rejected("RUNTIME_DIGEST_MISMATCH")
     # JSON basic strings are valid TOML strings for these path characters.
     command = json.dumps(str(runtime), ensure_ascii=False)
-    block = BEGIN.decode() + "[mcp_servers.lattice]\ncommand = " + command + "\n" + END.decode()
+    if arguments is not None and (not isinstance(arguments, list) or len(arguments) > 16
+            or any(not isinstance(arg, str) or len(arg) > 4096 or any(ord(c) < 32 for c in arg) for arg in arguments)):
+        raise Rejected("RUNTIME_ARGUMENTS_REJECTED")
+    args = "args = " + json.dumps(arguments, ensure_ascii=False) + "\n" if arguments else ""
+    block = BEGIN.decode() + "[mcp_servers.lattice]\ncommand = " + command + "\n" + args + END.decode()
     parse(block.encode())
     return block
 
@@ -278,7 +282,7 @@ def write_config(config: Path, before: bytes, after: bytes, existed: bool) -> No
             raise Rejected("CONFIG_READBACK_MISMATCH")
 
 
-def change(config: Path, operation: str, runtime: Path | None = None, runtime_digest: str = "") -> dict:
+def change(config: Path, operation: str, runtime: Path | None = None, runtime_digest: str = "", arguments: list[str] | None = None) -> dict:
     if os.name != "nt":
         raise Rejected("CONFIG_WRITE_PLATFORM_NOT_VERIFIED")
     folder, state_path, pending_path = locations(config)
@@ -304,7 +308,7 @@ def change(config: Path, operation: str, runtime: Path | None = None, runtime_di
         if operation in ("install", "update"):
             if runtime is None:
                 raise Rejected("RUNTIME_REQUIRED")
-            new_block = make_block(runtime, runtime_digest)
+            new_block = make_block(runtime, runtime_digest, arguments)
         else:
             new_block = ""
         if operation == "install":
@@ -325,8 +329,9 @@ def change(config: Path, operation: str, runtime: Path | None = None, runtime_di
                 new_block = state.get("previous_block", "")
                 if not new_block:
                     raise Rejected("NO_PREVIOUS_RUNTIME")
-                previous_path = parse(new_block.encode())["mcp_servers"]["lattice"]["command"]
-                if make_block(Path(previous_path), state.get("previous_runtime_digest", "")) != new_block:
+                previous = parse(new_block.encode())["mcp_servers"]["lattice"]
+                previous_path = previous["command"]
+                if make_block(Path(previous_path), state.get("previous_runtime_digest", ""), previous.get("args")) != new_block:
                     raise Rejected("PREVIOUS_RUNTIME_CHANGED")
             after = replace_owned(before, state, new_block)
             if operation == "remove" and state.get("original_digest") == digest(after.removesuffix(separator.encode()) if separator else after):

@@ -5979,6 +5979,16 @@ fn configured_task_ingress_peer(
     let channel_id = GatewayChannelId::new("main").map_err(|_| rejected())?;
 
     match ingress_kind.as_str() {
+        "CODEX_LOCAL_MCP" => TaskIngressPeerEvidence::new_codex_local_mcp_live(
+            GatewayInstanceId::new("latticed-codex-local-mcp").map_err(|_| rejected())?,
+            env!("CARGO_PKG_VERSION"),
+            adapter_binary_digest,
+            schema_digest,
+            channel_id,
+            profile_digest,
+            process_start_identity.clone(),
+        )
+        .map_err(|_| rejected()),
         TASK_INGRESS_SECURE_TUNNEL => TaskIngressPeerEvidence::new_chatgpt_secure_mcp_tunnel_live(
             GatewayInstanceId::new("latticed-chatgpt-secure-mcp").map_err(|_| rejected())?,
             env!("CARGO_PKG_VERSION"),

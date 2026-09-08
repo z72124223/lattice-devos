@@ -7157,6 +7157,8 @@ pub const LOCAL_CANONICAL_MCP_ACCEPTANCE_ACTOR_ID: &str = "local-canonical-mcp-a
 /// not a second normal human gateway and receives no generic gateway powers.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TaskIngressClientKind {
+    /// A customer-configured local Codex STDIO connection, without execution authority.
+    CodexLocalMcp,
     /// The fixed production `ChatGPT` secure MCP tunnel profile.
     ChatGptSecureMcpTunnel,
     /// A local canonical acceptance harness; never `ChatGPT` evidence.
@@ -7168,6 +7170,7 @@ impl TaskIngressClientKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::CodexLocalMcp => "CODEX_LOCAL_MCP",
             Self::ChatGptSecureMcpTunnel => "CHATGPT_SECURE_MCP_TUNNEL",
             Self::LocalCanonicalMcpAcceptance => "LOCAL_CANONICAL_MCP_ACCEPTANCE",
         }
@@ -7215,6 +7218,35 @@ pub struct TaskIngressPeerEvidence {
 }
 
 impl TaskIngressPeerEvidence {
+    /// Constructs a local customer STDIO peer from server-owned startup evidence.
+    /// This identity grants no execution, approval, merge, or deployment authority.
+    ///
+    /// # Errors
+    /// Rejects invalid versions and zero commitments like the other live peers.
+    pub fn new_codex_local_mcp_live(
+        gateway_instance_id: GatewayInstanceId,
+        adapter_version: impl Into<String>,
+        adapter_binary_digest: ContentDigest,
+        schema_digest: ContentDigest,
+        channel_id: GatewayChannelId,
+        profile_digest: ContentDigest,
+        process_start_authority_digest: ContentDigest,
+    ) -> Result<Self, ContractError> {
+        Self::new_closed_live(
+            TaskIngressClientKind::CodexLocalMcp,
+            gateway_instance_id,
+            "codex-local-mcp",
+            adapter_version,
+            adapter_binary_digest,
+            schema_digest,
+            "codex-local-mcp-profile",
+            TaskIngressActorKind::ControlledServiceProfile,
+            channel_id,
+            profile_digest,
+            process_start_authority_digest,
+        )
+    }
+
     /// Constructs the production `ChatGPT` secure MCP tunnel peer from trusted
     /// process-start configuration evidence.
     ///

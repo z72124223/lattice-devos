@@ -3,6 +3,7 @@
 這個元件管理客戶自己的 Codex 設定，尚不是完整三核心下載安裝包。
 目前寫入只支援 Windows，需 Python 3.11 以上；其他平台只可讀取診斷。
 執行環境仍須另外準備並驗證 PostgreSQL、LATTICE control 和 Graphify。
+獨立資料庫與本機 Runtime 的開發入口見 [客戶 Runtime](customer-runtime.md)。
 不包含作者設定、記憶、技能、營運總部、多 Bot 系統或登入憑證。
 
 ## 使用
