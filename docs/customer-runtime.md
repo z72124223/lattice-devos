@@ -228,3 +228,26 @@ PostgreSQL binary、新 loopback port、新 DPAPI 憑證及新 WSL 平台設定�
 
 已實測的同機不同目錄還原，不等於另一 Windows 使用者、另一台電腦、
 乾淨 OS 或企業政策環境的驗收；這些環境仍需獨立測試。
+
+## 可重複執行的客戶環境驗收
+
+`scripts/verify-lattice-customer-environment.py` 是獨立驗收入口，配合已核驗的
+bundle-v5 或相同介面的後續封裝，不需要更動封裝內容。先以備份還原到全新
+本工作專屬目錄，再執行：
+
+```text
+<封裝>/python/python.exe -I -B -S <驗收工具>/verify-lattice-customer-environment.py --bundle <封裝> --bundle-sha256 <可信摘要> --state <已還原安裝> --output <全新證據目錄> --reference <來源工作讀回JSON> --project-id <原專案ID> --completed-task <已完成task_ref> --commit <原Graphify commit> --query <原有關聯查詢>
+```
+
+reference 使用 `after` 下含 `task`、`product`、`decisions`、`graph` 的原始
+讀回 JSON。工具使用測試設定實際記錄的 MCP 命令，核對原成果、父子工作、
+決策及關聯；乾淨與自訂設定各自完成 PostgreSQL／MCP 重啟核對，移除後
+必須恢復原設定 bytes。它另對全新測試檔加入當前使用者的 NTFS 拒絕寫入
+規則，先觀察真正的作業系統拒絕，再確認 LATTICE 拒絕修改且未建立側錄
+狀態，最後還原該測試檔的原存取權。所有來源、失敗證據與客戶設定保留。
+
+這個入口不更改真實 Codex 設定、主機帳戶或全域安全政策，也不等於已測
+Codex App 的 UI、企業群組政策或另一實體電腦。報告記錄 Windows 版本與
+安裝識別摘要；同一 Windows 安裝下的新目錄仍須標為同機同 OS 驗收。
+獨立 Windows 客體須先有合法可使用的映像及所需註冊／授權，再在客體內
+建立自己的 WSL 平台與還原目錄，執行相同入口，才能補該環境的證據。
