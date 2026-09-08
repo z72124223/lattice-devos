@@ -20,7 +20,7 @@ DECLARE observed timestamptz;
 BEGIN
  PERFORM bot_lifecycle.keys_v1(p,ARRAY['source','observed_at','thread_id','host_id','latest_turn_id','thread_updated_at','status','latest_turn_status','pending_input_count','in_flight_count','readback_digest','evidence_ref']);
  IF p->>'source' IS DISTINCT FROM 'codex.read_thread' OR p->>'thread_id' IS DISTINCT FROM target OR p->>'host_id' IS DISTINCT FROM host
- OR p->>'status' IS DISTINCT FROM 'idle' OR p->>'latest_turn_status' IS DISTINCT FROM 'completed'
+ OR COALESCE(p->>'status','') NOT IN('idle','notLoaded') OR p->>'latest_turn_status' IS DISTINCT FROM 'completed'
  OR p->'pending_input_count' IS DISTINCT FROM '0'::jsonb OR p->'in_flight_count' IS DISTINCT FROM '0'::jsonb
  OR COALESCE(p->>'latest_turn_id','') !~ '^[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}$'
  OR jsonb_typeof(p->'thread_updated_at') IS DISTINCT FROM 'number' OR COALESCE(p->>'thread_updated_at','') !~ '^[0-9]{1,15}$'

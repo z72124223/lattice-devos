@@ -4,7 +4,7 @@ Scope: control self-handoff only. Other roles retain v1 JSON through the candida
 
 ## Commands
 All use exactly --postgres-host 127.0.0.1 --postgres-port <port> --postgres-run-id <32 lowercase hex>.
-- bot-lifecycle-install: unchanged v1 installation/verification.
+- bot-lifecycle-install: creates v1 only; existing installation is verified without migration and reports its actual schemaVersion (1 or 2).
 - bot-lifecycle-migrate: one JSON request on stdin, max 64 KiB. Migrator connection; verifies exact v1 or v2 installation, then atomic schema extension plus one control contract migration. Never installs during a read.
 - bot-lifecycle: reads, guards, ordinary v1 and explicit v2 requests on stdin.
 The new binary supports both installations. Old binaries fail closed on the extended function/privilege catalog; they are not compatible with a migrated database. Original v1 SQL/function bodies/events remain preserved. Runtime loses direct EXECUTE on apply_v1 after migration; apply_v2 delegates legacy roles internally.
@@ -41,7 +41,7 @@ Same exact retries return historical receipt plus current state. Replays do not 
 ```json
 {"source":"codex.read_thread","observed_at":"2026-09-08T00:00:00.000Z","thread_id":"actual-uuid","host_id":"local","latest_turn_id":"actual-uuid","thread_updated_at":1788825600,"status":"idle","latest_turn_status":"completed","pending_input_count":0,"in_flight_count":0,"readback_digest":"<64hex>","evidence_ref":"inbox/bot-lifecycle/native.json"}
 ```
-Database checks age <=300s (at most 5s future), explicit idle/completed/zero counts and exact target/source turn. HQ must derive from actual native evidence, never manufacture it. First executor operation pins old latest_turn_id/thread_updated_at to handoff_boundary; subsequent pre-CAS and post-CAS operations require unchanged boundary. New boundary at ack/commit must target registered successor and remain identical across ack/commit. Active successor may resume only after CAS.
+Database checks age <=300s (at most 5s future), status idle or notLoaded, completed latest turn, explicit zero counts and exact target/source turn. This matches the existing native safeBoundary semantics: archived tasks can be notLoaded without changing their completed turn or updatedAt. Preserve the actual native status; never rewrite notLoaded to idle. HQ must derive from actual native evidence, never manufacture it. First executor operation pins old latest_turn_id/thread_updated_at to handoff_boundary; subsequent pre-CAS and post-CAS operations require unchanged boundary. New boundary at ack/commit must target registered successor and remain identical across ack/commit. Active successor may resume only after CAS.
 All source/artifact/inventory verification in HQ prepare/verify stays mandatory; boundary fields cannot replace it.
 
 ## Read-only guards

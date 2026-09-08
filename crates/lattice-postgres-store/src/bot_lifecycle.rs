@@ -263,9 +263,9 @@ pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<
     }
     verify(&mut migrator, run_id)?;
     let mut runtime = connect(port, run_id, password, "runtime")?;
-    verify(&mut runtime, run_id)?;
+    let version = verify(&mut runtime, run_id)?;
     Ok(
-        json!({"schemaVersion":1,"schema_version":"lattice.bot-lifecycle.v1","status":if created {"INSTALLED"}else{"VERIFIED"},"database":name,"host":"127.0.0.1","port":port,"runId":run_id}),
+        json!({"schemaVersion":version,"schema_version":format!("lattice.bot-lifecycle.v{version}"),"status":if created {"INSTALLED"}else{"VERIFIED"},"database":name,"host":"127.0.0.1","port":port,"runId":run_id}),
     )
 }
 

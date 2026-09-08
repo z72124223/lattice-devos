@@ -52,6 +52,8 @@ assert.equal((await cli(null,'bot-lifecycle-install')).code,0);checks.push('fail
 await reject({...migration,extra:true},'INPUT_REJECTED','bot-lifecycle-migrate');
 await reject({...migration,expected_revision:0},'REVISION_CONFLICT','bot-lifecycle-migrate');
 const migrated=await apply(migration,'bot-lifecycle-migrate');
+const verifiedInstallation=await cli(null,'bot-lifecycle-install');
+assert.equal(verifiedInstallation.value.schemaVersion,2);assert.equal(verifiedInstallation.value.status,'VERIFIED');checks.push('explicit verifier reports actual installed schema version');
 assert.equal(state.generation,original.generation);assert.equal(state.owner_thread_id,original.owner_thread_id);assert.deepEqual(state.work_ids,work);assert.equal(state.revision,2);assert.equal(state.contract_version,2);
 assert.deepEqual(await read('reports'),legacy);checks.push('migration preserves owner generation work and legacy role');
 const historyAfter=JSON.parse(sql("SELECT jsonb_agg(to_jsonb(e) ORDER BY project_id,role_id,request_id)::text FROM bot_lifecycle.events e;"));
@@ -85,7 +87,7 @@ await reject(grant(),'EXECUTOR_GRANT_REJECTED');
 await reject(v2('add-work',{work_ids:['extra']},{...executorActor,generation:2}),'ACTOR_REJECTED');
 await reject({...v2('add-work',{work_ids:['extra']}),handoff_id:'other-handoff'},'EXECUTOR_GRANT_REJECTED');
 await reject(v2('reserve-step',{step:'routing_updated',operation_key:'no',input_digest:hash}),'EXECUTOR_GRANT_REJECTED');
-for(const change of [{status:'active'},{pending_input_count:null},{in_flight_count:1},{latest_turn_id:randomUUID()},{observed_at:new Date(Date.now()-301000).toISOString()}]){
+for(const change of [{status:'active'},{status:'unknown'},{latest_turn_status:'inProgress'},{pending_input_count:null},{in_flight_count:1},{latest_turn_id:randomUUID()},{observed_at:new Date(Date.now()-301000).toISOString()}]){
 await reject(v2('prepare',{handoff_id:handoff,manifest:manifest()},executorActor,{old:{...boundary(),...change},new:null}),'NATIVE_BOUNDARY_REJECTED');
 }
 await apply(v2('revoke-executor',{reason_digest:hash},controlActor(),{old:null,new:null}));
@@ -158,14 +160,19 @@ await reject(v2('finish',{},controlActor()),'MIGRATION_INCOMPLETE');
 await reject(v2('reserve-step',{step:'old_archived',operation_key:'archive',input_digest:hash},controlActor()),'ARCHIVE_NOT_READY');
 async function step(name,tool,target){
 await apply(v2('reserve-step',{step:name,operation_key:name,input_digest:hash},controlActor()));
-await apply(v2('native-step',{step:name,operation_key:name,receipt:receipt(tool,target)},controlActor()));
+const native={old:{...boundary(),...(name==='old_archived'?{status:'notLoaded'}:{})},new:null};
+await apply(v2('native-step',{step:name,operation_key:name,receipt:receipt(tool,target)},controlActor(),native));
 }
 await step('routing_updated','hq-routing-update',next);
 await reject(v2('finish',{},controlActor()),'MIGRATION_INCOMPLETE');
 await step('schedule_updated','schedule-not-configured',next);
 await reject(v2('reserve-step',{step:'old_archived',operation_key:'old_archived',input_digest:hash},controlActor(),{old:{...boundary(),pending_input_count:1},new:null}),'NATIVE_BOUNDARY_REJECTED');
 await step('old_archived','set_thread_archived',old);
-await apply(v2('finish',{},controlActor()));
+for(const change of [{status:'active'},{status:'unknown'},{latest_turn_status:'inProgress'},{pending_input_count:null},{in_flight_count:1},{latest_turn_id:randomUUID()},{thread_updated_at:1788825601}]){
+await reject(v2('finish',{},controlActor(),{old:{...boundary(),status:'notLoaded',...change},new:null}),'NATIVE_BOUNDARY_REJECTED');
+}
+await apply(v2('finish',{},controlActor(),{old:{...boundary(),status:'notLoaded'},new:null}));
+checks.push('post-archive notLoaded retains completed source identity through finish');
 assert.equal((await cli(ordinary())).value.status,'OWNER_CURRENT');
 await reject(handoffGuard,'ADMISSION_PAUSED');
 assert.equal(state.phase,'ACTIVE');assert.equal(state.work_ids.length,15);assert.ok(work.every(w=>state.work_ids.includes(w)));
