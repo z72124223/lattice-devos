@@ -97,6 +97,74 @@ pub const GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256: &str =
 const SITE_PACKAGES_RELATIVE: &str = "site-packages";
 const INSTALL_REPORT_RELATIVE: &str = "install-report.json";
 
+/// Operator-provisioned platform selection. Legacy identities are unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WslProfile {
+    distribution: String,
+    launcher_sha256: String,
+    portable: bool,
+}
+
+impl WslProfile {
+    #[must_use]
+    pub fn legacy() -> Self {
+        Self {
+            distribution: GRAPHIFY_WSL_DISTRO.into(),
+            launcher_sha256: GRAPHIFY_WSL_LAUNCHER_SHA256.into(),
+            portable: false,
+        }
+    }
+
+    /// Selects one separately provisioned, pinned Ubuntu 26.04.1 distribution.
+    pub fn portable(distribution: &str, launcher_sha256: &str) -> GraphifyAdapterResult<Self> {
+        let suffix = distribution.strip_prefix("LATTICE-Graphify-").unwrap_or("");
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || launcher_sha256.len() != 64
+            || !launcher_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(identity_error("GRAPHIFY_PLATFORM_SELECTION_REJECTED"));
+        }
+        Ok(Self {
+            distribution: distribution.into(),
+            launcher_sha256: launcher_sha256.into(),
+            portable: true,
+        })
+    }
+
+    #[must_use]
+    pub fn distribution(&self) -> &str {
+        &self.distribution
+    }
+    #[must_use]
+    pub const fn is_portable(&self) -> bool {
+        self.portable
+    }
+    #[must_use]
+    pub fn selection_digest(&self) -> String {
+        framed_digest(&[
+            b"lattice-graphify-platform-selection-2.0",
+            self.distribution.as_bytes(),
+            self.launcher_sha256.as_bytes(),
+            self.os_release_sha256().as_bytes(),
+            b"ubuntu-26.04.1-wsl-amd64",
+            b"48d56724b5c8e60f24893e83e73bbb58c60b3ca22fba3da977075420acd54104",
+            b"user=lattice",
+        ])
+    }
+    pub(crate) const fn os_release_sha256(&self) -> &'static str {
+        if self.portable {
+            "cf72627ff81aef345d0a9f3807eb80f1035e0f80fe2932d12d94efc02fd68104"
+        } else {
+            GRAPHIFY_WSL_OS_RELEASE_SHA256
+        }
+    }
+}
+
 /// Exact production identity after both trust boundaries have been verified.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReviewedGraphifyRuntime {
@@ -158,6 +226,14 @@ pub(crate) fn verify_reviewed_runtime(
     wsl_executable: &Path,
     runtime_root: &Path,
 ) -> GraphifyAdapterResult<ReviewedGraphifyRuntime> {
+    verify_runtime_profile(wsl_executable, runtime_root, &WslProfile::legacy())
+}
+
+pub(crate) fn verify_runtime_profile(
+    wsl_executable: &Path,
+    runtime_root: &Path,
+    profile: &WslProfile,
+) -> GraphifyAdapterResult<ReviewedGraphifyRuntime> {
     if !wsl_executable.is_absolute() || !runtime_root.is_absolute() {
         return Err(identity_error("GRAPHIFY_WSL_RUNTIME_PATH_REJECTED"));
     }
@@ -177,10 +253,10 @@ pub(crate) fn verify_reviewed_runtime(
         return Err(identity_error("GRAPHIFY_WSL_LAUNCHER_NAME_REJECTED"));
     }
     let launcher_sha256 = identity_file_sha256(&wsl_executable)?;
-    if launcher_sha256 != GRAPHIFY_WSL_LAUNCHER_SHA256 {
+    if launcher_sha256 != profile.launcher_sha256 {
         return Err(identity_error("GRAPHIFY_WSL_LAUNCHER_DIGEST_MISMATCH"));
     }
-    verify_reviewed_wsl_system_files()?;
+    verify_reviewed_wsl_system_files(profile)?;
 
     let payload = collect_wsl_payload(&runtime_root)?;
     if payload.entries.len() != GRAPHIFY_WSL_RUNTIME_FILE_COUNT
@@ -198,16 +274,25 @@ pub(crate) fn verify_reviewed_runtime(
         ));
     }
 
-    let execution_identity_sha256 = reviewed_execution_identity_digest(
+    let legacy_identity = reviewed_execution_identity_digest(
         &launcher_sha256,
         &payload.manifest_sha256,
         payload.entries.len(),
         payload.byte_count,
         &install_report_sha256,
     );
-    if execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256 {
+    if !profile.portable && legacy_identity != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256 {
         return Err(identity_error("GRAPHIFY_WSL_EXECUTION_IDENTITY_MISMATCH"));
     }
+    let execution_identity_sha256 = if profile.portable {
+        framed_digest(&[
+            b"lattice-graphify-reviewed-execution-2.0",
+            legacy_identity.as_bytes(),
+            profile.selection_digest().as_bytes(),
+        ])
+    } else {
+        legacy_identity
+    };
     Ok(ReviewedGraphifyRuntime {
         wsl_executable,
         runtime_root,
@@ -218,11 +303,11 @@ pub(crate) fn verify_reviewed_runtime(
 }
 
 #[cfg(windows)]
-fn verify_reviewed_wsl_system_files() -> GraphifyAdapterResult<()> {
+fn verify_reviewed_wsl_system_files(profile: &WslProfile) -> GraphifyAdapterResult<()> {
     for (linux_path, expected_sha256, code) in [
         (
             GRAPHIFY_WSL_OS_RELEASE_PATH,
-            GRAPHIFY_WSL_OS_RELEASE_SHA256,
+            profile.os_release_sha256(),
             "GRAPHIFY_WSL_OS_RELEASE_DIGEST_MISMATCH",
         ),
         (
@@ -236,7 +321,7 @@ fn verify_reviewed_wsl_system_files() -> GraphifyAdapterResult<()> {
             "GRAPHIFY_WSL_BWRAP_DIGEST_MISMATCH",
         ),
     ] {
-        let path = wsl_unc_path(linux_path)?;
+        let path = wsl_unc_profile_path(linux_path, profile)?;
         require_regular_file(&path, code)?;
         if identity_file_sha256(&path)? != expected_sha256 {
             return Err(identity_error(code));
@@ -246,7 +331,7 @@ fn verify_reviewed_wsl_system_files() -> GraphifyAdapterResult<()> {
 }
 
 #[cfg(windows)]
-fn wsl_unc_path(linux_path: &str) -> GraphifyAdapterResult<PathBuf> {
+fn wsl_unc_profile_path(linux_path: &str, profile: &WslProfile) -> GraphifyAdapterResult<PathBuf> {
     let relative = linux_path
         .strip_prefix('/')
         .ok_or_else(|| identity_error("GRAPHIFY_WSL_SYSTEM_PATH_REJECTED"))?;
@@ -260,13 +345,13 @@ fn wsl_unc_path(linux_path: &str) -> GraphifyAdapterResult<PathBuf> {
     }
     Ok(PathBuf::from(format!(
         r"\\wsl.localhost\{}\{}",
-        GRAPHIFY_WSL_DISTRO,
+        profile.distribution(),
         relative.replace('/', r"\")
     )))
 }
 
 #[cfg(not(windows))]
-fn verify_reviewed_wsl_system_files() -> GraphifyAdapterResult<()> {
+fn verify_reviewed_wsl_system_files(_profile: &WslProfile) -> GraphifyAdapterResult<()> {
     Err(identity_error("GRAPHIFY_WSL_HOST_PLATFORM_REJECTED"))
 }
 

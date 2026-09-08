@@ -1,7 +1,7 @@
 """Build and verify a local Windows dependency bundle from explicit software roots.
 
-Never copies a database, user configuration, credentials or a WSL distribution.
-The current reviewed WSL system remains an explicit external platform requirement.
+Never copies a database, user configuration, credentials or an installed WSL distribution.
+An optional pinned official image can provision a new private WSL2 distribution.
 """
 from __future__ import annotations
 import argparse
@@ -13,6 +13,9 @@ from pathlib import Path, PurePosixPath
 import shutil
 import stat
 import sys
+import io
+import urllib.request
+import zipfile
 
 sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("customer", Path(__file__).with_name("lattice-customer-runtime.py"))
@@ -21,6 +24,53 @@ SPEC.loader.exec_module(M)
 SCHEMA = "lattice.windows-dependency-bundle.v1"
 MAX_FILES = 50_000
 MAX_BYTES = 3_000_000_000
+NODE_VERSION = "24.16.0"
+NODE_ZIP_SHA256 = "edaca9bd58ec8e92037dac4e877d52f6b8f430b81c18b57e264b4e2fb111cd56"
+NODE_EXE_SHA256 = "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290aa3"
+NODE_LICENSE_SHA256 = "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c"
+WSL_IMAGE_SHA256 = "48d56724b5c8e60f24893e83e73bbb58c60b3ca22fba3da977075420acd54104"
+NODE_URL = "https://nodejs.org/download/release/v24.16.0/node-v24.16.0-win-x64.zip"
+
+
+def supply_node(root):
+    """Exact upstream archive; extract only runtime/license, never npm or installers."""
+    M.CONFIG.regular_path(root)
+    if root.exists() or not root.is_absolute() or not root.parent.is_dir():
+        raise M.Rejected("FRESH_NODE_SUPPLY_REQUIRED")
+    with urllib.request.urlopen(NODE_URL, timeout=60) as response:
+        data = response.read(100_000_001)
+    if len(data) > 100_000_000 or hashlib.sha256(data).hexdigest() != NODE_ZIP_SHA256:
+        raise M.Rejected("NODE_ARCHIVE_DIGEST_REJECTED")
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        contents = {}
+        for name in ("node.exe", "LICENSE"):
+            entry = archive.getinfo("node-v24.16.0-win-x64/" + name)
+            if entry.file_size > 150_000_000:
+                raise M.Rejected("NODE_ARCHIVE_CAPACITY_REJECTED")
+            contents[name] = archive.read(entry)
+    if (hashlib.sha256(contents["node.exe"]).hexdigest() != NODE_EXE_SHA256
+            or hashlib.sha256(contents["LICENSE"]).hexdigest() != NODE_LICENSE_SHA256):
+        raise M.Rejected("NODE_EXECUTABLE_DIGEST_REJECTED")
+    M.private_new_root(root)
+    for name, body in contents.items():
+        (root / name).write_bytes(body)
+    provenance = {"schema": "lattice.node-supply.v1", "version": NODE_VERSION, "source": NODE_URL,
+                  "archive_sha256": NODE_ZIP_SHA256, "files": {name: sha(root / name) for name in contents}}
+    (root / "provenance.json").write_bytes(M.CONFIG.json_bytes(provenance))
+    verify_node(root)
+    return {"status": "NODE_SUPPLY_VERIFIED", "path": str(root), "version": NODE_VERSION, "sha256": NODE_EXE_SHA256}
+
+
+def verify_node(root):
+    provenance = json.loads(M.regular(root / "provenance.json").read_bytes())
+    if (provenance.get("schema") != "lattice.node-supply.v1" or provenance.get("version") != NODE_VERSION
+            or provenance.get("source") != NODE_URL or provenance.get("archive_sha256") != NODE_ZIP_SHA256
+            or set(provenance.get("files", {})) != {"node.exe", "LICENSE"}
+            or provenance["files"]["node.exe"] != NODE_EXE_SHA256
+            or provenance["files"]["LICENSE"] != NODE_LICENSE_SHA256
+            or any(sha(root / name) != expected for name, expected in provenance["files"].items())):
+        raise M.Rejected("NODE_SUPPLY_REJECTED")
+    return provenance
 
 
 def sha(path, *, checked=False):
@@ -104,7 +154,7 @@ def copy_tree(source, target, excluded=(), budget=None):
             raise M.Rejected("BUNDLE_SOURCE_CHANGED")
 
 
-def build(root, runtime, runtime_sha, postgres, python, git, graphify):
+def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None, archive=None):
     if sha(runtime) != runtime_sha:
         raise M.Rejected("RUNTIME_DIGEST_MISMATCH")
     if not root.is_absolute():
@@ -119,6 +169,16 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify):
         if root == source or root.is_relative_to(source) or source.is_relative_to(root):
             raise M.Rejected("BUNDLE_SOURCE_OUTPUT_OVERLAP")
     postgres, python, git, graphify = sources
+    if node is None:
+        raise M.Rejected("NODE_SUPPLY_REQUIRED")
+    M.regular(node, directory=True)
+    node = node.resolve(strict=True)
+    if root == node or root.is_relative_to(node) or node.is_relative_to(root):
+        raise M.Rejected("BUNDLE_SOURCE_OUTPUT_OVERLAP")
+    verify_node(node)
+    if archive is not None:
+        if M.file_digest(archive) != WSL_IMAGE_SHA256:
+            raise M.Rejected("WSL_IMAGE_DIGEST_REJECTED")
     M.private_new_root(root)
     (root / "bin").mkdir()
     shutil.copyfile(runtime, root / "bin/latticed.exe")
@@ -139,14 +199,27 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify):
         copy_tree(git / name, root / "git" / name, ("etc", "__pycache__"), budget)
     shutil.copyfile(M.regular(git / "LICENSE.txt"), root / "git/LICENSE.txt")
     copy_tree(graphify, root / "graphify", budget=budget)
+    (root / "node").mkdir()
+    for name in ("node.exe", "LICENSE", "provenance.json"):
+        shutil.copyfile(node / name, root / "node" / name)
+    verify_node(root / "node")
+    if archive is not None:
+        (root / "platform").mkdir()
+        image = root / "platform/ubuntu-26.04.1-wsl-amd64.wsl"
+        shutil.copyfile(archive, image)
+        if M.file_digest(image) != WSL_IMAGE_SHA256:
+            raise M.Rejected("WSL_IMAGE_COPY_CHANGED")
     files, size = inventory(root)
     if files["bin/latticed.exe"]["sha256"] != runtime_sha:
         raise M.Rejected("BUNDLE_RUNTIME_CHANGED")
     data = {"schema": SCHEMA, "platform": "windows-x86_64", "distribution_status": "LOCAL_CANDIDATE",
             "files": files, "total_bytes": size, "runtime_sha256": runtime_sha,
-            "bundled": ["LATTICE Runtime and launchers", "PostgreSQL software and licenses", "CPython 3.12 standard library and native DLLs", "Git software and license", "Graphify reviewed payload"],
-            "external_requirements": ["Reviewed WSL launcher and Ubuntu 26.04 system", "Pinned Python 3.14.4 and bubblewrap 0.11.1 within Ubuntu", "Explicit Node executable for local result import", "Codex client and its existing account authorization"],
+            "bundled": ["LATTICE Runtime and launchers", "PostgreSQL software and licenses", "CPython 3.12 standard library and native DLLs", "Git software and license", "Graphify reviewed payload", "Node.js 24.16.0 runtime and license"],
+            "external_requirements": (["Enabled Windows WSL2 with virtualization and an authenticated Microsoft WSL launcher"] if archive is not None else ["Reviewed WSL launcher and Ubuntu system"])
+                + ["Codex client and its existing account authorization"],
             "full_dependency_portability": "NOT_VERIFIED", "hermes": "TASK_ONLY_DEFERRED"}
+    if archive is not None:
+        data["bundled"].append("Pinned official Ubuntu 26.04.1 WSL image with Python 3.14 and bubblewrap")
     (root / "bundle.json").write_bytes(M.CONFIG.json_bytes(data))
     digest = sha(root / "bundle.json")
     verify(root, digest)
@@ -154,7 +227,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify):
             "file_count": len(files), "bytes": size, "external_requirements": data["external_requirements"]}
 
 
-def install(root, expected, state, source, wsl):
+def install(root, expected, state, source, wsl, graphify_platform=None):
     M.CONFIG.regular_path(root)
     root = root.resolve(strict=True)
     for path in (state, source):
@@ -172,13 +245,17 @@ def install(root, expected, state, source, wsl):
     return M.prepare(state, root / "bin/latticed.exe", bundle["runtime_sha256"], root / "postgres/bin",
                      root / "git/cmd/git.exe", root / "graphify", source, wsl,
                      {**{str(root / name): entry["sha256"] for name, entry in bundle["files"].items()},
-                      str(root / "bundle.json"): expected}, root)
+                      str(root / "bundle.json"): expected}, root,
+                     node=root / "node/node.exe" if "node/node.exe" in bundle["files"] else None,
+                     graphify_platform=graphify_platform)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("build", "verify", "install"))
-    parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("action", choices=("build", "verify", "install", "supply-node"))
+    parser.add_argument("--bundle", type=Path)
+    parser.add_argument("--node", type=Path)
+    parser.add_argument("--archive", type=Path)
     parser.add_argument("--sha256")
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--runtime-sha256")
@@ -186,18 +263,25 @@ def main():
     parser.add_argument("--python", type=Path)
     parser.add_argument("--git", type=Path)
     parser.add_argument("--graphify", type=Path)
+    parser.add_argument("--graphify-platform", type=Path)
     parser.add_argument("--state", type=Path)
     parser.add_argument("--graph-source", type=Path)
     parser.add_argument("--wsl", type=Path)
     args = parser.parse_args()
-    if args.action == "build":
-        if not all((args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify)):
+    if args.action == "supply-node":
+        if args.node is None:
+            raise M.Rejected("NODE_SUPPLY_PATH_REQUIRED")
+        result = supply_node(args.node)
+    elif args.bundle is None:
+        raise M.Rejected("BUNDLE_PATH_REQUIRED")
+    elif args.action == "build":
+        if not all((args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node)):
             raise M.Rejected("BUNDLE_BUILD_ARGUMENTS_REQUIRED")
-        result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify)
+        result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node, args.archive)
     elif args.action == "install":
         if not all((args.sha256, args.state, args.graph_source, args.wsl)):
             raise M.Rejected("BUNDLE_INSTALL_ARGUMENTS_REQUIRED")
-        result = install(args.bundle, args.sha256, args.state, args.graph_source, args.wsl)
+        result = install(args.bundle, args.sha256, args.state, args.graph_source, args.wsl, args.graphify_platform)
     else:
         data = verify(args.bundle, args.sha256)
         result = {"status": "LOCAL_BUNDLE_VERIFIED", "files": len(data["files"]), "bytes": data["total_bytes"]}

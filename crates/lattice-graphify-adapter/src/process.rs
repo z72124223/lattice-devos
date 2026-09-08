@@ -17,13 +17,13 @@ use crate::error::{GraphifyAdapterError, GraphifyAdapterErrorKind, GraphifyAdapt
 use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph, parse_graph_for_display};
 use crate::identity::{
     GRAPHIFY_PRIVATE_RUNNER_SHA256, GRAPHIFY_WSL_BWRAP_HELP_SHA256, GRAPHIFY_WSL_BWRAP_PATH,
-    GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256, GRAPHIFY_WSL_DISTRO,
+    GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256,
     GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256, GRAPHIFY_WSL_GRAPHIFY_EXTRACT_WARNING_SHA256,
     GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256, GRAPHIFY_WSL_GRAPHIFY_VERSION_SHA256,
-    GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_OS_RELEASE_SHA256, GRAPHIFY_WSL_PYTHON_PATH,
-    GRAPHIFY_WSL_PYTHON_SHA256, GRAPHIFY_WSL_PYTHON_VERSION_SHA256,
-    GRAPHIFY_WSL_RUNTIME_BYTE_COUNT, GRAPHIFY_WSL_RUNTIME_FILE_COUNT,
-    GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, verify_reviewed_runtime,
+    GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_PYTHON_PATH, GRAPHIFY_WSL_PYTHON_SHA256,
+    GRAPHIFY_WSL_PYTHON_VERSION_SHA256, GRAPHIFY_WSL_RUNTIME_BYTE_COUNT,
+    GRAPHIFY_WSL_RUNTIME_FILE_COUNT, GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, WslProfile,
+    verify_reviewed_runtime, verify_runtime_profile,
 };
 use crate::snapshot::{
     MaterializedSnapshot, SnapshotBridge, file_sha256, framed_digest, verify_snapshot_binding,
@@ -111,6 +111,7 @@ impl Default for GraphOutputLimits {
 /// MCP or a graph-memory run request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphifyRuntimeConfig {
+    profile: WslProfile,
     wsl_executable: PathBuf,
     runtime_root: PathBuf,
     expected_launcher_sha256: String,
@@ -137,6 +138,25 @@ impl GraphifyRuntimeConfig {
         timeout: Duration,
         limits: GraphOutputLimits,
     ) -> GraphifyAdapterResult<Self> {
+        Self::new_for_profile(
+            wsl_executable,
+            runtime_root,
+            staging_root,
+            timeout,
+            limits,
+            WslProfile::legacy(),
+        )
+    }
+
+    /// Uses one explicit provisioned platform without changing the legacy profile.
+    pub fn new_for_profile(
+        wsl_executable: impl Into<PathBuf>,
+        runtime_root: impl Into<PathBuf>,
+        staging_root: impl Into<PathBuf>,
+        timeout: Duration,
+        limits: GraphOutputLimits,
+        profile: WslProfile,
+    ) -> GraphifyAdapterResult<Self> {
         let wsl_executable = wsl_executable.into();
         let runtime_root = runtime_root.into();
         let staging_root = staging_root.into();
@@ -156,8 +176,13 @@ impl GraphifyRuntimeConfig {
                 "GRAPHIFY_RUNTIME_CONFIG_REJECTED",
             ));
         }
-        let reviewed = verify_reviewed_runtime(&wsl_executable, &runtime_root)?;
+        let reviewed = if profile.is_portable() {
+            verify_runtime_profile(&wsl_executable, &runtime_root, &profile)?
+        } else {
+            verify_reviewed_runtime(&wsl_executable, &runtime_root)?
+        };
         Ok(Self {
+            profile,
             wsl_executable: reviewed.wsl_executable().to_path_buf(),
             runtime_root: reviewed.runtime_root().to_path_buf(),
             expected_launcher_sha256: reviewed.launcher_sha256().to_owned(),
@@ -202,6 +227,7 @@ impl GraphifyRuntimeConfig {
             ));
         }
         Ok(Self {
+            profile: WslProfile::legacy(),
             wsl_executable,
             runtime_root,
             expected_launcher_sha256,
@@ -266,7 +292,7 @@ impl GraphifyRuntimeConfig {
             .as_deref()
             .unwrap_or("TEST_UNVERIFIED_GRAPHIFY_PAYLOAD");
         let timeout_millis = self.timeout.as_millis().to_string();
-        framed_digest(&[
+        let legacy = framed_digest(&[
             b"lattice-graphify-adapter-private-copy-1.0",
             b"Ubuntu",
             b"--exec",
@@ -318,7 +344,16 @@ impl GraphifyRuntimeConfig {
             &(self.limits.max_edges as u64).to_be_bytes(),
             &(self.limits.max_text_bytes as u64).to_be_bytes(),
             &self.limits.max_diagnostic_bytes.to_be_bytes(),
-        ])
+        ]);
+        if self.profile.is_portable() {
+            framed_digest(&[
+                b"lattice-graphify-adapter-private-copy-2.0",
+                legacy.as_bytes(),
+                self.profile.selection_digest().as_bytes(),
+            ])
+        } else {
+            legacy
+        }
     }
 }
 
@@ -987,10 +1022,11 @@ fn execute_system_hash_check(
     )?;
     let outcome = executor.execute(&plan, deadline)?;
     require_clean_success(&outcome, "GRAPHIFY_SYSTEM_HASH_PROCESS_REJECTED")?;
+    let os_sha256 = config.profile.os_release_sha256();
     let expected = format!(
         "{GRAPHIFY_WSL_BWRAP_SHA256}  {GRAPHIFY_WSL_BWRAP_PATH}\n\
          {GRAPHIFY_WSL_PYTHON_SHA256}  {GRAPHIFY_WSL_PYTHON_PATH}\n\
-         {GRAPHIFY_WSL_OS_RELEASE_SHA256}  /usr/lib/os-release\n"
+         {os_sha256}  /usr/lib/os-release\n"
     );
     if outcome.stdout != expected.as_bytes() {
         return Err(error(
@@ -1015,6 +1051,7 @@ fn build_plan(
 ) -> GraphifyAdapterResult<CommandPlan> {
     let arguments = match kind {
         CommandKind::SystemHashes => fixed_wsl_exec(
+            config,
             WSL_SHA256SUM_PATH,
             [
                 GRAPHIFY_WSL_BWRAP_PATH,
@@ -1022,9 +1059,11 @@ fn build_plan(
                 "/usr/lib/os-release",
             ],
         ),
-        CommandKind::BwrapVersion => fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, ["--version"]),
-        CommandKind::BwrapHelp => fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, ["--help"]),
-        CommandKind::PythonVersion => fixed_wsl_exec(GRAPHIFY_WSL_PYTHON_PATH, ["--version"]),
+        CommandKind::BwrapVersion => fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, ["--version"]),
+        CommandKind::BwrapHelp => fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, ["--help"]),
+        CommandKind::PythonVersion => {
+            fixed_wsl_exec(config, GRAPHIFY_WSL_PYTHON_PATH, ["--version"])
+        }
         CommandKind::GraphifyVersion => {
             sandboxed_graphify_arguments(config, snapshot_root, artifact_root, ["--version"])?
         }
@@ -1123,7 +1162,7 @@ fn private_graphify_arguments(
         .expected_payload_manifest_sha256
         .as_deref()
         .unwrap_or("TEST_UNVERIFIED_GRAPHIFY_PAYLOAD");
-    let mut command = fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
+    let mut command = fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
     for argument in [
         "--die-with-parent",
         "--unshare-all",
@@ -1211,15 +1250,18 @@ fn private_graphify_arguments(
 }
 
 fn fixed_wsl_exec(
+    config: &GraphifyRuntimeConfig,
     executable: &str,
     arguments: impl IntoIterator<Item = &'static str>,
 ) -> Vec<OsString> {
     let mut command = vec![
         OsString::from("-d"),
-        OsString::from(GRAPHIFY_WSL_DISTRO),
-        OsString::from("--exec"),
-        OsString::from(executable),
+        OsString::from(config.profile.distribution()),
     ];
+    if config.profile.is_portable() {
+        command.extend([OsString::from("--user"), OsString::from("lattice")]);
+    }
+    command.extend([OsString::from("--exec"), OsString::from(executable)]);
     command.extend(arguments.into_iter().map(OsString::from));
     command
 }
@@ -1234,7 +1276,7 @@ fn sandboxed_graphify_arguments(
     let install_report = windows_path_to_wsl(&config.runtime_root.join("install-report.json"))?;
     let snapshot = windows_path_to_wsl(snapshot_root)?;
     let output = windows_path_to_wsl(artifact_root)?;
-    let mut command = fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
+    let mut command = fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
     for argument in [
         "--die-with-parent",
         "--unshare-all",
@@ -1445,12 +1487,17 @@ fn verify_runtime(config: &GraphifyRuntimeConfig) -> GraphifyAdapterResult<()> {
             "GRAPHIFY_TEST_LAUNCHER_DIGEST_MISMATCH",
         ));
     }
-    let reviewed = verify_reviewed_runtime(&config.wsl_executable, &config.runtime_root)?;
+    let reviewed = verify_runtime_profile(
+        &config.wsl_executable,
+        &config.runtime_root,
+        &config.profile,
+    )?;
     if reviewed.wsl_executable() != config.wsl_executable
         || reviewed.runtime_root() != config.runtime_root
         || reviewed.launcher_sha256() != config.expected_launcher_sha256
         || reviewed.execution_identity_sha256() != config.expected_execution_identity_sha256
-        || config.expected_execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256
+        || (!config.profile.is_portable()
+            && config.expected_execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256)
     {
         return Err(error(
             GraphifyAdapterErrorKind::GraphifyIdentity,
@@ -1983,6 +2030,57 @@ mod tests {
         ] {
             assert!(!extract.environment.contains_key(OsStr::new(forbidden)));
         }
+    }
+
+    #[test]
+    fn portable_profile_changes_identity_and_routes_every_command_without_fallback() {
+        let (mut adapter, snapshot, _) = fixture(FakeMode::Valid);
+        let legacy = adapter.config.capability_sha256();
+        let name = "LATTICE-Graphify-0123456789abcdef0123456789abcdef";
+        adapter.config.profile =
+            WslProfile::portable(name, &"a".repeat(64)).expect("explicit profile");
+        assert_ne!(adapter.config.capability_sha256(), legacy);
+        let root = adapter.config.staging_root().join("portable-plans");
+        let capture = root.join("capture");
+        fs::create_dir_all(&capture).expect("capture");
+        for kind in [
+            CommandKind::SystemHashes,
+            CommandKind::BwrapVersion,
+            CommandKind::BwrapHelp,
+            CommandKind::PythonVersion,
+            CommandKind::GraphifyVersion,
+            CommandKind::GraphifyHelp,
+            CommandKind::Extract,
+        ] {
+            let plan = build_plan(
+                &adapter.config,
+                kind,
+                snapshot.root(),
+                &root,
+                &root,
+                &capture,
+            )
+            .expect("plan");
+            assert_eq!(
+                &plan.arguments[..5],
+                ["-d", name, "--user", "lattice", "--exec"].map(OsString::from)
+            );
+            assert!(!plan.arguments.iter().any(|a| a == "Ubuntu"));
+        }
+        let plan = build_private_extract_plan(&adapter.config, &snapshot, &root, &capture)
+            .expect("private plan");
+        assert_eq!(
+            &plan.arguments[..5],
+            ["-d", name, "--user", "lattice", "--exec"].map(OsString::from)
+        );
+        for invalid in [
+            "Ubuntu",
+            "LATTICE-Graphify-../Ubuntu",
+            "LATTICE-Graphify-0123456789abcdef0123456789abcdef\n",
+        ] {
+            assert!(WslProfile::portable(invalid, &"a".repeat(64)).is_err());
+        }
+        assert!(WslProfile::portable(name, "unverified").is_err());
     }
 
     #[test]

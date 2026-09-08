@@ -45,6 +45,7 @@ def validate_pair(root, value):
             continue
         if M.file_digest(Path(path)) != digest:
             raise M.Rejected("UPDATE_COMPONENT_CHANGED")
+    M.platform_for_config(config)
     offline = M.checked([M.pg(config, "pg_controldata"), str(root / "cluster")], "UPDATE_CLUSTER_UNAVAILABLE")
     if config["system_id"] != M.control_identifier(offline):
         raise M.Rejected("UPDATE_CLUSTER_IDENTITY_REJECTED")
@@ -76,7 +77,7 @@ def journal(root):
         raise M.Rejected("UPDATE_JOURNAL_REJECTED")
     before, before_password = validate_pair(root, value["before"])
     after, after_password = validate_pair(root, value["after"])
-    for key in ("root", "run_id", "system_id", "port", "postgres_bin", "python", "git", "graph_source", "graphify_runtime", "wsl", "dependency_root"):
+    for key in ("root", "run_id", "system_id", "port", "postgres_bin", "python", "git", "node", "graph_source", "graphify_runtime", "graphify_platform", "wsl", "dependency_root"):
         if before.get(key) != after.get(key):
             raise M.Rejected("UPDATE_SCOPE_REJECTED")
     if before_password != after_password:

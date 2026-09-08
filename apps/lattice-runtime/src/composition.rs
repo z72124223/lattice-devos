@@ -4227,12 +4227,13 @@ pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight
                 .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
         );
         let staging_root = runtime_root.join(".lattice-preflight-staging");
-        GraphifyRuntimeConfig::new(
+        GraphifyRuntimeConfig::new_for_profile(
             wsl_executable,
             runtime_root,
             staging_root,
             Duration::from_secs(30),
             GraphOutputLimits::default(),
+            graphify_platform_from_environment()?,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
         Ok::<(), LatticedError>(())
@@ -9410,20 +9411,43 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             graph_executable_sha256(&git).map_err(|e| ToolExecutionError::new(e.code()))?;
         let configuration = runtime_graph_configuration_digest(&root, &git_sha256)
             .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let request = runtime_graph_request(
+        let mut request = runtime_graph_request(
             core.delivery.database.run_id(),
             &arguments.commit,
             configuration,
         )
         .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let receipt = load_runtime_graph_receipt(
+        let mut receipt = load_runtime_graph_receipt(
             &core.delivery.database,
             &core.delivery.password,
             deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
             &request,
         )
-        .map_err(|e| ToolExecutionError::new(e.code()))?
-        .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        // Historical reads may replay the retained legacy receipt. Refresh never
+        // uses this fallback: it must analyze under the selected platform identity.
+        if receipt.is_none()
+            && graphify_platform_from_environment()
+                .map_err(|e| ToolExecutionError::new(e.code()))?
+                .is_portable()
+        {
+            request = runtime_graph_request(
+                core.delivery.database.run_id(),
+                &arguments.commit,
+                legacy_runtime_graph_configuration_digest(&root, &git_sha256)
+                    .map_err(|e| ToolExecutionError::new(e.code()))?,
+            )
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+            receipt = load_runtime_graph_receipt(
+                &core.delivery.database,
+                &core.delivery.password,
+                deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
+                &request,
+            )
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+        }
+        let receipt = receipt
+            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
         let mut product = connect_control_product(&core)?;
         let mut page = product
             .code_relations(&receipt, &arguments.query, arguments.limit)
@@ -12013,7 +12037,7 @@ fn run_graph_memory_request(
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new(
+    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
         graphify_wsl_executable_from_environment(
             PathBuf::from(system_root).join("System32/wsl.exe"),
         ),
@@ -12021,6 +12045,7 @@ fn run_graph_memory_request(
         graph_root.join("staging"),
         remaining,
         GraphOutputLimits::default(),
+        graphify_platform_from_environment()?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
@@ -12212,6 +12237,30 @@ fn runtime_graph_configuration_digest(
     repository_root: &Path,
     git_sha256: &str,
 ) -> Result<ContentDigest, LatticedError> {
+    let legacy = legacy_runtime_graph_configuration_digest(repository_root, git_sha256)?;
+    let profile = graphify_platform_from_environment()?;
+    if !profile.is_portable() {
+        return Ok(legacy);
+    }
+    digest(
+        "lattice.runtime.graphify-source-configuration.v2",
+        &CanonicalValue::Object(vec![
+            (
+                "legacy_configuration".into(),
+                CanonicalValue::String(legacy.as_str().into()),
+            ),
+            (
+                "platform_selection".into(),
+                CanonicalValue::String(profile.selection_digest()),
+            ),
+        ]),
+    )
+}
+
+fn legacy_runtime_graph_configuration_digest(
+    repository_root: &Path,
+    git_sha256: &str,
+) -> Result<ContentDigest, LatticedError> {
     digest(
         "lattice.runtime.graphify-source-configuration",
         &CanonicalValue::Object(vec![
@@ -12283,7 +12332,7 @@ fn run_runtime_graph_memory_request(
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new(
+    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
         graphify_wsl_executable_from_environment(
             PathBuf::from(system_root).join("System32/wsl.exe"),
         ),
@@ -12291,6 +12340,7 @@ fn run_runtime_graph_memory_request(
         graph_root.join("staging"),
         remaining,
         GraphOutputLimits::default(),
+        graphify_platform_from_environment()?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
@@ -12342,6 +12392,23 @@ fn graphify_runtime_root_from_value(
     repository_root: &Path,
 ) -> PathBuf {
     configured.unwrap_or_else(|| repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH))
+}
+
+fn graphify_platform_from_environment()
+-> Result<lattice_graphify_adapter::WslProfile, LatticedError> {
+    match (
+        env::var("LATTICE_GRAPHIFY_WSL_DISTRO"),
+        env::var("LATTICE_GRAPHIFY_WSL_SHA256"),
+    ) {
+        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
+            Ok(lattice_graphify_adapter::WslProfile::legacy())
+        }
+        (Ok(distribution), Ok(launcher)) => {
+            lattice_graphify_adapter::WslProfile::portable(&distribution, &launcher)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+        }
+        _ => Err(LatticedError::new(LatticedErrorKind::GraphConfiguration)),
+    }
 }
 
 fn graphify_wsl_executable_from_environment(default: PathBuf) -> PathBuf {

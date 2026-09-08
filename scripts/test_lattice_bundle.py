@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+import io
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("bundle", Path(__file__).with_name("lattice-bundle.py"))
@@ -10,6 +11,17 @@ SPEC.loader.exec_module(B)
 
 
 class BundleTests(unittest.TestCase):
+    def test_bundle_rejects_wrong_wsl_image_before_creating_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"; source.mkdir()
+            runtime = source / "runtime.exe"; runtime.write_bytes(b"fixture")
+            image = source / "image.wsl"; image.write_bytes(b"wrong-image")
+            output = base / "bundle"
+            with patch.object(B, "verify_node"), self.assertRaisesRegex(B.M.Rejected, "WSL_IMAGE_DIGEST_REJECTED"):
+                B.build(output, runtime, B.sha(runtime), source, source, source, source, source, image)
+            self.assertFalse(output.exists())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="lattice-bundle-test-")
         self.addCleanup(self.temp.cleanup)
@@ -101,6 +113,28 @@ class BundleTests(unittest.TestCase):
             self.skipTest("Windows symbolic-link privilege unavailable")
         with self.assertRaisesRegex(B.M.Rejected, "PATH_REDIRECTION_REJECTED"):
             B.inventory(self.root)
+
+    def test_node_supply_rejects_untrusted_archive_before_creating_output(self):
+        output = self.root / "node"
+        with patch.object(B.urllib.request, "urlopen", return_value=io.BytesIO(b"not an official archive")):
+            with self.assertRaisesRegex(B.M.Rejected, "NODE_ARCHIVE_DIGEST_REJECTED"):
+                B.supply_node(output)
+        self.assertFalse(output.exists())
+
+    def test_node_supply_never_adopts_existing_directory_or_downloads(self):
+        with patch.object(B.urllib.request, "urlopen", side_effect=AssertionError("No download")):
+            with self.assertRaisesRegex(B.M.Rejected, "FRESH_NODE_SUPPLY_REQUIRED"):
+                B.supply_node(self.root)
+
+    def test_node_license_and_provenance_cannot_self_authorize_replacement(self):
+        node = self.root / "node"; node.mkdir()
+        (node / "node.exe").write_bytes(b"fixture")
+        (node / "LICENSE").write_bytes(b"altered license")
+        (node / "provenance.json").write_bytes(B.M.CONFIG.json_bytes({
+            "schema": "lattice.node-supply.v1", "version": B.NODE_VERSION, "source": B.NODE_URL,
+            "archive_sha256": B.NODE_ZIP_SHA256, "files": {"node.exe": B.NODE_EXE_SHA256, "LICENSE": B.sha(node / "LICENSE")}}))
+        with self.assertRaisesRegex(B.M.Rejected, "NODE_SUPPLY_REJECTED"):
+            B.verify_node(node)
 
 
 if __name__ == "__main__":

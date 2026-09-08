@@ -149,20 +149,44 @@ bootstrap 與新 Runtime 實際讀回後才完成切換。中斷後日常入口�
 
 `scripts/lattice-bundle.py build` 從明確指定的軟體來源建立全新目錄，包含
 Runtime／啟動器、PostgreSQL 軟體、CPython 3.12 標準函式庫及 DLL、Git 與
-Graphify payload。它保留來源授權文件，排除資料庫、Python site-packages、
+Graphify payload，以及固定摘要的 Node.js 24.16.0 與授權文件。可另加固定摘要的
+Ubuntu 官方 WSL 映像。它保留來源授權文件，排除資料庫、Python site-packages、
 Git 系統設定、使用者設定及憑證。每個檔案都有雜湊與大小；安裝時封存完整
 清單，之後啟動與更新恢復也拒絕新增、遺失或遭改動的依賴檔案。
 
 ```text
-python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄>
+python -I -B -S scripts/lattice-bundle.py supply-node --node <全新Node供應目錄>
+python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄> --node <Node供應目錄> --archive <官方ubuntu-26.04.1-wsl-amd64.wsl>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py verify --bundle <封裝目錄> --sha256 <bundle.json可信摘要>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py install --bundle <封裝目錄> --sha256 <bundle.json可信摘要> --state <封裝外的全新私有目錄> --graph-source <封裝外的客戶Git專案> --wsl <已核驗wsl.exe>
 ```
 
-這仍是本機候選封裝。Graphify 的既有系統身份固定綁定 WSL、Ubuntu 26.04、
-Python 3.14.4 與 bubblewrap 0.11.1；Node 結果匯入工具與 Codex 客戶端也仍為
-明列的外部需求。Hermes 維持 TASK_ONLY／DEFERRED。它不是完整三核心可攜
+這仍是本機候選封裝。`import-result` 預設使用已安裝並封存摘要的 Node；未配置
+時拒絕執行，不搜尋 PATH。Codex 客戶端與已啟用的 Windows WSL2／虛擬化仍是
+外部需求。Hermes 維持 TASK_ONLY／DEFERRED。它不是完整三核心可攜
 下載版，也不代表跨電腦、乾淨作業系統或企業政策已驗收。
+
+專用 WSL 安裝先執行以下入口，再將回傳的目錄傳給 bundle install 的
+`--graphify-platform`。它只新增 `LATTICE-Graphify-<隨機ID>`，不採用、重設或
+停止原有 Ubuntu／Docker，不修改全域 WSL 設定，也不自行啟用 Windows 功能。
+
+```text
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-wsl-platform.py provision --root <全新私有WSL目錄> --archive <封裝目錄>/platform/ubuntu-26.04.1-wsl-amd64.wsl --wsl <Windows系統wsl.exe> --wsl-sha256 <目前可信Microsoft簽署程式摘要>
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-wsl-platform.py recover --root <同一私有WSL目錄>
+```
+
+供應入口驗官方映像完整摘要，鎖定映像直到匯入結束；全新 Linux 環境建立
+密碼鎖定、UID/GID 1000、無额外群組的 `lattice` 服務使用者。每次客戶啟動器
+呼叫前驗證 DPAPI 封存的平台登記、三個系統檔與帳戶檔。原生 Runtime 另驗
+WSL 程式、三個系統檔與 Graphify payload，所有新 profile 命令明確選取專用
+distribution／使用者。原生驗證本身不代表目前整個 rootfs 已逐檔驗證。
+平台設定投影寫入中斷時，`recover` 只接受加密紀錄保存的精確前一版摘要；
+未知修改會保留並拒絕覆寫。匯入尚未完成或服务使用者尚未建立时，恢復入口
+不會猜測、接管或重建該環境。
+
+舊 `Ubuntu` profile 與歷史摘要保持原值。專用 profile 使用新的配置摘要；
+相同路徑下缺少新 profile 歷史分析時，唯讀查詢可讀回精確舊分析。重新抽取
+一律使用選定的新 profile；驗證失敗不會退回舊環境執行。
 
 Graphify refresh 要求來源專案的工作目錄乾淨。若專案由另一套 Git 複製，須先
 核對換行設定與真實差異；不要把換行差異當成已修改的程式，也不要自動重設

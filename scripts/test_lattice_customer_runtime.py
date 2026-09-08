@@ -14,6 +14,26 @@ SPEC.loader.exec_module(M)
 
 @unittest.skipUnless(os.name == "nt", "Windows customer Runtime")
 class CustomerRuntimeTests(unittest.TestCase):
+    def test_import_defaults_to_installed_hash_pinned_node(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); request = root / "request.json"; request.write_bytes(b"{}")
+            node = root / "node.exe"; node.write_bytes(b"fixture-node")
+            config = {"node": str(node), "files": {str(node): M.file_digest(node)}, "runtime": "fixture-runtime.exe"}
+            calls = []
+            def invoke(command, **kwargs):
+                calls.append((command, kwargs))
+                return type("Result", (), {"returncode": 0, "stdout": '{"status":"COMPLETED"}'})()
+            with patch.object(M, "load", return_value=(config, "fixture-only")), patch.object(M, "verify_running"), patch.object(M, "environment", return_value={}), patch.object(M, "invoke", side_effect=invoke):
+                self.assertEqual(M.import_result(root, request)["status"], "COMPLETED")
+            self.assertEqual(calls[0][1]["env"]["LATTICE_LOCAL_RESULT_NODE_EXE"], str(node))
+
+    def test_import_without_configured_node_does_not_search_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(M, "load", return_value=({}, "fixture-only")), patch.object(M, "invoke", side_effect=AssertionError("No process")):
+                with self.assertRaisesRegex(M.Rejected, "NODE_NOT_CONFIGURED"):
+                    M.import_result(root, root / "request.json")
+
     def test_dpapi_keeps_plaintext_out_and_rejects_tampering(self):
         secret = b"a-customer-only-secret-never-written-as-plaintext"
         sealed = M.dpapi(secret)

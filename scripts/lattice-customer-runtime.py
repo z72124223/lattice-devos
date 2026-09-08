@@ -32,7 +32,7 @@ SPEC.loader.exec_module(CONFIG)
 Rejected = CONFIG.Rejected
 SCHEMA = "lattice.customer-runtime.v1"
 TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "pg_controldata")
-SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py")
+SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py", "lattice-wsl-platform.py")
 BASE_ENV = ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA")
 
 
@@ -178,7 +178,28 @@ def environment(config: dict, password: str) -> dict:
                           ("graph_source", "LATTICE_GRAPHIFY_SOURCE_ROOT"), ("wsl", "LATTICE_GRAPHIFY_WSL_EXE")):
         if config.get(key):
             env[variable] = config[key]
+    platform = platform_for_config(config)
+    if platform:
+        env["LATTICE_GRAPHIFY_WSL_DISTRO"] = platform["distribution"]
+        env["LATTICE_GRAPHIFY_WSL_SHA256"] = platform["launcher_sha256"]
     return env
+
+
+def platform_for_config(config, *, preparing=False):
+    if not config.get("graphify_platform"):
+        return None
+    script = (Path(__file__).with_name("lattice-wsl-platform.py") if preparing else
+              Path(config.get("launcher", str(Path(config["root"]) / "bin" / SCRIPTS[0]))).with_name("lattice-wsl-platform.py"))
+    if not preparing:
+        expected = config.get("files", {}).get(str(script))
+        if expected is None or file_digest(script) != expected:
+            raise Rejected("CUSTOMER_COMPONENT_CHANGED")
+    spec = importlib.util.spec_from_file_location("platform", script)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    data = module.verify(Path(config["graphify_platform"]))
+    if Path(data["wsl"]) != Path(config["wsl"]):
+        raise Rejected("CUSTOMER_WSL_PLATFORM_MISMATCH")
+    return data
 
 
 def verify_dependency_file_set(config: dict) -> set[Path]:
@@ -231,6 +252,7 @@ def load(root: Path) -> tuple[dict, str]:
             continue
         if file_digest(Path(file)) != expected:
             raise Rejected("CUSTOMER_COMPONENT_CHANGED")
+    platform_for_config(config)
     offline = checked([pg(config, "pg_controldata"), str(root / "cluster")], "CUSTOMER_CLUSTER_CONTROL_UNREADABLE")
     if config["system_id"] != control_identifier(offline):
         raise Rejected("CUSTOMER_CLUSTER_IDENTITY_REJECTED")
@@ -295,12 +317,15 @@ def runtime_action(config: dict, password: str, action: str) -> dict | None:
 
 def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: Path,
             graphify_runtime: Path | None = None, graph_source: Path | None = None, wsl: Path | None = None,
-            dependency_files: dict[str, str] | None = None, dependency_root: Path | None = None) -> dict:
+            dependency_files: dict[str, str] | None = None, dependency_root: Path | None = None,
+            *, node: Path | None = None, graphify_platform: Path | None = None) -> dict:
     regular(runtime)
     if file_digest(runtime) != expected:
         raise Rejected("RUNTIME_DIGEST_MISMATCH")
     regular(postgres_bin, directory=True)
     regular(git)
+    if node:
+        regular(node)
     for tool in TOOLS:
         regular(postgres_bin / (tool + ".exe"))
     for directory in (graphify_runtime, graph_source):
@@ -310,6 +335,10 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
         regular(wsl)
     if bool(graphify_runtime) != bool(wsl):
         raise Rejected("GRAPHIFY_RUNTIME_AND_WSL_REQUIRED_TOGETHER")
+    if graphify_platform:
+        if not wsl or not graphify_runtime:
+            raise Rejected("GRAPHIFY_PLATFORM_DEPENDENCIES_REQUIRED")
+        platform_for_config({"graphify_platform": str(graphify_platform), "wsl": str(wsl)}, preparing=True)
     for file, wanted in (dependency_files or {}).items():
         if file_digest(Path(file)) != wanted:
             raise Rejected("CUSTOMER_DEPENDENCY_CHANGED")
@@ -345,10 +374,15 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
              root / "cluster" / "pg_hba.conf", root / "cluster" / "pg_ident.conf"]
     if wsl:
         paths.append(wsl)
+    if node:
+        paths.append(node)
+    if graphify_platform:
+        paths.append(graphify_platform / "platform.json")
     config = {"schema": SCHEMA, "root": str(root), "runtime": str(target), "postgres_bin": str(postgres_bin),
-              "git": str(git), "python": str(Path(sys.executable)), "port": port, "run_id": secrets.token_hex(16), "system_id": system_id,
+              "git": str(git), "node": str(node) if node else None, "python": str(Path(sys.executable)), "port": port, "run_id": secrets.token_hex(16), "system_id": system_id,
               "files": {**(dependency_files or {}), **{str(file): file_digest(file) for file in paths}},
               "dependency_root": str(dependency_root) if dependency_root else None,
+              "graphify_platform": str(graphify_platform) if graphify_platform else None,
               "graphify_runtime": str(graphify_runtime) if graphify_runtime else None,
               "graph_source": str(graph_source) if graph_source else None, "wsl": str(wsl) if wsl else None}
     data = CONFIG.json_bytes(config)
@@ -402,9 +436,14 @@ def register_project(root: Path, project_root: Path, name: str) -> dict:
         return {"status": "LOCATOR_SAVED", "project_id": project_id, "registry_authority": "PENDING_NATIVE_OBSERVATION"}
 
 
-def import_result(root: Path, request: Path, node: Path, expected: str) -> dict:
+def import_result(root: Path, request: Path, node: Path | None = None, expected: str | None = None) -> dict:
     """Operator action: the existing native importer verifies and retains evidence."""
-    load(root)
+    config, _ = load(root)
+    if node is None:
+        if expected is not None or not config.get("node"):
+            raise Rejected("CUSTOMER_NODE_NOT_CONFIGURED")
+        node = Path(config["node"])
+        expected = config["files"].get(str(node))
     regular(request)
     if file_digest(node) != expected:
         raise Rejected("CUSTOMER_NODE_DIGEST_MISMATCH")
@@ -492,6 +531,7 @@ def main() -> int:
     parser.add_argument("--postgres-bin", type=Path)
     parser.add_argument("--git", type=Path)
     parser.add_argument("--graphify-runtime", type=Path)
+    parser.add_argument("--graphify-platform", type=Path)
     parser.add_argument("--graph-source", type=Path)
     parser.add_argument("--wsl", type=Path)
     parser.add_argument("--codex-config", type=Path)
@@ -507,7 +547,8 @@ def main() -> int:
             if not all((args.runtime, args.sha256, args.postgres_bin, args.git)):
                 raise Rejected("CUSTOMER_COMPONENT_ARGUMENTS_REQUIRED")
             result = prepare(args.state, args.runtime, args.sha256, args.postgres_bin, args.git,
-                             args.graphify_runtime, args.graph_source, args.wsl)
+                             args.graphify_runtime, args.graph_source, args.wsl, node=args.node,
+                             graphify_platform=args.graphify_platform)
         elif args.action in ("update-runtime", "recover-update", "rollback-runtime"):
             if args.action == "rollback-runtime" and not args.update_id:
                 raise Rejected("UPDATE_ID_REQUIRED")
@@ -522,7 +563,7 @@ def main() -> int:
                 raise Rejected("CUSTOMER_PROJECT_ARGUMENTS_REQUIRED")
             result = register_project(args.state, args.project_root, args.project_name)
         elif args.action == "import-result":
-            if not all((args.evidence_request, args.node, args.node_sha256)):
+            if not args.evidence_request or bool(args.node) != bool(args.node_sha256):
                 raise Rejected("CUSTOMER_RESULT_ARGUMENTS_REQUIRED")
             result = import_result(args.state, args.evidence_request, args.node, args.node_sha256)
         else:
