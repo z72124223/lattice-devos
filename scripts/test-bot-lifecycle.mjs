@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { loadLatticeRuntimeConfiguration, closedChildEnvironment } from '../apps/lattice-control/src/lattice-runtime-health.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const binary = resolve(root, 'target/release/lattice-runtime.exe');
+const binary = process.env.LATTICE_BOT_LIFECYCLE_TEST_BINARY ?? resolve(root, 'target/release/lattice-runtime.exe');
 const { environment } = await loadLatticeRuntimeConfiguration();
 const env = closedChildEnvironment(environment);
 const runId = randomUUID().replaceAll('-', '');

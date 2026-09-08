@@ -62,6 +62,7 @@ pub enum RuntimeCommand {
         port: u16,
         run_id: String,
         install: bool,
+        migrate: bool,
     },
     ProjectRegistryInspect {
         database: DeliveryDatabaseBinding,
@@ -194,7 +195,7 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
         return Err(RuntimeError::Usage);
     };
     match command.as_str() {
-        "bot-lifecycle" | "bot-lifecycle-install" => {
+        "bot-lifecycle" | "bot-lifecycle-install" | "bot-lifecycle-migrate" => {
             let values = parse_options(
                 options,
                 &["--postgres-host", "--postgres-port", "--postgres-run-id"],
@@ -204,6 +205,7 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
                 port: values[1].parse().map_err(|_| RuntimeError::Usage)?,
                 run_id: binding.run_id().to_owned(),
                 install: command == "bot-lifecycle-install",
+                migrate: command == "bot-lifecycle-migrate",
             })
         }
         "project-registry-inspect"
@@ -382,6 +384,7 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
             port,
             run_id,
             install,
+            migrate,
         } => {
             let password = delivery_database_password()?;
             if install {
@@ -399,8 +402,16 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
                 }
                 let request: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
-                lattice_postgres_store::execute_bot_lifecycle(port, &run_id, &password, &request)
-                    .map_err(RuntimeError::BotLifecycle)
+                if migrate {
+                    lattice_postgres_store::migrate_bot_lifecycle(
+                        port, &run_id, &password, &request,
+                    )
+                } else {
+                    lattice_postgres_store::execute_bot_lifecycle(
+                        port, &run_id, &password, &request,
+                    )
+                }
+                .map_err(RuntimeError::BotLifecycle)
             }
         }
         RuntimeCommand::ProjectRegistryRestoreObserve {

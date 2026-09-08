@@ -17,9 +17,13 @@ fn args(command: &str) -> Vec<String> {
 
 #[test]
 fn lifecycle_requires_explicit_install_and_fixed_loopback_binding() {
-    for (name, expected_install) in [("bot-lifecycle", false), ("bot-lifecycle-install", true)] {
+    for (name, expected_install) in [
+        ("bot-lifecycle", false),
+        ("bot-lifecycle-install", true),
+        ("bot-lifecycle-migrate", false),
+    ] {
         assert!(
-            matches!(parse_command(&args(name)).unwrap(), RuntimeCommand::BotLifecycle { install, port: 58743, .. } if install == expected_install)
+            matches!(parse_command(&args(name)).unwrap(), RuntimeCommand::BotLifecycle { install, migrate, port: 58743, .. } if install == expected_install && migrate == (name == "bot-lifecycle-migrate"))
         );
         for (index, value) in [(2, "0.0.0.0"), (4, "0"), (6, "../../other")] {
             let mut invalid = args(name);

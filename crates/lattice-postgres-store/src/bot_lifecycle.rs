@@ -1,11 +1,12 @@
 //! Fixed-role lifecycle adapter for a dedicated database on the managed service.
 //! It never modifies the existing Store catalog or cluster roles.
-use postgres::{Client, Config, IsolationLevel, NoTls};
+use postgres::{Client, Config, GenericClient, IsolationLevel, NoTls};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub const BOT_LIFECYCLE_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v1.sql");
+pub const BOT_LIFECYCLE_V2_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v2.sql");
 type Result<T> = std::result::Result<T, &'static str>;
 
 fn digest(bytes: &[u8]) -> String {
@@ -83,6 +84,12 @@ fn error(e: postgres::Error) -> &'static str {
             "BOT_LIFECYCLE_ABORT_UNSAFE" => "BOT_LIFECYCLE_ABORT_UNSAFE",
             "BOT_LIFECYCLE_RULES_MISMATCH" => "BOT_LIFECYCLE_RULES_MISMATCH",
             "BOT_LIFECYCLE_LIMIT" => "BOT_LIFECYCLE_LIMIT",
+            "BOT_LIFECYCLE_CONTRACT_MIGRATION_REJECTED" => {
+                "BOT_LIFECYCLE_CONTRACT_MIGRATION_REJECTED"
+            }
+            "BOT_LIFECYCLE_ACTOR_REJECTED" => "BOT_LIFECYCLE_ACTOR_REJECTED",
+            "BOT_LIFECYCLE_EXECUTOR_GRANT_REJECTED" => "BOT_LIFECYCLE_EXECUTOR_GRANT_REJECTED",
+            "BOT_LIFECYCLE_NATIVE_BOUNDARY_REJECTED" => "BOT_LIFECYCLE_NATIVE_BOUNDARY_REJECTED",
             _ => "BOT_LIFECYCLE_DATABASE_REJECTED",
         }
     } else {
@@ -92,7 +99,7 @@ fn error(e: postgres::Error) -> &'static str {
 
 // Compare exact stored function bodies to the embedded installer. Runtime users
 // have EXECUTE on only three functions and no direct relation privileges.
-fn verify(client: &mut Client, run_id: &str) -> Result<()> {
+fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     let identity: Value = client
         .query_one("SELECT bot_lifecycle.identity_read_v1()", &[])
         .map_err(error)?
@@ -106,14 +113,24 @@ fn verify(client: &mut Client, run_id: &str) -> Result<()> {
         has_function_privilege('lattice_runtime',p.oid,'EXECUTE'), \
         EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE') \
         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='bot_lifecycle'", &[]).map_err(error)?;
-    if rows.len() != 7 {
+    let version = if rows.iter().any(|r| r.get::<_, String>(0) == "apply_v2") {
+        2
+    } else {
+        1
+    };
+    if rows.len() != if version == 2 { 11 } else { 7 } {
         return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
     }
     for row in rows {
         let name: String = row.get(0);
         let source: String = row.get(1);
         let marker = format!("CREATE FUNCTION bot_lifecycle.{name}(");
-        let section = BOT_LIFECYCLE_SQL
+        let sql = if name.ends_with("_v2") {
+            BOT_LIFECYCLE_V2_SQL
+        } else {
+            BOT_LIFECYCLE_SQL
+        };
+        let section = sql
             .split_once(&marker)
             .ok_or("BOT_LIFECYCLE_SCHEMA_REJECTED")?
             .1;
@@ -124,11 +141,16 @@ fn verify(client: &mut Client, run_id: &str) -> Result<()> {
             .split_once("$$;")
             .ok_or("BOT_LIFECYCLE_SCHEMA_REJECTED")?
             .0;
-        let public_api = matches!(name.as_str(), "identity_read_v1" | "read_v1" | "apply_v1");
+        let definer = matches!(
+            name.as_str(),
+            "identity_read_v1" | "read_v1" | "apply_v1" | "apply_v2" | "migrate_v2"
+        );
+        let public_api = matches!(name.as_str(), "identity_read_v1" | "read_v1" | "apply_v2")
+            || (version == 1 && name == "apply_v1");
         let options: Vec<String> = row.get::<_, Option<Vec<String>>>(4).unwrap_or_default();
         if source != expected
             || row.get::<_, String>(3) != "lattice_migrator"
-            || row.get::<_, bool>(2) != public_api
+            || row.get::<_, bool>(2) != definer
             || row.get::<_, bool>(5) != public_api
             || row.get::<_, bool>(6)
             || !options.iter().any(|o| o == "search_path=pg_catalog")
@@ -152,7 +174,36 @@ fn verify(client: &mut Client, run_id: &str) -> Result<()> {
             return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
         }
     }
-    Ok(())
+    Ok(version)
+}
+
+/// Explicit versioned migration; schema extension and control enrollment share
+/// one serializable transaction. Never called by runtime reads or installation.
+pub fn migrate_bot_lifecycle(
+    port: u16,
+    run_id: &str,
+    password: &str,
+    request: &Value,
+) -> Result<Value> {
+    let mut client = connect(port, run_id, password, "migrator")?;
+    let mut tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .map_err(error)?;
+    let version = verify(&mut tx, run_id)?;
+    if version == 1 {
+        tx.batch_execute(BOT_LIFECYCLE_V2_SQL).map_err(error)?;
+    }
+    verify(&mut tx, run_id)?;
+    let mut value: Value = tx
+        .query_one("SELECT bot_lifecycle.migrate_v2($1)", &[request])
+        .map_err(error)?
+        .get(0);
+    tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
+    value["v1_sql_sha256"] = json!(digest(BOT_LIFECYCLE_SQL.as_bytes()));
+    value["v2_sql_sha256"] = json!(digest(BOT_LIFECYCLE_V2_SQL.as_bytes()));
+    Ok(value)
 }
 
 /// Explicit installer. Only creates the exact new database; existing data is
@@ -244,9 +295,9 @@ pub fn execute_bot_lifecycle(
         }
     }
     let mut client = connect(port, run_id, password, "runtime")?;
-    verify(&mut client, run_id)?;
-    if matches!(action, "read" | "assert-owner") {
-        let expected = if action == "read" {
+    let version = verify(&mut client, run_id)?;
+    if matches!(action, "read" | "assert-owner" | "assert-handoff-owner") {
+        let mut expected = if action == "read" {
             vec!["action", "project_id", "role_id"]
         } else {
             vec![
@@ -258,6 +309,9 @@ pub fn execute_bot_lifecycle(
                 "owner_host_id",
             ]
         };
+        if action == "assert-handoff-owner" {
+            expected.push("handoff_id");
+        }
         if object.len() != expected.len() || expected.iter().any(|k| !object.contains_key(*k)) {
             return Err("BOT_LIFECYCLE_INPUT_REJECTED");
         }
@@ -274,7 +328,7 @@ pub fn execute_bot_lifecycle(
             )
             .map_err(error)?
             .get(0);
-        if action == "assert-owner" {
+        if action != "read" {
             let state = &value["current"];
             if request["expected_generation"].as_u64().is_none()
                 || state["generation"] != request["expected_generation"]
@@ -283,10 +337,28 @@ pub fn execute_bot_lifecycle(
             {
                 return Err("BOT_LIFECYCLE_STALE_OWNER");
             }
-            if state["phase"] != "ACTIVE" {
+            if action == "assert-handoff-owner" {
+                if version != 2
+                    || request["role_id"] != "control"
+                    || state["contract_version"] != 2
+                    || state["phase"] != "MIGRATING"
+                    || request["handoff_id"].as_str().is_none()
+                    || state["handoff"]["handoff_id"] != request["handoff_id"]
+                    || state["handoff"]["successor_thread_id"] != state["owner_thread_id"]
+                    || state["ack"]["manifest_digest"].is_null()
+                    || state["ack"]["manifest_digest"] != state["manifest_digest"]
+                {
+                    return Err("BOT_LIFECYCLE_ADMISSION_PAUSED");
+                }
+                value["status"] = json!("HANDOFF_OWNER_CURRENT");
+            } else if state["phase"] != "ACTIVE" {
                 return Err("BOT_LIFECYCLE_ADMISSION_PAUSED");
+            } else {
+                value["status"] = json!("OWNER_CURRENT");
             }
-            value["status"] = json!("OWNER_CURRENT");
+        }
+        if value["current"]["contract_version"] == 2 {
+            value["schema_version"] = json!("lattice.bot-lifecycle.v2");
         }
         tx.commit().map_err(error)?;
         return Ok(value);
@@ -300,7 +372,14 @@ pub fn execute_bot_lifecycle(
         .start()
         .map_err(error)?;
     let value: Value = tx
-        .query_one("SELECT bot_lifecycle.apply_v1($1)", &[request])
+        .query_one(
+            if version == 2 {
+                "SELECT bot_lifecycle.apply_v2($1)"
+            } else {
+                "SELECT bot_lifecycle.apply_v1($1)"
+            },
+            &[request],
+        )
         .map_err(error)?
         .get(0);
     tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;

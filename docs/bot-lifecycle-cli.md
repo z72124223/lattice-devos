@@ -1,5 +1,10 @@
 # Bot lifecycle local interface (v1)
 
+The additive control self-handoff interface and explicit atomic migration are
+specified in [bot-lifecycle-v2-interface.md](bot-lifecycle-v2-interface.md).
+The v1 SQL remains unchanged; use the candidate binary for both legacy and
+migrated roles after an explicitly verified v2 activation.
+
 This is a durable role transition interface, not a scheduler or a context store.
 PostgreSQL guards only this managed interface. Direct Codex filesystem writes are
 outside its enforcement. Native effects must be performed and independently read
