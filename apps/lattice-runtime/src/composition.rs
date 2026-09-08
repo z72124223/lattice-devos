@@ -9446,6 +9446,33 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             )
             .map_err(|e| ToolExecutionError::new(e.code()))?;
         }
+        if receipt.is_none() {
+            let retained = retained_graph_configurations_from_environment()
+                .map_err(|e| ToolExecutionError::new(e.code()))?
+                .into_iter()
+                .map(|digest| {
+                    runtime_graph_request(
+                        core.delivery.database.run_id(),
+                        &arguments.commit,
+                        digest,
+                    )
+                    .map_err(|e| ToolExecutionError::new(e.code()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some((selected, source)) = select_retained_receipt(retained, |selected| {
+                load_runtime_graph_receipt(
+                    &core.delivery.database,
+                    &core.delivery.password,
+                    deadline(core.delivery.timeout)
+                        .map_err(|e| ToolExecutionError::new(e.code()))?,
+                    selected,
+                )
+                .map_err(|e| ToolExecutionError::new(e.code()))
+            })? {
+                request = selected;
+                receipt = Some(source);
+            }
+        }
         let receipt = receipt
             .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
         let mut product = connect_control_product(&core)?;
@@ -12233,6 +12260,72 @@ fn runtime_graph_source_request(
     Ok((source, request))
 }
 
+/// Export a read-only configuration selector for an authenticated customer backup.
+pub fn graphify_configuration_from_environment() -> Result<Value, LatticedError> {
+    let root = graph_canonical_directory(Path::new(&required_environment(
+        "LATTICE_GRAPHIFY_SOURCE_ROOT",
+    )?))?;
+    let git = PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?);
+    let git_sha = graph_executable_sha256(&git)?;
+    let configuration = runtime_graph_configuration_digest(&root, &git_sha)?;
+    let mut readable = vec![
+        configuration.clone(),
+        legacy_runtime_graph_configuration_digest(&root, &git_sha)?,
+    ];
+    readable.extend(retained_graph_configurations_from_environment()?);
+    let mut selectors = Vec::new();
+    for value in readable {
+        if !selectors.contains(&value) {
+            selectors.push(value);
+        }
+    }
+    if selectors.len() > 16 {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    Ok(
+        json!({"schema":"lattice.graphify-configuration.v1","configuration_sha256":configuration.as_str(),
+        "readable_configurations":selectors.iter().map(ContentDigest::as_str).collect::<Vec<_>>()}),
+    )
+}
+
+fn select_retained_receipt<T, R, E>(
+    requests: impl IntoIterator<Item = T>,
+    mut load: impl FnMut(&T) -> Result<Option<R>, E>,
+) -> Result<Option<(T, R)>, E> {
+    for request in requests {
+        if let Some(receipt) = load(&request)? {
+            return Ok(Some((request, receipt)));
+        }
+    }
+    Ok(None)
+}
+
+fn retained_graph_configurations_from_environment() -> Result<Vec<ContentDigest>, LatticedError> {
+    let mut values: Vec<String> = match env::var("LATTICE_GRAPHIFY_RETAINED_CONFIGURATIONS") {
+        Ok(value) if value.len() <= 1200 => serde_json::from_str(&value)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        Err(env::VarError::NotPresent) => Vec::new(),
+        _ => return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration)),
+    };
+    if let Some(value) = env::var_os("LATTICE_GRAPHIFY_RETAINED_CONFIGURATION_SHA256") {
+        values.push(
+            value
+                .into_string()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        );
+    }
+    if values.len() > 16 {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    values
+        .into_iter()
+        .map(|v| {
+            ContentDigest::from_sha256(v)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+        })
+        .collect()
+}
+
 fn runtime_graph_configuration_digest(
     repository_root: &Path,
     git_sha256: &str,
@@ -12972,6 +13065,25 @@ fn path_text(path: &Path) -> Result<String, LatticedError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_receipt_selection_keeps_the_matching_request_and_stops_on_error() {
+        let mut read = Vec::new();
+        let selected = super::select_retained_receipt(["first", "second"], |request| {
+            read.push(*request);
+            Ok::<_, &str>(Some(format!("receipt-for-{request}")))
+        })
+        .unwrap();
+        assert_eq!(selected, Some(("first", "receipt-for-first".to_owned())));
+        assert_eq!(read, ["first"]);
+        let mut read = Vec::new();
+        let rejected = super::select_retained_receipt(["damaged", "fallback"], |request| {
+            read.push(*request);
+            Err::<Option<()>, _>("invalid retained receipt")
+        });
+        assert!(rejected.is_err());
+        assert_eq!(read, ["damaged"]);
+    }
+
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 

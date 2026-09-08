@@ -35,6 +35,46 @@ fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     if let Some(argument) = arguments.next() {
+        if matches!(
+            argument.to_str(),
+            Some(
+                "project-registry-inspect"
+                    | "project-registry-reconcile"
+                    | "project-registry-restore"
+                    | "project-registry-restore-observe"
+            )
+        ) {
+            let Ok(all) = std::iter::once(argument)
+                .chain(arguments)
+                .map(|a| a.into_string())
+                .collect::<Result<Vec<_>, _>>()
+            else {
+                eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                return ExitCode::from(2);
+            };
+            return match lattice_runtime::parse_command(&all).and_then(lattice_runtime::execute) {
+                Ok(value) => {
+                    println!("{value}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
+        if argument == "--graphify-configuration" && arguments.next().is_none() {
+            return match lattice_runtime::composition::graphify_configuration_from_environment() {
+                Ok(value) => {
+                    println!("{value}");
+                    ExitCode::SUCCESS
+                }
+                Err(error) => {
+                    eprintln!("{}", error.code());
+                    ExitCode::from(2)
+                }
+            };
+        }
         if argument == "--external-result-import" || argument == "--local-result-import" {
             let Some(path) = arguments.next() else {
                 eprintln!("LATTICED_ARGUMENTS_REJECTED");

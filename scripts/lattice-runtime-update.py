@@ -77,7 +77,7 @@ def journal(root):
         raise M.Rejected("UPDATE_JOURNAL_REJECTED")
     before, before_password = validate_pair(root, value["before"])
     after, after_password = validate_pair(root, value["after"])
-    for key in ("root", "run_id", "system_id", "port", "postgres_bin", "python", "git", "node", "graph_source", "graphify_runtime", "graphify_platform", "wsl", "dependency_root"):
+    for key in ("root", "run_id", "system_id", "port", "postgres_bin", "python", "git", "node", "graph_source", "graphify_runtime", "graphify_platform", "wsl", "dependency_root", "retained_graph_configuration", "retained_graph_configurations"):
         if before.get(key) != after.get(key):
             raise M.Rejected("UPDATE_SCOPE_REJECTED")
     if before_password != after_password:

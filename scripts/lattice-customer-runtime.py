@@ -32,7 +32,8 @@ SPEC.loader.exec_module(CONFIG)
 Rejected = CONFIG.Rejected
 SCHEMA = "lattice.customer-runtime.v1"
 TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "pg_controldata")
-SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py", "lattice-wsl-platform.py")
+SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py", "lattice-wsl-platform.py",
+           "lattice-bundle.py", "lattice-customer-backup.py", "lattice-backup-crypto.mjs")
 BASE_ENV = ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA")
 
 
@@ -182,6 +183,10 @@ def environment(config: dict, password: str) -> dict:
     if platform:
         env["LATTICE_GRAPHIFY_WSL_DISTRO"] = platform["distribution"]
         env["LATTICE_GRAPHIFY_WSL_SHA256"] = platform["launcher_sha256"]
+    if config.get("retained_graph_configuration"):
+        env["LATTICE_GRAPHIFY_RETAINED_CONFIGURATION_SHA256"] = config["retained_graph_configuration"]
+    if config.get("retained_graph_configurations"):
+        env["LATTICE_GRAPHIFY_RETAINED_CONFIGURATIONS"] = json.dumps(config["retained_graph_configurations"], separators=(",", ":"))
     return env
 
 
@@ -230,8 +235,10 @@ def verify_dependency_file_set(config: dict) -> set[Path]:
     return set()
 
 
-def load(root: Path) -> tuple[dict, str]:
+def load(root: Path, *, allow_restore=False) -> tuple[dict, str]:
     regular(root, directory=True)
+    if ((root / "restore.pending.dpapi").exists() or (root / "restore.in-progress").exists()) and not allow_restore:
+        raise Rejected("CUSTOMER_RESTORE_FINALIZATION_REQUIRED")
     if (root / "update.pending.dpapi").exists():
         raise Rejected("CUSTOMER_UPDATE_RECOVERY_REQUIRED")
     public = regular(root / "installation.json").read_bytes()

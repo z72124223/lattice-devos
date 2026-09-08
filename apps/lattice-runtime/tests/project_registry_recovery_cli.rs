@@ -33,6 +33,44 @@ fn args(reconcile: bool) -> Vec<String> {
 }
 
 #[test]
+fn restore_observe_requires_proof_and_rejects_reconcile_flags() {
+    let mut request = args(false);
+    request[0] = "project-registry-restore-observe".into();
+    assert!(parse_command(&request).is_err());
+    request.extend([
+        "--restore-proof".into(),
+        "C:/owned/restore-proof.json".into(),
+        "--restore-proof-sha256".into(),
+        "c".repeat(64),
+    ]);
+    assert!(parse_command(&request).is_ok());
+    request.extend(["--expected-revision".into(), "2".into()]);
+    assert!(parse_command(&request).is_err());
+}
+
+#[test]
+fn restore_cli_requires_separate_proof_and_exact_digest() {
+    let mut request = args(true);
+    request[0] = "project-registry-restore".into();
+    assert!(parse_command(&request).is_err());
+    request.extend([
+        "--restore-proof".into(),
+        "C:/owned/restore-proof.json".into(),
+        "--restore-proof-sha256".into(),
+        "c".repeat(64),
+    ]);
+    assert!(matches!(
+        parse_command(&request).unwrap(),
+        RuntimeCommand::ProjectRegistryReconcile {
+            restore_proof: Some(_),
+            ..
+        }
+    ));
+    *request.last_mut().unwrap() = "invalid".into();
+    assert!(parse_command(&request).is_err());
+}
+
+#[test]
 fn registry_cli_parses_explicit_read_and_write_commands() {
     assert!(matches!(
         parse_command(&args(false)).unwrap(),

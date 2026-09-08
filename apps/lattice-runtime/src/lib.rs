@@ -67,9 +67,16 @@ pub enum RuntimeCommand {
         database: DeliveryDatabaseBinding,
         project_id: lattice_contracts::ProjectId,
     },
+    ProjectRegistryRestoreObserve {
+        database: DeliveryDatabaseBinding,
+        project_id: lattice_contracts::ProjectId,
+        proof: PathBuf,
+        proof_digest: lattice_contracts::ContentDigest,
+    },
     ProjectRegistryReconcile {
         database: DeliveryDatabaseBinding,
         request: project_bridge::recovery::RecoveryRequest,
+        restore_proof: Option<PathBuf>,
     },
     CodexPreflight {
         launcher: PathBuf,
@@ -199,24 +206,45 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
                 install: command == "bot-lifecycle-install",
             })
         }
-        "project-registry-inspect" | "project-registry-reconcile" => {
+        "project-registry-inspect"
+        | "project-registry-reconcile"
+        | "project-registry-restore"
+        | "project-registry-restore-observe" => {
             let mut names = vec![
                 "--postgres-host",
                 "--postgres-port",
                 "--postgres-run-id",
                 "--project-id",
             ];
-            if command == "project-registry-reconcile" {
+            if matches!(
+                command.as_str(),
+                "project-registry-reconcile" | "project-registry-restore"
+            ) {
                 names.extend([
                     "--expected-revision",
                     "--expected-receipt-digest",
                     "--pending-observation-digest",
                 ]);
             }
+            if matches!(
+                command.as_str(),
+                "project-registry-restore" | "project-registry-restore-observe"
+            ) {
+                names.extend(["--restore-proof", "--restore-proof-sha256"]);
+            }
             let values = parse_options(options, &names)?;
             let database = parse_database_binding(&values[0], &values[1], &values[2])?;
             let project_id = lattice_contracts::ProjectId::new(values[3].clone())
                 .map_err(|_| RuntimeError::Usage)?;
+            if command == "project-registry-restore-observe" {
+                return Ok(RuntimeCommand::ProjectRegistryRestoreObserve {
+                    database,
+                    project_id,
+                    proof: PathBuf::from(&values[4]),
+                    proof_digest: lattice_contracts::ContentDigest::from_sha256(&values[5])
+                        .map_err(|_| RuntimeError::InvalidDigest)?,
+                });
+            }
             if command == "project-registry-inspect" {
                 return Ok(RuntimeCommand::ProjectRegistryInspect {
                     database,
@@ -239,6 +267,16 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
                     revision,
                     receipt_digest: digest(&values[5])?,
                     pending_digest: digest(&values[6])?,
+                    restore_digest: if command == "project-registry-restore" {
+                        Some(digest(&values[8])?)
+                    } else {
+                        None
+                    },
+                },
+                restore_proof: if command == "project-registry-restore" {
+                    Some(PathBuf::from(&values[7]))
+                } else {
+                    None
                 },
             })
         }
@@ -365,6 +403,19 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
                     .map_err(RuntimeError::BotLifecycle)
             }
         }
+        RuntimeCommand::ProjectRegistryRestoreObserve {
+            database,
+            project_id,
+            proof,
+            proof_digest,
+        } => project_bridge::recovery::observe_restore(
+            &database,
+            &delivery_database_password()?,
+            &project_id,
+            &proof,
+            &proof_digest,
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
         RuntimeCommand::ProjectRegistryInspect {
             database,
             project_id,
@@ -375,15 +426,18 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
             None,
         )
         .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
-        RuntimeCommand::ProjectRegistryReconcile { database, request } => {
-            project_bridge::recovery::run(
-                &database,
-                &delivery_database_password()?,
-                &request.project_id,
-                Some(&request),
-            )
-            .map_err(|e| RuntimeError::ProjectRecovery(e.code()))
-        }
+        RuntimeCommand::ProjectRegistryReconcile {
+            database,
+            request,
+            restore_proof,
+        } => project_bridge::recovery::run_with_proof(
+            &database,
+            &delivery_database_password()?,
+            &request.project_id,
+            Some(&request),
+            restore_proof.as_deref(),
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
         RuntimeCommand::CodexPreflight {
             launcher,
             version,

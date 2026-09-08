@@ -194,3 +194,37 @@ Graphify refresh 要求來源專案的工作目錄乾淨。若專案由另一套
 
 這些檢查驗證靜態檔案與安裝身份；不宣稱可抵禦同一 Windows 使用者在核對後
 併發替換檔案，或已遭替換的 Python 本體在自我核對之前執行。
+
+## 客戶資料備份與新位置還原
+
+```text
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-customer-backup.py backup --state <原安裝目錄> --output <全新備份目錄> --key-root <另一個全新私有目錄> --evidence-root <要保留的外部驗證證據目錄>
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-customer-backup.py restore --state <全新還原目錄> --backup <備份目錄> --sha256 <backup.json可信摘要> --key <獨立保存的recovery.key> --bundle <已核驗封裝> --bundle-sha256 <bundle.json可信摘要> --graphify-platform <目標使用者新建且已核驗的WSL目錄>
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-customer-backup.py finalize-restore --state <同一還原目錄>
+```
+
+備份會短暫停止已核驗的自有 PostgreSQL，保存資料庫、已登記的獨立 Git
+專案（包含未提交檔案）、自有 graph-work／dependencies，以及明確指定的
+外部證據目錄。完成或失敗後恢復原本的資料庫啟停狀態。資料以 Node 的
+AES-256-GCM 加密，逐檔驗證實際讀入的內容；恢復金鑰另存於私有目錄。
+保管備份、可信摘要與金鑰；跨電腦還原不依賴原 Windows 使用者的 DPAPI。
+
+目前接受已核驗為 ACTIVE 的專案、獨立 `.git` 目錄、無外部 tablespace／
+Git alternates／路徑重新導向的來源。超過 100,000 個檔案、10 GiB 明文或
+32 MiB metadata 時拒絕產生成功備份。來源資料與失敗測試產物保留。
+
+還原只寫全新私有目錄，先解密與逐檔核驗，再使用目標端可信封裝的相同
+PostgreSQL binary、新 loopback port、新 DPAPI 憑證及新 WSL 平台設定。
+原 run ID、cluster system ID、工作與證據摘要保留；原生 Runtime 透過
+正式 Registry observe／reconcile 紀錄新實體身分，不改寫歷史資料列。
+原生入口另驗 DPAPI 還原紀錄、安裝與 catalog 摘要、專案 proof、精確版本
+及 pending observation。普通啟動、recover 與 MCP 在還原中會被擋住。
+
+`finalize-restore` 只重播原已封存請求。若在首次憑證與還原 journal 建立前
+中斷，保留失敗目錄並從原備份還原到另一個全新目錄；它不接管未知目錄。
+成功後仍須讀回正式工作、決策、成果與 Graphify 關聯，再核對重啟一致性。
+歷史 Graphify selector 會沿後續備份保留，最多 16 個；僅用於原資料庫的
+唯讀歷史查詢，重新抽取仍使用新平台。兩份安裝後續的新變更不會自動同步。
+
+已實測的同機不同目錄還原，不等於另一 Windows 使用者、另一台電腦、
+乾淨 OS 或企業政策環境的驗收；這些環境仍需獨立測試。

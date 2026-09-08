@@ -182,9 +182,9 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     M.private_new_root(root)
     (root / "bin").mkdir()
     shutil.copyfile(runtime, root / "bin/latticed.exe")
-    for name in (*M.SCRIPTS, "lattice-bundle.py"):
+    for name in M.SCRIPTS:
         shutil.copyfile(Path(__file__).with_name(name), root / "bin" / name)
-    budget = {"files": len(M.SCRIPTS) + 2, "bytes": sum(path.stat().st_size for path in (root / "bin").iterdir())}
+    budget = {"files": len(M.SCRIPTS) + 1, "bytes": sum(path.stat().st_size for path in (root / "bin").iterdir())}
     # Explicit software subtrees; PostgreSQL data, Git global config, Python
     # site-packages, user homes, installer state and credentials are never inputs.
     for name in ("bin", "lib", "share"):
