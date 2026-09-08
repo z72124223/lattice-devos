@@ -25,7 +25,7 @@ def snapshot(root, project, completed):
         {"jsonrpc": "2.0", "method": "notifications/initialized"}]
     requests += [{"jsonrpc": "2.0", "id": i + 2, "method": "tools/call", "params": {"name": name, "arguments": args}}
                  for i, (name, args) in enumerate(calls)]
-    child = subprocess.Popen([config["python"], "-I", str(root / "bin" / M.SCRIPTS[0]), "serve", "--state", str(root)],
+    child = subprocess.Popen([config["python"], "-I", "-B", "-S", config.get("launcher", str(root / "bin" / M.SCRIPTS[0])), "serve", "--state", str(root)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
         env=M.closed_environment(), creationflags=subprocess.CREATE_NO_WINDOW)
     try:

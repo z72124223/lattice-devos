@@ -70,10 +70,10 @@ Runtime 核對請求、專案及證據摘要，實際執行指定的 Node 測試
 或證據；需要停止該安裝時另用 `stop`。既有客戶政策無法寫入時明確拒絕，
 不能把權限失敗當成安裝成功。
 
-尚待完成：完整依賴封裝與可信版本清單、Runtime 本體的更新／回復、一般程式
-關係 MCP 查詢、獨立乾淨作業系統及企業嚴格權限環境驗收。
-目前只固定所列執行檔與安裝腳本，尚未證明 PostgreSQL／Python 的完整依賴樹
-可攜性。DPAPI 綁目前 Windows 使用者，不能當跨使用者／跨電腦恢復方案。
+目前已有一般程式關係查詢、可回復 Runtime 更新與本機 Windows 依賴封裝入口。
+尚待完成完整跨機依賴可攜性、獨立乾淨作業系統及企業嚴格權限環境驗收。
+封裝安裝會保存並持續核對完整依賴檔案集合及雜湊；未封裝的既有安裝仍只核對
+原本登記的檔案。DPAPI 綁目前 Windows 使用者，不能當跨使用者／跨電腦恢復方案。
 此階段不代表已發布、全平台支援或三核心商品驗收完成。
 
 ## 聚焦驗證
@@ -81,6 +81,8 @@ Runtime 核對請求、專案及證據摘要，實際執行指定的 Node 測試
 ```text
 python -m unittest discover -s scripts -p test_lattice_customer_runtime.py -v
 python -m unittest discover -s scripts -p test_lattice_mcp_config.py -v
+python -m unittest discover -s scripts -p test_lattice_runtime_update.py -v
+python -m unittest discover -s scripts -p test_lattice_bundle.py -v
 cargo +1.97.1 test -p lattice-runtime --lib project_bridge::tests
 cargo +1.97.1 test -p lattice-contracts --test task_ingress_contracts
 python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> --project-id <正式專案ID> --completed-task <已驗證範例工作ref> --output <全新證據JSON路徑>
@@ -89,7 +91,7 @@ python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> -
 重啟驗證會先確認範例工作已有正式完成摘要、決策與父子關係，再停止及重啟
 同一個已核驗 cluster，以新 MCP 程序比較前後完整快照。它不建立工作、不修改
 完成狀態，也不把這個範例的完成當成整個下載版完成。
-# Retained code relationship queries
+## Retained code relationship queries
 
 `lattice_code_relations` takes exactly `project_id`, an exact retained Git `commit`,
 a literal case-insensitive `query` (1–128 characters), and `limit` (1–32).
@@ -120,4 +122,51 @@ empty queries, truncation, rejected selectors, retained completed work, and iden
 reads after PostgreSQL and MCP restart. When using an explicitly hash-pinned candidate
 binary, its evidence says `PINNED_CANDIDATE`; that does not establish installed-package
 acceptance. Full dependency packaging and a recoverable installed Runtime update remain
-separate outstanding work.
+separate acceptance scopes.
+
+## 更新與中斷恢復
+
+```text
+python -I -B -S scripts/lattice-customer-runtime.py update-runtime --state <安裝目錄> --runtime <已核對的新latticed.exe> --sha256 <可信摘要>
+python -I -B -S scripts/lattice-customer-runtime.py recover-update --state <安裝目錄>
+python -I -B -S scripts/lattice-customer-runtime.py rollback-runtime --state <安裝目錄> --update-id <目前更新回傳的ID>
+python -I -B -S scripts/lattice-customer-runtime.py reconnect --state <安裝目錄> --codex-config <原本受管理的config.toml>
+```
+
+更新會保留不可變的舊版與新版檔案，封存加密的前後設定，經正式 schema
+bootstrap 與新 Runtime 實際讀回後才完成切換。中斷後日常入口拒絕啟動；
+`recover-update` 先核對加密紀錄與資料庫身份，必要時安全啟動同一個 cluster，
+再完成更新。它會保留未知的外部修改，不猜測應覆寫哪份內容。
+
+`rollback-runtime` 只接受目前更新的 ID，且舊版必須能核驗目前資料庫；不相容
+時保留新版與資料，不還原陳舊資料庫。`reconnect` 只更新原受管理的 LATTICE
+設定，指向已安裝的新版啟動器。移除及設定回復仍走原設定管理入口。
+
+新版 MCP 連線共用服務租約，允許多個連線與一般短操作並存；更新、回復及
+停止／schema 恢復需排他租約。更新前須關閉仍使用舊版無租約啟動器的連線。
+
+## 本機 Windows 依賴封裝
+
+`scripts/lattice-bundle.py build` 從明確指定的軟體來源建立全新目錄，包含
+Runtime／啟動器、PostgreSQL 軟體、CPython 3.12 標準函式庫及 DLL、Git 與
+Graphify payload。它保留來源授權文件，排除資料庫、Python site-packages、
+Git 系統設定、使用者設定及憑證。每個檔案都有雜湊與大小；安裝時封存完整
+清單，之後啟動與更新恢復也拒絕新增、遺失或遭改動的依賴檔案。
+
+```text
+python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄>
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py verify --bundle <封裝目錄> --sha256 <bundle.json可信摘要>
+<封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py install --bundle <封裝目錄> --sha256 <bundle.json可信摘要> --state <封裝外的全新私有目錄> --graph-source <封裝外的客戶Git專案> --wsl <已核驗wsl.exe>
+```
+
+這仍是本機候選封裝。Graphify 的既有系統身份固定綁定 WSL、Ubuntu 26.04、
+Python 3.14.4 與 bubblewrap 0.11.1；Node 結果匯入工具與 Codex 客戶端也仍為
+明列的外部需求。Hermes 維持 TASK_ONLY／DEFERRED。它不是完整三核心可攜
+下載版，也不代表跨電腦、乾淨作業系統或企業政策已驗收。
+
+Graphify refresh 要求來源專案的工作目錄乾淨。若專案由另一套 Git 複製，須先
+核對換行設定與真實差異；不要把換行差異當成已修改的程式，也不要自動重設
+或捨棄客戶變更。封裝不帶入原電腦的 Git 系統設定。
+
+這些檢查驗證靜態檔案與安裝身份；不宣稱可抵禦同一 Windows 使用者在核對後
+併發替換檔案，或已遭替換的 Python 本體在自我核對之前執行。

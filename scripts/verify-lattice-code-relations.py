@@ -31,7 +31,10 @@ def read(config, password, runtime, project, commit, query, path, task):
         {"jsonrpc": "2.0", "method": "notifications/initialized"}]
     requests += [{"jsonrpc": "2.0", "id": i + 2, "method": "tools/call", "params": {"name": name, "arguments": args}}
                  for i, (name, args) in enumerate(calls)]
-    result = M.invoke([str(runtime)], env=M.environment(config, password),
+    installed = runtime == Path(config["runtime"])
+    command = ([config["python"], "-I", "-B", "-S", config.get("launcher", str(Path(config["root"]) / "bin" / M.SCRIPTS[0])),
+                "serve", "--state", config["root"]] if installed else [str(runtime)])
+    result = M.invoke(command, env=M.closed_environment() if installed else M.environment(config, password),
                       input_text="".join(json.dumps(r) + "\n" for r in requests), timeout=180)
     if result.returncode:
         raise RuntimeError("RELATIONS_RUNTIME_EXIT_REJECTED")

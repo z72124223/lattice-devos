@@ -8,6 +8,7 @@ Normal STDIO startup verifies the prepared cluster; it never migrates a database
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import ctypes
 from ctypes import wintypes
 import importlib.util
@@ -18,19 +19,46 @@ import re
 import secrets
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import unicodedata
 import uuid
 
+sys.dont_write_bytecode = True
 SPEC = importlib.util.spec_from_file_location("lattice_config", Path(__file__).with_name("lattice-mcp-config.py"))
 CONFIG = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CONFIG)
 Rejected = CONFIG.Rejected
 SCHEMA = "lattice.customer-runtime.v1"
 TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "pg_controldata")
-SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py")
+SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py")
 BASE_ENV = ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA")
+
+
+@contextmanager
+def runtime_lease(root: Path, *, exclusive: bool = False):
+    """Shared MCP connections; only version/schema switches need exclusive access."""
+    import msvcrt
+    class Overlapped(ctypes.Structure):
+        _fields_ = [("internal", ctypes.c_size_t), ("internal_high", ctypes.c_size_t),
+                    ("offset", wintypes.DWORD), ("offset_high", wintypes.DWORD), ("event", wintypes.HANDLE)]
+    path = root / ".runtime-lease"
+    CONFIG.regular_path(path)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+    kernel.LockFileEx.restype = wintypes.BOOL
+    kernel.UnlockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+    kernel.UnlockFileEx.restype = wintypes.BOOL
+    with path.open("a+b") as stream:
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        overlap = Overlapped()
+        if not kernel.LockFileEx(handle, 3 if exclusive else 1, 0, 1, 0, ctypes.byref(overlap)):
+            raise Rejected("CUSTOMER_RUNTIME_IN_USE")
+        try:
+            yield
+        finally:
+            kernel.UnlockFileEx(handle, 0, 1, 0, ctypes.byref(overlap))
 
 
 def closed_environment() -> dict[str, str]:
@@ -153,8 +181,38 @@ def environment(config: dict, password: str) -> dict:
     return env
 
 
+def verify_dependency_file_set(config: dict) -> set[Path]:
+    if config.get("dependency_root"):
+        dependency_root = regular(Path(config["dependency_root"]), directory=True)
+        expected = {Path(path): digest for path, digest in config["files"].items() if Path(path).is_relative_to(dependency_root)}
+        actual = set()
+        for directory, dirs, files in os.walk(dependency_root, followlinks=False):
+            for name in dirs:
+                regular(Path(directory) / name, directory=True)
+            for name in files:
+                path = Path(directory) / name
+                info = path.lstat()
+                if not stat.S_ISREG(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                    raise Rejected("PATH_REDIRECTION_REJECTED")
+                if path not in expected:
+                    raise Rejected("CUSTOMER_DEPENDENCY_FILE_SET_CHANGED")
+                # Root and directory redirects were checked once above. Avoid
+                # rewalking every ancestor for every immutable dependency file.
+                if CONFIG.digest(path.read_bytes()) != expected[path]:
+                    raise Rejected("CUSTOMER_COMPONENT_CHANGED")
+                actual.add(path)
+            if len(actual) > len(expected):
+                raise Rejected("CUSTOMER_DEPENDENCY_FILE_SET_CHANGED")
+        if actual != set(expected):
+            raise Rejected("CUSTOMER_DEPENDENCY_FILE_SET_CHANGED")
+        return actual
+    return set()
+
+
 def load(root: Path) -> tuple[dict, str]:
     regular(root, directory=True)
+    if (root / "update.pending.dpapi").exists():
+        raise Rejected("CUSTOMER_UPDATE_RECOVERY_REQUIRED")
     public = regular(root / "installation.json").read_bytes()
     sealed = json.loads(dpapi(regular(root / "credentials.dpapi").read_bytes(), decrypt=True))
     if sealed["installation_sha256"] != CONFIG.digest(public):
@@ -162,12 +220,15 @@ def load(root: Path) -> tuple[dict, str]:
     config = json.loads(public)
     if config["schema"] != SCHEMA or Path(config["root"]) != root:
         raise Rejected("CUSTOMER_INSTALLATION_IDENTITY_REJECTED")
+    dependencies = verify_dependency_file_set(config)
     if not isinstance(config["port"], int) or not 1024 < config["port"] <= 65535 or config["port"] in (5432, 58743):
         raise Rejected("CUSTOMER_PORT_REJECTED")
     if len(config["run_id"]) != 32 or any(c not in "0123456789abcdef" for c in config["run_id"]):
         raise Rejected("CUSTOMER_INSTALLATION_IDENTITY_REJECTED")
     regular(root / "cluster", directory=True)
     for file, expected in config["files"].items():
+        if Path(file) in dependencies:
+            continue
         if file_digest(Path(file)) != expected:
             raise Rejected("CUSTOMER_COMPONENT_CHANGED")
     offline = checked([pg(config, "pg_controldata"), str(root / "cluster")], "CUSTOMER_CLUSTER_CONTROL_UNREADABLE")
@@ -233,7 +294,8 @@ def runtime_action(config: dict, password: str, action: str) -> dict | None:
 
 
 def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: Path,
-            graphify_runtime: Path | None = None, graph_source: Path | None = None, wsl: Path | None = None) -> dict:
+            graphify_runtime: Path | None = None, graph_source: Path | None = None, wsl: Path | None = None,
+            dependency_files: dict[str, str] | None = None, dependency_root: Path | None = None) -> dict:
     regular(runtime)
     if file_digest(runtime) != expected:
         raise Rejected("RUNTIME_DIGEST_MISMATCH")
@@ -248,6 +310,9 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
         regular(wsl)
     if bool(graphify_runtime) != bool(wsl):
         raise Rejected("GRAPHIFY_RUNTIME_AND_WSL_REQUIRED_TOGETHER")
+    for file, wanted in (dependency_files or {}).items():
+        if file_digest(Path(file)) != wanted:
+            raise Rejected("CUSTOMER_DEPENDENCY_CHANGED")
     private_new_root(root)
     (root / "bin").mkdir()
     target = root / "bin" / "latticed.exe"
@@ -282,7 +347,8 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
         paths.append(wsl)
     config = {"schema": SCHEMA, "root": str(root), "runtime": str(target), "postgres_bin": str(postgres_bin),
               "git": str(git), "python": str(Path(sys.executable)), "port": port, "run_id": secrets.token_hex(16), "system_id": system_id,
-              "files": {str(file): file_digest(file) for file in paths},
+              "files": {**(dependency_files or {}), **{str(file): file_digest(file) for file in paths}},
+              "dependency_root": str(dependency_root) if dependency_root else None,
               "graphify_runtime": str(graphify_runtime) if graphify_runtime else None,
               "graph_source": str(graph_source) if graph_source else None, "wsl": str(wsl) if wsl else None}
     data = CONFIG.json_bytes(config)
@@ -364,10 +430,12 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
             raise Rejected("CUSTOMER_CLUSTER_STOPPED_USE_START")
         verify_running(config, password)
         # STDIO belongs entirely to the native MCP server. No secret or wrapper log.
-        return subprocess.call([config["runtime"]], env=environment(config, password),
-                               stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
-                               creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-    with CONFIG.manager_lock(root / ".operations"):
+        with runtime_lease(root):
+            config, password = load(root)
+            return subprocess.call([config["runtime"]], env=environment(config, password),
+                                   stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
+                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    with (runtime_lease(root, exclusive=True) if action in ("recover", "stop") else nullcontext()), CONFIG.manager_lock(root / ".operations"):
         # Revalidate after taking the cross-process operation lock.
         config, password = load(root)
         operation_evidence = None
@@ -395,14 +463,14 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
             operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
             if action == "graphify-preflight":
                 operation_evidence = {"component": "graphify", "status": "IDENTITY_VERIFIED", "workflow": "NOT_VERIFIED"}
-        elif action == "connect":
+        elif action in ("connect", "reconnect"):
             if config_path is None:
                 raise Rejected("CUSTOMER_CODEX_CONFIG_REQUIRED")
             if not (root / "ready.json").is_file():
                 raise Rejected("CUSTOMER_INITIALIZATION_INCOMPLETE")
             python = Path(config["python"])
-            CONFIG.change(config_path, "install", python, config["files"][str(python)],
-                          ["-I", str(root / "bin" / SCRIPTS[0]), "serve", "--state", str(root)])
+            CONFIG.change(config_path, "install" if action == "connect" else "update", python, config["files"][str(python)],
+                          ["-I", "-B", "-S", config.get("launcher", str(root / "bin" / SCRIPTS[0])), "serve", "--state", str(root)])
         elif action == "status":
             if running(config):
                 verify_running(config, password)
@@ -417,7 +485,7 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "recover", "start", "stop", "status", "serve", "connect", "register-project", "import-result", "graphify-preflight", "graphify-refresh"])
+    parser.add_argument("action", choices=["prepare", "recover", "start", "stop", "status", "serve", "connect", "reconnect", "update-runtime", "recover-update", "rollback-runtime", "register-project", "import-result", "graphify-preflight", "graphify-refresh"])
     parser.add_argument("--state", type=Path, required=True)
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--sha256")
@@ -432,6 +500,7 @@ def main() -> int:
     parser.add_argument("--evidence-request", type=Path)
     parser.add_argument("--node", type=Path)
     parser.add_argument("--node-sha256")
+    parser.add_argument("--update-id")
     args = parser.parse_args()
     try:
         if args.action == "prepare":
@@ -439,6 +508,15 @@ def main() -> int:
                 raise Rejected("CUSTOMER_COMPONENT_ARGUMENTS_REQUIRED")
             result = prepare(args.state, args.runtime, args.sha256, args.postgres_bin, args.git,
                              args.graphify_runtime, args.graph_source, args.wsl)
+        elif args.action in ("update-runtime", "recover-update", "rollback-runtime"):
+            if args.action == "rollback-runtime" and not args.update_id:
+                raise Rejected("UPDATE_ID_REQUIRED")
+            spec = importlib.util.spec_from_file_location("updater", Path(__file__).with_name("lattice-runtime-update.py"))
+            updater = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(updater)
+            result = updater.apply(args.state, args.runtime, args.sha256,
+                                   recover=args.action == "recover-update",
+                                   rollback=args.update_id if args.action == "rollback-runtime" else None)
         elif args.action == "register-project":
             if not args.project_root or not args.project_name:
                 raise Rejected("CUSTOMER_PROJECT_ARGUMENTS_REQUIRED")
