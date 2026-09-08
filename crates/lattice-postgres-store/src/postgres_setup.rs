@@ -8600,12 +8600,17 @@ fn verify_exact_principal_database_core<C: GenericClient>(
 pub const CONTROL_PRODUCT_SQL: &str = include_str!("../../../db/extensions/control-product/v1.sql");
 const CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256: &str =
     "500622c2dc4cb24ca5bf2ed1b7d3bd537783754c6b8cba17fd1d790f3ec07b4d";
+const CONTROL_RELATIONS_SQL: &str =
+    include_str!("../../../db/extensions/control-product/code-relations-v1.sql");
+const CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256: &str =
+    "f6c7a6745e64557cace7a2363f29acdf47259c6eebe9b1b3c9a9f068c9c6fe49";
 const CONTROL_PRODUCT_TABLE_CATALOG_SHA256: &str =
     "28c9a3ae3d9038332ab590ab073ba8385b3c4940d82cf54b097a1e7d087569b8";
 
 struct ControlProductPrincipalProfile {
     relation_oids: Vec<i64>,
     function_oids: Vec<i64>,
+    code_relations: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8631,7 +8636,8 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
         b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
     )?;
-    if functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256
+    let code_relations = functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
+    if (!code_relations && functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256)
         || tables != CONTROL_PRODUCT_TABLE_CATALOG_SHA256
     {
         return Err(catalog_error());
@@ -8644,7 +8650,14 @@ fn verify_optional_control_product_extension<C: GenericClient>(
           (SELECT count(*) FROM pg_policy p JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product'), \
           (SELECT count(*) FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product')",
         &[]).map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
-    for (index, expected) in [(0, 26_i64), (1, 15), (2, 16), (3, 0), (4, 0), (5, 0)] {
+    for (index, expected) in [
+        (0, 26_i64),
+        (1, if code_relations { 16 } else { 15 }),
+        (2, 16),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+    ] {
         if row_value::<i64>(&shape, index, PostgresStoreSetupErrorKind::CorruptCatalog)? != expected
         {
             return Err(catalog_error());
@@ -8677,6 +8690,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
     Ok(Some(ControlProductPrincipalProfile {
         relation_oids,
         function_oids,
+        code_relations,
     }))
 }
 
@@ -8716,7 +8730,21 @@ pub fn apply_control_product_extension(
             &[&current.database_uuid(),&current.manifest_sha256().as_str(),&sql_digest])
             .map_err(|error| map_postgres_error(&error,PostgresStoreSetupErrorKind::TransactionFailed))?;
     }
-    verify_optional_control_product_extension(&mut transaction)?.ok_or_else(catalog_error)?;
+    let product =
+        verify_optional_control_product_extension(&mut transaction)?.ok_or_else(catalog_error)?;
+    if !product.code_relations {
+        transaction
+            .batch_execute(CONTROL_RELATIONS_SQL)
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        if !verify_optional_control_product_extension(&mut transaction)?
+            .ok_or_else(catalog_error)?
+            .code_relations
+        {
+            return Err(catalog_error());
+        }
+    }
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
     })?;
@@ -8731,7 +8759,9 @@ fn verify_exact_principal_database_boundary<C: GenericClient>(
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     let product = verify_optional_control_product_extension(client)?;
-    let product_functions = if product.is_some() { 14 } else { 0 };
+    let product_functions = product
+        .as_ref()
+        .map_or(0, |p| if p.code_relations { 15 } else { 14 });
     if verify_exact_principal_database_core(client)?
         != expected_dangerous_functions + product_functions
     {

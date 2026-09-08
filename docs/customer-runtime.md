@@ -89,3 +89,35 @@ python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> -
 重啟驗證會先確認範例工作已有正式完成摘要、決策與父子關係，再停止及重啟
 同一個已核驗 cluster，以新 MCP 程序比較前後完整快照。它不建立工作、不修改
 完成狀態，也不把這個範例的完成當成整個下載版完成。
+# Retained code relationship queries
+
+`lattice_code_relations` takes exactly `project_id`, an exact retained Git `commit`,
+a literal case-insensitive `query` (1–128 characters), and `limit` (1–32).
+It searches symbol names, relationship endpoints, relationship names and source paths.
+For example, query `normalize_name` can return `greeting() calls normalize_name()`.
+The Runtime requires an active registered project whose physical root matches its
+configured Graphify source and replays the original source receipt for that commit.
+Missing analysis is an error; this read never runs Graphify or silently selects another commit.
+
+Results remain `DERIVED` / `CANDIDATE` / untrusted. The original source receipt is
+an anchor for the retained analysis, not acceptance evidence for the new query.
+The Runtime verifies the complete record-ID/content-digest set against that receipt,
+then verifies every returned record's content and membership before discarding the
+internal proof. This establishes returned-record integrity, not exhaustive recall or
+the content integrity of records outside the returned page. `truncated` identifies
+a result page with additional matches. Current working-tree changes are outside an
+explicit historical-commit query.
+
+The additive Control query function is installed only by explicit native
+`--postgres-bootstrap`. Ordinary startup accepts the exact old or new catalog;
+the new query reports `CODE_RELATIONS_UPGRADE_REQUIRED` on the old catalog.
+Historical Control SQL, Memory identity, analyses, receipts and retrieval audits
+are preserved. Older Runtime binaries that do not recognize the new catalog cannot
+serve an upgraded database; binary rollback must check schema compatibility.
+
+`scripts/verify-lattice-code-relations.py` verifies real call-edge hits, literal
+empty queries, truncation, rejected selectors, retained completed work, and identical
+reads after PostgreSQL and MCP restart. When using an explicitly hash-pinned candidate
+binary, its evidence says `PINNED_CANDIDATE`; that does not establish installed-package
+acceptance. Full dependency packaging and a recoverable installed Runtime update remain
+separate outstanding work.

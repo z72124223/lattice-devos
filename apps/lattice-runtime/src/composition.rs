@@ -2460,7 +2460,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             .is_ok()
             && migrator
                 .query_one(
-                    "SELECT pg_catalog.to_regnamespace('control_product') IS NOT NULL",
+                    "SELECT pg_catalog.to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL",
                     &[],
                 )
                 .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?
@@ -5451,7 +5451,8 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
                 hermes_activation_status(
                     self.integration_mode.uses_hermes(),
                     hermes_production_preflight_from_environment,
-                ).to_owned(),
+                )
+                .to_owned(),
             ),
         );
         // Writer readiness is observed only after the Task Ledger replay has
@@ -9373,6 +9374,84 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
+    fn code_relations(
+        &mut self,
+        arguments: &mcp::CodeRelationsArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new("CODE_RELATIONS_UNAVAILABLE"))?;
+        let project = control_product_project(&core, &arguments.project_id)?;
+        if project["active"] != json!(true) {
+            return Err(ToolExecutionError::new("CODE_RELATIONS_PROJECT_INACTIVE"));
+        }
+        let root = graph_canonical_directory(Path::new(
+            &required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+                .map_err(|e| ToolExecutionError::new(e.code()))?,
+        ))
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let registered = project["canonical_path"]
+            .as_str()
+            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"))?;
+        if graph_canonical_directory(Path::new(registered))
+            .map_err(|e| ToolExecutionError::new(e.code()))?
+            != root
+        {
+            return Err(ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"));
+        }
+        // Historical commit is explicit. This read neither creates directories,
+        // inspects dirty files nor invokes Graphify to fabricate missing evidence.
+        let git = PathBuf::from(
+            required_environment("LATTICE_DELIVERY_GIT_EXE")
+                .map_err(|e| ToolExecutionError::new(e.code()))?,
+        );
+        let git_sha256 =
+            graph_executable_sha256(&git).map_err(|e| ToolExecutionError::new(e.code()))?;
+        let configuration = runtime_graph_configuration_digest(&root, &git_sha256)
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let request = runtime_graph_request(
+            core.delivery.database.run_id(),
+            &arguments.commit,
+            configuration,
+        )
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let receipt = load_runtime_graph_receipt(
+            &core.delivery.database,
+            &core.delivery.password,
+            deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
+            &request,
+        )
+        .map_err(|e| ToolExecutionError::new(e.code()))?
+        .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
+        let mut product = connect_control_product(&core)?;
+        let mut page = product
+            .code_relations(&receipt, &arguments.query, arguments.limit)
+            .map_err(ToolExecutionError::new)?;
+        crate::code_relations::verify_page(
+            &mut page,
+            receipt.persistence().record_set_digest().as_str(),
+            receipt.persistence().record_count(),
+            arguments.limit,
+        )
+        .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_RECORD_INTEGRITY_REJECTED"))?;
+        let response = json!({
+            "schema_version":"lattice.code-relations.v1","authority":"DERIVED","trusted_context":false,
+            "registered_project_id":arguments.project_id,"commit":arguments.commit,"source_selection":"EXACT_RETAINED_COMMIT",
+            "source_memory_project_id":request.project_id().as_str(),
+            "source_project_snapshot_id":request.invocation().project_snapshot_id().as_str(),
+            "source_receipt_digest":receipt.receipt_digest().as_str(),
+            "analysis_digest":receipt.persistence().analysis_digest().as_str(),
+            "query":arguments.query,"limit":arguments.limit,"records":page["records"],"truncated":page["truncated"],
+        });
+        if response.to_string().len() > 750_000 {
+            return Err(ToolExecutionError::new(
+                "CODE_RELATIONS_RESPONSE_LIMIT_EXCEEDED",
+            ));
+        }
+        Ok(response)
+    }
+
     fn control_snapshot(
         &mut self,
         arguments: &ControlSnapshotArguments,
@@ -12123,27 +12202,35 @@ fn runtime_graph_source_request(
     database: &DeliveryDatabaseBinding,
 ) -> Result<(RuntimeGraphSource, GraphMemoryRunRequest), LatticedError> {
     let (source, commit) = runtime_graph_source_from_environment()?;
-    let configuration_digest = digest(
+    let configuration_digest =
+        runtime_graph_configuration_digest(&source.repository_root, &source.git_sha256)?;
+    let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
+    Ok((source, request))
+}
+
+fn runtime_graph_configuration_digest(
+    repository_root: &Path,
+    git_sha256: &str,
+) -> Result<ContentDigest, LatticedError> {
+    digest(
         "lattice.runtime.graphify-source-configuration",
         &CanonicalValue::Object(vec![
             (
                 "git_sha256".to_owned(),
-                CanonicalValue::String(source.git_sha256.clone()),
+                CanonicalValue::String(git_sha256.to_owned()),
             ),
             (
                 "repository_root".to_owned(),
-                CanonicalValue::String(path_text(&source.repository_root)?),
+                CanonicalValue::String(path_text(repository_root)?),
             ),
             (
                 "runtime_root".to_owned(),
                 CanonicalValue::String(path_text(&graphify_runtime_root_from_environment(
-                    &source.repository_root,
+                    repository_root,
                 ))?),
             ),
         ]),
-    )?;
-    let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
-    Ok((source, request))
+    )
 }
 
 fn load_runtime_graph_receipt(
@@ -17489,26 +17576,31 @@ mod tests {
     #[test]
     fn hermes_activation_status_requires_only_real_configuration() {
         assert_eq!(
-            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(vec![
-                "LATTICE_HERMES_CODEX_HOME",
-            ])),
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(
+                vec!["LATTICE_HERMES_CODEX_HOME",]
+            )),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(vec![
-                "LATTICE_HERMES_CODEX_HOME",
-            ])),
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(
+                vec!["LATTICE_HERMES_CODEX_HOME",]
+            )),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(true, || HermesProductionPreflight::ConfigurationPresentUnverified),
+            hermes_activation_status(true, || {
+                HermesProductionPreflight::ConfigurationPresentUnverified
+            }),
             "PREPARED"
         );
     }
 
     #[test]
     fn suspended_hermes_activation_never_reads_its_configuration() {
-        assert_eq!(hermes_activation_status(false, || panic!("Hermes must stay inactive")), "DEFERRED");
+        assert_eq!(
+            hermes_activation_status(false, || panic!("Hermes must stay inactive")),
+            "DEFERRED"
+        );
     }
 
     #[test]
@@ -17516,10 +17608,19 @@ mod tests {
         let launcher = std::env::current_exe().unwrap();
         let root = launcher.parent().unwrap();
         // An ordinary directory and executable suffice for PREPARED, never READY.
-        assert_eq!(graphify_configuration_status(Some(root), Some(&launcher)), "PREPARED");
-        assert_eq!(graphify_configuration_status(None, Some(&launcher)), "DEGRADED");
+        assert_eq!(
+            graphify_configuration_status(Some(root), Some(&launcher)),
+            "PREPARED"
+        );
+        assert_eq!(
+            graphify_configuration_status(None, Some(&launcher)),
+            "DEGRADED"
+        );
         assert_eq!(graphify_configuration_status(Some(root), None), "DEGRADED");
-        assert_eq!(graphify_configuration_status(Some(Path::new("relative")), Some(&launcher)), "DEGRADED");
+        assert_eq!(
+            graphify_configuration_status(Some(Path::new("relative")), Some(&launcher)),
+            "DEGRADED"
+        );
     }
 
     #[cfg(windows)]

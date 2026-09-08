@@ -1,5 +1,6 @@
 //! LATTICE runtime composition entry.
 
+mod code_relations;
 pub mod composition;
 mod control_product;
 pub mod coordination;
