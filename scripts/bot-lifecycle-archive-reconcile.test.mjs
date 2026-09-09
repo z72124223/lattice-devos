@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {digest,validateProof,inspectHistory} from './bot-lifecycle-archive-reconcile.mjs';
+import {digest,validateProof,inspectHistory,commandVector} from './bot-lifecycle-archive-reconcile.mjs';
 const now=Date.now(),stamp=Math.floor(now/1000)-60,turn='completed-checkpoint',old='old-owner';
 function fixture(){
  const pre={source:'codex.read_thread',observedAt:new Date(now-60000).toISOString(),pages:[{thread:{id:old,hostId:'local',updatedAt:stamp,status:{type:'idle'}},turns:[{id:turn,status:'completed',items:[{type:'agentMessage',id:'final',text:'retained complete result',phase:'final_answer'}]}]}]};
@@ -67,4 +67,41 @@ test('earlier completed turn followed by a different valid turn remains eligible
  const lines=[{type:'session_meta',payload:{id:old}},...['earlier',turn].flatMap(id=>[{type:'event_msg',payload:{type:'task_started',turn_id:id}},{type:'response_item',payload:{type:'message',role:'user',content:[]}},{type:'event_msg',payload:{type:'task_complete',turn_id:id}}])];
  try{fs.writeFileSync(file,lines.map(x=>JSON.stringify(x)).join('\n')+'\n');const x=fixture();x.history=await inspectHistory(file);assert.equal(x.history.afterCompletionEvents,0);validateProof(x,now);}
  finally{fs.unlinkSync(file);fs.rmdirSync(dir);}
+});
+
+function enrichedFixture(){
+ const x=fixture(),items=[{id:'command',type:'commandExecution',cwd:'retained-directory'},{id:'tool',type:'mcpToolCall',server:'codex',tool:'read_thread'}];
+ x.pre.pages[0].turns[0].items.push(...items);x.post.pages[0].turns[0].items.push(...structuredClone(items));
+ x.post.pages[0].turns[0].items[1].command='node "a b"';x.post.pages[0].turns[0].items[2].arguments={threadId:old};
+ x.anchor.request.native.old.readback_digest=digest(x.pre);x.anchor.requestDigest=digest(x.anchor.request);
+ const original=digest(x.pre.pages[0].turns[0]);x.historyAnchor={status:'READ_ONLY_ELIGIBLE',databaseMutation:false,proof:{pre_turn_digest:original,post_turn_digest:original,latest_turn_id:turn,rollout_sha256:x.history.sha256}};
+ x.history.completedItems=[{id:'command',type:'CommandExecution',threadId:old,turnId:turn,cwd:'retained-directory',commandVectorDigest:digest(['node','a b'])},{id:'tool',type:'McpToolCall',threadId:old,turnId:turn,server:'codex',tool:'read_thread',argumentsDigest:digest({threadId:old})}];return x;
+}
+test('only archive-proven missing fields enrich the anchored turn without source mutation',()=>{
+ const x=enrichedFixture(),before=structuredClone(x),proof=validateProof(x,now);
+ assert.equal(proof.pre_turn_digest,digest(x.post.pages[0].turns[0]));assert.equal(proof.pre_turn_digest,proof.post_turn_digest);assert.deepEqual(x,before);
+});
+for(const [name,change] of [
+ ['missing prior history anchor',x=>delete x.historyAnchor],
+ ['changed archived rollout',x=>x.history.sha256='b'.repeat(64)],
+ ['unbound prior turn digest',x=>x.historyAnchor.proof.pre_turn_digest='b'.repeat(64)],
+ ['changed newly disclosed command',x=>x.post.pages[0].turns[0].items[1].command='node changed'],
+ ['changed newly disclosed arguments',x=>x.post.pages[0].turns[0].items[2].arguments.threadId='another'],
+ ['missing archived item',x=>x.history.completedItems.shift()],
+ ['ambiguous duplicate item',x=>x.history.completedItems.push(x.history.completedItems[0])],
+ ['different source turn',x=>x.history.completedItems[0].turnId='another'],
+ ['different source thread',x=>x.history.completedItems[0].threadId='another'],
+ ['different command directory',x=>x.history.completedItems[0].cwd='another'],
+ ['different tool target',x=>x.history.completedItems[1].tool='another'],
+ ['unrecognized new field',x=>x.post.pages[0].turns[0].items[1].newField=true],
+ ['changed retained field',x=>x.post.pages[0].turns[0].items[0].text='changed'],
+ ['deleted retained field',x=>delete x.post.pages[0].turns[0].items[0].text],
+ ['reordered items',x=>x.post.pages[0].turns[0].items.reverse()],
+])test('reject enrichment with '+name,()=>{const x=enrichedFixture();change(x);assert.throws(()=>validateProof(x,now));});
+test('command display decoding preserves argument boundaries and quoting without evaluation',()=>{
+ assert.deepEqual(commandVector(`node 'a b' "c d" plain`),['node','a b','c d','plain']);
+ assert.deepEqual(commandVector(`node 'a'"'"'b'`),['node',"a'b"]);
+ assert.deepEqual(commandVector(String.raw`"C:\\tools\\node.exe" "a\"b" '$literal' "back\\slash"`),['C:\\tools\\node.exe','a"b','$literal','back\\slash']);
+ assert.deepEqual(commandVector(`node '' 'line\nline'`),['node','','line\nline']);
+ assert.throws(()=>commandVector(`node 'unclosed`));assert.throws(()=>commandVector('node \\'));
 });

@@ -82,6 +82,18 @@ archive status, hashes the archived rollout, and rejects new input or pending
 actions. Summary-only native observations are insufficient. Database checks
 these closed fields and the exact owner/generation/revision/manifest/operation.
 
+If an anchored observation omitted command/argument fields that a fresh native
+projection supplies, `historyAnchorPath` must identify the previously verified
+read-only proof binding that exact original turn digest to the unchanged archived
+rollout SHA256. Each added field must match exactly one `item_completed` event
+with the same thread, turn and item ID. MCP arguments are compared in full;
+command display strings are decoded without execution and compared to the full
+archived argument vector and working directory. Existing fields cannot change or
+disappear. Only these verified additions enrich a copy of the original turn;
+both complete enriched turn digests must match. Original native observations,
+the prior proof digest, item provenance hashes and full current observation
+digest remain in saved evidence. Unproven, ambiguous or changed fields reject.
+
 Recovery retains `archive_reconciliation.original_boundary`, the observed
 boundary, handoff ID and all evidence in current state and an immutable event.
 Only the pinned metadata boundary and revision change. The owner must still
