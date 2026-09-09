@@ -21,9 +21,10 @@ fn lifecycle_requires_explicit_install_and_fixed_loopback_binding() {
         ("bot-lifecycle", false),
         ("bot-lifecycle-install", true),
         ("bot-lifecycle-migrate", false),
+        ("bot-lifecycle-reconcile-archive", false),
     ] {
         assert!(
-            matches!(parse_command(&args(name)).unwrap(), RuntimeCommand::BotLifecycle { install, migrate, port: 58743, .. } if install == expected_install && migrate == (name == "bot-lifecycle-migrate"))
+            matches!(parse_command(&args(name)).unwrap(), RuntimeCommand::BotLifecycle { install, migrate, reconcile_archive, port: 58743, .. } if install == expected_install && migrate == (name == "bot-lifecycle-migrate") && reconcile_archive == (name == "bot-lifecycle-reconcile-archive"))
         );
         for (index, value) in [(2, "0.0.0.0"), (4, "0"), (6, "../../other")] {
             let mut invalid = args(name);

@@ -63,6 +63,7 @@ pub enum RuntimeCommand {
         run_id: String,
         install: bool,
         migrate: bool,
+        reconcile_archive: bool,
     },
     ProjectRegistryInspect {
         database: DeliveryDatabaseBinding,
@@ -195,7 +196,10 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
         return Err(RuntimeError::Usage);
     };
     match command.as_str() {
-        "bot-lifecycle" | "bot-lifecycle-install" | "bot-lifecycle-migrate" => {
+        "bot-lifecycle"
+        | "bot-lifecycle-install"
+        | "bot-lifecycle-migrate"
+        | "bot-lifecycle-reconcile-archive" => {
             let values = parse_options(
                 options,
                 &["--postgres-host", "--postgres-port", "--postgres-run-id"],
@@ -206,6 +210,7 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
                 run_id: binding.run_id().to_owned(),
                 install: command == "bot-lifecycle-install",
                 migrate: command == "bot-lifecycle-migrate",
+                reconcile_archive: command == "bot-lifecycle-reconcile-archive",
             })
         }
         "project-registry-inspect"
@@ -385,6 +390,7 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
             run_id,
             install,
             migrate,
+            reconcile_archive,
         } => {
             let password = delivery_database_password()?;
             if install {
@@ -402,7 +408,11 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
                 }
                 let request: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
-                if migrate {
+                if reconcile_archive {
+                    lattice_postgres_store::reconcile_bot_lifecycle_archive(
+                        port, &run_id, &password, &request,
+                    )
+                } else if migrate {
                     lattice_postgres_store::migrate_bot_lifecycle(
                         port, &run_id, &password, &request,
                     )

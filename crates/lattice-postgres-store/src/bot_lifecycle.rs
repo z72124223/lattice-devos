@@ -7,6 +7,8 @@ use std::time::Duration;
 
 pub const BOT_LIFECYCLE_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v1.sql");
 pub const BOT_LIFECYCLE_V2_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v2.sql");
+pub const BOT_LIFECYCLE_ARCHIVE_SQL: &str =
+    include_str!("../../../db/extensions/bot-lifecycle/archive-reconcile-v2.sql");
 type Result<T> = std::result::Result<T, &'static str>;
 
 fn digest(bytes: &[u8]) -> String {
@@ -90,6 +92,9 @@ fn error(e: postgres::Error) -> &'static str {
             "BOT_LIFECYCLE_ACTOR_REJECTED" => "BOT_LIFECYCLE_ACTOR_REJECTED",
             "BOT_LIFECYCLE_EXECUTOR_GRANT_REJECTED" => "BOT_LIFECYCLE_EXECUTOR_GRANT_REJECTED",
             "BOT_LIFECYCLE_NATIVE_BOUNDARY_REJECTED" => "BOT_LIFECYCLE_NATIVE_BOUNDARY_REJECTED",
+            "BOT_LIFECYCLE_ARCHIVE_RECONCILE_REJECTED" => {
+                "BOT_LIFECYCLE_ARCHIVE_RECONCILE_REJECTED"
+            }
             _ => "BOT_LIFECYCLE_DATABASE_REJECTED",
         }
     } else {
@@ -118,14 +123,25 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     } else {
         1
     };
-    if rows.len() != if version == 2 { 11 } else { 7 } {
+    let archive_extension = rows
+        .iter()
+        .any(|r| r.get::<_, String>(0) == "reconcile_archive_v2");
+    if rows.len()
+        != if version == 2 {
+            11 + usize::from(archive_extension)
+        } else {
+            7
+        }
+    {
         return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
     }
     for row in rows {
         let name: String = row.get(0);
         let source: String = row.get(1);
         let marker = format!("CREATE FUNCTION bot_lifecycle.{name}(");
-        let sql = if name.ends_with("_v2") {
+        let sql = if name == "reconcile_archive_v2" {
+            BOT_LIFECYCLE_ARCHIVE_SQL
+        } else if name.ends_with("_v2") {
             BOT_LIFECYCLE_V2_SQL
         } else {
             BOT_LIFECYCLE_SQL
@@ -143,7 +159,12 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
             .0;
         let definer = matches!(
             name.as_str(),
-            "identity_read_v1" | "read_v1" | "apply_v1" | "apply_v2" | "migrate_v2"
+            "identity_read_v1"
+                | "read_v1"
+                | "apply_v1"
+                | "apply_v2"
+                | "migrate_v2"
+                | "reconcile_archive_v2"
         );
         let public_api = matches!(name.as_str(), "identity_read_v1" | "read_v1" | "apply_v2")
             || (version == 1 && name == "apply_v1");
@@ -203,6 +224,49 @@ pub fn migrate_bot_lifecycle(
     tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
     value["v1_sql_sha256"] = json!(digest(BOT_LIFECYCLE_SQL.as_bytes()));
     value["v2_sql_sha256"] = json!(digest(BOT_LIFECYCLE_V2_SQL.as_bytes()));
+    Ok(value)
+}
+
+/// Install the additive recovery function and reconcile one exact archived
+/// boundary atomically. Failure rolls back installation as well as state.
+pub fn reconcile_bot_lifecycle_archive(
+    port: u16,
+    run_id: &str,
+    password: &str,
+    request: &Value,
+) -> Result<Value> {
+    let mut client = connect(port, run_id, password, "migrator")?;
+    let mut tx = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::Serializable)
+        .start()
+        .map_err(error)?;
+    if verify(&mut tx, run_id)? != 2 {
+        return Err("BOT_LIFECYCLE_ARCHIVE_RECONCILE_REJECTED");
+    }
+    // Serialize catalog installation independently of the per-role state lock.
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended('bot_lifecycle/archive-reconcile-v2',0))",
+        &[],
+    )
+    .map_err(error)?;
+    let present: bool = tx
+        .query_one(
+            "SELECT to_regprocedure('bot_lifecycle.reconcile_archive_v2(jsonb)') IS NOT NULL",
+            &[],
+        )
+        .map_err(error)?
+        .get(0);
+    if !present {
+        tx.batch_execute(BOT_LIFECYCLE_ARCHIVE_SQL).map_err(error)?;
+    }
+    verify(&mut tx, run_id)?;
+    let mut value: Value = tx
+        .query_one("SELECT bot_lifecycle.reconcile_archive_v2($1)", &[request])
+        .map_err(error)?
+        .get(0);
+    tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
+    value["archive_sql_sha256"] = json!(digest(BOT_LIFECYCLE_ARCHIVE_SQL.as_bytes()));
     Ok(value)
 }
 

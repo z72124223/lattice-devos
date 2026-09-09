@@ -68,7 +68,8 @@ const direct=spawnSync(resolve(marker.pgBin,'psql.exe'),['-X','-h','127.0.0.1','
 assert.notEqual(direct.status,0);assert.ok(direct.stderr.includes('permission denied for function apply_v1'),direct.stderr);checks.push('runtime cannot bypass v2 via direct apply_v1');
 const handoff='same-original-work-id',controlActor=()=>({role_id:'control',thread_id:state.owner_thread_id,host_id:'local',generation:state.generation});
 const executorActor={role_id:'lattice_maintenance',thread_id:executor,host_id:'local',generation:1};
-const boundary=(id=old,latest=turn)=>({source:'codex.read_thread',observed_at:new Date().toISOString(),thread_id:id,host_id:'local',latest_turn_id:latest,thread_updated_at:1788825600,status:'idle',latest_turn_status:'completed',pending_input_count:0,in_flight_count:0,readback_digest:hash,evidence_ref:'fixture:synthetic-only'});
+let oldUpdatedAt=1788825600;
+const boundary=(id=old,latest=turn)=>({source:'codex.read_thread',observed_at:new Date().toISOString(),thread_id:id,host_id:'local',latest_turn_id:latest,thread_updated_at:oldUpdatedAt,status:'idle',latest_turn_status:'completed',pending_input_count:0,in_flight_count:0,readback_digest:hash,evidence_ref:'fixture:synthetic-only'});
 const grantBody=()=>({executor_role_id:'lattice_maintenance',executor_thread_id:executor,executor_host_id:'local',executor_generation:1,checkpoint_turn_id:turn,expires_at:new Date(Date.now()+3600000).toISOString(),authorization_receipt:receipt('read_thread')});
 const v2=(action,body,actor=executorActor,native={old:boundary(),new:null})=>({...base(action,body),actor,handoff_id:handoff,native});
 const grant=()=>v2('authorize-executor',grantBody(),controlActor(),{old:null,new:null});
@@ -167,7 +168,33 @@ await step('routing_updated','hq-routing-update',next);
 await reject(v2('finish',{},controlActor()),'MIGRATION_INCOMPLETE');
 await step('schedule_updated','schedule-not-configured',next);
 await reject(v2('reserve-step',{step:'old_archived',operation_key:'old_archived',input_digest:hash},controlActor(),{old:{...boundary(),pending_input_count:1},new:null}),'NATIVE_BOUNDARY_REJECTED');
-await step('old_archived','set_thread_archived',old);
+let archiveRecoveryRequest,archiveSqlSha256;
+if(process.env.LATTICE_BOT_LIFECYCLE_ARCHIVE_RECOVERY==='1'){
+ await apply(v2('reserve-step',{step:'old_archived',operation_key:'archive-recovery',input_digest:hash},controlActor()));
+ const originalBoundary=structuredClone(state.handoff_boundary),retained=structuredClone(state),post={...boundary(),status:'notLoaded',thread_updated_at:oldUpdatedAt-3600};
+ const body={manifest_digest:state.manifest_digest,anchor_request_id:winning.request_id,pre_native_digest:hash,archive_operation_key:'archive-recovery',archive_receipt:receipt('set_thread_archived',old),history_proof:{pre_turn_digest:hash,post_turn_digest:hash,rollout_sha256:hash,evidence_digest:hash,archived:true,archived_at:oldUpdatedAt+10,durable_updated_at:post.thread_updated_at,latest_turn_id:turn,new_input_count:0,in_flight_count:0}};
+ const recovery=()=>v2('reconcile-archived-boundary',body,controlActor(),{old:post,new:null});
+ await reject({...recovery(),actor:executorActor},'ACTOR_REJECTED','bot-lifecycle-reconcile-archive');
+ await reject({...recovery(),expected_revision:0},'REVISION_CONFLICT','bot-lifecycle-reconcile-archive');
+ for(const change of [{latest_turn_id:randomUUID()},{status:'active'},{status:'idle'},{pending_input_count:1},{in_flight_count:1},{thread_updated_at:oldUpdatedAt+1},{observed_at:new Date(Date.now()-301000).toISOString()}]){
+  await reject({...recovery(),native:{old:{...post,...change},new:null}},'NATIVE_BOUNDARY_REJECTED','bot-lifecycle-reconcile-archive');
+ }
+ for(const change of [{post_turn_digest:newHash},{archived:false},{new_input_count:1},{in_flight_count:1},{durable_updated_at:oldUpdatedAt},{latest_turn_id:randomUUID()},{archived_at:oldUpdatedAt-1}]){
+  await reject({...recovery(),body:{...body,history_proof:{...body.history_proof,...change}}},'ARCHIVE_RECONCILE_REJECTED','bot-lifecycle-reconcile-archive');
+ }
+ for(const change of [{manifest_digest:newHash},{anchor_request_id:'missing-anchor'},{pre_native_digest:newHash},{archive_operation_key:'other-operation'}]){
+  await reject({...recovery(),body:{...body,...change}},'ARCHIVE_RECONCILE_REJECTED','bot-lifecycle-reconcile-archive');
+ }
+ assert.equal((await cli(null,'bot-lifecycle-install')).value.schemaVersion,2);checks.push('failed reconcile rolls back additive function installation');
+ archiveRecoveryRequest=recovery();archiveSqlSha256=(await apply(archiveRecoveryRequest,'bot-lifecycle-reconcile-archive')).value.archive_sql_sha256;
+ for(const key of ['owner_thread_id','generation','phase','work_ids','steps','manifest','manifest_digest','executor_grant','ack'])assert.deepEqual(state[key],retained[key]);
+ assert.deepEqual(state.archive_reconciliation.original_boundary,originalBoundary);assert.equal(state.handoff_boundary.thread_updated_at,post.thread_updated_at);oldUpdatedAt=post.thread_updated_at;
+ assert.equal((await cli(archiveRecoveryRequest,'bot-lifecycle-reconcile-archive')).value.status,'REPLAYED');
+ await reject({...archiveRecoveryRequest,body:{...body,pre_native_digest:newHash}},'IDEMPOTENCY_CONFLICT','bot-lifecycle-reconcile-archive');
+ await reject(v2('finish',{},controlActor()),'MIGRATION_INCOMPLETE');
+ await apply(v2('native-step',{step:'old_archived',operation_key:'archive-recovery',receipt:receipt('set_thread_archived',old)},controlActor(),{old:{...boundary(),status:'notLoaded'},new:null}));
+ checks.push('archive reconcile preserves original boundary and only resumes reserved recording');
+}else await step('old_archived','set_thread_archived',old);
 for(const change of [{status:'active'},{status:'unknown'},{latest_turn_status:'inProgress'},{pending_input_count:null},{in_flight_count:1},{latest_turn_id:randomUUID()},{thread_updated_at:1788825601}]){
 await reject(v2('finish',{},controlActor(),{old:{...boundary(),status:'notLoaded',...change},new:null}),'NATIVE_BOUNDARY_REJECTED');
 }
@@ -177,7 +204,8 @@ assert.equal((await cli(ordinary())).value.status,'OWNER_CURRENT');
 await reject(handoffGuard,'ADMISSION_PAUSED');
 assert.equal(state.phase,'ACTIVE');assert.equal(state.work_ids.length,15);assert.ok(work.every(w=>state.work_ids.includes(w)));
 assert.equal(state.contract_version,2);assert.deepEqual(state.contract_migration,migration.body);assert.equal(state.executor_grant.status,'CONSUMED');
+if(archiveRecoveryRequest){const before=structuredClone(state);assert.equal((await cli(archiveRecoveryRequest,'bot-lifecycle-reconcile-archive')).value.status,'REPLAYED');assert.deepEqual(await read(),before);checks.push('historical reconcile replay cannot restore migration or authority');}
 const final=structuredClone(state);assert.equal((await cli(migration,'bot-lifecycle-migrate')).value.status,'REPLAYED');assert.deepEqual(await read(),final);checks.push('migration historical replay preserves completed owner');
-const evidence={status:'PASS',scope:'real-isolated-postgresql-synthetic-native-receipts',runId,port:Number(port),database:installed.value.database,partialFixtureDatabase:partial.value.database,retained:true,binary, binarySha256:createHash('sha256').update(readFileSync(binary)).digest('hex'),v1SqlSha256:migrated.value.v1_sql_sha256,v2SqlSha256:migrated.value.v2_sql_sha256,checks,finalState:state,verifiedAt:new Date().toISOString()};
+const evidence={status:'PASS',scope:'real-isolated-postgresql-synthetic-native-receipts',runId,port:Number(port),database:installed.value.database,partialFixtureDatabase:partial.value.database,retained:true,binary, binarySha256:createHash('sha256').update(readFileSync(binary)).digest('hex'),v1SqlSha256:migrated.value.v1_sql_sha256,v2SqlSha256:migrated.value.v2_sql_sha256,archiveSqlSha256,checks,finalState:state,verifiedAt:new Date().toISOString()};
 const evidencePath=resolve(marker.dataDirectory,'..','v2-acceptance-'+runId+'.json');writeFileSync(evidencePath,JSON.stringify(evidence,null,2)+'\n',{flag:'wx'});
 console.log(JSON.stringify({status:'PASS',checks:checks.length,runId,evidencePath,binarySha256:evidence.binarySha256,v2SqlSha256:evidence.v2SqlSha256}));

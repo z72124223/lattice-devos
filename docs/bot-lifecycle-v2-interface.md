@@ -51,6 +51,57 @@ New assert-handoff-owner exact fields:
 Succeeds HANDOFF_OWNER_CURRENT only for migrated control's current new owner in MIGRATING with matching handoff and accepted CAS state. Does not grant ordinary work before finish/ACTIVE.
 
 ## Limitations and activation
+### Archived metadata reconciliation
+
+`bot-lifecycle-reconcile-archive` is a separate, explicit migrator command with
+the same fixed loopback options and 64 KiB JSON limit. It atomically installs
+the additive `archive-reconcile-v2.sql` function and reconciles one exact
+control handoff. Existing v1/v2 functions, policies, events and permissions
+remain unchanged; the runtime principal cannot execute the recovery function.
+Use the candidate binary for all lifecycle readers after activation: old
+binaries reject the additional catalog function. A failed request rolls back
+both installation and state. Schema version remains 2.
+
+The action is `reconcile-archived-boundary`, using the v2 envelope with the
+actual current control actor, fresh `native.old` and null `native.new`. It is
+limited to MIGRATING, a consumed executor grant, completed routing/schedule,
+and an already reserved old archive operation. The body contains exactly:
+`manifest_digest`, `anchor_request_id`, `pre_native_digest`,
+`archive_operation_key`, `archive_receipt`, and `history_proof`.
+The anchor is the immutable successful commit event; its old native digest
+must match the pre-archive observation. The same completed turn is mandatory,
+and the actual archived timestamp must be a regression, never forward drift.
+
+`history_proof` contains `pre_turn_digest`, `post_turn_digest`,
+`rollout_sha256`, `evidence_digest`, `archived`, `archived_at`,
+`durable_updated_at`, `latest_turn_id`, `new_input_count`, `in_flight_count`.
+The trusted `scripts/bot-lifecycle-archive-reconcile.mjs` adapter binds the
+actual calling task, compares the complete native turn, including command and argument fields, against the
+commit-bound observation, rereads the native archive receipt and SQLite
+archive status, hashes the archived rollout, and rejects new input or pending
+actions. Summary-only native observations are insufficient. Database checks
+these closed fields and the exact owner/generation/revision/manifest/operation.
+
+Recovery retains `archive_reconciliation.original_boundary`, the observed
+boundary, handoff ID and all evidence in current state and an immutable event.
+Only the pinned metadata boundary and revision change. The owner must still
+record the existing archive effect using its original operation key, then
+finish and pass ACTIVE admission. Do not archive again or edit timestamps.
+Exact replay returns the historical receipt without restoring authority.
+
+Adapter CLI: `prepare <HQ-root> <input.json> <saved-request.json>`, then
+`execute <HQ-root> <saved-request.json> <result.json> <fresh-self-native-ref>`.
+Input includes `actor`, `projectId`, `requestId`, `preNativePath`,
+`postNativePath`, `anchorPath`, `archiveNativePath`, `selfNativePath`,
+`evidencePath`; source references are relative to the shared HQ root.
+Prepare and execute within the original observation's five-minute window.
+Unknown outcomes replay identical saved request bytes; never refresh a request
+ID's timestamp or revision. Preserve a real failure if evidence expires.
+
+Focused recovery acceptance adds
+`$env:LATTICE_BOT_LIFECYCLE_ARCHIVE_RECOVERY = '1'` to the isolated v2 test below,
+and `node --test scripts/bot-lifecycle-archive-reconcile.test.mjs`.
+
 Receipts are verified structurally in DB; trusted native adapter verifies authenticity, pending state, source snapshots and caller binding. Tests use explicitly synthetic native receipts. Live HQ DB migration, binary selection, executor grant, candidate creation and actual handoff are separate activation steps owned by CONTROL, not performed by implementation.
 
 If old source changes after CAS, this interface refuses further completion and
