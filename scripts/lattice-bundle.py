@@ -217,7 +217,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
             "bundled": ["LATTICE Runtime and launchers", "PostgreSQL software and licenses", "CPython 3.12 standard library and native DLLs", "Git software and license", "Graphify reviewed payload", "Node.js 24.16.0 runtime and license"],
             "external_requirements": (["Enabled Windows WSL2 with virtualization and an authenticated Microsoft WSL launcher"] if archive is not None else ["Reviewed WSL launcher and Ubuntu system"])
                 + ["Codex client and its existing account authorization"],
-            "full_dependency_portability": "NOT_VERIFIED", "hermes": "TASK_ONLY_DEFERRED"}
+            "full_dependency_portability": "NOT_VERIFIED", "cores": ["control", "postgresql", "graphify"]}
     if archive is not None:
         data["bundled"].append("Pinned official Ubuntu 26.04.1 WSL image with Python 3.14 and bubblewrap")
     (root / "bundle.json").write_bytes(M.CONFIG.json_bytes(data))

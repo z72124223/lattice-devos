@@ -443,8 +443,10 @@ fn parse_catalog_locator(value: &Value) -> ProjectBridgeResult<CatalogLocator> {
     let eligible = common_boundary
         && ((object.get("schema_version").and_then(Value::as_str) == Some(CATALOG_SCHEMA)
             && object.get("record_kind").and_then(Value::as_str) == Some(CATALOG_RECORD_KIND))
-            || (object.get("schema_version").and_then(Value::as_str) == Some(CUSTOMER_CATALOG_SCHEMA)
-                && object.get("record_kind").and_then(Value::as_str) == Some("CUSTOMER_LOCAL_LOCATOR")));
+            || (object.get("schema_version").and_then(Value::as_str)
+                == Some(CUSTOMER_CATALOG_SCHEMA)
+                && object.get("record_kind").and_then(Value::as_str)
+                    == Some("CUSTOMER_LOCAL_LOCATOR")));
     let legacy = common_boundary
         && object.get("schema_version").is_some_and(Value::is_null)
         && object.get("record_kind").and_then(Value::as_str) == Some("LEGACY_CONTROL_PROJECT");
@@ -685,25 +687,39 @@ fn control_get_json(
     }
     let value = parse_http_json(&response)?;
     if value["schema_version"] == CUSTOMER_CATALOG_SCHEMA
-        || value["projects"].as_array().is_some_and(|projects| projects.iter()
-            .any(|project| project["schema_version"] == CUSTOMER_CATALOG_SCHEMA))
+        || value["projects"].as_array().is_some_and(|projects| {
+            projects
+                .iter()
+                .any(|project| project["schema_version"] == CUSTOMER_CATALOG_SCHEMA)
+        })
     {
         return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
     }
     Ok(value)
 }
 
-fn customer_catalog_get_json(catalog: &Path, path: &str, deadline: Instant) -> ProjectBridgeResult<Value> {
+fn customer_catalog_get_json(
+    catalog: &Path,
+    path: &str,
+    deadline: Instant,
+) -> ProjectBridgeResult<Value> {
     ensure_before(deadline)?;
     let identity = ManagedFileIdentity::capture(catalog, MAX_CONTROL_RESPONSE_BYTES)
         .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlConfiguration))?;
     #[cfg(windows)]
-    let _seal = identity.seal()
+    let _seal = identity
+        .seal()
         .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlConfiguration))?;
     let mut bytes = Vec::new();
-    File::open(catalog).and_then(|file| file.take(MAX_CONTROL_RESPONSE_BYTES + 1).read_to_end(&mut bytes))
+    File::open(catalog)
+        .and_then(|file| {
+            file.take(MAX_CONTROL_RESPONSE_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
         .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlUnavailable))?;
-    identity.verify().map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    identity
+        .verify()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
     ensure_before(deadline)?;
     if bytes.len() as u64 > MAX_CONTROL_RESPONSE_BYTES {
         return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
@@ -712,19 +728,25 @@ fn customer_catalog_get_json(catalog: &Path, path: &str, deadline: Instant) -> P
         .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlProtocol))?;
     parse_catalog_state(&value)?;
     let projects = value["projects"].as_array().expect("validated catalog");
-    if value["schema"] != CUSTOMER_CATALOG_SCHEMA || projects.iter().any(|project| {
-        project["schema_version"] != CUSTOMER_CATALOG_SCHEMA
-            || project["record_kind"] != "CUSTOMER_LOCAL_LOCATOR"
-    }) {
+    if value["schema"] != CUSTOMER_CATALOG_SCHEMA
+        || projects.iter().any(|project| {
+            project["schema_version"] != CUSTOMER_CATALOG_SCHEMA
+                || project["record_kind"] != "CUSTOMER_LOCAL_LOCATOR"
+        })
+    {
         return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
     }
     if path == "/api/state" {
         return Ok(value);
     }
-    let id = path.strip_prefix("/api/projects/")
+    let id = path
+        .strip_prefix("/api/projects/")
         .filter(|id| ProjectId::new((*id).to_owned()).is_ok())
         .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::InvalidSelector))?;
-    let matches = projects.iter().filter(|project| project["id"] == id).collect::<Vec<_>>();
+    let matches = projects
+        .iter()
+        .filter(|project| project["id"] == id)
+        .collect::<Vec<_>>();
     match matches.as_slice() {
         [project] => Ok((*project).clone()),
         [] => Err(bridge_error(ProjectBridgeErrorKind::ProjectNotFound)),
@@ -1704,7 +1726,8 @@ mod tests {
         let projects = parse_catalog_state(&state).expect("customer locator");
         let selector = ProjectSelector::new(Some(id), None).expect("selector");
         let selected = select_catalog_project(&projects, &selector).expect("exact project");
-        let detail = parse_catalog_detail(&state["projects"][0], Some(&selected)).expect("locator only");
+        let detail =
+            parse_catalog_detail(&state["projects"][0], Some(&selected)).expect("locator only");
         assert_eq!(detail.id.as_str(), id);
         assert!(state["projects"][0].get("git_observation").is_none());
         let mut changed = state["projects"][0].clone();
@@ -1714,8 +1737,11 @@ mod tests {
 
     #[test]
     fn customer_catalog_is_bounded_and_never_falls_back_when_missing_or_invalid() {
-        let root = env::temp_dir().join(format!("lattice-customer-catalog-{}-{}", std::process::id(),
-            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)));
+        let root = env::temp_dir().join(format!(
+            "lattice-customer-catalog-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::create_dir(&root).expect("fresh fixture");
         let path = root.join("projects.json");
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -1724,9 +1750,13 @@ mod tests {
         assert!(customer_catalog_get_json(&path, "/api/state", deadline).is_err());
         let state = json!({"schema":CUSTOMER_CATALOG_SCHEMA,"projects":[]});
         fs::write(&path, state.to_string()).expect("empty locator");
-        assert_eq!(customer_catalog_get_json(&path, "/api/state", deadline).expect("read"), state);
+        assert_eq!(
+            customer_catalog_get_json(&path, "/api/state", deadline).expect("read"),
+            state
+        );
         assert!(customer_catalog_get_json(&path, "/unbounded", deadline).is_err());
-        fs::write(&path, vec![b' '; (MAX_CONTROL_RESPONSE_BYTES + 1) as usize]).expect("oversized fixture");
+        fs::write(&path, vec![b' '; (MAX_CONTROL_RESPONSE_BYTES + 1) as usize])
+            .expect("oversized fixture");
         assert!(customer_catalog_get_json(&path, "/api/state", deadline).is_err());
         fs::remove_file(path).expect("remove owned fixture");
         fs::remove_dir(root).expect("remove empty fixture directory");

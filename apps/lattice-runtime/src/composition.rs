@@ -4143,6 +4143,7 @@ impl HermesRuntimePreflight {
     }
 }
 
+#[cfg(test)]
 fn hermes_activation_status(
     enabled: bool,
     preflight: impl FnOnce() -> HermesProductionPreflight,
@@ -5123,9 +5124,6 @@ fn parse_runtime_integration_mode(
     match value {
         None | Some("CORE_ONLY") => Ok(RuntimeIntegrationMode::CoreOnly),
         Some("GRAPHIFY") => Ok(RuntimeIntegrationMode::Graphify),
-        // Keep the legacy spelling readable, but express the new composition
-        // in terms of the independently degradable components.
-        Some("GRAPHIFY_HERMES" | "FULL_CHAIN") => Ok(RuntimeIntegrationMode::GraphifyHermes),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -5138,6 +5136,10 @@ fn runtime_integration_mode_from_environment() -> Result<RuntimeIntegrationMode,
             Err(LatticedError::new(LatticedErrorKind::Configuration))
         }
     }
+}
+
+fn reject_retired_hermes_runtime() -> Result<(), LatticedError> {
+    Err(LatticedError::new(LatticedErrorKind::Configuration))
 }
 
 fn canonical_hermes_mode_from_environment() -> Result<CanonicalHermesMode, LatticedError> {
@@ -5155,7 +5157,6 @@ fn canonical_hermes_mode_from_value(
 ) -> Result<CanonicalHermesMode, LatticedError> {
     match value {
         None | Some("TASK_ONLY") => Ok(CanonicalHermesMode::TaskOnly),
-        Some("PRODUCTION") => Ok(CanonicalHermesMode::Production),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -5429,32 +5430,9 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         } else {
             "DEFERRED"
         };
-        let hermes_status = if self.integration_mode.uses_hermes() {
-            match hermes_runtime_preflight_from_environment() {
-                HermesRuntimePreflight::ConfigurationPresentUnverified => "PREPARED",
-                HermesRuntimePreflight::MissingConfiguration(_)
-                | HermesRuntimePreflight::ConfigurationRejected => "DEGRADED",
-            }
-        } else {
-            "DEFERRED"
-        };
         object.insert(
             "graphify_runtime_status".to_owned(),
             Value::String(graphify_status.to_owned()),
-        );
-        object.insert(
-            "hermes_runtime_status".to_owned(),
-            Value::String(hermes_status.to_owned()),
-        );
-        object.insert(
-            "hermes_activation_status".to_owned(),
-            Value::String(
-                hermes_activation_status(
-                    self.integration_mode.uses_hermes(),
-                    hermes_production_preflight_from_environment,
-                )
-                .to_owned(),
-            ),
         );
         // Writer readiness is observed only after the Task Ledger replay has
         // been verified. It can degrade write readiness, never replay truth.
@@ -9962,6 +9940,7 @@ where
 ///
 /// Returns a stable startup, configuration, database, or transport failure.
 pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
+    reject_retired_hermes_runtime()?;
     #[cfg(not(windows))]
     {
         Err(LatticedError::new(
@@ -9999,6 +9978,7 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
 /// Returns the existing production configuration or runner failure before
 /// reporting a successful process exit.
 pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
+    reject_retired_hermes_runtime()?;
     require_hermes_preparation_environment()?;
     #[cfg(not(windows))]
     {
@@ -12126,6 +12106,7 @@ pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt,
 /// A failed optional reflection never changes PostgreSQL task or delivery truth.
 #[cfg(windows)]
 pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    reject_retired_hermes_runtime()?;
     let (_unused_delivery, database, password) =
         delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
     let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
@@ -12245,6 +12226,7 @@ fn persist_direct_codex_reflection(
 
 #[cfg(not(windows))]
 pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    reject_retired_hermes_runtime()?;
     Err(LatticedError::new(
         LatticedErrorKind::HermesProductionRunnerRequired,
     ))
@@ -17731,15 +17713,8 @@ mod tests {
             parse_runtime_integration_mode(Some("GRAPHIFY")).expect("graphify mode"),
             RuntimeIntegrationMode::Graphify
         );
-        assert_eq!(
-            parse_runtime_integration_mode(Some("GRAPHIFY_HERMES"))
-                .expect("graphify and hermes mode"),
-            RuntimeIntegrationMode::GraphifyHermes
-        );
-        assert_eq!(
-            parse_runtime_integration_mode(Some("FULL_CHAIN")).expect("legacy alias"),
-            RuntimeIntegrationMode::GraphifyHermes
-        );
+        assert!(parse_runtime_integration_mode(Some("GRAPHIFY_HERMES")).is_err());
+        assert!(parse_runtime_integration_mode(Some("FULL_CHAIN")).is_err());
         assert!(parse_runtime_integration_mode(Some("full_chain")).is_err());
         assert!(parse_runtime_integration_mode(Some("")).is_err());
     }
@@ -17871,10 +17846,7 @@ mod tests {
             canonical_hermes_mode_from_value(Some("TASK_ONLY")).expect("explicit task-only mode"),
             CanonicalHermesMode::TaskOnly
         );
-        assert_eq!(
-            canonical_hermes_mode_from_value(Some("PRODUCTION")).expect("production mode"),
-            CanonicalHermesMode::Production
-        );
+        assert!(canonical_hermes_mode_from_value(Some("PRODUCTION")).is_err());
         assert!(canonical_hermes_mode_from_value(Some("production")).is_err());
         assert!(canonical_hermes_mode_from_value(Some("")).is_err());
     }

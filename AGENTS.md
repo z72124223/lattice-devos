@@ -94,7 +94,7 @@ tests prove only the tested behavior.
 
 ## Backend acceptance boundary
 
-Keep the four cores available through Codex App and its LATTICE MCP tools.
+Keep the three cores available through Codex App and its LATTICE MCP tools.
 Verify durable project/work identities, parent and dependency queries, decisions,
 and verified results across process restart. Codex owns progress presentation,
 approvals, conversations, and archival. A missing browser or desktop window is

@@ -9,10 +9,6 @@ use std::fs;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lattice_contracts::{DeliveryProfile, DeliveryRuntime};
-#[cfg(windows)]
-use lattice_hermes_adapter::preparation::{
-    OFFICIAL_HERMES_RUNTIME_GUEST_ROOT, materialize_official_preparation_bundle,
-};
 use lattice_runtime::composition::{
     LatticedDeliveryConfig, LatticedDeliveryService, LatticedErrorKind, fixed_gateway_submission,
 };
@@ -23,38 +19,6 @@ use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 static NEXT_SCRIPTED_GATE_FIXTURE: AtomicU64 = AtomicU64::new(1);
-
-#[cfg(windows)]
-struct HermesPreparationFixtureCleanup(PathBuf);
-
-#[cfg(windows)]
-impl Drop for HermesPreparationFixtureCleanup {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-#[cfg(windows)]
-fn hermes_preparation_fixture(
-    name: &str,
-) -> (PathBuf, PathBuf, String, HermesPreparationFixtureCleanup) {
-    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let fixture_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
-        .join(format!("task058-{name}-{}-{unique}", std::process::id()));
-    fs::create_dir_all(&fixture_root).expect("create preparation gate fixture root");
-    let product_root = fixture_root.join("product");
-    fs::create_dir(&product_root).expect("create protected product root");
-    let preparation_root = fixture_root.join("prepared-assets");
-    let outcome = materialize_official_preparation_bundle(&preparation_root, &product_root)
-        .expect("materialize exact preparation gate fixture");
-    let receipt = outcome.receipt().bundle_sha256().to_owned();
-    (
-        preparation_root,
-        product_root,
-        receipt,
-        HermesPreparationFixtureCleanup(fixture_root),
-    )
-}
 
 fn database(run_id: &str) -> DeliveryDatabaseBinding {
     DeliveryDatabaseBinding::new("127.0.0.1", 55432, run_id).expect("database binding")
@@ -876,7 +840,7 @@ fn full_chain_binary_is_reachable_and_fails_closed_without_a_sealed_hermes_runne
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICE_HERMES_PREPARATION_REJECTED\n"
+        "LATTICE_FULL_CHAIN_RETIRED\n"
     );
 }
 
@@ -896,176 +860,6 @@ fn legacy_full_chain_entry_rejects_hermes_preflight() {
     );
 }
 
-#[cfg(windows)]
-#[test]
-fn latticed_hermes_prepare_materializes_then_revalidates_without_launch_configuration() {
-    const SECRET_SENTINEL: &str = "TASK057-SECRET-MUST-NOT-BE-READ-OR-RENDERED";
-
-    struct FixtureCleanup(PathBuf);
-
-    impl Drop for FixtureCleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
-    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let fixture_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "task057-hermes-prepare-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&fixture_root).expect("create test-owned preparation fixture");
-    let _cleanup = FixtureCleanup(fixture_root.clone());
-    let product_root = fixture_root.join("product");
-    fs::create_dir(&product_root).expect("create protected product root");
-    let preparation_root = fixture_root.join("prepared-assets");
-
-    let invoke = || {
-        Command::new(env!("CARGO_BIN_EXE_latticed"))
-            .arg("--hermes-prepare")
-            .env_clear()
-            .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
-            .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
-            .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
-            .output()
-            .expect("start canonical latticed Hermes preparation")
-    };
-
-    let created = invoke();
-    assert_eq!(created.status.code(), Some(0));
-    assert!(created.stdout.is_empty());
-    let created_stderr = String::from_utf8(created.stderr).expect("created stderr UTF-8");
-    let created_digest = created_stderr
-        .strip_prefix("LATTICE_HERMES_PREPARE_ASSETS_CREATED_UNVERIFIED:")
-        .and_then(|value| value.strip_suffix('\n'))
-        .expect("fixed created receipt");
-    assert_eq!(created_digest.len(), 64);
-    assert!(created_digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
-    assert!(!created_stderr.contains(SECRET_SENTINEL));
-
-    let present = invoke();
-    assert_eq!(present.status.code(), Some(0));
-    assert!(present.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(present.stderr).expect("present stderr UTF-8"),
-        format!("LATTICE_HERMES_PREPARE_ASSETS_PRESENT_UNVERIFIED:{created_digest}\n")
-    );
-    let mut file_names = fs::read_dir(&preparation_root)
-        .expect("read preparation root")
-        .map(|entry| {
-            entry
-                .expect("prepared entry")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
-        .collect::<Vec<_>>();
-    file_names.sort();
-    assert_eq!(
-        file_names,
-        ["offline-runtime-manifest.json", "prepared-assets.json"]
-    );
-}
-
-#[test]
-fn latticed_hermes_preflight_reports_exact_missing_settings() {
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-preflight")
-        .env_clear()
-        .output()
-        .expect("start canonical latticed Hermes preflight");
-    let stale_helper_output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-preflight")
-        .env_clear()
-        .env(
-            "LATTICE_HERMES_BROKER_HELPER",
-            r"C:\STALE-HELPER-PATH-MUST-NOT-LEAK\helper.exe",
-        )
-        .env(
-            "LATTICE_HERMES_BROKER_HELPER_SHA256",
-            "STALE-HELPER-DIGEST-MUST-NOT-LEAK",
-        )
-        .output()
-        .expect("start canonical latticed with ignored legacy helper settings");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr.clone()).expect("stderr utf8"),
-        concat!(
-            "LATTICE_HERMES_PREFLIGHT_MISSING_CONFIGURATION:",
-            "LATTICE_HERMES_PREPARATION_ROOT,",
-            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256,",
-            "LATTICE_HERMES_RUNTIME_MANIFEST,",
-            "LATTICE_HERMES_RUNTIME_GUEST_ROOT,",
-            "LATTICE_HERMES_PRODUCT_ROOT,",
-            "LATTICE_HERMES_WSL_EXE,",
-            "LATTICE_HERMES_ISOLATION_PARENT,",
-            "LATTICE_HERMES_CODEX_LAUNCHER,",
-            "LATTICE_HERMES_CODEX_HOME,",
-            "LATTICE_HERMES_BROKER_ISOLATION_ROOT,",
-            "LATTICE_HERMES_DEADLINE_SECONDS\n",
-        )
-    );
-    assert_eq!(stale_helper_output.status.code(), Some(2));
-    assert!(stale_helper_output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(stale_helper_output.stderr).expect("stale helper stderr utf8"),
-        String::from_utf8(output.stderr).expect("original stderr utf8")
-    );
-}
-
-#[cfg(windows)]
-#[test]
-fn latticed_hermes_reflect_rejects_missing_runtime_configuration_before_any_effect() {
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-reflect")
-        .env_clear()
-        .output()
-        .expect("start standalone Hermes reflection entrypoint");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICED_CONFIGURATION_REJECTED\n"
-    );
-}
-
-#[test]
-fn latticed_hermes_runtime_preflight_reports_missing_direct_codex_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-runtime-preflight")
-        .env_clear()
-        .env("LATTICE_HERMES_PREPARATION_ROOT", r"C:\prepared")
-        .env("LATTICE_HERMES_PREPARATION_RECEIPT_SHA256", "a".repeat(64))
-        .env(
-            "LATTICE_HERMES_RUNTIME_MANIFEST",
-            r"C:\runtime\manifest.json",
-        )
-        .env(
-            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
-            "/var/tmp/lattice-runtime-targets/hermes",
-        )
-        .env("LATTICE_HERMES_PRODUCT_ROOT", r"C:\product")
-        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .output()
-        .expect("start canonical latticed Hermes runtime preflight");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("stderr utf8"),
-        concat!(
-            "LATTICE_HERMES_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
-            "LATTICE_HERMES_CODEX_LAUNCHER,",
-            "LATTICE_HERMES_CODEX_HOME,",
-            "LATTICE_HERMES_BROKER_ISOLATION_ROOT,",
-            "LATTICE_HERMES_DEADLINE_SECONDS\n"
-        )
-    );
-}
-
 #[test]
 fn latticed_graphify_runtime_preflight_reports_missing_independent_runtime_configuration() {
     let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
@@ -1082,22 +876,6 @@ fn latticed_graphify_runtime_preflight_reports_missing_independent_runtime_confi
             "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
             "LATTICE_GRAPHIFY_RUNTIME_ROOT,LATTICE_GRAPHIFY_WSL_EXE\n"
         )
-    );
-}
-
-#[test]
-fn latticed_hermes_launch_routes_to_production_configuration() {
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-launch")
-        .env_clear()
-        .output()
-        .expect("start canonical latticed Hermes launcher");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICE_HERMES_PREPARATION_REQUIRED\n"
     );
 }
 
@@ -1133,158 +911,56 @@ fn canonical_latticed_rejects_unknown_hermes_mode_without_echoing_it() {
     assert!(!stderr.contains(MODE_SENTINEL));
 }
 
-#[cfg(windows)]
 #[test]
-fn latticed_hermes_runtime_preflight_accepts_valid_direct_codex_configuration_without_starting() {
-    let (preparation_root, product_root, preparation_receipt, _cleanup) =
-        hermes_preparation_fixture("invalid-runtime-isolation");
-    let manifest = preparation_root.join("offline-runtime-manifest.json");
-    let invalid_isolation_root = product_root.join("inside-product-root");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-runtime-preflight")
-        .env_clear()
-        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
-        .env(
-            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
-            &preparation_receipt,
-        )
-        .env("LATTICE_HERMES_RUNTIME_MANIFEST", &manifest)
-        .env(
-            "LATTICE_HERMES_RUNTIME_GUEST_ROOT",
-            OFFICIAL_HERMES_RUNTIME_GUEST_ROOT,
-        )
-        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
-        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_PARENT", &invalid_isolation_root)
-        .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
-        .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
-        .env("LATTICE_HERMES_BROKER_ISOLATION_ROOT", r"C:\broker")
-        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30")
-        .output()
-        .expect("start canonical latticed Hermes runtime preflight");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
-        String::from_utf8(output.stderr).expect("stderr utf8"),
-        "LATTICE_HERMES_RUNTIME_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED\n"
-    );
-}
-
-#[test]
-fn latticed_hermes_preflight_rejects_unavailable_manifest_without_echoing_values() {
-    const SECRET_SENTINEL: &str = "TASK056-SECRET-SENTINEL-DO-NOT-LEAK";
-    const PATH_SENTINEL: &str = r"C:\TASK056-PATH-SENTINEL-DO-NOT-LEAK\manifest.json";
-    #[cfg(windows)]
-    let (preparation_root, product_root, preparation_receipt, _cleanup) =
-        hermes_preparation_fixture("unavailable-manifest");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_latticed"));
-    command
-        .arg("--hermes-preflight")
-        .env_clear()
-        .env("LATTICE_HERMES_RUNTIME_MANIFEST", PATH_SENTINEL)
-        .env("LATTICE_HERMES_RUNTIME_GUEST_ROOT", "/runtime")
-        .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
-        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_PARENT", r"C:\")
-        .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
-        .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
-        .env(
-            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
-            r"C:\broker\isolation",
-        )
-        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30");
-    #[cfg(windows)]
-    command
-        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
-        .env(
-            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
-            &preparation_receipt,
-        )
-        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root);
-    let output = command
-        .output()
-        .expect("start canonical latticed Hermes preflight");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
-    assert_eq!(stderr, "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_REJECTED\n");
-    assert!(!stderr.contains(SECRET_SENTINEL));
-    assert!(!stderr.contains(PATH_SENTINEL));
-}
-
-#[cfg(windows)]
-#[test]
-fn latticed_hermes_preflight_ignores_legacy_api_key_after_exact_manifest_identity() {
-    const MANIFEST_BYTES: &[u8] = br#"{"cpython_archive_bytes":111375313,"cpython_archive_sha256":"a140c0868258075d160fa0da51ddffd423efbc9dd350695abd33e7ce3ce94352","cpython_build_release":"20260804","cpython_provenance":"astral-sh/python-build-standalone","cpython_sha256sums_sha256":"eccfdcc61c9fe48b7fe61db8812925ce30f23943d16c60861001004a4ae8f55c","cpython_version":"3.12.13","hermes_archive_sha256":"a9a84a25999a23a859a9d17ef3134ea1c3371d8bf1984313eab839e939528152","hermes_commit":"3c27eb6234bf91b8ceee9e9071591b31e9b148cb","hermes_release":"v2026.8.3","payload_byte_count":722643145,"payload_file_count":14077,"payload_manifest_sha256":"cb0e331bcb2b4fe2fd0977401d246819aadb800b645ca31ec233ad4e25b96929","platform":"x86_64-unknown-linux-gnu","pyproject_sha256":"64d1085ee1c23caf0ae0d9e65c73e280f466362ed43fdda1531f18f3af1d9869","schema":"lattice.hermes.offline-runtime.v1","uv_lock_sha256":"aab3c83f71b683507a590b6315b23bdc0abd6b63b76b2349eae15bf00dfbaf2b"}"#;
-    const MANIFEST_SHA256: &str =
-        "e3a3272b6cead30cd2df1af755df031766475595fdacfb080d0886671b6d1fbb";
-    const RUNTIME_GUEST_ROOT: &str = concat!(
-        "/var/tmp/lattice-runtime-targets/",
-        "hermes-v2026.8.3-cpython-3.12.13-pbs-20260804-errorfix-v1"
-    );
-    const SECRET_SENTINEL: &str = "TASK056-SECRET";
-
-    struct FixtureCleanup(PathBuf);
-
-    impl Drop for FixtureCleanup {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
+fn retired_reflection_commands_reject_even_configured_legacy_requests() {
+    for command in [
+        "--hermes-prepare",
+        "--hermes-preflight",
+        "--hermes-runtime-preflight",
+        "--hermes-codex-broker-preflight",
+        "--hermes-reflect",
+        "--hermes-launch",
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+            .arg(command)
+            .env_clear()
+            .env("LATTICE_HERMES_MODE", "PRODUCTION")
+            .env("LATTICE_RUNTIME_INTEGRATION", "GRAPHIFY_HERMES")
+            .env("LATTICE_HERMES_API_KEY", "must-not-be-rendered")
+            .output()
+            .expect("run removed command");
+        assert_eq!(output.status.code(), Some(2), "{command}");
+        assert!(output.stdout.is_empty(), "{command}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            "LATTICED_ARGUMENTS_REJECTED\n",
+            "{command}"
+        );
     }
+}
 
-    assert_eq!(test_sha256(MANIFEST_BYTES), MANIFEST_SHA256);
-    let unique = NEXT_SCRIPTED_GATE_FIXTURE.fetch_add(1, Ordering::Relaxed);
-    let fixture_root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-        "task056-hermes-invalid-secret-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir_all(&fixture_root).expect("create test-owned Hermes fixture root");
-    let _cleanup = FixtureCleanup(fixture_root.clone());
-    let product_root = fixture_root.join("product");
-    fs::create_dir(&product_root).expect("create protected product root");
-    let preparation_root = fixture_root.join("prepared-assets");
-    let preparation = materialize_official_preparation_bundle(&preparation_root, &product_root)
-        .expect("materialize exact preparation gate fixture");
-    let manifest_path = fixture_root.join("TASK056-PATH-SENTINEL-manifest.json");
-    fs::write(&manifest_path, MANIFEST_BYTES).expect("write exact pinned manifest fixture");
-    let manifest_path_text = manifest_path
-        .to_str()
-        .expect("test-owned manifest path UTF-8");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
-        .arg("--hermes-preflight")
-        .env_clear()
-        .env("LATTICE_HERMES_PREPARATION_ROOT", &preparation_root)
-        .env(
-            "LATTICE_HERMES_PREPARATION_RECEIPT_SHA256",
-            preparation.receipt().bundle_sha256(),
-        )
-        .env("LATTICE_HERMES_RUNTIME_MANIFEST", manifest_path_text)
-        .env("LATTICE_HERMES_RUNTIME_GUEST_ROOT", RUNTIME_GUEST_ROOT)
-        .env("LATTICE_HERMES_API_KEY", SECRET_SENTINEL)
-        .env("LATTICE_HERMES_PRODUCT_ROOT", &product_root)
-        .env("LATTICE_HERMES_WSL_EXE", r"C:\Windows\System32\wsl.exe")
-        .env("LATTICE_HERMES_ISOLATION_PARENT", r"C:\")
-        .env("LATTICE_HERMES_CODEX_LAUNCHER", r"C:\codex\codex.exe")
-        .env("LATTICE_HERMES_CODEX_HOME", r"C:\codex\home")
-        .env(
-            "LATTICE_HERMES_BROKER_ISOLATION_ROOT",
-            r"C:\broker\isolation",
-        )
-        .env("LATTICE_HERMES_DEADLINE_SECONDS", "30")
-        .output()
-        .expect("start canonical latticed legacy-key preflight");
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(output.stdout.is_empty());
-    let stderr = String::from_utf8(output.stderr).expect("stderr utf8");
+#[test]
+fn retired_reflection_library_entries_reject_before_configuration_or_io() {
+    use lattice_runtime::composition::{
+        launch_hermes_from_environment, reflect_runtime_hermes_from_environment,
+        serve_full_chain_from_environment,
+    };
     assert_eq!(
-        stderr,
-        "LATTICE_HERMES_PREFLIGHT_CONFIGURATION_PRESENT_UNVERIFIED\n"
+        launch_hermes_from_environment().unwrap_err().kind(),
+        LatticedErrorKind::Configuration
     );
-    assert!(!stderr.contains(SECRET_SENTINEL));
-    assert!(!stderr.contains(manifest_path_text));
+    assert_eq!(
+        reflect_runtime_hermes_from_environment()
+            .unwrap_err()
+            .kind(),
+        LatticedErrorKind::Configuration
+    );
+    assert_eq!(
+        serve_full_chain_from_environment().unwrap_err().kind(),
+        LatticedErrorKind::Configuration
+    );
+    assert_eq!(
+        lattice_hermes_adapter::__run_codex_reflection_broker_helper(),
+        2
+    );
 }

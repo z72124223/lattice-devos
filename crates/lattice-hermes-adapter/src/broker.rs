@@ -967,6 +967,7 @@ impl CodexReflectionBrokerConfig {
         &self,
         deadline: Instant,
     ) -> HermesAdapterResult<CodexBrokerPreflightReceipt> {
+        crate::reject_retired_reflection()?;
         if deadline <= Instant::now() {
             return Err(timeout("HERMES_CODEX_BROKER_DEADLINE_EXCEEDED"));
         }
@@ -1013,6 +1014,7 @@ impl CodexReflectionBrokerConfig {
         job: &HermesReflectionJob,
         deadline: Instant,
     ) -> HermesAdapterResult<DirectCodexReflection> {
+        crate::reject_retired_reflection()?;
         if deadline <= Instant::now() || job.model() != self.model {
             return Err(configuration("HERMES_CODEX_DIRECT_REFLECTION_REJECTED"));
         }
@@ -1050,8 +1052,13 @@ impl CodexReflectionBrokerConfig {
                 &mut transcript,
             )?;
             if let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE") {
-                authenticate_codex_host(&mut duplex, &receiver, &mut transcript,
-                    Path::new(&source), deadline)?;
+                authenticate_codex_host(
+                    &mut duplex,
+                    &receiver,
+                    &mut transcript,
+                    Path::new(&source),
+                    deadline,
+                )?;
             }
             protocol
                 .mark_request_sent(CodexBrokerRequest::ThreadStart)
@@ -1080,7 +1087,8 @@ impl CodexReflectionBrokerConfig {
                 control.ensure_running()?;
                 let frame = receive_codex_frame(&receiver, &mut transcript, deadline)
                     .map_err(direct_protocol_error)?;
-                if let Some(terminal) = ingest_direct_codex_frame(&mut protocol, &frame, &control, &mut duplex)?
+                if let Some(terminal) =
+                    ingest_direct_codex_frame(&mut protocol, &frame, &control, &mut duplex)?
                 {
                     break terminal;
                 }
@@ -1450,7 +1458,9 @@ impl VerifiedCodexProxyConfig {
 #[cfg(windows)]
 fn read_host_access_token(source: &Path) -> HermesAdapterResult<Value> {
     let rejected = || configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
-    if !source.is_absolute() || source.file_name().and_then(|name| name.to_str()) != Some("auth.json") {
+    if !source.is_absolute()
+        || source.file_name().and_then(|name| name.to_str()) != Some("auth.json")
+    {
         return Err(rejected());
     }
     crate::reject_link_or_reparse_ancestors(source).map_err(|_| rejected())?;
@@ -1465,14 +1475,25 @@ fn access_token_from_host_auth(bytes: &[u8]) -> HermesAdapterResult<Value> {
     if auth.get("auth_mode").and_then(Value::as_str) != Some("chatgpt") {
         return Err(rejected());
     }
-    let access = auth.pointer("/tokens/access_token")
+    let access = auth
+        .pointer("/tokens/access_token")
         .and_then(Value::as_str)
-        .filter(|token| !token.is_empty() && token.len() <= 32_768
-            && token.bytes().all(|byte| byte.is_ascii_graphic()))
+        .filter(|token| {
+            !token.is_empty()
+                && token.len() <= 32_768
+                && token.bytes().all(|byte| byte.is_ascii_graphic())
+        })
         .ok_or_else(rejected)?;
-    let account = auth.pointer("/tokens/account_id").and_then(Value::as_str)
-        .filter(|value| !value.is_empty() && value.len() <= 256
-            && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_:".contains(&byte)))
+    let account = auth
+        .pointer("/tokens/account_id")
+        .and_then(Value::as_str)
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 256
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_:".contains(&byte))
+        })
         .ok_or_else(rejected)?;
     Ok(json!({"type":"chatgptAuthTokens", "accessToken":access, "chatgptAccountId":account}))
 }
@@ -1486,8 +1507,9 @@ fn authenticate_codex_host(
     deadline: Instant,
 ) -> HermesAdapterResult<()> {
     let params = read_host_access_token(source)?;
-    let mut encoded = serde_json::to_vec(&json!({"id":3,"method":"account/login/start","params":params}))
-        .map_err(|_| configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE"))?;
+    let mut encoded =
+        serde_json::to_vec(&json!({"id":3,"method":"account/login/start","params":params}))
+            .map_err(|_| configuration("HERMES_CODEX_HOST_AUTH_UNAVAILABLE"))?;
     encoded.push(b'\n');
     // External ChatGPT tokens live only in this one App Server process.
     // Neither token nor account identifier is logged, hashed or saved.
@@ -1497,23 +1519,41 @@ fn authenticate_codex_host(
     transcript.update(b"HOST_CHATGPT_AUTH_REQUEST\0");
     let mut seen = [false; 3];
     while !seen.iter().all(|value| *value) {
-        let frame = receive_codex_frame(receiver, transcript, deadline).map_err(direct_protocol_error)?;
+        let frame =
+            receive_codex_frame(receiver, transcript, deadline).map_err(direct_protocol_error)?;
         match &frame.kind {
             CodexAppServerFrameKind::Response { id: 3 }
-                if frame.value.get("result") == Some(&json!({"type":"chatgptAuthTokens"})) && !seen[0] => seen[0] = true,
-            CodexAppServerFrameKind::Lifecycle { method } if method == "account/login/completed" => {
-                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
-                if seen[1] { return Err(direct_protocol_error(89)); }
+                if frame.value.get("result") == Some(&json!({"type":"chatgptAuthTokens"}))
+                    && !seen[0] =>
+            {
+                seen[0] = true
+            }
+            CodexAppServerFrameKind::Lifecycle { method }
+                if method == "account/login/completed" =>
+            {
+                classify_notification(frame.value.as_object().unwrap())
+                    .map_err(|_| direct_protocol_error(89))?;
+                if seen[1] {
+                    return Err(direct_protocol_error(89));
+                }
                 seen[1] = true;
             }
             CodexAppServerFrameKind::Lifecycle { method } if method == "account/updated" => {
-                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
-                if seen[2] { return Err(direct_protocol_error(89)); }
+                classify_notification(frame.value.as_object().unwrap())
+                    .map_err(|_| direct_protocol_error(89))?;
+                if seen[2] {
+                    return Err(direct_protocol_error(89));
+                }
                 seen[2] = true;
             }
-            CodexAppServerFrameKind::Lifecycle { method } if matches!(method.as_str(),
-                "warning" | "remoteControl/status/changed" | "mcpServer/startupStatus/updated") => {
-                classify_notification(frame.value.as_object().unwrap()).map_err(|_| direct_protocol_error(89))?;
+            CodexAppServerFrameKind::Lifecycle { method }
+                if matches!(
+                    method.as_str(),
+                    "warning" | "remoteControl/status/changed" | "mcpServer/startupStatus/updated"
+                ) =>
+            {
+                classify_notification(frame.value.as_object().unwrap())
+                    .map_err(|_| direct_protocol_error(89))?;
             }
             _ => return Err(direct_protocol_error(89)),
         }
@@ -1527,15 +1567,24 @@ mod host_auth_tests {
 
     #[test]
     fn host_access_is_read_fresh_without_writing_or_exporting_refresh_credentials() {
-        let root = std::env::temp_dir().join(format!("lattice-host-auth-{}-{}",
-            std::process::id(), SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "lattice-host-auth-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         fs::create_dir(&root).unwrap();
         let source = root.join("auth.json");
         for token in ["fixture-first-access", "fixture-renewed-access"] {
             let bytes = serde_json::to_vec(&json!({"auth_mode":"chatgpt",
                 "tokens":{"access_token":token,"account_id":"fixture-account","refresh_token":"fixture-refresh-never-export"}})).unwrap();
             fs::write(&source, &bytes).unwrap();
-            assert_eq!(read_host_access_token(&source).unwrap(), json!({"type":"chatgptAuthTokens", "accessToken":token, "chatgptAccountId":"fixture-account"}));
+            assert_eq!(
+                read_host_access_token(&source).unwrap(),
+                json!({"type":"chatgptAuthTokens", "accessToken":token, "chatgptAccountId":"fixture-account"})
+            );
             assert_eq!(fs::read(&source).unwrap(), bytes);
             assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
         }
@@ -1545,9 +1594,12 @@ mod host_auth_tests {
 
     #[test]
     fn unavailable_host_auth_never_falls_back_to_a_stale_copy() {
-        for bytes in [b"{}".as_slice(), br#"{"auth_mode":"apikey","tokens":{"access_token":"fixture"}}"#,
+        for bytes in [
+            b"{}".as_slice(),
+            br#"{"auth_mode":"apikey","tokens":{"access_token":"fixture"}}"#,
             br#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"fixture"}}"#,
-            br#"{"auth_mode":"chatgpt","tokens":{"access_token":"bad\ntoken"}}"#] {
+            br#"{"auth_mode":"chatgpt","tokens":{"access_token":"bad\ntoken"}}"#,
+        ] {
             let failure = access_token_from_host_auth(bytes).unwrap_err();
             assert_eq!(failure.code(), "HERMES_CODEX_HOST_AUTH_UNAVAILABLE");
         }
@@ -1557,10 +1609,19 @@ mod host_auth_tests {
     #[test]
     fn host_refresh_is_limited_to_the_current_account() {
         let auth = json!({"chatgptAccountId":"fixture-account"});
-        assert!(host_refresh_matches(&json!({"reason":"unauthorized"}), &auth));
-        assert!(host_refresh_matches(&json!({"reason":"unauthorized","previousAccountId":"fixture-account"}), &auth));
-        for params in [json!({"reason":"unauthorized","previousAccountId":"other-account"}),
-            json!({"reason":"other"}), json!({"reason":"unauthorized","command":"ignored"})] {
+        assert!(host_refresh_matches(
+            &json!({"reason":"unauthorized"}),
+            &auth
+        ));
+        assert!(host_refresh_matches(
+            &json!({"reason":"unauthorized","previousAccountId":"fixture-account"}),
+            &auth
+        ));
+        for params in [
+            json!({"reason":"unauthorized","previousAccountId":"other-account"}),
+            json!({"reason":"other"}),
+            json!({"reason":"unauthorized","command":"ignored"}),
+        ] {
             assert!(!host_refresh_matches(&params, &auth));
         }
     }
@@ -2646,8 +2707,13 @@ fn ingest_direct_codex_frame(
         && let Some(source) = std::env::var_os("LATTICE_HERMES_CODEX_AUTH_SOURCE")
     {
         let mut auth = read_host_access_token(Path::new(&source))?;
-        let params = frame.value.get("params").ok_or_else(|| direct_protocol_error(89))?;
-        if !host_refresh_matches(params, &auth) { return Err(direct_protocol_error(89)); }
+        let params = frame
+            .value
+            .get("params")
+            .ok_or_else(|| direct_protocol_error(89))?;
+        if !host_refresh_matches(params, &auth) {
+            return Err(direct_protocol_error(89));
+        }
         protocol.host_auth_refresh_used = true;
         auth.as_object_mut().unwrap().remove("type");
         let mut encoded = serde_json::to_vec(&json!({"id":id,"result":auth}))
@@ -2661,7 +2727,8 @@ fn ingest_direct_codex_frame(
     if matches!(frame.kind, CodexAppServerFrameKind::ServerRequest { .. }) {
         let _ = control.terminate();
         if matches!(&frame.kind, CodexAppServerFrameKind::ServerRequest { method, .. }
-            if method == "account/chatgptAuthTokens/refresh") {
+            if method == "account/chatgptAuthTokens/refresh")
+        {
             return Err(direct_protocol_error(89));
         }
         return Err(HermesAdapterError::new(
@@ -2674,11 +2741,16 @@ fn ingest_direct_codex_frame(
 
 #[cfg(any(windows, test))]
 fn host_refresh_matches(params: &Value, auth: &Value) -> bool {
-    params.as_object().is_some_and(|fields| fields.len() <= 2
-        && fields.keys().all(|key| ["reason", "previousAccountId"].contains(&key.as_str()))
-        && fields.get("reason").and_then(Value::as_str) == Some("unauthorized")
-        && fields.get("previousAccountId").is_none_or(|previous|
-            previous.is_null() || previous == &auth["chatgptAccountId"]))
+    params.as_object().is_some_and(|fields| {
+        fields.len() <= 2
+            && fields
+                .keys()
+                .all(|key| ["reason", "previousAccountId"].contains(&key.as_str()))
+            && fields.get("reason").and_then(Value::as_str) == Some("unauthorized")
+            && fields
+                .get("previousAccountId")
+                .is_none_or(|previous| previous.is_null() || previous == &auth["chatgptAccountId"])
+    })
 }
 
 #[cfg(windows)]
@@ -3098,7 +3170,11 @@ impl CodexBrokerProtocol {
             CodexAppServerFrameKind::ServerRequest { .. } => return Err(74),
             CodexAppServerFrameKind::Lifecycle { method } if method == "error" => {
                 self.require_turn_request()?;
-                let params = frame.value.get("params").and_then(Value::as_object).ok_or(76)?;
+                let params = frame
+                    .value
+                    .get("params")
+                    .and_then(Value::as_object)
+                    .ok_or(76)?;
                 self.validate_thread_binding(params, 76)?;
                 let turn_id = required_nonempty_string(params, "turnId").map_err(|_| 76)?;
                 self.bind_turn_id(&turn_id, 76)?;
@@ -3107,8 +3183,10 @@ impl CodexBrokerProtocol {
                 let error = params.get("error").and_then(Value::as_object).ok_or(76)?;
                 let authentication = error.get("codexErrorInfo").and_then(Value::as_str)
                     == Some("unauthorized")
-                    || error.get("message").and_then(Value::as_str).is_some_and(|message|
-                        message.contains("refresh token was revoked"));
+                    || error
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .is_some_and(|message| message.contains("refresh token was revoked"));
                 return Err(if authentication { 89 } else { 90 });
             }
             CodexAppServerFrameKind::Lifecycle { method } if method == "thread/started" => {
@@ -4306,28 +4384,43 @@ fn classify_notification(
         .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
     match method {
         "account/login/completed" => {
-            if params != json!({"loginId":null,"success":true,"error":null}).as_object().unwrap() {
+            if params
+                != json!({"loginId":null,"success":true,"error":null})
+                    .as_object()
+                    .unwrap()
+            {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }
         "account/updated" => {
             require_control_keys(params, &["authMode", "planType"])?;
             if params.get("authMode").and_then(Value::as_str) != Some("chatgptAuthTokens")
-                || !params.get("planType").is_some_and(|value| value.is_null() || value.is_string()) {
+                || !params
+                    .get("planType")
+                    .is_some_and(|value| value.is_null() || value.is_string())
+            {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }
         }
         "error" => {
             require_control_keys(params, &["error", "threadId", "turnId", "willRetry"])?;
-            let error = params.get("error").and_then(Value::as_object)
+            let error = params
+                .get("error")
+                .and_then(Value::as_object)
                 .ok_or_else(|| fatal("HERMES_CODEX_BROKER_FATAL_FRAME"))?;
             if !params.get("threadId").is_some_and(Value::is_string)
                 || !params.get("turnId").is_some_and(Value::is_string)
                 || !params.get("willRetry").is_some_and(Value::is_boolean)
                 || !error.get("message").is_some_and(Value::is_string)
-                || error.keys().any(|key| !["message", "codexErrorInfo", "additionalDetails"].contains(&key.as_str()))
-                || error.get("additionalDetails").is_some_and(|value| !value.is_null() && !value.is_string())
-                || error.get("codexErrorInfo").is_some_and(|value| !value.is_null() && !value.is_string() && !value.is_object())
+                || error.keys().any(|key| {
+                    !["message", "codexErrorInfo", "additionalDetails"].contains(&key.as_str())
+                })
+                || error
+                    .get("additionalDetails")
+                    .is_some_and(|value| !value.is_null() && !value.is_string())
+                || error.get("codexErrorInfo").is_some_and(|value| {
+                    !value.is_null() && !value.is_string() && !value.is_object()
+                })
             {
                 return Err(fatal("HERMES_CODEX_BROKER_FATAL_FRAME"));
             }

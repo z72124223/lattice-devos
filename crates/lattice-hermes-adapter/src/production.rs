@@ -293,6 +293,14 @@ impl Drop for ProductionOwnedRoot {
     }
 }
 
+// No environment variable or legacy caller can restore the retired service.
+fn reject_retired_reflection() -> HermesAdapterResult<()> {
+    Err(error(
+        HermesAdapterErrorKind::Configuration,
+        "LATTICE_HERMES_RETIRED",
+    ))
+}
+
 fn production_root_cleanup_error() -> HermesAdapterError {
     error(
         HermesAdapterErrorKind::Ambiguous,
@@ -2282,6 +2290,7 @@ impl HermesProductionRunnerConfig {
     /// Fails closed on deadline, path, launcher, runtime, broker, socketpair,
     /// endpoint, PID, containment-frame, child-liveness, or startup ambiguity.
     pub fn launch(self, absolute_deadline: Instant) -> HermesAdapterResult<ProductionHermesRunner> {
+        reject_retired_reflection()?;
         self.launch_inner(absolute_deadline)
     }
 
@@ -2836,6 +2845,7 @@ impl ProductionHermesPort {
     }
 
     fn prepare_operation(&mut self) -> PortResult<()> {
+        crate::reject_retired_reflection().map_err(|failure| map_port_error(&failure))?;
         self.ensure_live()?;
         let remaining = self
             .absolute_deadline

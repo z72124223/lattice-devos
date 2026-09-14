@@ -44,6 +44,9 @@ pub use runtime::{
 #[doc(hidden)]
 #[must_use]
 pub fn __run_codex_reflection_broker_helper() -> i32 {
+    if reject_retired_reflection().is_err() {
+        return 2;
+    }
     broker::run_codex_reflection_broker_helper()
 }
 
@@ -438,6 +441,7 @@ impl HermesProcessConfig {
     /// Returns a configuration error if a required environment value cannot be
     /// represented safely.
     pub fn gateway_command(&self) -> HermesAdapterResult<Command> {
+        crate::reject_retired_reflection()?;
         let mut command = self.base_command_with_arg("gateway");
         command
             .env("API_SERVER_ENABLED", "true")
@@ -458,6 +462,7 @@ impl HermesProcessConfig {
     ///
     /// This fixed command shape currently has no fallible inputs.
     pub fn version_probe_command(&self) -> HermesAdapterResult<Command> {
+        crate::reject_retired_reflection()?;
         Ok(self.base_command_with_arg("--version"))
     }
 
@@ -469,6 +474,7 @@ impl HermesProcessConfig {
     /// Fails closed when the probe cannot run, exits unsuccessfully, or does
     /// not contain the exact standalone package-version token.
     pub fn verify_pinned_version(&self) -> HermesAdapterResult<()> {
+        crate::reject_retired_reflection()?;
         self.verify_executable_identity()?;
         let mut command = self.version_probe_command()?;
         let output = bounded_output(&mut command, self.startup_timeout)?;
@@ -487,6 +493,7 @@ impl HermesProcessConfig {
     ///
     /// Fails closed on identity, home ownership, or process-spawn ambiguity.
     pub fn spawn(&self) -> HermesAdapterResult<HermesProcess> {
+        crate::reject_retired_reflection()?;
         prepare_isolated_run(self)?;
         self.verify_pinned_version()?;
         validate_prepared_isolation(self)?;
@@ -1315,6 +1322,7 @@ impl HermesReflectionAdapter {
         config: HermesAdapterConfig,
         job: HermesReflectionJob,
     ) -> HermesAdapterResult<Self> {
+        crate::reject_retired_reflection()?;
         Ok(Self {
             config,
             job,
@@ -1532,6 +1540,7 @@ impl HermesReflectionAdapter {
     }
 
     fn require_containment_receipt(&self) -> HermesAdapterResult<&HermesContainmentReceipt> {
+        crate::reject_retired_reflection()?;
         let receipt = self.config.containment_receipt.as_ref().ok_or_else(|| {
             error(
                 HermesAdapterErrorKind::Configuration,
@@ -3468,4 +3477,12 @@ mod tests {
     mod reflection_api {
         include!("../tests/reflection_api.rs");
     }
+}
+
+// Historical receipt types remain readable; execution has no opt-in switch.
+pub(crate) fn reject_retired_reflection() -> HermesAdapterResult<()> {
+    Err(error(
+        HermesAdapterErrorKind::Configuration,
+        "LATTICE_HERMES_RETIRED",
+    ))
 }
