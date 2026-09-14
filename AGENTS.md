@@ -11,17 +11,14 @@ smallest workflow and verification that can prove the requested result.
   and the backend task, relationship, decision, and evidence APIs.
 - LATTICE is one local Runtime with three core functions: LATTICE control,
   PostgreSQL durable facts, and Graphify derived relationship memory. Use the
-  `GRAPHIFY` integration mode for the main product. Hermes is a suspended,
-  optional reflection module; retain its code and historical data, but do not
-  require its login or reflection for normal work or three-core acceptance.
-  Codex owns reasoning and review. Resume Hermes development only for an
-  explicitly approved use case with measurable additional value.
+  `GRAPHIFY` integration mode for the main product. Hermes reflection is retired:
+  do not restore an activation path, login, configuration, or reflection workflow.
+  Codex owns reasoning and review.
 - PostgreSQL is the only authoritative durable truth. Graphify is rebuilt from
-  that truth when necessary. Hermes may create observations or suggestions, but
-  never overwrites authoritative facts by itself.
-- PostgreSQL failure makes durable Runtime work unavailable. Graphify or Hermes
-  failure is a visible degraded mode: preserve facts and receipts, keep the
-  control core usable where possible, and repair or rebuild only that module.
+  that truth when necessary.
+- PostgreSQL failure makes durable Runtime work unavailable. Graphify failure is
+  a visible degraded mode: preserve facts and receipts, keep the control core
+  usable where possible, and repair or rebuild only that module.
 - Keep runtime health separate from delivery receipts. A successful PostgreSQL
   health probe proves only that the fixed durable-facts connection is available;
   it never implies that a delivery was started, completed, failed, or corrupt.

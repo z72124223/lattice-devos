@@ -3689,7 +3689,7 @@ fn tool_catalog(protocol: RequestProtocol, surface: ToolSurface) -> Value {
             json!({
                 "name": RUNTIME_STATUS_TOOL,
                 "title": "Read LATTICE Runtime component status",
-                "description": "Reads PostgreSQL, Graphify, and Hermes activation or degradation state without starting optional components.",
+                "description": "Reads PostgreSQL and Graphify activation or degradation state without starting optional components.",
                 "inputSchema": delivery_arguments_schema()
             }),
             json!({

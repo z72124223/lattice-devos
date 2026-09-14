@@ -1,36 +1,5 @@
 use std::process::ExitCode;
 
-fn run_hermes_prepare() -> ExitCode {
-    let Some(preparation_root) = std::env::var_os("LATTICE_HERMES_PREPARATION_ROOT") else {
-        eprintln!("LATTICE_HERMES_PREPARE_MISSING_CONFIGURATION:LATTICE_HERMES_PREPARATION_ROOT");
-        return ExitCode::from(2);
-    };
-    let Some(product_root) = std::env::var_os("LATTICE_HERMES_PRODUCT_ROOT") else {
-        eprintln!("LATTICE_HERMES_PREPARE_MISSING_CONFIGURATION:LATTICE_HERMES_PRODUCT_ROOT");
-        return ExitCode::from(2);
-    };
-    match lattice_hermes_adapter::preparation::materialize_official_preparation_bundle(
-        std::path::Path::new(&preparation_root),
-        std::path::Path::new(&product_root),
-    ) {
-        Ok(outcome) => {
-            eprintln!("{}", outcome.render());
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            let classification = match error.code() {
-                "HERMES_PREPARATION_TARGET_REJECTED" => "TARGET_REJECTED",
-                "HERMES_PREPARATION_ASSET_CONFLICT" => "ASSET_CONFLICT",
-                "HERMES_PREPARATION_WRITE_REJECTED" => "WRITE_REJECTED",
-                "HERMES_PREPARATION_RECONCILIATION_REQUIRED" => "RECONCILIATION_REQUIRED",
-                _ => "PREPARATION_REJECTED",
-            };
-            eprintln!("LATTICE_HERMES_PREPARE_{classification}");
-            ExitCode::from(2)
-        }
-    }
-}
-
 fn main() -> ExitCode {
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
@@ -104,34 +73,6 @@ fn main() -> ExitCode {
                 }
             };
         }
-        if argument == "--hermes-prepare" && arguments.next().is_none() {
-            return run_hermes_prepare();
-        }
-        if argument == "--hermes-preflight" && arguments.next().is_none() {
-            let preflight =
-                lattice_runtime::composition::hermes_production_preflight_from_environment();
-            eprintln!("{}", preflight.render());
-            return ExitCode::from(2);
-        }
-        if argument == "--hermes-runtime-preflight" && arguments.next().is_none() {
-            let preflight =
-                lattice_runtime::composition::hermes_runtime_preflight_from_environment();
-            eprintln!("{}", preflight.render());
-            return ExitCode::from(2);
-        }
-        if argument == "--hermes-codex-broker-preflight" && arguments.next().is_none() {
-            let preflight =
-                lattice_runtime::composition::hermes_codex_broker_preflight_from_environment();
-            eprintln!("{}", preflight.render());
-            return if matches!(
-                preflight,
-                lattice_runtime::composition::HermesCodexBrokerPreflight::Ready
-            ) {
-                ExitCode::SUCCESS
-            } else {
-                ExitCode::from(2)
-            };
-        }
         if argument == "--graphify-runtime-preflight" && arguments.next().is_none() {
             let preflight =
                 lattice_runtime::composition::graphify_runtime_preflight_from_environment();
@@ -164,27 +105,6 @@ fn main() -> ExitCode {
                 }
             };
         }
-        if argument == "--hermes-reflect" && arguments.next().is_none() {
-            return match lattice_runtime::composition::reflect_runtime_hermes_from_environment() {
-                Ok(receipt) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "component": "hermes", "status": "INFERENCE_CANDIDATE",
-                            "summary": receipt.content().summary(),
-                            "graph_receipt_digest": receipt.graph_receipt_digest().as_str(),
-                            "receipt_digest": receipt.receipt_digest().as_str(),
-                        })
-                    );
-                    eprintln!("LATTICE_HERMES_REFLECTION_READY");
-                    ExitCode::SUCCESS
-                }
-                Err(error) => {
-                    eprintln!("{}", error.code());
-                    ExitCode::from(2)
-                }
-            };
-        }
         if argument == "--postgres-bootstrap" && arguments.next().is_none() {
             return match lattice_runtime::composition::bootstrap_postgres_extensions_from_environment() {
                 Ok(()) => {
@@ -204,15 +124,6 @@ fn main() -> ExitCode {
                     eprintln!("LATTICE_POSTGRES_INITIALIZE_READY");
                     ExitCode::SUCCESS
                 }
-                Err(error) => {
-                    eprintln!("{}", error.code());
-                    ExitCode::from(2)
-                }
-            };
-        }
-        if argument == "--hermes-launch" && arguments.next().is_none() {
-            return match lattice_runtime::composition::launch_hermes_from_environment() {
-                Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("{}", error.code());
                     ExitCode::from(2)

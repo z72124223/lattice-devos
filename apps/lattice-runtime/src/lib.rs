@@ -564,12 +564,9 @@ fn execute_runtime_health(database: &DeliveryDatabaseBinding) -> Result<Value, R
 }
 
 fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, RuntimeError> {
-    let (mode, graphify_status, hermes_status) = match integration_mode {
-        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED", "DEFERRED"),
-        Some("GRAPHIFY") => ("GRAPHIFY", "NOT_INSPECTED", "DEFERRED"),
-        Some("GRAPHIFY_HERMES") | Some("FULL_CHAIN") => {
-            ("GRAPHIFY_HERMES", "NOT_INSPECTED", "NOT_INSPECTED")
-        }
+    let (mode, graphify_status) = match integration_mode {
+        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED"),
+        Some("GRAPHIFY") => ("GRAPHIFY", "NOT_INSPECTED"),
         Some(_) => return Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
     };
 
@@ -580,8 +577,7 @@ fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, Ru
             "control": {"status": "READY", "role": "coordination"},
             "postgresql": {"status": "CONNECTABLE", "role": "durable-truth"},
             "delivery_receipt": {"status": "NOT_INSPECTED", "role": "read-separately"},
-            "graphify": {"status": graphify_status, "role": "derived-memory"},
-            "hermes": {"status": hermes_status, "role": "reflection"}
+            "graphify": {"status": graphify_status, "role": "derived-memory"}
         }
     }))
 }
@@ -694,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn core_only_health_reports_optional_modules_as_deferred_without_activating_them() {
+    fn core_only_health_reports_graphify_as_deferred_without_activating_it() {
         let health = runtime_health_projection(Some("CORE_ONLY")).expect("core-only health");
 
         assert_eq!(health["runtime"], "LATTICE");
@@ -706,7 +702,7 @@ mod tests {
             "NOT_INSPECTED"
         );
         assert_eq!(health["components"]["graphify"]["status"], "DEFERRED");
-        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
+        assert!(health["components"].get("hermes").is_none());
     }
 
     #[test]
@@ -720,11 +716,11 @@ mod tests {
     }
 
     #[test]
-    fn graphify_health_does_not_claim_hermes_is_active() {
+    fn graphify_health_has_no_reflection_component() {
         let health = runtime_health_projection(Some("GRAPHIFY")).expect("graphify health");
         assert_eq!(health["mode"], "GRAPHIFY");
         assert_eq!(health["components"]["graphify"]["status"], "NOT_INSPECTED");
-        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
+        assert!(health["components"].get("hermes").is_none());
     }
 
     #[test]

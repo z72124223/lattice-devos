@@ -12,9 +12,8 @@ LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 | PostgreSQL | 唯一權威資料來源，保存工作、決策與證據 |
 | Graphify | 可重建的程式關係與影響查詢 |
 
-Hermes 暫停啟用，保留程式與歷史反思資料，列為選配。
-主版本使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`，不需要 Hermes 登入。
-推理與檢查由 Codex 執行；一般工作與三核心驗收不再等待 Hermes。
+Hermes 反思功能已自正式產品退休，沒有登入、設定或命令可以重新啟用它。
+主版本使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`。推理與檢查由 Codex 執行。
 
 工作樹的上下層關係和程式圖譜的呼叫關係仍保存在後台。
 移除的是觀看介面，沒有刪除工作資料、驗收結果、程式分析或核心契約。
@@ -62,11 +61,11 @@ npm.cmd test
 npm.cmd run check
 ```
 
-PostgreSQL 故障時，正式工作不可用。Graphify、Hermes 可以獨立降級及修復，
-不能拿其失敗或「就緒」狀態改寫正式工作結果。
+PostgreSQL 故障時，正式工作不可用。Graphify 可以獨立降級及修復，不能拿其
+失敗或「就緒」狀態改寫正式工作結果。
 狀態查詢中的 PREPARED 只代表配置存在；Graphify 的完整身分檢查仍在
-實際分析時執行。Hermes 的 DEFERRED 表示主版本未啟用。測試通過只證明
-受測路徑；GitHub 推送、合併及發布另依使用者當次指示處理。
+實際分析時執行。測試通過只證明受測路徑；GitHub 推送、合併及發布另依使用者
+當次指示處理。
 
 現行產品方向以 [AGENTS.md](AGENTS.md) 為準；歷史文件與提交保留作追溯，
 其中的網頁、桌面安裝及截圖步驟不再是目前產品要求。
