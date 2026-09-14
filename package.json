@@ -1,6 +1,6 @@
 {
   "name": "lattice-devos",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Stable three-core background services for Codex App: control, PostgreSQL, and Graphify.",
   "type": "module",

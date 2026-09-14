@@ -1,4 +1,4 @@
-# LATTICE DevOS
+# LATTICE DevOS 2.0
 
 LATTICE 是支援 **Codex App 的三核心後台**。使用者只操作 Codex App；
 LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
@@ -22,9 +22,23 @@ LATTICE 不建立第二套通用代理迴圈或操作平台。
 
 ## 使用方式
 
+2.0 為三核心正式版，移除舊版 Hermes 啟動命令與四核心模式，屬不相容變更。
+目前支援已配置依賴的 Windows 本機環境；新機安裝與備份／還原步驟見
+[本機 Runtime 安裝說明](docs/customer-runtime.md)。完整依賴的一鍵可攜封裝仍是候選功能，
+不包含在本次正式版保證內。
+
 在 Codex App 透過已設定的 LATTICE MCP 連線使用 latticed。
 新工作先呼叫 lattice_runtime_status，再讀取或登記正式工作。
 單純讀取狀態不會自行呼叫模型；就緒狀態也不代表任務已驗收完成。
+
+Codex 執行工作後，可用 `--local-result-import` 提交可驗證的本機交付：
+Runtime 實際執行指定的 Node 測試、保存證據，再由正式工作帳本記錄完成。
+重新連線後用 `lattice_task_status` 讀回結果。此流程不會另啟模型；
+舊的受控模型示範流程及歷史失敗收據不能替代這項交付驗收。
+
+升級前保留設定與資料庫備份。移除 LATTICE 設定中的 `LATTICE_HERMES_*` 欄位，
+使用 `GRAPHIFY` 模式，並明確設定 `LATTICE_DELIVERY_LAUNCHER`；
+更新執行檔後讓 Codex 重新連線，既有程序不會自動換成新版本。
 
 既有本機相容 API 仍供後台工具使用，可用以下命令啟動：
 
