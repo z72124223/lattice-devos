@@ -1,7 +1,5 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import path from "node:path";
+import { pathToFileURL } from "node:url";
 import process from "node:process";
 import { CodexAppServer } from "./codex-app-server.mjs";
 import {
@@ -15,9 +13,12 @@ import { LatticeControlService } from "./service.mjs";
 import { LatticeStore } from "./store.mjs";
 import { FormalWorkStore } from "./formal-work-store.mjs";
 import { FormalTaskService } from "./formal-task-service.mjs";
+import { CodeGraphStore } from './code-graph.mjs';
 
-const sourceDirectory = path.dirname(fileURLToPath(import.meta.url));
-const publicDirectory = path.resolve(sourceDirectory, "..", "public");
+const retiredVisualRoutes = new Set([
+  "/", "/index.html", "/work-view.mjs", "/work-view.css",
+  "/code-graph-view.mjs", "/code-graph-model.mjs", "/code-graph.css",
+]);
 const maximumDesktopShutdownFrameBytes = 4_096;
 const desktopShutdownSchemaVersion = "lattice.control.desktop-shutdown.v1";
 
@@ -173,6 +174,7 @@ export function createLatticeServer({
     store,
     codex,
     formalWorkStore,
+    codeGraphStore: new CodeGraphStore(),
     ...(projectInspector ? { projectInspector } : {}),
     ...(conversationModel ? { conversationModel } : {}),
     ...(conversationStartTimeoutMs ? { conversationStartTimeoutMs } : {}),
@@ -251,14 +253,12 @@ export function createLatticeServer({
       inFlightRequests.add(trackedRequest);
       const url = new URL(request.url, "http://127.0.0.1");
       assertMutationAdmission(request, url);
-      if (request.method === "GET" && url.pathname === "/") {
-        const body = await readFile(path.join(publicDirectory, "index.html"));
-        response.writeHead(200, {
-          "content-type": "text/html; charset=utf-8",
-          "content-length": body.length,
-          "cache-control": "no-store",
+      if (request.method === "GET" && retiredVisualRoutes.has(url.pathname)) {
+        sendJson(response, 410, {
+          code: "LATTICE_VISUAL_PLATFORM_REMOVED",
+          message: "LATTICE 已改為後台服務，請從 Codex App 使用。",
+          interface: "CODEX_APP",
         });
-        response.end(body);
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
@@ -326,10 +326,27 @@ export function createLatticeServer({
         sendJson(response, 200, await service.fourCoreSurface());
         return;
       }
+      if (request.method === "GET" && url.pathname === "/api/work-view") {
+        sendJson(response, 200, await service.workViewSurface(url.searchParams.get("projectId")));
+        return;
+      }
+      if (request.method === 'GET' && url.pathname === '/api/code-graph') {
+        sendJson(response, 200, await service.codeGraphSurface(url.searchParams.get('projectId'),
+          Object.fromEntries(['node','q','direction','depth','checkout'].filter(k => url.searchParams.has(k))
+            .map(k => [k, url.searchParams.get(k)]))));
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/api/code-graph/analyze') {
+        const body = await readMutationJson(request, url);
+        if (Object.keys(body).some(k => !['projectId','checkout'].includes(k))) throw new TypeError('Invalid code graph request');
+        sendJson(response, 202, await service.codeGraphSurface(body.projectId, {checkout:body.checkout}, true));
+        return;
+      }
       const fourCoreWorkItemId = fourCoreRouteId(url.pathname, "work");
       if (request.method === "GET" && fourCoreWorkItemId) {
         sendJson(response, 200, await service.fourCoreWorkNode({
           workItemId: fourCoreWorkItemId,
+          projectId: url.searchParams.get("projectId"),
           expectedRevision: url.searchParams.get("revision"),
           expectedDigest: url.searchParams.get("digest"),
         }));
@@ -520,6 +537,7 @@ export function createLatticeServer({
       .then(() => resolvedRuntimeHealth.close?.())
       .catch(() => { process.exitCode = 1; });
     service.close();
+    void service.codeGraphStore?.close();
     void codex.close();
     void formalTasks?.close();
     void formalWorkStore?.close();
@@ -554,6 +572,8 @@ export function createLatticeServer({
         });
         await drainRequests(deadline);
         service.close();
+        const graphResult = await settleWithin(service.codeGraphStore?.close(), deadline);
+        if (!graphResult.settled || graphResult.error) throw shutdownDrainTimeoutError();
         if (formalTasks) {
           const formalResult = await settleWithin(formalTasks.close(), deadline);
           if (!formalResult.settled || formalResult.error) throw shutdownDrainTimeoutError();
@@ -652,10 +672,8 @@ export async function startDefaultServer() {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
-  application.codexPrewarm = application.service.prewarmCodex()
-    .catch((error) => ({ ready: false, error }));
   application.formalRestore = application.formalTasks.restore(application.service.state().projects.map((project) => project.id));
-  process.stdout.write(`LATTICE Control: http://127.0.0.1:${port}\n`);
+  process.stdout.write(`LATTICE background API: http://127.0.0.1:${port} (use Codex App)\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });
   }

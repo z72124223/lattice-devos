@@ -792,6 +792,28 @@ fn new_codex_protocol_fixture() -> (CodexBrokerProtocol, std::path::PathBuf) {
     (protocol, fixture_root)
 }
 
+#[test]
+fn upstream_error_reports_authentication_without_accepting_success_or_foreign_turns() {
+    for (thread_id, error, expected) in [
+        ("thread-1", serde_json::json!({"message":"Sign in again", "codexErrorInfo":"unauthorized"}), 89),
+        ("thread-1", serde_json::json!({"message":"Your refresh token was revoked. Please log out and sign in again.", "codexErrorInfo":"other"}), 89),
+        ("thread-1", serde_json::json!({"message":"Provider failed", "codexErrorInfo":"other"}), 90),
+        ("wrong-thread", serde_json::json!({"message":"Sign in again", "codexErrorInfo":"unauthorized"}), 76),
+    ] {
+        let (mut protocol, root) = new_codex_protocol_fixture();
+        admit_valid_initialize(&mut protocol, &root.join("codex-home"));
+        admit_valid_thread(&mut protocol, &root.join("empty-cwd"));
+        protocol.mark_request_sent(CodexBrokerRequest::TurnStart).expect("turn sent");
+        let notification = serde_json::json!({
+            "emittedAtMs": 1788685648000u64,
+            "method": "error",
+            "params": {"threadId":thread_id, "turnId":"turn-1", "willRetry":false, "error":error}
+        });
+        assert_eq!(protocol.ingest_json_line(notification.to_string().as_bytes()), Err(expected));
+        std::fs::remove_dir_all(root).expect("remove owned protocol fixture");
+    }
+}
+
 fn admit_valid_initialize(protocol: &mut CodexBrokerProtocol, codex_home: &std::path::Path) {
     protocol
         .mark_request_sent(CodexBrokerRequest::Initialize)
@@ -1861,6 +1883,26 @@ fn failed_run_details_are_bounded_and_reduced_to_fixed_safe_hints() {
             observe_failed_run(detail, false, &format!("run_event_schema_{index}"));
         assert_eq!(event_failure.kind(), HermesAdapterErrorKind::Malformed);
         assert_eq!(event_failure.code(), "HERMES_EVENT_MALFORMED");
+    }
+}
+
+#[test]
+fn observations_are_bound_to_the_job_and_prompt_requests_real_reflection() {
+    let make = |observation: &str| HermesReflectionJob::new(
+        request(), "lattice-task-034-session", "hermes-agent",
+        vec![ReflectionEvidence::new(ReflectionEvidenceKind::Graphify, digest(GRAPH_DIGEST))
+            .unwrap().with_observation(observation).unwrap()],
+    ).unwrap();
+    let first = make("The saved analysis contains 42 records; no test results were supplied.");
+    let changed = make("The saved analysis contains 43 records; no test results were supplied.");
+    assert_ne!(first.input_digest(), changed.input_digest());
+    assert!(first.prompt().contains("42 records"));
+    assert!(first.prompt().contains("write your own summary"));
+    assert!(!first.prompt().contains("Evidence-bound LATTICE reflection completed."));
+    assert!(!first.prompt().contains("Return exactly this compact JSON object"));
+    for bad in ["password=example", "", "line one\nline two"] {
+        assert!(ReflectionEvidence::new(ReflectionEvidenceKind::Graphify, digest(GRAPH_DIGEST))
+            .unwrap().with_observation(bad).is_err());
     }
 }
 

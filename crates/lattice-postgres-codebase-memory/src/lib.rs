@@ -16,7 +16,8 @@ pub use adapter::PostgresCodebaseMemory;
 pub use setup::{
     ExtensionApplyOutcome, ExtensionBootstrapGlobalProfile, ExtensionBootstrapProfile,
     ExtensionCatalogEvidence, ExtensionDatabaseRole, ExtensionSetupError, ExtensionSetupErrorKind,
-    ExtensionTarget, apply_extension, inspect_bootstrap_profile, verify_extension,
+    ExtensionTarget, apply_extension, apply_store_v8_compatibility, inspect_bootstrap_profile,
+    verify_extension, verify_store_v8_compatibility,
 };
 
 /// Repository-relative location of the frozen v1 extension profile.

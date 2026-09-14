@@ -2447,15 +2447,20 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
         ForemanExtensionTarget::new(database.database_name(), database.run_id())
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
     let terminal_current = if action == PostgresBootstrapAction::V8VerifyOnly {
-        verify_postgres_foreman_extension(
+        lattice_postgres_codebase_memory::verify_store_v8_compatibility(
             &mut migrator,
-            &foreman_target,
-            ForemanExtensionDatabaseRole::Migrator,
+            &memory_target,
         )
         .is_ok()
+            && verify_postgres_foreman_extension(
+                &mut migrator,
+                &foreman_target,
+                ForemanExtensionDatabaseRole::Migrator,
+            )
+            .is_ok()
             && migrator
                 .query_one(
-                    "SELECT pg_catalog.to_regnamespace('control_product') IS NOT NULL",
+                    "SELECT pg_catalog.to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL",
                     &[],
                 )
                 .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?
@@ -2707,6 +2712,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
     }
     lattice_postgres_store::apply_control_product_extension(&mut migrator, &store_target)
         .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresMigration))?;
+    lattice_postgres_codebase_memory::apply_store_v8_compatibility(&mut migrator, &memory_target)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let final_store =
         verify_store_schema(&mut migrator, &store_target, StoreDatabaseRole::Migrator)
             .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?;
@@ -4136,8 +4143,15 @@ impl HermesRuntimePreflight {
     }
 }
 
-fn hermes_activation_status(preflight: HermesProductionPreflight) -> &'static str {
-    match preflight {
+#[cfg(test)]
+fn hermes_activation_status(
+    enabled: bool,
+    preflight: impl FnOnce() -> HermesProductionPreflight,
+) -> &'static str {
+    if !enabled {
+        return "DEFERRED";
+    }
+    match preflight() {
         HermesProductionPreflight::MissingConfiguration(_) => "CONFIGURATION_REQUIRED",
         HermesProductionPreflight::ConfigurationRejected => "CONFIGURATION_REJECTED",
         HermesProductionPreflight::ConfigurationPresentUnverified => "PREPARED",
@@ -4151,6 +4165,19 @@ pub enum GraphifyRuntimePreflight {
     MissingConfiguration(Vec<&'static str>),
     ConfigurationRejected,
     IdentityVerified,
+}
+
+// A status request is not an execution preflight. Hashing the whole optional
+// runtime here can exceed the MCP call deadline and hide healthy durable work.
+// Real Graphify execution still verifies its complete pinned identity.
+fn graphify_configuration_status(root: Option<&Path>, launcher: Option<&Path>) -> &'static str {
+    if root.is_some_and(|path| path.is_absolute() && path.is_dir())
+        && launcher.is_some_and(|path| path.is_absolute() && path.is_file())
+    {
+        "PREPARED"
+    } else {
+        "DEGRADED"
+    }
 }
 
 impl GraphifyRuntimePreflight {
@@ -4201,12 +4228,13 @@ pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight
                 .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
         );
         let staging_root = runtime_root.join(".lattice-preflight-staging");
-        GraphifyRuntimeConfig::new(
+        GraphifyRuntimeConfig::new_for_profile(
             wsl_executable,
             runtime_root,
             staging_root,
             Duration::from_secs(30),
             GraphOutputLimits::default(),
+            graphify_platform_from_environment()?,
         )
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
         Ok::<(), LatticedError>(())
@@ -5096,9 +5124,6 @@ fn parse_runtime_integration_mode(
     match value {
         None | Some("CORE_ONLY") => Ok(RuntimeIntegrationMode::CoreOnly),
         Some("GRAPHIFY") => Ok(RuntimeIntegrationMode::Graphify),
-        // Keep the legacy spelling readable, but express the new composition
-        // in terms of the independently degradable components.
-        Some("GRAPHIFY_HERMES" | "FULL_CHAIN") => Ok(RuntimeIntegrationMode::GraphifyHermes),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -5111,6 +5136,10 @@ fn runtime_integration_mode_from_environment() -> Result<RuntimeIntegrationMode,
             Err(LatticedError::new(LatticedErrorKind::Configuration))
         }
     }
+}
+
+fn reject_retired_hermes_runtime() -> Result<(), LatticedError> {
+    Err(LatticedError::new(LatticedErrorKind::Configuration))
 }
 
 fn canonical_hermes_mode_from_environment() -> Result<CanonicalHermesMode, LatticedError> {
@@ -5128,7 +5157,6 @@ fn canonical_hermes_mode_from_value(
 ) -> Result<CanonicalHermesMode, LatticedError> {
     match value {
         None | Some("TASK_ONLY") => Ok(CanonicalHermesMode::TaskOnly),
-        Some("PRODUCTION") => Ok(CanonicalHermesMode::Production),
         Some(_) => Err(LatticedError::new(LatticedErrorKind::Configuration)),
     }
 }
@@ -5396,36 +5424,15 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
             ),
         );
         let graphify_status = if self.integration_mode.uses_graphify() {
-            match graphify_runtime_preflight_from_environment() {
-                GraphifyRuntimePreflight::IdentityVerified => "READY",
-                GraphifyRuntimePreflight::MissingConfiguration(_)
-                | GraphifyRuntimePreflight::ConfigurationRejected => "DEGRADED",
-            }
-        } else {
-            "DEFERRED"
-        };
-        let hermes_status = if self.integration_mode.uses_hermes() {
-            match hermes_runtime_preflight_from_environment() {
-                HermesRuntimePreflight::ConfigurationPresentUnverified => "PREPARED",
-                HermesRuntimePreflight::MissingConfiguration(_)
-                | HermesRuntimePreflight::ConfigurationRejected => "DEGRADED",
-            }
+            let root = env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT").map(PathBuf::from);
+            let launcher = env::var_os("LATTICE_GRAPHIFY_WSL_EXE").map(PathBuf::from);
+            graphify_configuration_status(root.as_deref(), launcher.as_deref())
         } else {
             "DEFERRED"
         };
         object.insert(
             "graphify_runtime_status".to_owned(),
             Value::String(graphify_status.to_owned()),
-        );
-        object.insert(
-            "hermes_runtime_status".to_owned(),
-            Value::String(hermes_status.to_owned()),
-        );
-        object.insert(
-            "hermes_activation_status".to_owned(),
-            Value::String(
-                hermes_activation_status(hermes_production_preflight_from_environment()).to_owned(),
-            ),
         );
         // Writer readiness is observed only after the Task Ledger replay has
         // been verified. It can degrade write readiness, never replay truth.
@@ -5896,7 +5903,7 @@ fn load_general_submission_by_task_ref_at<H: FullChainHermesPort>(
     .map_err(|error| ToolExecutionError::new(error.code()))
 }
 
-fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
+pub(crate) fn configured_store_authority() -> Result<StoreAuthorityHead, LatticedError> {
     let rejected = || LatticedError::new(LatticedErrorKind::LedgerConfiguration);
     let daemon_instance_id = StoreDaemonInstanceId::new(
         required_environment(STORE_DAEMON_INSTANCE_ID_ENV).map_err(|_| rejected())?,
@@ -5952,6 +5959,16 @@ fn configured_task_ingress_peer(
     let channel_id = GatewayChannelId::new("main").map_err(|_| rejected())?;
 
     match ingress_kind.as_str() {
+        "CODEX_LOCAL_MCP" => TaskIngressPeerEvidence::new_codex_local_mcp_live(
+            GatewayInstanceId::new("latticed-codex-local-mcp").map_err(|_| rejected())?,
+            env!("CARGO_PKG_VERSION"),
+            adapter_binary_digest,
+            schema_digest,
+            channel_id,
+            profile_digest,
+            process_start_identity.clone(),
+        )
+        .map_err(|_| rejected()),
         TASK_INGRESS_SECURE_TUNNEL => TaskIngressPeerEvidence::new_chatgpt_secure_mcp_tunnel_live(
             GatewayInstanceId::new("latticed-chatgpt-secure-mcp").map_err(|_| rejected())?,
             env!("CARGO_PKG_VERSION"),
@@ -7081,6 +7098,7 @@ fn replay_general_submission<H: FullChainHermesPort>(
         .map_err(|error| ToolExecutionError::new(error.code()))?;
     let admission = create_general_task(&request, &mut lifecycle)
         .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    retain_general_branch(core, arguments, existing)?;
     general_task_public_status(admission.evidence(), existing)
         .map_err(|error| ToolExecutionError::new(error.code()))
 }
@@ -7137,6 +7155,7 @@ fn admit_general_submission<H: FullChainHermesPort>(
         resolved.authority(),
     )
     .map_err(|error| ToolExecutionError::new(error.code()))?;
+    validate_general_branch_parent(core, arguments, &submission)?;
     let binding =
         general_task_binding(&submission).map_err(|error| ToolExecutionError::new(error.code()))?;
     let request = GeneralTaskIntakeRequest::new(binding, arguments.client_request_id())
@@ -7145,8 +7164,83 @@ fn admit_general_submission<H: FullChainHermesPort>(
         .map_err(|error| ToolExecutionError::new(error.code()))?;
     let admission = create_general_task(&request, &mut lifecycle)
         .map_err(|error| ToolExecutionError::new(general_task_error_code(&error)))?;
+    retain_general_branch(core, arguments, &submission)?;
     general_task_public_status(admission.evidence(), &submission)
         .map_err(|error| ToolExecutionError::new(error.code()))
+}
+
+fn validate_general_branch_parent<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<(), ToolExecutionError> {
+    let Some(parent) = arguments.parent_task_ref() else {
+        return Ok(());
+    };
+    let parent_ref = ContentDigest::from_sha256(parent)
+        .map_err(|_| ToolExecutionError::new("CONTROL_PRODUCT_RELATION_REJECTED"))?;
+    let parent = load_general_submission_by_task_ref(core, &parent_ref)?
+        .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_TASK_MISSING"))?;
+    if parent.identity().project_id() != submission.identity().project_id()
+        || parent.task_ref() == submission.task_ref()
+    {
+        return Err(ToolExecutionError::new("CONTROL_PRODUCT_RELATION_REJECTED"));
+    }
+    Ok(())
+}
+
+// Use the existing durable metadata contract. A failed write returns an error
+// before scheduling; retrying the same intake repairs an interrupted save.
+// Never infer parents from dependencies, file names, or conversation recency.
+fn retain_general_branch<H: FullChainHermesPort>(
+    core: &FullChainCore<H>,
+    arguments: &TaskSubmitArguments,
+    submission: &TaskSubmissionEnvelope,
+) -> Result<(), ToolExecutionError> {
+    let Some(parent) = arguments.parent_task_ref() else {
+        return Ok(());
+    };
+    validate_general_branch_parent(core, arguments, submission)?;
+    let mut product = connect_control_product(core)?;
+    let facts = product
+        .snapshot(
+            submission.identity().project_id().as_str(),
+            &[submission.task_ref().as_str().to_owned()],
+        )
+        .map_err(ToolExecutionError::new)?;
+    let metadata = facts["metadata"]
+        .as_array()
+        .ok_or_else(|| ToolExecutionError::new("CONTROL_PRODUCT_RESPONSE_REJECTED"))?;
+    if let Some(saved) = metadata
+        .iter()
+        .find(|row| row["task_ref"].as_str() == Some(submission.task_ref().as_str()))
+    {
+        return check_retained_branch_parent(saved, parent);
+    }
+    product
+        .execute(&ControlProductCommand::Metadata {
+            task_ref: submission.task_ref().clone(),
+            request_id: format!("branch-intake:{}", arguments.client_request_id()),
+            expected_revision: 0,
+            title: submission.objective().chars().take(60).collect(),
+            success_criteria: format!(
+                "完成分支需求：{}\n驗證成果後回到原工作 {} 繼續；分支完成不代表原目標完成。",
+                submission.objective(),
+                parent
+            ),
+            priority: 2,
+            parent_ref: Some(parent.to_owned()),
+            dependency_refs: Vec::new(),
+        })
+        .map_err(ToolExecutionError::new)?;
+    Ok(())
+}
+
+fn check_retained_branch_parent(saved: &Value, parent: &str) -> Result<(), ToolExecutionError> {
+    if saved["parent_ref"].as_str() != Some(parent) {
+        return Err(ToolExecutionError::new("LATTICE_TASK_IDEMPOTENCY_CONFLICT"));
+    }
+    Ok(())
 }
 
 fn general_task_public_status(
@@ -9259,6 +9353,134 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .map_err(|error| ToolExecutionError::new(error.code()))
     }
 
+    fn code_relations(
+        &mut self,
+        arguments: &mcp::CodeRelationsArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new("CODE_RELATIONS_UNAVAILABLE"))?;
+        let project = control_product_project(&core, &arguments.project_id)?;
+        if project["active"] != json!(true) {
+            return Err(ToolExecutionError::new("CODE_RELATIONS_PROJECT_INACTIVE"));
+        }
+        let root = graph_canonical_directory(Path::new(
+            &required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+                .map_err(|e| ToolExecutionError::new(e.code()))?,
+        ))
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let registered = project["canonical_path"]
+            .as_str()
+            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"))?;
+        if graph_canonical_directory(Path::new(registered))
+            .map_err(|e| ToolExecutionError::new(e.code()))?
+            != root
+        {
+            return Err(ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"));
+        }
+        // Historical commit is explicit. This read neither creates directories,
+        // inspects dirty files nor invokes Graphify to fabricate missing evidence.
+        let git = PathBuf::from(
+            required_environment("LATTICE_DELIVERY_GIT_EXE")
+                .map_err(|e| ToolExecutionError::new(e.code()))?,
+        );
+        let git_sha256 =
+            graph_executable_sha256(&git).map_err(|e| ToolExecutionError::new(e.code()))?;
+        let configuration = runtime_graph_configuration_digest(&root, &git_sha256)
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let mut request = runtime_graph_request(
+            core.delivery.database.run_id(),
+            &arguments.commit,
+            configuration,
+        )
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        let mut receipt = load_runtime_graph_receipt(
+            &core.delivery.database,
+            &core.delivery.password,
+            deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
+            &request,
+        )
+        .map_err(|e| ToolExecutionError::new(e.code()))?;
+        // Historical reads may replay the retained legacy receipt. Refresh never
+        // uses this fallback: it must analyze under the selected platform identity.
+        if receipt.is_none()
+            && graphify_platform_from_environment()
+                .map_err(|e| ToolExecutionError::new(e.code()))?
+                .is_portable()
+        {
+            request = runtime_graph_request(
+                core.delivery.database.run_id(),
+                &arguments.commit,
+                legacy_runtime_graph_configuration_digest(&root, &git_sha256)
+                    .map_err(|e| ToolExecutionError::new(e.code()))?,
+            )
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+            receipt = load_runtime_graph_receipt(
+                &core.delivery.database,
+                &core.delivery.password,
+                deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
+                &request,
+            )
+            .map_err(|e| ToolExecutionError::new(e.code()))?;
+        }
+        if receipt.is_none() {
+            let retained = retained_graph_configurations_from_environment()
+                .map_err(|e| ToolExecutionError::new(e.code()))?
+                .into_iter()
+                .map(|digest| {
+                    runtime_graph_request(
+                        core.delivery.database.run_id(),
+                        &arguments.commit,
+                        digest,
+                    )
+                    .map_err(|e| ToolExecutionError::new(e.code()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some((selected, source)) = select_retained_receipt(retained, |selected| {
+                load_runtime_graph_receipt(
+                    &core.delivery.database,
+                    &core.delivery.password,
+                    deadline(core.delivery.timeout)
+                        .map_err(|e| ToolExecutionError::new(e.code()))?,
+                    selected,
+                )
+                .map_err(|e| ToolExecutionError::new(e.code()))
+            })? {
+                request = selected;
+                receipt = Some(source);
+            }
+        }
+        let receipt = receipt
+            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
+        let mut product = connect_control_product(&core)?;
+        let mut page = product
+            .code_relations(&receipt, &arguments.query, arguments.limit)
+            .map_err(ToolExecutionError::new)?;
+        crate::code_relations::verify_page(
+            &mut page,
+            receipt.persistence().record_set_digest().as_str(),
+            receipt.persistence().record_count(),
+            arguments.limit,
+        )
+        .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_RECORD_INTEGRITY_REJECTED"))?;
+        let response = json!({
+            "schema_version":"lattice.code-relations.v1","authority":"DERIVED","trusted_context":false,
+            "registered_project_id":arguments.project_id,"commit":arguments.commit,"source_selection":"EXACT_RETAINED_COMMIT",
+            "source_memory_project_id":request.project_id().as_str(),
+            "source_project_snapshot_id":request.invocation().project_snapshot_id().as_str(),
+            "source_receipt_digest":receipt.receipt_digest().as_str(),
+            "analysis_digest":receipt.persistence().analysis_digest().as_str(),
+            "query":arguments.query,"limit":arguments.limit,"records":page["records"],"truncated":page["truncated"],
+        });
+        if response.to_string().len() > 750_000 {
+            return Err(ToolExecutionError::new(
+                "CODE_RELATIONS_RESPONSE_LIMIT_EXCEEDED",
+            ));
+        }
+        Ok(response)
+    }
+
     fn control_snapshot(
         &mut self,
         arguments: &ControlSnapshotArguments,
@@ -9718,6 +9940,7 @@ where
 ///
 /// Returns a stable startup, configuration, database, or transport failure.
 pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
+    reject_retired_hermes_runtime()?;
     #[cfg(not(windows))]
     {
         Err(LatticedError::new(
@@ -9755,6 +9978,7 @@ pub fn serve_full_chain_from_environment() -> Result<(), LatticedError> {
 /// Returns the existing production configuration or runner failure before
 /// reporting a successful process exit.
 pub fn launch_hermes_from_environment() -> Result<(), LatticedError> {
+    reject_retired_hermes_runtime()?;
     require_hermes_preparation_environment()?;
     #[cfg(not(windows))]
     {
@@ -10833,6 +11057,12 @@ fn hermes_job_evidence(
         graph_receipt.receipt_digest().clone(),
         graph_details,
     )
+    .and_then(|evidence| evidence.with_observation(format!(
+        "Graphify analysis was persisted for project {} at Git commit {}. It contains {} derived records. The bound query retrieved {} records with a limit of {}. These are derived observations; no test results, code excerpts or completed-task verification are supplied by this receipt.",
+        graph_request.project_id().as_str(), graph_request.commit_id().as_str(),
+        graph_receipt.persistence().record_count(), graph_receipt.retrieval().results().len(),
+        graph_receipt.retrieval().limit(),
+    )))
     .map_err(|failure| map_hermes_adapter_error(&failure))?;
 
     let git_context = CanonicalValue::Object(vec![
@@ -11814,7 +12044,7 @@ fn run_graph_memory_request(
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new(
+    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
         graphify_wsl_executable_from_environment(
             PathBuf::from(system_root).join("System32/wsl.exe"),
         ),
@@ -11822,6 +12052,7 @@ fn run_graph_memory_request(
         graph_root.join("staging"),
         remaining,
         GraphOutputLimits::default(),
+        graphify_platform_from_environment()?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
@@ -11875,6 +12106,7 @@ pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt,
 /// A failed optional reflection never changes PostgreSQL task or delivery truth.
 #[cfg(windows)]
 pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    reject_retired_hermes_runtime()?;
     let (_unused_delivery, database, password) =
         delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
     let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
@@ -11994,6 +12226,7 @@ fn persist_direct_codex_reflection(
 
 #[cfg(not(windows))]
 pub fn reflect_runtime_hermes_from_environment() -> Result<HermesReflectionReceipt, LatticedError> {
+    reject_retired_hermes_runtime()?;
     Err(LatticedError::new(
         LatticedErrorKind::HermesProductionRunnerRequired,
     ))
@@ -12003,27 +12236,125 @@ fn runtime_graph_source_request(
     database: &DeliveryDatabaseBinding,
 ) -> Result<(RuntimeGraphSource, GraphMemoryRunRequest), LatticedError> {
     let (source, commit) = runtime_graph_source_from_environment()?;
-    let configuration_digest = digest(
+    let configuration_digest =
+        runtime_graph_configuration_digest(&source.repository_root, &source.git_sha256)?;
+    let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
+    Ok((source, request))
+}
+
+/// Export a read-only configuration selector for an authenticated customer backup.
+pub fn graphify_configuration_from_environment() -> Result<Value, LatticedError> {
+    let root = graph_canonical_directory(Path::new(&required_environment(
+        "LATTICE_GRAPHIFY_SOURCE_ROOT",
+    )?))?;
+    let git = PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?);
+    let git_sha = graph_executable_sha256(&git)?;
+    let configuration = runtime_graph_configuration_digest(&root, &git_sha)?;
+    let mut readable = vec![
+        configuration.clone(),
+        legacy_runtime_graph_configuration_digest(&root, &git_sha)?,
+    ];
+    readable.extend(retained_graph_configurations_from_environment()?);
+    let mut selectors = Vec::new();
+    for value in readable {
+        if !selectors.contains(&value) {
+            selectors.push(value);
+        }
+    }
+    if selectors.len() > 16 {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    Ok(
+        json!({"schema":"lattice.graphify-configuration.v1","configuration_sha256":configuration.as_str(),
+        "readable_configurations":selectors.iter().map(ContentDigest::as_str).collect::<Vec<_>>()}),
+    )
+}
+
+fn select_retained_receipt<T, R, E>(
+    requests: impl IntoIterator<Item = T>,
+    mut load: impl FnMut(&T) -> Result<Option<R>, E>,
+) -> Result<Option<(T, R)>, E> {
+    for request in requests {
+        if let Some(receipt) = load(&request)? {
+            return Ok(Some((request, receipt)));
+        }
+    }
+    Ok(None)
+}
+
+fn retained_graph_configurations_from_environment() -> Result<Vec<ContentDigest>, LatticedError> {
+    let mut values: Vec<String> = match env::var("LATTICE_GRAPHIFY_RETAINED_CONFIGURATIONS") {
+        Ok(value) if value.len() <= 1200 => serde_json::from_str(&value)
+            .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        Err(env::VarError::NotPresent) => Vec::new(),
+        _ => return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration)),
+    };
+    if let Some(value) = env::var_os("LATTICE_GRAPHIFY_RETAINED_CONFIGURATION_SHA256") {
+        values.push(
+            value
+                .into_string()
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
+        );
+    }
+    if values.len() > 16 {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    values
+        .into_iter()
+        .map(|v| {
+            ContentDigest::from_sha256(v)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+        })
+        .collect()
+}
+
+fn runtime_graph_configuration_digest(
+    repository_root: &Path,
+    git_sha256: &str,
+) -> Result<ContentDigest, LatticedError> {
+    let legacy = legacy_runtime_graph_configuration_digest(repository_root, git_sha256)?;
+    let profile = graphify_platform_from_environment()?;
+    if !profile.is_portable() {
+        return Ok(legacy);
+    }
+    digest(
+        "lattice.runtime.graphify-source-configuration.v2",
+        &CanonicalValue::Object(vec![
+            (
+                "legacy_configuration".into(),
+                CanonicalValue::String(legacy.as_str().into()),
+            ),
+            (
+                "platform_selection".into(),
+                CanonicalValue::String(profile.selection_digest()),
+            ),
+        ]),
+    )
+}
+
+fn legacy_runtime_graph_configuration_digest(
+    repository_root: &Path,
+    git_sha256: &str,
+) -> Result<ContentDigest, LatticedError> {
+    digest(
         "lattice.runtime.graphify-source-configuration",
         &CanonicalValue::Object(vec![
             (
                 "git_sha256".to_owned(),
-                CanonicalValue::String(source.git_sha256.clone()),
+                CanonicalValue::String(git_sha256.to_owned()),
             ),
             (
                 "repository_root".to_owned(),
-                CanonicalValue::String(path_text(&source.repository_root)?),
+                CanonicalValue::String(path_text(repository_root)?),
             ),
             (
                 "runtime_root".to_owned(),
                 CanonicalValue::String(path_text(&graphify_runtime_root_from_environment(
-                    &source.repository_root,
+                    repository_root,
                 ))?),
             ),
         ]),
-    )?;
-    let request = runtime_graph_request(database.run_id(), &commit, configuration_digest)?;
-    Ok((source, request))
+    )
 }
 
 fn load_runtime_graph_receipt(
@@ -12076,7 +12407,7 @@ fn run_runtime_graph_memory_request(
     let system_root = env::var_os("SystemRoot")
         .filter(|value| !value.is_empty())
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new(
+    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
         graphify_wsl_executable_from_environment(
             PathBuf::from(system_root).join("System32/wsl.exe"),
         ),
@@ -12084,6 +12415,7 @@ fn run_runtime_graph_memory_request(
         graph_root.join("staging"),
         remaining,
         GraphOutputLimits::default(),
+        graphify_platform_from_environment()?,
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
@@ -12127,6 +12459,23 @@ fn graphify_runtime_root_from_value(
     repository_root: &Path,
 ) -> PathBuf {
     configured.unwrap_or_else(|| repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH))
+}
+
+fn graphify_platform_from_environment()
+-> Result<lattice_graphify_adapter::WslProfile, LatticedError> {
+    match (
+        env::var("LATTICE_GRAPHIFY_WSL_DISTRO"),
+        env::var("LATTICE_GRAPHIFY_WSL_SHA256"),
+    ) {
+        (Err(env::VarError::NotPresent), Err(env::VarError::NotPresent)) => {
+            Ok(lattice_graphify_adapter::WslProfile::legacy())
+        }
+        (Ok(distribution), Ok(launcher)) => {
+            lattice_graphify_adapter::WslProfile::portable(&distribution, &launcher)
+                .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+        }
+        _ => Err(LatticedError::new(LatticedErrorKind::GraphConfiguration)),
+    }
 }
 
 fn graphify_wsl_executable_from_environment(default: PathBuf) -> PathBuf {
@@ -12690,6 +13039,25 @@ fn path_text(path: &Path) -> Result<String, LatticedError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_receipt_selection_keeps_the_matching_request_and_stops_on_error() {
+        let mut read = Vec::new();
+        let selected = super::select_retained_receipt(["first", "second"], |request| {
+            read.push(*request);
+            Ok::<_, &str>(Some(format!("receipt-for-{request}")))
+        })
+        .unwrap();
+        assert_eq!(selected, Some(("first", "receipt-for-first".to_owned())));
+        assert_eq!(read, ["first"]);
+        let mut read = Vec::new();
+        let rejected = super::select_retained_receipt(["damaged", "fallback"], |request| {
+            read.push(*request);
+            Err::<Option<()>, _>("invalid retained receipt")
+        });
+        assert!(rejected.is_err());
+        assert_eq!(read, ["damaged"]);
+    }
+
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -12737,6 +13105,22 @@ mod tests {
     use postgres::{Client, Config, NoTls};
 
     const TASK050_PROFILE_MARKER_PREFIX: &str = "TASK050_LATTICED_PROFILE_INPUT=";
+
+    #[test]
+    fn branch_intake_retry_preserves_saved_parent_instead_of_reparenting() {
+        let saved = json!({"parent_ref":"a".repeat(64)});
+        assert!(super::check_retained_branch_parent(&saved, &"a".repeat(64)).is_ok());
+        assert_eq!(
+            super::check_retained_branch_parent(&saved, &"b".repeat(64))
+                .unwrap_err()
+                .code(),
+            "LATTICE_TASK_IDEMPOTENCY_CONFLICT"
+        );
+        assert!(
+            super::check_retained_branch_parent(&json!({"parent_ref":null}), &"a".repeat(64))
+                .is_err()
+        );
+    }
 
     fn task050_test_digest(value: char) -> ContentDigest {
         ContentDigest::from_sha256(value.to_string().repeat(64)).expect("TASK050 digest")
@@ -17329,15 +17713,8 @@ mod tests {
             parse_runtime_integration_mode(Some("GRAPHIFY")).expect("graphify mode"),
             RuntimeIntegrationMode::Graphify
         );
-        assert_eq!(
-            parse_runtime_integration_mode(Some("GRAPHIFY_HERMES"))
-                .expect("graphify and hermes mode"),
-            RuntimeIntegrationMode::GraphifyHermes
-        );
-        assert_eq!(
-            parse_runtime_integration_mode(Some("FULL_CHAIN")).expect("legacy alias"),
-            RuntimeIntegrationMode::GraphifyHermes
-        );
+        assert!(parse_runtime_integration_mode(Some("GRAPHIFY_HERMES")).is_err());
+        assert!(parse_runtime_integration_mode(Some("FULL_CHAIN")).is_err());
         assert!(parse_runtime_integration_mode(Some("full_chain")).is_err());
         assert!(parse_runtime_integration_mode(Some("")).is_err());
     }
@@ -17345,20 +17722,50 @@ mod tests {
     #[test]
     fn hermes_activation_status_requires_only_real_configuration() {
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
-                "LATTICE_HERMES_CODEX_HOME",
-            ])),
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(
+                vec!["LATTICE_HERMES_CODEX_HOME",]
+            )),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::MissingConfiguration(vec![
-                "LATTICE_HERMES_CODEX_HOME",
-            ])),
+            hermes_activation_status(true, || HermesProductionPreflight::MissingConfiguration(
+                vec!["LATTICE_HERMES_CODEX_HOME",]
+            )),
             "CONFIGURATION_REQUIRED"
         );
         assert_eq!(
-            hermes_activation_status(HermesProductionPreflight::ConfigurationPresentUnverified),
+            hermes_activation_status(true, || {
+                HermesProductionPreflight::ConfigurationPresentUnverified
+            }),
             "PREPARED"
+        );
+    }
+
+    #[test]
+    fn suspended_hermes_activation_never_reads_its_configuration() {
+        assert_eq!(
+            hermes_activation_status(false, || panic!("Hermes must stay inactive")),
+            "DEFERRED"
+        );
+    }
+
+    #[test]
+    fn graphify_configuration_status_does_not_claim_identity_verification() {
+        let launcher = std::env::current_exe().unwrap();
+        let root = launcher.parent().unwrap();
+        // An ordinary directory and executable suffice for PREPARED, never READY.
+        assert_eq!(
+            graphify_configuration_status(Some(root), Some(&launcher)),
+            "PREPARED"
+        );
+        assert_eq!(
+            graphify_configuration_status(None, Some(&launcher)),
+            "DEGRADED"
+        );
+        assert_eq!(graphify_configuration_status(Some(root), None), "DEGRADED");
+        assert_eq!(
+            graphify_configuration_status(Some(Path::new("relative")), Some(&launcher)),
+            "DEGRADED"
         );
     }
 
@@ -17439,10 +17846,7 @@ mod tests {
             canonical_hermes_mode_from_value(Some("TASK_ONLY")).expect("explicit task-only mode"),
             CanonicalHermesMode::TaskOnly
         );
-        assert_eq!(
-            canonical_hermes_mode_from_value(Some("PRODUCTION")).expect("production mode"),
-            CanonicalHermesMode::Production
-        );
+        assert!(canonical_hermes_mode_from_value(Some("PRODUCTION")).is_err());
         assert!(canonical_hermes_mode_from_value(Some("production")).is_err());
         assert!(canonical_hermes_mode_from_value(Some("")).is_err());
     }
@@ -18569,11 +18973,11 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_startup_requires_prepared_assets_before_a_production_hermes_runner() {
+    fn full_chain_startup_rejects_retired_hermes_before_external_effects() {
         let error = serve_full_chain_from_environment()
-            .expect_err("incomplete official Hermes chain fails before external effects");
-        assert_eq!(error.kind(), LatticedErrorKind::HermesPreparationRequired);
-        assert_eq!(error.code(), "LATTICE_HERMES_PREPARATION_REJECTED");
+            .expect_err("retired Hermes chain fails before external effects");
+        assert_eq!(error.kind(), LatticedErrorKind::Configuration);
+        assert_eq!(error.code(), "LATTICED_CONFIGURATION_REJECTED");
     }
 
     #[test]

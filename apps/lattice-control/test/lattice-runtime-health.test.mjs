@@ -28,10 +28,8 @@ function validRuntimeStatus() {
     component: "delivery-receipt",
     status: "NOT_STARTED",
     scope: "receipt-only",
-    runtime_integration: "GRAPHIFY_HERMES",
+    runtime_integration: "GRAPHIFY",
     graphify_runtime_status: "READY",
-    hermes_runtime_status: "PREPARED",
-    hermes_activation_status: "PREPARED",
     foreman: {
       schema: "lattice.foreman-runtime-projection/1.1",
       replay_status: "VERIFIED",
@@ -252,7 +250,7 @@ test("formal PostgreSQL health remains verified when delivery already has a term
   });
 });
 
-test("the configuration loader derives only the two legacy Runtime aliases in memory", async () => {
+test("the configuration loader requires the current delivery configuration", async () => {
   const executablePath = path.resolve("runtime", "latticed.exe");
   const launcherPath = path.resolve("bin", "codex.exe");
   const deliveryRoot = path.resolve("delivery");
@@ -261,7 +259,7 @@ test("the configuration loader derives only the two legacy Runtime aliases in me
     "[mcp_servers.lattice]",
     `command = ${JSON.stringify(executablePath)}`,
     "[mcp_servers.lattice.env]",
-    `LATTICE_HERMES_CODEX_LAUNCHER = ${JSON.stringify(launcherPath)}`,
+    `LATTICE_DELIVERY_LAUNCHER = ${JSON.stringify(launcherPath)}`,
     `LATTICE_DELIVERY_ROOT = ${JSON.stringify(deliveryRoot)}`,
     `LATTICE_TASK019_PASSWORD = ${JSON.stringify(secret)}`,
   ].join("\n");
@@ -398,8 +396,6 @@ test("hostile direct Runtime and Foreman projection values fail closed", async (
   const fixtures = [
     ["integration", (value) => { value.runtime_integration = "UNKNOWN"; }],
     ["Graphify correlation", (value) => { value.graphify_runtime_status = "DEFERRED"; }],
-    ["Hermes correlation", (value) => { value.hermes_runtime_status = "DEFERRED"; }],
-    ["Hermes activation", (value) => { value.hermes_activation_status = "UNKNOWN"; }],
     ["schema", (value) => { value.foreman.schema = "lattice.foreman-runtime-projection/9.9"; }],
     ["replay", (value) => { value.foreman.replay_status = "UNKNOWN"; }],
     ["checkpoint correlation", (value) => { value.foreman.checkpoint_digest = null; }],
@@ -427,11 +423,9 @@ test("hostile direct Runtime and Foreman projection values fail closed", async (
   }
 });
 
-test("optional Runtime module degradation does not mask verified PostgreSQL", async () => {
+test("Graphify degradation does not mask verified PostgreSQL", async () => {
   const runtimeStatus = validRuntimeStatus();
   runtimeStatus.graphify_runtime_status = "DEGRADED";
-  runtimeStatus.hermes_runtime_status = "DEGRADED";
-  runtimeStatus.hermes_activation_status = "CONFIGURATION_REJECTED";
   const status = await probeLatticeRuntimeEndpoint({
     executablePath: path.resolve("latticed.exe"),
     environment: {},
@@ -439,6 +433,16 @@ test("optional Runtime module degradation does not mask verified PostgreSQL", as
     spawnProcess: fakeRuntimeSpawn({ runtimeStatus }),
   });
   assert.equal(status.postgresql, "HEALTHY");
+});
+
+test("three-core health accepts prepared Graphify without claiming execution", async () => {
+  const runtimeStatus = { ...validRuntimeStatus(), runtime_integration: "GRAPHIFY",
+    graphify_runtime_status: "PREPARED" };
+  const probe = () => probeLatticeRuntimeEndpoint({ executablePath: path.resolve("latticed.exe"),
+    environment: {}, timeoutMs: 500, spawnProcess: fakeRuntimeSpawn({ runtimeStatus }) });
+  assert.equal((await probe()).postgresql, "HEALTHY");
+  runtimeStatus.runtime_integration = "FULL_CHAIN";
+  assert.equal((await probe()).postgresql, "INCOMPATIBLE");
 });
 
 test("a Runtime tool failure is unreachable without leaking raw output", async () => {

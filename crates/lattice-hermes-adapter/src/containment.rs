@@ -509,6 +509,7 @@ impl HermesWslContainmentConfig {
         &self,
         deadline: Instant,
     ) -> HermesAdapterResult<HermesSocketpairReceipt> {
+        crate::reject_retired_reflection()?;
         if deadline <= Instant::now() || self.isolation_root.exists() {
             return Err(HermesAdapterError::new(
                 HermesAdapterErrorKind::Configuration,
@@ -807,4 +808,21 @@ fn encode_digest(digest: &[u8]) -> String {
         let _ = write!(encoded, "{byte:02x}");
     }
     encoded
+}
+
+#[cfg(all(test, windows))]
+mod retirement_tests {
+    use super::*;
+
+    #[test]
+    fn socketpair_canary_is_retired_before_path_or_process_access() {
+        let config = HermesWslContainmentConfig {
+            wsl_executable: PathBuf::new(),
+            runtime_guest_root: String::new(),
+            isolation_root: PathBuf::new(),
+            product_root: PathBuf::new(),
+        };
+        let error = config.run_socketpair_canary(Instant::now()).unwrap_err();
+        assert_eq!(error.code(), "LATTICE_HERMES_RETIRED");
+    }
 }

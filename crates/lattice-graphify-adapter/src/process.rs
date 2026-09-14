@@ -14,16 +14,16 @@ use std::process::{Child, Command, Stdio};
 use lattice_contracts::GRAPHIFY_VERSION;
 
 use crate::error::{GraphifyAdapterError, GraphifyAdapterErrorKind, GraphifyAdapterResult};
-use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph};
+use crate::graph::{GraphParseLimits, NormalizedGraph, parse_graph, parse_graph_for_display};
 use crate::identity::{
     GRAPHIFY_PRIVATE_RUNNER_SHA256, GRAPHIFY_WSL_BWRAP_HELP_SHA256, GRAPHIFY_WSL_BWRAP_PATH,
-    GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256, GRAPHIFY_WSL_DISTRO,
+    GRAPHIFY_WSL_BWRAP_SHA256, GRAPHIFY_WSL_BWRAP_VERSION_SHA256,
     GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256, GRAPHIFY_WSL_GRAPHIFY_EXTRACT_WARNING_SHA256,
     GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256, GRAPHIFY_WSL_GRAPHIFY_VERSION_SHA256,
-    GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_OS_RELEASE_SHA256, GRAPHIFY_WSL_PYTHON_PATH,
-    GRAPHIFY_WSL_PYTHON_SHA256, GRAPHIFY_WSL_PYTHON_VERSION_SHA256,
-    GRAPHIFY_WSL_RUNTIME_BYTE_COUNT, GRAPHIFY_WSL_RUNTIME_FILE_COUNT,
-    GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, verify_reviewed_runtime,
+    GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_PYTHON_PATH, GRAPHIFY_WSL_PYTHON_SHA256,
+    GRAPHIFY_WSL_PYTHON_VERSION_SHA256, GRAPHIFY_WSL_RUNTIME_BYTE_COUNT,
+    GRAPHIFY_WSL_RUNTIME_FILE_COUNT, GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, WslProfile,
+    verify_reviewed_runtime, verify_runtime_profile,
 };
 use crate::snapshot::{
     MaterializedSnapshot, SnapshotBridge, file_sha256, framed_digest, verify_snapshot_binding,
@@ -111,6 +111,7 @@ impl Default for GraphOutputLimits {
 /// MCP or a graph-memory run request.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphifyRuntimeConfig {
+    profile: WslProfile,
     wsl_executable: PathBuf,
     runtime_root: PathBuf,
     expected_launcher_sha256: String,
@@ -137,6 +138,25 @@ impl GraphifyRuntimeConfig {
         timeout: Duration,
         limits: GraphOutputLimits,
     ) -> GraphifyAdapterResult<Self> {
+        Self::new_for_profile(
+            wsl_executable,
+            runtime_root,
+            staging_root,
+            timeout,
+            limits,
+            WslProfile::legacy(),
+        )
+    }
+
+    /// Uses one explicit provisioned platform without changing the legacy profile.
+    pub fn new_for_profile(
+        wsl_executable: impl Into<PathBuf>,
+        runtime_root: impl Into<PathBuf>,
+        staging_root: impl Into<PathBuf>,
+        timeout: Duration,
+        limits: GraphOutputLimits,
+        profile: WslProfile,
+    ) -> GraphifyAdapterResult<Self> {
         let wsl_executable = wsl_executable.into();
         let runtime_root = runtime_root.into();
         let staging_root = staging_root.into();
@@ -156,8 +176,13 @@ impl GraphifyRuntimeConfig {
                 "GRAPHIFY_RUNTIME_CONFIG_REJECTED",
             ));
         }
-        let reviewed = verify_reviewed_runtime(&wsl_executable, &runtime_root)?;
+        let reviewed = if profile.is_portable() {
+            verify_runtime_profile(&wsl_executable, &runtime_root, &profile)?
+        } else {
+            verify_reviewed_runtime(&wsl_executable, &runtime_root)?
+        };
         Ok(Self {
+            profile,
             wsl_executable: reviewed.wsl_executable().to_path_buf(),
             runtime_root: reviewed.runtime_root().to_path_buf(),
             expected_launcher_sha256: reviewed.launcher_sha256().to_owned(),
@@ -202,6 +227,7 @@ impl GraphifyRuntimeConfig {
             ));
         }
         Ok(Self {
+            profile: WslProfile::legacy(),
             wsl_executable,
             runtime_root,
             expected_launcher_sha256,
@@ -266,7 +292,7 @@ impl GraphifyRuntimeConfig {
             .as_deref()
             .unwrap_or("TEST_UNVERIFIED_GRAPHIFY_PAYLOAD");
         let timeout_millis = self.timeout.as_millis().to_string();
-        framed_digest(&[
+        let legacy = framed_digest(&[
             b"lattice-graphify-adapter-private-copy-1.0",
             b"Ubuntu",
             b"--exec",
@@ -318,7 +344,16 @@ impl GraphifyRuntimeConfig {
             &(self.limits.max_edges as u64).to_be_bytes(),
             &(self.limits.max_text_bytes as u64).to_be_bytes(),
             &self.limits.max_diagnostic_bytes.to_be_bytes(),
-        ])
+        ]);
+        if self.profile.is_portable() {
+            framed_digest(&[
+                b"lattice-graphify-adapter-private-copy-2.0",
+                legacy.as_bytes(),
+                self.profile.selection_digest().as_bytes(),
+            ])
+        } else {
+            legacy
+        }
     }
 }
 
@@ -332,9 +367,15 @@ pub struct GraphifyAnalysis {
     capability_sha256: String,
     raw_process_sha256: String,
     evidence_sha256: String,
+    coverage_warnings: Vec<(&'static str, usize)>,
 }
 
 impl GraphifyAnalysis {
+    /// Known extraction gaps, allowed only by the explicitly partial display path.
+    #[must_use]
+    pub fn coverage_warnings(&self) -> &[(&'static str, usize)] {
+        &self.coverage_warnings
+    }
     #[must_use]
     pub const fn graph(&self) -> &NormalizedGraph {
         &self.graph
@@ -418,9 +459,35 @@ impl PinnedGraphifyAdapter {
     // This intentionally remains a linear ownership protocol: preflight,
     // execute, validate, re-bind. Splitting it would obscure teardown order.
     #[allow(clippy::too_many_lines)]
+    /// Analyze an exact snapshot using the same verified execution boundary as Runtime.
+    /// The result is derived structural evidence and never changes durable task state.
+    ///
+    /// # Errors
+    /// Rejects changed snapshots, mismatched runtime identity, or incomplete output.
     pub(crate) fn analyze_materialized(
         &mut self,
         snapshot: &MaterializedSnapshot,
+    ) -> GraphifyAdapterResult<GraphifyAnalysis> {
+        self.analyze_with_coverage(snapshot, false)
+    }
+
+    /// Read-only display observations may expose known coverage gaps explicitly.
+    /// This path is never used by the durable GraphifyAnalysisPort.
+    ///
+    /// # Errors
+    /// Rejects all execution/provenance failures and unknown extraction warnings.
+    pub fn analyze_for_display(
+        &mut self,
+        snapshot: &MaterializedSnapshot,
+    ) -> GraphifyAdapterResult<GraphifyAnalysis> {
+        self.analyze_with_coverage(snapshot, true)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn analyze_with_coverage(
+        &mut self,
+        snapshot: &MaterializedSnapshot,
+        partial_display: bool,
     ) -> GraphifyAdapterResult<GraphifyAnalysis> {
         verify_snapshot_binding(snapshot)?;
         fs::create_dir_all(&self.config.staging_root).map_err(|_| {
@@ -503,6 +570,7 @@ impl PinnedGraphifyAdapter {
             )?;
         }
         let production = self.config.expected_payload_manifest_sha256.is_some();
+        let mut coverage_warnings = Vec::new();
         let graph_path = sandbox_output.join("graphify-out").join("graph.json");
         let (help_sha256, extract_stdout, extract_stderr, extract_exit_code, graph_bytes) =
             if production {
@@ -514,7 +582,11 @@ impl PinnedGraphifyAdapter {
                 validate_graphify_version(frame.version_stdout, frame.version_stderr)?;
                 let help_sha256 =
                     validate_graphify_help(&self.config, frame.help_stdout, frame.help_stderr)?;
-                validate_graphify_extract_stderr(frame.extract_stderr)?;
+                if partial_display {
+                    coverage_warnings = display_coverage_warnings(frame.extract_stderr)?;
+                } else {
+                    validate_graphify_extract_stderr(frame.extract_stderr)?;
+                }
                 (
                     help_sha256,
                     frame.extract_stdout.to_vec(),
@@ -596,7 +668,12 @@ impl PinnedGraphifyAdapter {
         }
         verify_runtime(&self.config)?;
 
-        let graph = parse_graph(
+        let parse = if partial_display {
+            parse_graph_for_display
+        } else {
+            parse_graph
+        };
+        let graph = parse(
             &graph_bytes,
             snapshot,
             GraphParseLimits {
@@ -634,6 +711,7 @@ impl PinnedGraphifyAdapter {
             capability_sha256,
             raw_process_sha256,
             evidence_sha256,
+            coverage_warnings,
         })
     }
 
@@ -944,10 +1022,11 @@ fn execute_system_hash_check(
     )?;
     let outcome = executor.execute(&plan, deadline)?;
     require_clean_success(&outcome, "GRAPHIFY_SYSTEM_HASH_PROCESS_REJECTED")?;
+    let os_sha256 = config.profile.os_release_sha256();
     let expected = format!(
         "{GRAPHIFY_WSL_BWRAP_SHA256}  {GRAPHIFY_WSL_BWRAP_PATH}\n\
          {GRAPHIFY_WSL_PYTHON_SHA256}  {GRAPHIFY_WSL_PYTHON_PATH}\n\
-         {GRAPHIFY_WSL_OS_RELEASE_SHA256}  /usr/lib/os-release\n"
+         {os_sha256}  /usr/lib/os-release\n"
     );
     if outcome.stdout != expected.as_bytes() {
         return Err(error(
@@ -972,6 +1051,7 @@ fn build_plan(
 ) -> GraphifyAdapterResult<CommandPlan> {
     let arguments = match kind {
         CommandKind::SystemHashes => fixed_wsl_exec(
+            config,
             WSL_SHA256SUM_PATH,
             [
                 GRAPHIFY_WSL_BWRAP_PATH,
@@ -979,9 +1059,11 @@ fn build_plan(
                 "/usr/lib/os-release",
             ],
         ),
-        CommandKind::BwrapVersion => fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, ["--version"]),
-        CommandKind::BwrapHelp => fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, ["--help"]),
-        CommandKind::PythonVersion => fixed_wsl_exec(GRAPHIFY_WSL_PYTHON_PATH, ["--version"]),
+        CommandKind::BwrapVersion => fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, ["--version"]),
+        CommandKind::BwrapHelp => fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, ["--help"]),
+        CommandKind::PythonVersion => {
+            fixed_wsl_exec(config, GRAPHIFY_WSL_PYTHON_PATH, ["--version"])
+        }
         CommandKind::GraphifyVersion => {
             sandboxed_graphify_arguments(config, snapshot_root, artifact_root, ["--version"])?
         }
@@ -1080,7 +1162,7 @@ fn private_graphify_arguments(
         .expected_payload_manifest_sha256
         .as_deref()
         .unwrap_or("TEST_UNVERIFIED_GRAPHIFY_PAYLOAD");
-    let mut command = fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
+    let mut command = fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
     for argument in [
         "--die-with-parent",
         "--unshare-all",
@@ -1168,15 +1250,18 @@ fn private_graphify_arguments(
 }
 
 fn fixed_wsl_exec(
+    config: &GraphifyRuntimeConfig,
     executable: &str,
     arguments: impl IntoIterator<Item = &'static str>,
 ) -> Vec<OsString> {
     let mut command = vec![
         OsString::from("-d"),
-        OsString::from(GRAPHIFY_WSL_DISTRO),
-        OsString::from("--exec"),
-        OsString::from(executable),
+        OsString::from(config.profile.distribution()),
     ];
+    if config.profile.is_portable() {
+        command.extend([OsString::from("--user"), OsString::from("lattice")]);
+    }
+    command.extend([OsString::from("--exec"), OsString::from(executable)]);
     command.extend(arguments.into_iter().map(OsString::from));
     command
 }
@@ -1191,7 +1276,7 @@ fn sandboxed_graphify_arguments(
     let install_report = windows_path_to_wsl(&config.runtime_root.join("install-report.json"))?;
     let snapshot = windows_path_to_wsl(snapshot_root)?;
     let output = windows_path_to_wsl(artifact_root)?;
-    let mut command = fixed_wsl_exec(GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
+    let mut command = fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
     for argument in [
         "--die-with-parent",
         "--unshare-all",
@@ -1402,12 +1487,17 @@ fn verify_runtime(config: &GraphifyRuntimeConfig) -> GraphifyAdapterResult<()> {
             "GRAPHIFY_TEST_LAUNCHER_DIGEST_MISMATCH",
         ));
     }
-    let reviewed = verify_reviewed_runtime(&config.wsl_executable, &config.runtime_root)?;
+    let reviewed = verify_runtime_profile(
+        &config.wsl_executable,
+        &config.runtime_root,
+        &config.profile,
+    )?;
     if reviewed.wsl_executable() != config.wsl_executable
         || reviewed.runtime_root() != config.runtime_root
         || reviewed.launcher_sha256() != config.expected_launcher_sha256
         || reviewed.execution_identity_sha256() != config.expected_execution_identity_sha256
-        || config.expected_execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256
+        || (!config.profile.is_portable()
+            && config.expected_execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256)
     {
         return Err(error(
             GraphifyAdapterErrorKind::GraphifyIdentity,
@@ -1538,10 +1628,62 @@ fn validate_graphify_extract_stderr(stderr: &[u8]) -> GraphifyAdapterResult<()> 
     {
         return Ok(());
     }
+    // Data/config files can legitimately have no structural nodes. Preserve
+    // the pinned upstream warning in the evidence digest and report its count;
+    // missing parsers and every unknown diagnostic remain hard failures.
+    if let Ok(warnings) = display_coverage_warnings(stderr) {
+        if warnings
+            .iter()
+            .all(|(code, _)| *code == "EMPTY_SOURCE_FILES")
+        {
+            for (_, count) in warnings {
+                eprintln!("GRAPHIFY_EMPTY_SOURCE_FILES:{count}");
+            }
+            return Ok(());
+        }
+    }
     Err(error(
         GraphifyAdapterErrorKind::PartialOutput,
         "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
     ))
+}
+
+// Only these two observed upstream coverage diagnostics are displayable.
+// Their source-list text is neither executed nor returned to the product UI.
+fn display_coverage_warnings(stderr: &[u8]) -> GraphifyAdapterResult<Vec<(&'static str, usize)>> {
+    let reject = || {
+        error(
+            GraphifyAdapterErrorKind::PartialOutput,
+            "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED",
+        )
+    };
+    if stderr.is_empty() {
+        return Ok(Vec::new());
+    }
+    if stderr.len() > 8192 {
+        return Err(reject());
+    }
+    let text = std::str::from_utf8(stderr).map_err(|_| reject())?;
+    let mut warnings = Vec::new();
+    for line in text.lines() {
+        let remainder = line.strip_prefix("  warning: ").ok_or_else(reject)?;
+        let (count, message) = remainder.split_once(' ').ok_or_else(reject)?;
+        let count: usize = count.parse().map_err(|_| reject())?;
+        if count == 0 || count > 50000 {
+            return Err(reject());
+        }
+        let code = if message.starts_with("source file(s) produced zero nodes and are absent from the graph: ")
+            && message.ends_with("A re-run will retry them (empties are no longer cached); if it persists, please report the file(s) (#1666).") {
+            "EMPTY_SOURCE_FILES"
+        } else if message == ".sql file(s) contributed nothing to the graph because a dependency is missing: tree_sitter_sql not installed. Install it with: pip install \"graphifyy[sql]\" (#1745)" {
+            "SQL_PARSER_UNAVAILABLE"
+        } else { return Err(reject()); };
+        warnings.push((code, count));
+    }
+    if warnings.is_empty() || warnings.len() > 2 {
+        return Err(reject());
+    }
+    Ok(warnings)
 }
 
 #[derive(Debug)]
@@ -1891,6 +2033,57 @@ mod tests {
     }
 
     #[test]
+    fn portable_profile_changes_identity_and_routes_every_command_without_fallback() {
+        let (mut adapter, snapshot, _) = fixture(FakeMode::Valid);
+        let legacy = adapter.config.capability_sha256();
+        let name = "LATTICE-Graphify-0123456789abcdef0123456789abcdef";
+        adapter.config.profile =
+            WslProfile::portable(name, &"a".repeat(64)).expect("explicit profile");
+        assert_ne!(adapter.config.capability_sha256(), legacy);
+        let root = adapter.config.staging_root().join("portable-plans");
+        let capture = root.join("capture");
+        fs::create_dir_all(&capture).expect("capture");
+        for kind in [
+            CommandKind::SystemHashes,
+            CommandKind::BwrapVersion,
+            CommandKind::BwrapHelp,
+            CommandKind::PythonVersion,
+            CommandKind::GraphifyVersion,
+            CommandKind::GraphifyHelp,
+            CommandKind::Extract,
+        ] {
+            let plan = build_plan(
+                &adapter.config,
+                kind,
+                snapshot.root(),
+                &root,
+                &root,
+                &capture,
+            )
+            .expect("plan");
+            assert_eq!(
+                &plan.arguments[..5],
+                ["-d", name, "--user", "lattice", "--exec"].map(OsString::from)
+            );
+            assert!(!plan.arguments.iter().any(|a| a == "Ubuntu"));
+        }
+        let plan = build_private_extract_plan(&adapter.config, &snapshot, &root, &capture)
+            .expect("private plan");
+        assert_eq!(
+            &plan.arguments[..5],
+            ["-d", name, "--user", "lattice", "--exec"].map(OsString::from)
+        );
+        for invalid in [
+            "Ubuntu",
+            "LATTICE-Graphify-../Ubuntu",
+            "LATTICE-Graphify-0123456789abcdef0123456789abcdef\n",
+        ] {
+            assert!(WslProfile::portable(invalid, &"a".repeat(64)).is_err());
+        }
+        assert!(WslProfile::portable(name, "unverified").is_err());
+    }
+
+    #[test]
     fn fake_failures_close_on_timeout_nonzero_missing_malformed_and_zero_nodes() {
         let cases = [
             (FakeMode::Timeout, GraphifyAdapterErrorKind::Timeout),
@@ -1992,5 +2185,21 @@ mod tests {
             .expect_err("unreviewed stderr must not become a warning allowance");
         assert_eq!(error.kind(), GraphifyAdapterErrorKind::PartialOutput);
         assert_eq!(error.code(), "GRAPHIFY_PRIVATE_EXTRACT_STDERR_REJECTED");
+        let empty = b"  warning: 1 source file(s) produced zero nodes and are absent from the graph: empty.json. A re-run will retry them (empties are no longer cached); if it persists, please report the file(s) (#1666).\n";
+        validate_graphify_extract_stderr(empty).expect("bounded empty-file observation");
+    }
+
+    #[test]
+    fn display_path_reports_known_gaps_without_weakening_durable_acceptance() {
+        let warning = b"  warning: 24 .sql file(s) contributed nothing to the graph because a dependency is missing: tree_sitter_sql not installed. Install it with: pip install \"graphifyy[sql]\" (#1745)\n";
+        assert!(validate_graphify_extract_stderr(warning).is_err());
+        assert_eq!(
+            display_coverage_warnings(warning).unwrap(),
+            vec![("SQL_PARSER_UNAVAILABLE", 24)]
+        );
+        assert!(display_coverage_warnings(b"  warning: 1 unexpected parser failure\n").is_err());
+        let mut injected = warning.to_vec();
+        injected.extend_from_slice(b"unreviewed diagnostic\n");
+        assert!(display_coverage_warnings(&injected).is_err());
     }
 }

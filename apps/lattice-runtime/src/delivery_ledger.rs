@@ -159,6 +159,10 @@ impl DeliveryDatabaseBinding {
     pub fn run_id(&self) -> &str {
         &self.run_id
     }
+
+    pub(crate) const fn port(&self) -> u16 {
+        self.port
+    }
 }
 
 fn fixed_runtime_config(

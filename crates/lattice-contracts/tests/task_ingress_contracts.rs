@@ -9,6 +9,35 @@ fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).expect("valid digest")
 }
 
+#[test]
+fn customer_codex_peer_is_distinct_and_requires_committed_server_evidence() {
+    let build = |commitment| {
+        TaskIngressPeerEvidence::new_codex_local_mcp_live(
+            GatewayInstanceId::new("customer-codex").unwrap(),
+            "1.0.0",
+            commitment,
+            digest('b'),
+            GatewayChannelId::new("stdio").unwrap(),
+            digest('c'),
+            digest('d'),
+        )
+    };
+    let peer = build(digest('a')).unwrap();
+    assert_eq!(peer.runtime(), RuntimeKind::Live);
+    assert_eq!(peer.client_kind(), TaskIngressClientKind::CodexLocalMcp);
+    assert_eq!(peer.client_kind().as_str(), "CODEX_LOCAL_MCP");
+    assert_eq!(
+        peer.actor_kind(),
+        TaskIngressActorKind::ControlledServiceProfile
+    );
+    assert_ne!(peer.adapter_id(), live_peer().adapter_id());
+    assert_ne!(
+        peer.actor_id().as_str(),
+        LOCAL_CANONICAL_MCP_ACCEPTANCE_ACTOR_ID
+    );
+    assert!(build(digest('0')).is_err());
+}
+
 fn live_peer() -> TaskIngressPeerEvidence {
     TaskIngressPeerEvidence::new_chatgpt_secure_mcp_tunnel_live(
         GatewayInstanceId::new("lattice-mcp-production").expect("gateway instance"),

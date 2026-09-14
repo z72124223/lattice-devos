@@ -184,11 +184,8 @@ export async function loadLatticeRuntimeConfiguration({
   }
   await verifyExecutable(parsed.command);
   const environment = { ...parsed.environment };
-  if (!environment.LATTICE_DELIVERY_LAUNCHER) {
-    if (!path.isAbsolute(environment.LATTICE_HERMES_CODEX_LAUNCHER ?? "")) {
-      throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
-    }
-    environment.LATTICE_DELIVERY_LAUNCHER = environment.LATTICE_HERMES_CODEX_LAUNCHER;
+  if (!path.isAbsolute(environment.LATTICE_DELIVERY_LAUNCHER ?? "")) {
+    throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
   }
   if (!environment.LATTICE_DELIVERY_SCHEMA_DIR) {
     if (!path.isAbsolute(environment.LATTICE_DELIVERY_ROOT ?? "")) {
@@ -338,19 +335,13 @@ function validForemanProjection(foreman) {
 
 function validRuntimeStatus(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
-  if (!["CORE_ONLY", "GRAPHIFY", "GRAPHIFY_HERMES"].includes(value.runtime_integration)) {
+  if (!["CORE_ONLY", "GRAPHIFY"].includes(value.runtime_integration)) {
     return false;
   }
   const graphifyStatuses = value.runtime_integration === "CORE_ONLY"
     ? ["DEFERRED"]
-    : ["READY", "DEGRADED"];
-  const hermesStatuses = value.runtime_integration === "GRAPHIFY_HERMES"
-    ? ["PREPARED", "DEGRADED"]
-    : ["DEFERRED"];
+    : ["READY", "PREPARED", "DEGRADED"];
   return graphifyStatuses.includes(value.graphify_runtime_status)
-    && hermesStatuses.includes(value.hermes_runtime_status)
-    && ["CONFIGURATION_REQUIRED", "CONFIGURATION_REJECTED", "PREPARED"]
-      .includes(value.hermes_activation_status)
     && validForemanProjection(value.foreman);
 }
 

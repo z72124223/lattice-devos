@@ -18,6 +18,15 @@ function assertIdentity(snapshot, revision, expectedDigest) {
 function pendingCount(claim) {
   return claim?.pending_questions?.length ?? claim?.pending_questions_count ?? 0;
 }
+function snapshotProgress(value) {
+  let result = "", bytes = 0;
+  for (const character of value.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim()) {
+    bytes += Buffer.byteLength(character);
+    if (bytes > 4096) break;
+    result += character;
+  }
+  return result || "進度已保存；請查看工作詳情。";
+}
 function taskProjection(task, facts) {
   const metadata = facts.metadata.find((row) => row.task_ref === task.task_ref);
   const claims = facts.claims.filter((row) => row.task_ref === task.task_ref);
@@ -78,7 +87,8 @@ export function projectFormalWork(pages, { maxNodes = 256, maxEdges = 1024 } = {
   if (dependencies.length + relations.filter((row) => row.parent_work_item_id).length > maxEdges) {
     throw formalWorkError("CONTROL_WORK_EDGE_LIMIT_EXCEEDED", "工作關聯超過這次快照的範圍。");
   }
-  const snapshot = projectControlWorkSnapshot({ projectId: first.project.id, nodes: rows,
+  const snapshot = projectControlWorkSnapshot({ projectId: first.project.id,
+    nodes: rows.map((row) => ({ ...row, progress: snapshotProgress(row.progress) })),
     relations, dependencies, source, sourceIdentity: pages.map((page) => page.revision) });
   return { project: first.project, snapshot, rows, facts,
     decisionsTruncated: pages.some((page) => page.product.truncation?.decisions === true) };
@@ -132,6 +142,9 @@ export class FormalWorkStore {
         if (page.schema_version !== "lattice.control.product-snapshot.v1") {
           throw formalWorkError("CONTROL_WORK_SCHEMA_REJECTED", "正式工作資料版本無法核對。");
         }
+        if (page.project?.id !== projectId) {
+          throw formalWorkError("CONTROL_WORK_PROJECT_MISMATCH", "工作資料不屬於所選專案，已停止顯示。");
+        }
         pages.push(page);
         if (page.next_task_ref && (pages.length >= 8 || page.next_task_ref === cursor)) {
           throw formalWorkError("CONTROL_WORK_NODE_LIMIT_EXCEEDED", "工作清單超過這次完整快照的範圍。");
@@ -147,6 +160,9 @@ export class FormalWorkStore {
   }
   async detail(projectId, taskRef) {
     const page = await this.runtime.call("lattice_control_snapshot", { project_id: projectId, task_ref: taskRef });
+    if (page.project?.id !== projectId) {
+      throw formalWorkError("CONTROL_WORK_PROJECT_MISMATCH", "工作資料不屬於所選專案，已停止顯示。");
+    }
     const task = page.tasks.find((row) => row.task_ref === taskRef);
     if (!task) throw formalWorkError("CONTROL_WORK_ITEM_NOT_FOUND", "找不到這項正式工作。", 404);
     return { ...taskProjection(task, page.product), task, product: page.product, project: page.project };

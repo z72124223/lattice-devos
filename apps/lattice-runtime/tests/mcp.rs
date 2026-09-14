@@ -237,7 +237,7 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[1]["result"]["tools"].as_array().map(Vec::len),
-        Some(9)
+        Some(10)
     );
 }
 
@@ -584,6 +584,10 @@ fn general_task_input_variant(field: &str, excludes_canary: bool) -> Value {
                 "minLength": 1,
                 "maxLength": 64,
                 "description": "Exact NFC Control catalog display name."
+            },
+            "parent_task_ref": {
+                "type":"string","pattern":"^[a-f0-9]{64}$",
+                "description":"For a problem discovered while pursuing an existing task, retain that task here. Describe the encountered problem and intended solution in objective. Runtime saves the parent link before returning; this does not complete or resume the parent."
             }
         },
         "required": ["client_request_id", field],
@@ -899,7 +903,8 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "lattice_delivery_reconcile",
             "lattice_foreman_checkpoint",
             "lattice_control_snapshot",
-            "lattice_control_update"
+            "lattice_control_update",
+            "lattice_code_relations"
         ]
     );
     assert_eq!(
@@ -1277,7 +1282,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(9)
+        Some(10)
     );
 
     for method in ["initialize", "ping"] {
@@ -1304,7 +1309,16 @@ fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 10);
+    let relations = tools
+        .iter()
+        .find(|t| t["name"] == "lattice_code_relations")
+        .expect("relations tool");
+    assert_eq!(
+        relations["annotations"],
+        json!({"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false})
+    );
+    assert_eq!(relations["inputSchema"]["additionalProperties"], false);
     assert_eq!(
         tools
             .iter()
@@ -1319,7 +1333,8 @@ fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
             "lattice_delivery_reconcile",
             "lattice_foreman_checkpoint",
             "lattice_control_snapshot",
-            "lattice_control_update"
+            "lattice_control_update",
+            "lattice_code_relations"
         ]
     );
     for tool in &tools[..2] {
@@ -1388,6 +1403,33 @@ fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
     assert_eq!(tools[6]["outputSchema"]["additionalProperties"], false);
     assert!(tools[2].get("annotations").is_none());
     assert!(tools[3].get("annotations").is_none());
+}
+
+#[test]
+fn code_relations_dispatches_only_closed_arguments_in_both_protocols() {
+    for modern in [false, true] {
+        let (mut server, _, _) = server();
+        if !modern {
+            initialize(&mut server);
+        }
+        let mut params = json!({"name":"lattice_code_relations","arguments":{"project_id":"customer-test","commit":"a".repeat(40),"query":"normalize_name","limit":1}});
+        if modern {
+            params["_meta"] = modern_request_meta();
+        }
+        let valid = server
+            .handle(json!({"jsonrpc":"2.0","id":10,"method":"tools/call","params":params}))
+            .unwrap();
+        assert_eq!(valid["result"]["isError"], true);
+        assert_eq!(
+            valid["result"]["structuredContent"]["code"],
+            "CODE_RELATIONS_UNAVAILABLE"
+        );
+        params["arguments"]["analysis_digest"] = json!("b".repeat(64));
+        let invalid = server
+            .handle(json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":params}))
+            .unwrap();
+        assert_eq!(invalid["error"]["code"], -32602);
+    }
 }
 
 #[test]
@@ -1785,6 +1827,11 @@ fn legacy_observer_neither_mutates_nor_advertises_or_dispatches_task_tools() {
             "lattice_foreman_checkpoint",
             valid_foreman_checkpoint_arguments(),
         ),
+        (
+            "legacy-relations",
+            "lattice_code_relations",
+            json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"hello","limit":1}),
+        ),
     ] {
         let response = legacy_server
             .handle(json!({
@@ -1847,6 +1894,11 @@ fn stateless_legacy_observer_neither_advertises_nor_dispatches_task_tools() {
             "stateless-checkpoint",
             "lattice_foreman_checkpoint",
             valid_foreman_checkpoint_arguments(),
+        ),
+        (
+            "stateless-relations",
+            "lattice_code_relations",
+            json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"hello","limit":1}),
         ),
     ] {
         let response = stateless_server
@@ -3070,7 +3122,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(9));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(10));
 
     let call = server
         .handle(json!({

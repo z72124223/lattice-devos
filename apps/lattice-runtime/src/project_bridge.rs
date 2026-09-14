@@ -6,6 +6,8 @@
 //! Registry command. It never accepts a path, Git executable, database target,
 //! or Registry identity from MCP request bytes.
 
+pub(crate) mod recovery;
+
 use std::env;
 use std::error::Error;
 use std::ffi::{OsStr, OsString};
@@ -58,6 +60,8 @@ use crate::managed_file_identity::ManagedFileIdentity;
 
 const DEFAULT_CONTROL_ORIGIN: &str = "http://127.0.0.1:4317";
 const CONTROL_ORIGIN_ENV: &str = "LATTICE_CONTROL_ORIGIN";
+const CUSTOMER_CATALOG_ENV: &str = "LATTICE_CUSTOMER_CATALOG_PATH";
+const CUSTOMER_CATALOG_SCHEMA: &str = "lattice.customer-project-catalog.v1";
 const GIT_EXECUTABLE_ENV: &str = "LATTICE_DELIVERY_GIT_EXE";
 const CATALOG_SCHEMA: &str = "lattice.control.project-catalog.v1";
 const CATALOG_RECORD_KIND: &str = "CONTROL_LOCAL_CATALOG";
@@ -437,8 +441,12 @@ fn parse_catalog_locator(value: &Value) -> ProjectBridgeResult<CatalogLocator> {
             .is_some_and(Value::is_null)
         && object.get("control_project_id").and_then(Value::as_str) == Some(id_text);
     let eligible = common_boundary
-        && object.get("schema_version").and_then(Value::as_str) == Some(CATALOG_SCHEMA)
-        && object.get("record_kind").and_then(Value::as_str) == Some(CATALOG_RECORD_KIND);
+        && ((object.get("schema_version").and_then(Value::as_str) == Some(CATALOG_SCHEMA)
+            && object.get("record_kind").and_then(Value::as_str) == Some(CATALOG_RECORD_KIND))
+            || (object.get("schema_version").and_then(Value::as_str)
+                == Some(CUSTOMER_CATALOG_SCHEMA)
+                && object.get("record_kind").and_then(Value::as_str)
+                    == Some("CUSTOMER_LOCAL_LOCATOR")));
     let legacy = common_boundary
         && object.get("schema_version").is_some_and(Value::is_null)
         && object.get("record_kind").and_then(Value::as_str) == Some("LEGACY_CONTROL_PROJECT");
@@ -532,6 +540,17 @@ fn parse_catalog_detail(
             || locator.canonical_path != expected.canonical_path
     }) {
         return Err(bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged));
+    }
+    if object.get("schema_version").and_then(Value::as_str) == Some(CUSTOMER_CATALOG_SCHEMA) {
+        // Customer locators contain no claimed Git/rule observations. The
+        // existing native repository inspection and Registry command below
+        // establish every authoritative identity, exactly as for Control.
+        return Ok(CatalogProject {
+            id: ProjectId::new(locator.id)
+                .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdUnsupported))?,
+            name: locator.name,
+            canonical_path: locator.canonical_path,
+        });
     }
     if !object
         .get("last_refresh_failure")
@@ -628,6 +647,11 @@ fn control_get_json(
     path: &str,
     deadline: Instant,
 ) -> ProjectBridgeResult<Value> {
+    if let Some(catalog) = env::var_os(CUSTOMER_CATALOG_ENV) {
+        // Process-owned installation input only. A missing or changed file
+        // fails closed; never fall back to another installation's HTTP server.
+        return customer_catalog_get_json(Path::new(&catalog), path, deadline);
+    }
     if !path.starts_with('/')
         || path
             .bytes()
@@ -661,7 +685,73 @@ fn control_get_json(
     if response.len() as u64 > MAX_CONTROL_RESPONSE_BYTES {
         return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
     }
-    parse_http_json(&response)
+    let value = parse_http_json(&response)?;
+    if value["schema_version"] == CUSTOMER_CATALOG_SCHEMA
+        || value["projects"].as_array().is_some_and(|projects| {
+            projects
+                .iter()
+                .any(|project| project["schema_version"] == CUSTOMER_CATALOG_SCHEMA)
+        })
+    {
+        return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
+    }
+    Ok(value)
+}
+
+fn customer_catalog_get_json(
+    catalog: &Path,
+    path: &str,
+    deadline: Instant,
+) -> ProjectBridgeResult<Value> {
+    ensure_before(deadline)?;
+    let identity = ManagedFileIdentity::capture(catalog, MAX_CONTROL_RESPONSE_BYTES)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlConfiguration))?;
+    #[cfg(windows)]
+    let _seal = identity
+        .seal()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlConfiguration))?;
+    let mut bytes = Vec::new();
+    File::open(catalog)
+        .and_then(|file| {
+            file.take(MAX_CONTROL_RESPONSE_BYTES + 1)
+                .read_to_end(&mut bytes)
+        })
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlUnavailable))?;
+    identity
+        .verify()
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectIdentityChanged))?;
+    ensure_before(deadline)?;
+    if bytes.len() as u64 > MAX_CONTROL_RESPONSE_BYTES {
+        return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
+    }
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ControlProtocol))?;
+    parse_catalog_state(&value)?;
+    let projects = value["projects"].as_array().expect("validated catalog");
+    if value["schema"] != CUSTOMER_CATALOG_SCHEMA
+        || projects.iter().any(|project| {
+            project["schema_version"] != CUSTOMER_CATALOG_SCHEMA
+                || project["record_kind"] != "CUSTOMER_LOCAL_LOCATOR"
+        })
+    {
+        return Err(bridge_error(ProjectBridgeErrorKind::ControlProtocol));
+    }
+    if path == "/api/state" {
+        return Ok(value);
+    }
+    let id = path
+        .strip_prefix("/api/projects/")
+        .filter(|id| ProjectId::new((*id).to_owned()).is_ok())
+        .ok_or_else(|| bridge_error(ProjectBridgeErrorKind::InvalidSelector))?;
+    let matches = projects
+        .iter()
+        .filter(|project| project["id"] == id)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [project] => Ok((*project).clone()),
+        [] => Err(bridge_error(ProjectBridgeErrorKind::ProjectNotFound)),
+        _ => Err(bridge_error(ProjectBridgeErrorKind::ProjectAmbiguous)),
+    }
 }
 
 fn parse_http_json(response: &[u8]) -> ProjectBridgeResult<Value> {
@@ -1625,6 +1715,52 @@ mod tests {
     use super::*;
 
     static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn customer_catalog_reuses_selectors_without_claiming_repository_observations() {
+        let id = "11111111-1111-1111-1111-111111111111";
+        let mut project = locator(id, "Customer", true);
+        project["schema_version"] = json!(CUSTOMER_CATALOG_SCHEMA);
+        project["record_kind"] = json!("CUSTOMER_LOCAL_LOCATOR");
+        let state = json!({"schema":CUSTOMER_CATALOG_SCHEMA,"projects":[project]});
+        let projects = parse_catalog_state(&state).expect("customer locator");
+        let selector = ProjectSelector::new(Some(id), None).expect("selector");
+        let selected = select_catalog_project(&projects, &selector).expect("exact project");
+        let detail =
+            parse_catalog_detail(&state["projects"][0], Some(&selected)).expect("locator only");
+        assert_eq!(detail.id.as_str(), id);
+        assert!(state["projects"][0].get("git_observation").is_none());
+        let mut changed = state["projects"][0].clone();
+        changed["registry_authority"] = json!("AUTHORITATIVE");
+        assert!(parse_catalog_detail(&changed, Some(&selected)).is_err());
+    }
+
+    #[test]
+    fn customer_catalog_is_bounded_and_never_falls_back_when_missing_or_invalid() {
+        let root = env::temp_dir().join(format!(
+            "lattice-customer-catalog-{}-{}",
+            std::process::id(),
+            TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&root).expect("fresh fixture");
+        let path = root.join("projects.json");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        assert!(customer_catalog_get_json(&path, "/api/state", deadline).is_err());
+        fs::write(&path, b"not json").expect("invalid fixture");
+        assert!(customer_catalog_get_json(&path, "/api/state", deadline).is_err());
+        let state = json!({"schema":CUSTOMER_CATALOG_SCHEMA,"projects":[]});
+        fs::write(&path, state.to_string()).expect("empty locator");
+        assert_eq!(
+            customer_catalog_get_json(&path, "/api/state", deadline).expect("read"),
+            state
+        );
+        assert!(customer_catalog_get_json(&path, "/unbounded", deadline).is_err());
+        fs::write(&path, vec![b' '; (MAX_CONTROL_RESPONSE_BYTES + 1) as usize])
+            .expect("oversized fixture");
+        assert!(customer_catalog_get_json(&path, "/api/state", deadline).is_err());
+        fs::remove_file(path).expect("remove owned fixture");
+        fs::remove_dir(root).expect("remove empty fixture directory");
+    }
 
     #[test]
     fn control_origin_is_exact_http_ipv4_loopback_only() {

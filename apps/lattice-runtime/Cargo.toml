@@ -38,13 +38,14 @@ unicode-normalization = "=0.1.25"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_ToolHelp",
 ] }
 
 # Audited Win32 calls are isolated to exact file-identity inspection in
 # `composition.rs`, the registered-project bridge, and the managed verifier,
-# plus process-tree observation in `managed_process_observer.rs`; the rest of
+# plus customer restore DPAPI verification, process-tree observation in `managed_process_observer.rs`; the rest of
 # the crate remains unsafe-free.
 [lints.rust]
 unsafe_code = "deny"

@@ -149,6 +149,61 @@ pub struct PostgresControlProduct {
 }
 
 impl PostgresControlProduct {
+    /// Reads derived records anchored to an independently replayed source receipt.
+    ///
+    /// # Errors
+    /// Rejects missing upgrades, mismatched sources, invalid bounds or database errors.
+    pub fn code_relations(
+        &mut self,
+        receipt: &lattice_contracts::GraphMemoryReceipt,
+        query: &str,
+        limit: i32,
+    ) -> Result<Value, &'static str> {
+        if query.is_empty()
+            || query.len() > 512
+            || query.chars().count() > 128
+            || query.trim() != query
+            || query.chars().any(char::is_control)
+            || !(1..=32).contains(&limit)
+        {
+            return Err("CODE_RELATIONS_ARGUMENTS_REJECTED");
+        }
+        let mut tx = self
+            .client
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .map_err(product_error)?;
+        tx.batch_execute("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
+            .map_err(product_error)?;
+        let installed: bool = tx.query_one("SELECT to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL", &[])
+            .map_err(product_error)?.get(0);
+        if !installed {
+            return Err("CODE_RELATIONS_UPGRADE_REQUIRED");
+        }
+        let saved = receipt.persistence();
+        let request = saved.request();
+        let result = tx
+            .query_one(
+                "SELECT control_product.code_relations_v1($1,$2,$3,$4,$5,$6,$7)",
+                &[
+                    &saved.analysis_digest().as_str(),
+                    &request.project_id().as_str(),
+                    &request.invocation().project_snapshot_id().as_str(),
+                    &request.commit_id().as_str(),
+                    &saved.persistence_digest().as_str(),
+                    &query,
+                    &limit,
+                ],
+            )
+            .map_err(|_| "CODE_RELATIONS_READ_REJECTED")?
+            .try_get(0)
+            .map_err(|_| "CODE_RELATIONS_RESPONSE_REJECTED")?;
+        tx.commit().map_err(product_error)?;
+        Ok(result)
+    }
+
     /// Verifies the connection before allowing product reads or writes.
     ///
     /// # Errors

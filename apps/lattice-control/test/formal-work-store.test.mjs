@@ -4,6 +4,12 @@ import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs
 import { openCircuitSummary } from "../src/execution-recovery.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
+test("a response for another project cannot populate the selected project's graph or details", async () => {
+  const store = new FormalWorkStore({ runtime: { call: async () => page() } });
+  await assert.rejects(store.readProject('project-b'), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });
+  await assert.rejects(store.detail('project-b', taskA), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });
+  assert.equal(store.cache.size, 0);
+});
 function page() {
   return { schema_version: "lattice.control.product-snapshot.v1", source: { authority: "POSTGRESQL_TASK_LEDGER" },
     project: { id: "project-a" }, revision: "1".repeat(64), next_task_ref: null,
@@ -29,10 +35,18 @@ test("archive and model completion cannot satisfy a formal dependency", () => {
   input.product.claims.push({ claim_id: "claim-a", task_ref: taskA, phase: "EXECUTION", archived: true, turn_status: "TURN_COMPLETED" });
   const first = projectFormalWork([input]).snapshot;
   assert.equal(first.tree.nodes[0].status, "archived");
+  assert.equal(first.tree.nodes[0].completion_verified, false);
+  assert.equal(first.tree.nodes.filter(node => node.completion_verified).length, 0);
   assert.equal(first.graph.nodes[1].blocker.status, "blocked");
   input.tasks[0].ledger.status = "COMPLETED";
   input.tasks[0].ledger.result_digest = "3".repeat(64);
   const verified = projectFormalWork([input]).snapshot;
+  assert.equal(verified.tree.nodes[0].status, "archived");
+  assert.equal(verified.tree.nodes[0].completion_verified, true);
+  assert.equal(verified.graph.nodes[0].completion_verified, true);
+  const completed = verified.tree.nodes.filter(node => node.completion_verified);
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].id, taskA);
   assert.equal(verified.graph.nodes[1].blocker.status, "clear");
   assert.equal(verified.tree.revision, verified.graph.revision);
   assert.equal(verified.tree.digest, verified.graph.digest);
@@ -48,6 +62,24 @@ test("Runtime failure after invalidation cannot fall back to old local facts", a
   await store.getWorkSnapshot({ projectId: "project-a" });
   store.invalidate();
   await assert.rejects(store.getWorkSnapshot({ projectId: "project-a" }), { code: "RUNTIME_UNAVAILABLE" });
+});
+
+test("native multiline and long Unicode progress cannot break the work tree or imply completion", () => {
+  for (const summary of [JSON.stringify({ summary: "檢查通過\n等待獨立驗收", artifact_path: "acceptance.mjs" }, null, 2),
+    "檢查\r\n" + "進度✅".repeat(1400), "\u001b\u0000\u007f"]) {
+    const input = page();
+    input.product.claims.push({ claim_id: "claim-a", task_ref: taskA, phase: "EXECUTION", turn_status: "TURN_COMPLETED" });
+    input.product.observations.push({ claim_id: "claim-a", kind: "TURN_COMPLETED", summary,
+      observed_at: "2026-09-06T05:11:00Z" });
+    const { snapshot, rows, facts } = projectFormalWork([input]);
+    const work = snapshot.tree.nodes.find((node) => node.id === taskA);
+    assert.equal(work.status, "codex_done");
+    assert.equal(work.completion_verified, false);
+    assert.ok(work.progress.length > 0 && Buffer.byteLength(work.progress) <= 4096);
+    assert.doesNotMatch(work.progress, /[\u0000-\u001f\u007f-\u009f\ufffd]/u);
+    assert.equal(rows[0].progress, summary.slice(0, 4096));
+    assert.equal(facts.observations[0].summary, summary);
+  }
 });
 
 test("node selection is bound to the same tree and graph identity", async () => {

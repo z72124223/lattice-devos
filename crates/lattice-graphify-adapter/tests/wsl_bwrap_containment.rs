@@ -260,9 +260,14 @@ fn pinned_graphify_extract_runs_in_the_fixed_bwrap_mount_shape() {
 
 fn fixed_bwrap_command(runtime: &Path, snapshot: &Path, output: &Path) -> Command {
     let mut command = Command::new(fixed_wsl_executable());
+    if let Ok(distribution) = std::env::var("LATTICE_TEST_GRAPHIFY_WSL_DISTRO") {
+        lattice_graphify_adapter::WslProfile::portable(&distribution, &"0".repeat(64))
+            .expect("explicit test distribution must be a new LATTICE-owned name");
+        command.args(["-d", &distribution, "--user", "lattice"]);
+    } else {
+        command.args(["-d", DISTRO]);
+    }
     command.args([
-        OsString::from("-d"),
-        OsString::from(DISTRO),
         OsString::from("--exec"),
         OsString::from(BWRAP),
         OsString::from("--die-with-parent"),

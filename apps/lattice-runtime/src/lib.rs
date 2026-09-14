@@ -1,5 +1,6 @@
 //! LATTICE runtime composition entry.
 
+mod code_relations;
 pub mod composition;
 mod control_product;
 pub mod coordination;
@@ -57,6 +58,28 @@ const DELIVERY_PROMPT: &str = concat!(
 /// Closed command surface for the first delivery node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeCommand {
+    BotLifecycle {
+        port: u16,
+        run_id: String,
+        install: bool,
+        migrate: bool,
+        reconcile_archive: bool,
+    },
+    ProjectRegistryInspect {
+        database: DeliveryDatabaseBinding,
+        project_id: lattice_contracts::ProjectId,
+    },
+    ProjectRegistryRestoreObserve {
+        database: DeliveryDatabaseBinding,
+        project_id: lattice_contracts::ProjectId,
+        proof: PathBuf,
+        proof_digest: lattice_contracts::ContentDigest,
+    },
+    ProjectRegistryReconcile {
+        database: DeliveryDatabaseBinding,
+        request: project_bridge::recovery::RecoveryRequest,
+        restore_proof: Option<PathBuf>,
+    },
     CodexPreflight {
         launcher: PathBuf,
         version: String,
@@ -88,6 +111,8 @@ pub enum RuntimeCommand {
 /// Stable command-line failures without sensitive process output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    BotLifecycle(&'static str),
+    ProjectRecovery(&'static str),
     Usage,
     InvalidDigest,
     InvalidTimeout,
@@ -113,6 +138,8 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::BotLifecycle(code) => code,
+            Self::ProjectRecovery(code) => code,
             Self::Usage => "LATTICE_RUNTIME_USAGE",
             Self::InvalidDigest => "LATTICE_RUNTIME_INVALID_DIGEST",
             Self::InvalidTimeout => "LATTICE_RUNTIME_INVALID_TIMEOUT",
@@ -134,6 +161,8 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::BotLifecycle(code) => formatter.write_str(code),
+            Self::ProjectRecovery(code) => formatter.write_str(code),
             Self::Usage => formatter.write_str(USAGE),
             Self::InvalidDigest => formatter.write_str("expected one lowercase SHA-256 digest"),
             Self::InvalidTimeout => {
@@ -167,6 +196,97 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
         return Err(RuntimeError::Usage);
     };
     match command.as_str() {
+        "bot-lifecycle"
+        | "bot-lifecycle-install"
+        | "bot-lifecycle-migrate"
+        | "bot-lifecycle-reconcile-archive" => {
+            let values = parse_options(
+                options,
+                &["--postgres-host", "--postgres-port", "--postgres-run-id"],
+            )?;
+            let binding = parse_database_binding(&values[0], &values[1], &values[2])?;
+            Ok(RuntimeCommand::BotLifecycle {
+                port: values[1].parse().map_err(|_| RuntimeError::Usage)?,
+                run_id: binding.run_id().to_owned(),
+                install: command == "bot-lifecycle-install",
+                migrate: command == "bot-lifecycle-migrate",
+                reconcile_archive: command == "bot-lifecycle-reconcile-archive",
+            })
+        }
+        "project-registry-inspect"
+        | "project-registry-reconcile"
+        | "project-registry-restore"
+        | "project-registry-restore-observe" => {
+            let mut names = vec![
+                "--postgres-host",
+                "--postgres-port",
+                "--postgres-run-id",
+                "--project-id",
+            ];
+            if matches!(
+                command.as_str(),
+                "project-registry-reconcile" | "project-registry-restore"
+            ) {
+                names.extend([
+                    "--expected-revision",
+                    "--expected-receipt-digest",
+                    "--pending-observation-digest",
+                ]);
+            }
+            if matches!(
+                command.as_str(),
+                "project-registry-restore" | "project-registry-restore-observe"
+            ) {
+                names.extend(["--restore-proof", "--restore-proof-sha256"]);
+            }
+            let values = parse_options(options, &names)?;
+            let database = parse_database_binding(&values[0], &values[1], &values[2])?;
+            let project_id = lattice_contracts::ProjectId::new(values[3].clone())
+                .map_err(|_| RuntimeError::Usage)?;
+            if command == "project-registry-restore-observe" {
+                return Ok(RuntimeCommand::ProjectRegistryRestoreObserve {
+                    database,
+                    project_id,
+                    proof: PathBuf::from(&values[4]),
+                    proof_digest: lattice_contracts::ContentDigest::from_sha256(&values[5])
+                        .map_err(|_| RuntimeError::InvalidDigest)?,
+                });
+            }
+            if command == "project-registry-inspect" {
+                return Ok(RuntimeCommand::ProjectRegistryInspect {
+                    database,
+                    project_id,
+                });
+            }
+            let revision = values[4]
+                .parse::<u64>()
+                .ok()
+                .filter(|v| *v > 0)
+                .ok_or(RuntimeError::Usage)?;
+            let digest = |v: &str| {
+                lattice_contracts::ContentDigest::from_sha256(v)
+                    .map_err(|_| RuntimeError::InvalidDigest)
+            };
+            Ok(RuntimeCommand::ProjectRegistryReconcile {
+                database,
+                request: project_bridge::recovery::RecoveryRequest {
+                    project_id,
+                    revision,
+                    receipt_digest: digest(&values[5])?,
+                    pending_digest: digest(&values[6])?,
+                    restore_digest: if command == "project-registry-restore" {
+                        Some(digest(&values[8])?)
+                    } else {
+                        None
+                    },
+                },
+                restore_proof: if command == "project-registry-restore" {
+                    Some(PathBuf::from(&values[7]))
+                } else {
+                    None
+                },
+            })
+        }
         "codex-preflight" => {
             let values = parse_options(
                 options,
@@ -265,6 +385,80 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
 #[allow(clippy::too_many_lines)]
 pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
     match command {
+        RuntimeCommand::BotLifecycle {
+            port,
+            run_id,
+            install,
+            migrate,
+            reconcile_archive,
+        } => {
+            let password = delivery_database_password()?;
+            if install {
+                lattice_postgres_store::install_bot_lifecycle(port, &run_id, &password)
+                    .map_err(RuntimeError::BotLifecycle)
+            } else {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::io::stdin()
+                    .take(65537)
+                    .read_to_end(&mut bytes)
+                    .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
+                if bytes.len() > 65536 {
+                    return Err(RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"));
+                }
+                let request: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| RuntimeError::BotLifecycle("BOT_LIFECYCLE_INPUT_REJECTED"))?;
+                if reconcile_archive {
+                    lattice_postgres_store::reconcile_bot_lifecycle_archive(
+                        port, &run_id, &password, &request,
+                    )
+                } else if migrate {
+                    lattice_postgres_store::migrate_bot_lifecycle(
+                        port, &run_id, &password, &request,
+                    )
+                } else {
+                    lattice_postgres_store::execute_bot_lifecycle(
+                        port, &run_id, &password, &request,
+                    )
+                }
+                .map_err(RuntimeError::BotLifecycle)
+            }
+        }
+        RuntimeCommand::ProjectRegistryRestoreObserve {
+            database,
+            project_id,
+            proof,
+            proof_digest,
+        } => project_bridge::recovery::observe_restore(
+            &database,
+            &delivery_database_password()?,
+            &project_id,
+            &proof,
+            &proof_digest,
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
+        RuntimeCommand::ProjectRegistryInspect {
+            database,
+            project_id,
+        } => project_bridge::recovery::run(
+            &database,
+            &delivery_database_password()?,
+            &project_id,
+            None,
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
+        RuntimeCommand::ProjectRegistryReconcile {
+            database,
+            request,
+            restore_proof,
+        } => project_bridge::recovery::run_with_proof(
+            &database,
+            &delivery_database_password()?,
+            &request.project_id,
+            Some(&request),
+            restore_proof.as_deref(),
+        )
+        .map_err(|e| RuntimeError::ProjectRecovery(e.code())),
         RuntimeCommand::CodexPreflight {
             launcher,
             version,
@@ -370,12 +564,9 @@ fn execute_runtime_health(database: &DeliveryDatabaseBinding) -> Result<Value, R
 }
 
 fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, RuntimeError> {
-    let (mode, graphify_status, hermes_status) = match integration_mode {
-        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED", "DEFERRED"),
-        Some("GRAPHIFY") => ("GRAPHIFY", "NOT_INSPECTED", "DEFERRED"),
-        Some("GRAPHIFY_HERMES") | Some("FULL_CHAIN") => {
-            ("GRAPHIFY_HERMES", "NOT_INSPECTED", "NOT_INSPECTED")
-        }
+    let (mode, graphify_status) = match integration_mode {
+        None | Some("CORE_ONLY") => ("CORE_ONLY", "DEFERRED"),
+        Some("GRAPHIFY") => ("GRAPHIFY", "NOT_INSPECTED"),
         Some(_) => return Err(RuntimeError::Latticed(LatticedErrorKind::Configuration)),
     };
 
@@ -386,8 +577,7 @@ fn runtime_health_projection(integration_mode: Option<&str>) -> Result<Value, Ru
             "control": {"status": "READY", "role": "coordination"},
             "postgresql": {"status": "CONNECTABLE", "role": "durable-truth"},
             "delivery_receipt": {"status": "NOT_INSPECTED", "role": "read-separately"},
-            "graphify": {"status": graphify_status, "role": "derived-memory"},
-            "hermes": {"status": hermes_status, "role": "reflection"}
+            "graphify": {"status": graphify_status, "role": "derived-memory"}
         }
     }))
 }
@@ -500,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn core_only_health_reports_optional_modules_as_deferred_without_activating_them() {
+    fn core_only_health_reports_graphify_as_deferred_without_activating_it() {
         let health = runtime_health_projection(Some("CORE_ONLY")).expect("core-only health");
 
         assert_eq!(health["runtime"], "LATTICE");
@@ -512,7 +702,7 @@ mod tests {
             "NOT_INSPECTED"
         );
         assert_eq!(health["components"]["graphify"]["status"], "DEFERRED");
-        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
+        assert!(health["components"].get("hermes").is_none());
     }
 
     #[test]
@@ -526,11 +716,11 @@ mod tests {
     }
 
     #[test]
-    fn graphify_health_does_not_claim_hermes_is_active() {
+    fn graphify_health_has_no_reflection_component() {
         let health = runtime_health_projection(Some("GRAPHIFY")).expect("graphify health");
         assert_eq!(health["mode"], "GRAPHIFY");
         assert_eq!(health["components"]["graphify"]["status"], "NOT_INSPECTED");
-        assert_eq!(health["components"]["hermes"]["status"], "DEFERRED");
+        assert!(health["components"].get("hermes").is_none());
     }
 
     #[test]
