@@ -79,7 +79,7 @@ tests prove only the tested behavior.
 ## Verification and delivery
 
 - Keep each Runtime module independently testable and repairable. Reserve a
-  complete four-part run for an explicit release-level integration check, never
+  complete three-core run for an explicit release-level integration check, never
   as the mandatory proof for routine module work.
 - Add or update the smallest behavioral test when behavior changes.
 - Run focused checks and inspect the final diff before reporting completion.
