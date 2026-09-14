@@ -18973,11 +18973,11 @@ mod tests {
     }
 
     #[test]
-    fn full_chain_startup_requires_prepared_assets_before_a_production_hermes_runner() {
+    fn full_chain_startup_rejects_retired_hermes_before_external_effects() {
         let error = serve_full_chain_from_environment()
-            .expect_err("incomplete official Hermes chain fails before external effects");
-        assert_eq!(error.kind(), LatticedErrorKind::HermesPreparationRequired);
-        assert_eq!(error.code(), "LATTICE_HERMES_PREPARATION_REJECTED");
+            .expect_err("retired Hermes chain fails before external effects");
+        assert_eq!(error.kind(), LatticedErrorKind::Configuration);
+        assert_eq!(error.code(), "LATTICED_CONFIGURATION_REJECTED");
     }
 
     #[test]
