@@ -3702,51 +3702,9 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     read_database_identity(client, target)
 }
 
-fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
-    client: &mut C,
-    target: &MigrationTarget,
-    manifest: &ManifestEvidence,
-    runtime_active: bool,
-) -> Result<String, PostgresStoreSetupError> {
-    let rows = read_history_rows(client)?;
-    let expected = migration_manifest()
-        .get(..manifest.entry_count())
-        .ok_or_else(history_error)?;
-    verify_history_rows(&rows, expected)?;
-    let compatibility = read_retained_schema_compatibility(client)?;
-    if compatibility.manifest_sha256 != manifest.manifest_sha256().as_str()
-        || compatibility.versions != [8, 8, 8, 8, 8]
-    {
-        return Err(history_error());
-    }
-    verify_schema_header_comments(client, "V7")?;
-    let managed_foreman = verify_optional_managed_foreman_extension(client, target)?;
-    if runtime_active
-        && managed_foreman
-            .as_ref()
-            .is_some_and(|profile| profile.binding != ManagedForemanStoreBinding::StoreV8Rebound)
-    {
-        return Err(catalog_error());
-    }
-    verify_schema_v8_forbidden_object_profile(client, managed_foreman.is_some())?;
-    if manifest.entry_count() == migration_manifest().len() {
-        let function_signature = catalog_signature(
-            client,
-            FUNCTION_SIGNATURE_SQL,
-            PostgresStoreSetupErrorKind::CorruptCatalog,
-        )?;
-        verify_owned_catalog_signature_profile(
-            client,
-            &store_v8_catalog_signatures(&function_signature)?,
-        )?;
-        verify_store_v8_runtime_successor_functions(client)?;
-        verify_writer_lease_v5_store_v8_successor(client)?;
-        verify_exact_default_acl_signature(client)?;
-        verify_autonomy_receipt_profile(client)?;
-        verify_forbidden_namespace_objects(client)?;
-        verify_effective_default_privileges(client)?;
-    }
-    verify_v7_ingress_ambiguity_profile(client)?;
+fn verify_external_adoption_relations(
+    client: &mut impl GenericClient,
+) -> Result<(), PostgresStoreSetupError> {
     let profile = client
         .query_one(
             "SELECT \
@@ -3793,6 +3751,55 @@ fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
             return Err(catalog_error());
         }
     }
+    Ok(())
+}
+
+fn verify_runtime_external_adoption_schema_v8<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    manifest: &ManifestEvidence,
+    runtime_active: bool,
+) -> Result<String, PostgresStoreSetupError> {
+    let rows = read_history_rows(client)?;
+    let expected = migration_manifest()
+        .get(..manifest.entry_count())
+        .ok_or_else(history_error)?;
+    verify_history_rows(&rows, expected)?;
+    let compatibility = read_retained_schema_compatibility(client)?;
+    if compatibility.manifest_sha256 != manifest.manifest_sha256().as_str()
+        || compatibility.versions != [8, 8, 8, 8, 8]
+    {
+        return Err(history_error());
+    }
+    verify_schema_header_comments(client, "V7")?;
+    let managed_foreman = verify_optional_managed_foreman_extension(client, target)?;
+    if runtime_active
+        && managed_foreman
+            .as_ref()
+            .is_some_and(|profile| profile.binding != ManagedForemanStoreBinding::StoreV8Rebound)
+    {
+        return Err(catalog_error());
+    }
+    verify_schema_v8_forbidden_object_profile(client, managed_foreman.is_some())?;
+    if manifest.entry_count() == migration_manifest().len() {
+        let function_signature = catalog_signature(
+            client,
+            FUNCTION_SIGNATURE_SQL,
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        )?;
+        verify_owned_catalog_signature_profile(
+            client,
+            &store_v8_catalog_signatures(&function_signature)?,
+        )?;
+        verify_store_v8_runtime_successor_functions(client)?;
+        verify_writer_lease_v5_store_v8_successor(client)?;
+        verify_exact_default_acl_signature(client)?;
+        verify_autonomy_receipt_profile(client)?;
+        verify_forbidden_namespace_objects(client)?;
+        verify_effective_default_privileges(client)?;
+    }
+    verify_v7_ingress_ambiguity_profile(client)?;
+    verify_external_adoption_relations(client)?;
     if runtime_active {
         verify_runtime_admission_present(client)?;
     } else {

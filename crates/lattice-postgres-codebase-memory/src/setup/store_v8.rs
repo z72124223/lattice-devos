@@ -1,4 +1,13 @@
-use super::*;
+use super::{
+    Client, ExactCatalogProfile, ExtensionApplyOutcome, ExtensionBootstrapGlobalProfile,
+    ExtensionDatabaseRole, ExtensionPreState, ExtensionSetupError, ExtensionSetupErrorKind,
+    ExtensionTarget, FUNCTION_SIGNATURE_SQL, GenericClient, IsolationLevel,
+    V3_EXPECTED_FUNCTION_SIGNATURE, acquire_writer_companion_advisory_locks, catalog_error,
+    catalog_signature, classify_pre_state, harden_transaction, map_extension_sql_error,
+    preflight_bootstrap, read_identity, transaction_error, verify_catalog_closure,
+    verify_embedded_extension_manifest, verify_exact_catalog_profile,
+    verify_global_default_acl_closure, verify_namespace_auxiliary_closure,
+};
 
 // Memory's v3 persistence profile and all historical receipt digests remain
 // immutable. Only its seven fixed entry points bind to the exact current Store.
@@ -135,7 +144,45 @@ pub fn verify_store_v8_compatibility(
 
 #[cfg(test)]
 mod tests {
+    use super::super::BOOTSTRAP_V8_GLOBAL_MANIFEST_SHA256;
     use super::*;
+    fn connect_fixture(port: u16, target: &ExtensionTarget, role: &str) -> Client {
+        use postgres::{Config, NoTls};
+        let mut client = Config::new()
+            .host("127.0.0.1")
+            .port(port)
+            .dbname(target.database_name())
+            .user(&format!("{role}_login"))
+            .password(std::env::var("LATTICE_TASK019_PASSWORD").expect("fixture password required"))
+            .connect(NoTls)
+            .expect("fixture connection");
+        client.batch_execute(&format!("SET ROLE {role}")).unwrap();
+        client
+    }
+
+    fn snapshot(client: &mut Client) -> [Option<String>; 7] {
+        [
+            "extension_identity",
+            "extension_ledger",
+            "analyses",
+            "records",
+            "retrieval_audits",
+            "receipts",
+            "reflections",
+        ]
+        .map(|table| {
+            client
+                .query_one(
+                    &format!(
+                        "SELECT md5(string_agg(h, '' ORDER BY h)) FROM \
+                    (SELECT md5(row_to_json(t)::text) h FROM memory.codebase_memory_{table} t) s"
+                    ),
+                    &[],
+                )
+                .unwrap()
+                .get::<_, Option<String>>(0)
+        })
+    }
 
     #[test]
     fn successor_changes_only_fixed_runtime_bindings() {
@@ -154,49 +201,15 @@ mod tests {
     #[test]
     #[ignore = "requires an isolated Store-v8 database copy with historical Memory receipts"]
     fn live_successor_preserves_history_and_rejects_substitution() {
-        use postgres::{Config, NoTls, types::ToSql};
+        use postgres::types::ToSql;
         let env = |key| std::env::var(key).expect("isolated fixture configuration required");
         assert_eq!(env("LATTICE_MEMORY_STORE_V8_FIXTURE"), "1");
         let port = env("LATTICE_TASK019_PORT").parse::<u16>().unwrap();
         let run_id = env("LATTICE_TASK019_RUN_ID");
         let target =
             ExtensionTarget::new(format!("lattice_task019_{}_base", &run_id[..8]), run_id).unwrap();
-        let connect = |role: &str| {
-            let mut client = Config::new()
-                .host("127.0.0.1")
-                .port(port)
-                .dbname(target.database_name())
-                .user(&format!("{role}_login"))
-                .password(env("LATTICE_TASK019_PASSWORD"))
-                .connect(NoTls)
-                .expect("fixture connection");
-            client.batch_execute(&format!("SET ROLE {role}")).unwrap();
-            client
-        };
+        let connect = |role: &str| connect_fixture(port, &target, role);
         let mut owner = connect("lattice_migrator");
-        let snapshot = |client: &mut Client| {
-            [
-                "extension_identity",
-                "extension_ledger",
-                "analyses",
-                "records",
-                "retrieval_audits",
-                "receipts",
-                "reflections",
-            ]
-            .map(|table| {
-                client
-                    .query_one(
-                        &format!(
-                            "SELECT md5(string_agg(h, '' ORDER BY h)) FROM \
-                    (SELECT md5(row_to_json(t)::text) h FROM memory.codebase_memory_{table} t) s"
-                        ),
-                        &[],
-                    )
-                    .unwrap()
-                    .get::<_, Option<String>>(0)
-            })
-        };
         let before = snapshot(&mut owner);
         let a = owner.query_one("SELECT decode(btrim(i.database_identity_sha256),'hex'), \
             decode(btrim(i.global_manifest_sha256),'hex'), decode(btrim(i.extension_sql_sha256),'hex'), \

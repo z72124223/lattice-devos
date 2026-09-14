@@ -12,10 +12,13 @@ pub const BOT_LIFECYCLE_ARCHIVE_SQL: &str =
 type Result<T> = std::result::Result<T, &'static str>;
 
 fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(64);
+    for byte in Sha256::digest(bytes) {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 15)]));
+    }
+    value
 }
 fn database(run_id: &str) -> Result<String> {
     if run_id.len() != 32
@@ -61,7 +64,7 @@ fn connect(port: u16, run_id: &str, password: &str, principal: &str) -> Result<C
         .ok_or("BOT_LIFECYCLE_DATABASE_UNAVAILABLE")
 }
 
-fn error(e: postgres::Error) -> &'static str {
+fn error(e: &postgres::Error) -> &'static str {
     if let Some(d) = e.as_db_error() {
         if matches!(d.code().code(), "40001" | "40P01") {
             return "BOT_LIFECYCLE_REVISION_CONFLICT";
@@ -107,7 +110,7 @@ fn error(e: postgres::Error) -> &'static str {
 fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     let identity: Value = client
         .query_one("SELECT bot_lifecycle.identity_read_v1()", &[])
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     if identity
         != json!({"database":database(run_id)?,"run_id":run_id,"sql_sha256":digest(BOT_LIFECYCLE_SQL.as_bytes())})
@@ -117,7 +120,7 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     let rows = client.query("SELECT p.proname,p.prosrc,p.prosecdef,pg_get_userbyid(p.proowner),p.proconfig, \
         has_function_privilege('lattice_runtime',p.oid,'EXECUTE'), \
         EXISTS(SELECT 1 FROM aclexplode(COALESCE(p.proacl,acldefault('f',p.proowner))) a WHERE a.grantee=0 AND a.privilege_type='EXECUTE') \
-        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='bot_lifecycle'", &[]).map_err(error)?;
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='bot_lifecycle'", &[]).map_err(|e| error(&e))?;
     let version = if rows.iter().any(|r| r.get::<_, String>(0) == "apply_v2") {
         2
     } else {
@@ -182,7 +185,7 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     let relations=client.query("SELECT c.relname,pg_get_userbyid(c.relowner), \
         has_table_privilege('lattice_runtime',c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER'), \
         EXISTS(SELECT 1 FROM aclexplode(COALESCE(c.relacl,acldefault('r',c.relowner))) a WHERE a.grantee=0) \
-        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='bot_lifecycle' AND c.relkind='r' ORDER BY c.relname",&[]).map_err(error)?;
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='bot_lifecycle' AND c.relkind='r' ORDER BY c.relname",&[]).map_err(|e| error(&e))?;
     if relations.len() != 3 {
         return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
     }
@@ -200,6 +203,10 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
 
 /// Explicit versioned migration; schema extension and control enrollment share
 /// one serializable transaction. Never called by runtime reads or installation.
+///
+/// # Errors
+/// Rejects schema drift, invalid migration requests and database failures.
+/// A failed commit can have an unknown outcome.
 pub fn migrate_bot_lifecycle(
     port: u16,
     run_id: &str,
@@ -211,15 +218,16 @@ pub fn migrate_bot_lifecycle(
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
         .start()
-        .map_err(error)?;
+        .map_err(|e| error(&e))?;
     let version = verify(&mut tx, run_id)?;
     if version == 1 {
-        tx.batch_execute(BOT_LIFECYCLE_V2_SQL).map_err(error)?;
+        tx.batch_execute(BOT_LIFECYCLE_V2_SQL)
+            .map_err(|e| error(&e))?;
     }
     verify(&mut tx, run_id)?;
     let mut value: Value = tx
         .query_one("SELECT bot_lifecycle.migrate_v2($1)", &[request])
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
     value["v1_sql_sha256"] = json!(digest(BOT_LIFECYCLE_SQL.as_bytes()));
@@ -229,6 +237,10 @@ pub fn migrate_bot_lifecycle(
 
 /// Install the additive recovery function and reconcile one exact archived
 /// boundary atomically. Failure rolls back installation as well as state.
+///
+/// # Errors
+/// Rejects invalid archive evidence, schema drift and database failures.
+/// A failed commit can have an unknown outcome.
 pub fn reconcile_bot_lifecycle_archive(
     port: u16,
     run_id: &str,
@@ -240,7 +252,7 @@ pub fn reconcile_bot_lifecycle_archive(
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
         .start()
-        .map_err(error)?;
+        .map_err(|e| error(&e))?;
     if verify(&mut tx, run_id)? != 2 {
         return Err("BOT_LIFECYCLE_ARCHIVE_RECONCILE_REJECTED");
     }
@@ -249,21 +261,22 @@ pub fn reconcile_bot_lifecycle_archive(
         "SELECT pg_advisory_xact_lock(hashtextextended('bot_lifecycle/archive-reconcile-v2',0))",
         &[],
     )
-    .map_err(error)?;
+    .map_err(|e| error(&e))?;
     let present: bool = tx
         .query_one(
             "SELECT to_regprocedure('bot_lifecycle.reconcile_archive_v2(jsonb)') IS NOT NULL",
             &[],
         )
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     if !present {
-        tx.batch_execute(BOT_LIFECYCLE_ARCHIVE_SQL).map_err(error)?;
+        tx.batch_execute(BOT_LIFECYCLE_ARCHIVE_SQL)
+            .map_err(|e| error(&e))?;
     }
     verify(&mut tx, run_id)?;
     let mut value: Value = tx
         .query_one("SELECT bot_lifecycle.reconcile_archive_v2($1)", &[request])
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
     value["archive_sql_sha256"] = json!(digest(BOT_LIFECYCLE_ARCHIVE_SQL.as_bytes()));
@@ -272,6 +285,10 @@ pub fn reconcile_bot_lifecycle_archive(
 
 /// Explicit installer. Only creates the exact new database; existing data is
 /// verified and retained. No original Store objects, roles or passwords change.
+///
+/// # Errors
+/// Rejects shared clusters, unexpected owners, partial installations and database failures.
+/// A failed commit can have an unknown outcome.
 pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<Value> {
     let name = database(run_id)?;
     let mut bootstrap = connect(port, run_id, password, "bootstrap")?;
@@ -280,12 +297,12 @@ pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<
             "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname LIKE 'lattice_task019_%')",
             &[],
         )
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     if shared_store {
         return Err("BOT_LIFECYCLE_ISOLATED_CLUSTER_REQUIRED");
     }
-    let roles=bootstrap.query("SELECT rolname,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname IN('lattice_runtime','lattice_runtime_login','lattice_migrator','lattice_migrator_login')",&[]).map_err(error)?;
+    let roles=bootstrap.query("SELECT rolname,rolsuper,rolcreatedb,rolcreaterole,rolbypassrls FROM pg_roles WHERE rolname IN('lattice_runtime','lattice_runtime_login','lattice_migrator','lattice_migrator_login')",&[]).map_err(|e| error(&e))?;
     if roles.len() != 4 || roles.iter().any(|r| (1..=4).any(|i| r.get::<_, bool>(i))) {
         return Err("BOT_LIFECYCLE_ROLE_REJECTED");
     }
@@ -294,7 +311,7 @@ pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<
             "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname=$1",
             &[&name],
         )
-        .map_err(error)?;
+        .map_err(|e| error(&e))?;
     let created = found.is_empty();
     if created {
         // name is derived solely from a validated 32-byte lowercase hex run ID.
@@ -302,27 +319,27 @@ pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<
             .batch_execute(&format!(
                 "CREATE DATABASE {name} OWNER lattice_migrator TEMPLATE template0;"
             ))
-            .map_err(error)?;
-        bootstrap.batch_execute(&format!("REVOKE ALL ON DATABASE {name} FROM PUBLIC; GRANT CONNECT ON DATABASE {name} TO lattice_runtime,lattice_runtime_login,lattice_migrator,lattice_migrator_login;")).map_err(error)?;
+            .map_err(|e| error(&e))?;
+        bootstrap.batch_execute(&format!("REVOKE ALL ON DATABASE {name} FROM PUBLIC; GRANT CONNECT ON DATABASE {name} TO lattice_runtime,lattice_runtime_login,lattice_migrator,lattice_migrator_login;")).map_err(|e| error(&e))?;
     } else if found[0].get::<_, String>(0) != "lattice_migrator" {
         return Err("BOT_LIFECYCLE_DATABASE_IDENTITY_REJECTED");
     }
     let mut migrator = connect(port, run_id, password, "migrator")?;
     let present: bool = migrator
         .query_one("SELECT to_regnamespace('bot_lifecycle') IS NOT NULL", &[])
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     if !present {
         if !created {
             return Err("BOT_LIFECYCLE_PARTIAL_INSTALL_REVIEW_REQUIRED");
         }
-        let mut tx = migrator.transaction().map_err(error)?;
-        tx.batch_execute(BOT_LIFECYCLE_SQL).map_err(error)?;
+        let mut tx = migrator.transaction().map_err(|e| error(&e))?;
+        tx.batch_execute(BOT_LIFECYCLE_SQL).map_err(|e| error(&e))?;
         tx.execute(
             "INSERT INTO bot_lifecycle.identity VALUES(true,$1,$2)",
             &[&run_id, &digest(BOT_LIFECYCLE_SQL.as_bytes())],
         )
-        .map_err(error)?;
+        .map_err(|e| error(&e))?;
         tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
     }
     verify(&mut migrator, run_id)?;
@@ -333,6 +350,10 @@ pub fn install_bot_lifecycle(port: u16, run_id: &str, password: &str) -> Result<
     )
 }
 
+///
+/// # Errors
+/// Rejects invalid input, stale ownership, paused admission and database failures.
+/// A failed commit can have an unknown outcome.
 pub fn execute_bot_lifecycle(
     port: u16,
     run_id: &str,
@@ -384,13 +405,13 @@ pub fn execute_bot_lifecycle(
             .isolation_level(IsolationLevel::RepeatableRead)
             .read_only(true)
             .start()
-            .map_err(error)?;
+            .map_err(|e| error(&e))?;
         let mut value: Value = tx
             .query_one(
                 "SELECT bot_lifecycle.read_v1($1,$2)",
                 &[&text("project_id")?, &text("role_id")?],
             )
-            .map_err(error)?
+            .map_err(|e| error(&e))?
             .get(0);
         if action != "read" {
             let state = &value["current"];
@@ -424,17 +445,21 @@ pub fn execute_bot_lifecycle(
         if value["current"]["contract_version"] == 2 {
             value["schema_version"] = json!("lattice.bot-lifecycle.v2");
         }
-        tx.commit().map_err(error)?;
+        tx.commit().map_err(|e| error(&e))?;
         return Ok(value);
     }
     for key in ["request_id", "owner_thread_id", "owner_host_id"] {
         text(key)?;
     }
+    apply_lifecycle_request(&mut client, version, request)
+}
+
+fn apply_lifecycle_request(client: &mut Client, version: u8, request: &Value) -> Result<Value> {
     let mut tx = client
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
         .start()
-        .map_err(error)?;
+        .map_err(|e| error(&e))?;
     let value: Value = tx
         .query_one(
             if version == 2 {
@@ -444,7 +469,7 @@ pub fn execute_bot_lifecycle(
             },
             &[request],
         )
-        .map_err(error)?
+        .map_err(|e| error(&e))?
         .get(0);
     tx.commit().map_err(|_| "BOT_LIFECYCLE_OUTCOME_UNKNOWN")?;
     Ok(value)
