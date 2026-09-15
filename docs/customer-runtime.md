@@ -1,5 +1,8 @@
 # 客戶獨立 Runtime（Windows 開發階段）
 
+一般使用者請從[讓 Codex 協助安裝](../INSTALL_WITH_CODEX.md)開始。
+以下為 Codex／維護者使用的操作參考，命令中的路徑及摘要由執行者核驗後填入。
+
 `scripts/lattice-customer-runtime.py` 在客戶指定的新目錄建立獨立 PostgreSQL
 cluster、Runtime 身份及加密憑證，並把啟動器複製到安裝目錄。
 目前是可驗證的本機元件，**不是已完成的三核心下載包**。
@@ -163,7 +166,7 @@ python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --
 
 這仍是本機候選封裝。`import-result` 預設使用已安裝並封存摘要的 Node；未配置
 時拒絕執行，不搜尋 PATH。Codex 客戶端與已啟用的 Windows WSL2／虛擬化仍是
-外部需求。Hermes 維持 TASK_ONLY／DEFERRED。它不是完整三核心可攜
+外部需求。Hermes 已永久退役，不得啟用。它不是完整三核心可攜
 下載版，也不代表跨電腦、乾淨作業系統或企業政策已驗收。
 
 專用 WSL 安裝先執行以下入口，再將回傳的目錄傳給 bundle install 的

@@ -4,6 +4,20 @@ LATTICE 是支援 **Codex App 的三核心後台**。使用者只操作 Codex Ap
 LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 獨立網頁平台、視覺工作樹／圖譜、聊天畫面及 Windows 桌面外殼已移除。
 
+## 讓 Codex 幫你安裝
+
+不熟悉技術設定，可以把下面這段交給自己的 Codex App：
+
+```text
+請按照 https://github.com/z72124223/lattice-devos/blob/product/lattice-control-mvp/INSTALL_WITH_CODEX.md
+協助我檢查並安裝 LATTICE 與必要依賴，保留我的設定，完成實際驗收。
+先確認相容 Graphify 依賴能否取得；缺少時如實回報，不宣稱三核心安裝完成。
+```
+
+[完整 Codex 安裝入口](INSTALL_WITH_CODEX.md)包含官方依賴來源、現有安裝命令、
+重新連線及驗收要求。目前 v2.0.0 只有 Runtime 下載檔，尚未提供完整已核驗的
+Graphify 依賴包；此流程是協助安裝，不是任何電腦皆可完成的一鍵安裝承諾。
+
 ## 三核心
 
 | 核心 | 責任 |
