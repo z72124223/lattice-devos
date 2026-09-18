@@ -7,9 +7,10 @@ if errorlevel 1 (
   echo Install Python from https://www.python.org/downloads/windows/ and run this file again.
   exit /b 2
 )
-if "%~2"=="" (
-  echo Usage: Install-LATTICE.cmd ^<Graphify-source-folder^> ^<WSL-launcher^> [--install]
-  exit /b 2
-)
-py -3 "%ROOT%scripts\lattice-one-click-install.py" --graph-source "%~1" --wsl "%~2" --report "%LOCALAPPDATA%\LATTICE\one-click-report.json" %3
+set "SOURCE=%~1"
+if "%SOURCE%"=="" set "SOURCE=%CD%"
+set "WSL=%~2"
+if "%WSL%"=="" set "WSL=%SystemRoot%\System32\wsl.exe"
+set "MODE=%~3"
+py -3 "%ROOT%scripts\lattice-one-click-install.py" --graph-source "%SOURCE%" --wsl "%WSL%" --report "%LOCALAPPDATA%\LATTICE\one-click-report.json" %MODE%
 exit /b %errorlevel%

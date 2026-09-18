@@ -12,12 +12,14 @@ Graphify payload，因此缺件時會安全停止並寫出報告，不會假裝�
 一般使用者使用方式（先以唯讀模式檢查，再安裝）：
 
 ```text
-Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher>
+Install-LATTICE.cmd
 Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher> --install
 ```
 
 報告會寫到 `%LOCALAPPDATA%\\LATTICE\\one-click-report.json`。這個入口不會下載
 未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
+安裝成功後會自動把 LATTICE MCP 寫入使用者的 Codex 設定，並在 Graphify
+專案加入受管理的 `AGENTS.md` 掛勾；原有 MCP、模型、權限與其他設定會保留。
 
 Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；它不能取代尚未公開
 的專用 WSL 映像：
