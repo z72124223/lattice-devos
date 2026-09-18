@@ -26,6 +26,13 @@ Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；它不�
 python scripts/lattice-graphify-supply.py --output <全新Graphify供應目錄>
 ```
 
+Ubuntu 26.04.1 WSL 映像也有 Canonical 公開來源與固定摘要，可由維護者用以下
+入口下載；下載約 400 MB，完成後才能建立真正可攜的三核心 bundle：
+
+```text
+python scripts/lattice-wsl-supply.py --output <全新目錄>\\ubuntu-26.04.1-wsl-amd64.wsl
+```
+
 ## 複製給 Codex
 
 ```text
