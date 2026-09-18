@@ -97,10 +97,22 @@ def main() -> int:
                         default=Path(os.environ.get("USERPROFILE", str(Path.home()))) / ".codex" / "config.toml")
     parser.add_argument("--project-name", default="LATTICE project")
     parser.add_argument("--report", type=Path); parser.add_argument("--install", action="store_true")
+    parser.add_argument("--overlap-report", type=Path)
+    parser.add_argument("--ack-overlap-warning", action="store_true", help="acknowledge warnings; never deletes or changes originals")
     args = parser.parse_args()
     if args.graphify_platform is None and (args.bundle / "platform").is_dir(): args.graphify_platform = args.bundle / "platform"
     bundle, state, source, wsl = (p.resolve() for p in (args.bundle, args.state, args.graph_source, args.wsl))
     report = preflight(bundle, state, source, wsl)
+    audit = Path(__file__).with_name("lattice-overlap-audit.py")
+    overlap_report = args.overlap_report or Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "LATTICE" / "overlap-audit.json"
+    audit_result = subprocess.run([sys.executable, str(audit), "--project", str(source), "--report", str(overlap_report)],
+                                  capture_output=True, text=True, encoding="utf-8", errors="replace")
+    try: report["overlap_audit"] = json.loads(audit_result.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError): report["overlap_audit"] = {"status":"BLOCKED","code":"OVERLAP_AUDIT_UNREADABLE"}
+    if report["overlap_audit"].get("status") == "WARNING" and not args.ack_overlap_warning:
+        report["status"] = "WARNING_REVIEW_REQUIRED"
+    elif report["overlap_audit"].get("status") == "WARNING":
+        report["overlap_audit"]["user_acknowledged"] = True
     if args.install and report["status"] == "READY":
         report["installation"] = run_install(bundle, state, source, wsl, args.graphify_platform,
                                                args.codex_config, args.project_name)
