@@ -7,7 +7,7 @@ from pathlib import Path
 PATTERNS = {
     "lattice_startup": re.compile(r"lattice_runtime_status|lattice_task_submit|LATTICE-first|LATTICE MCP", re.I),
     "lattice_install": re.compile(r"lattice.*(install|connect|prepare|bootstrap)|graphify.*(install|refresh)", re.I),
-    "repeat_workflow": re.compile(r"heartbeat|schedule|automation|startup|every new|每次|每個新", re.I),
+    "repeat_workflow": re.compile(r"heartbeat|schedule|automation|lattice_runtime_status|lattice_task_submit", re.I),
 }
 
 def files(root: Path, suffixes: tuple[str, ...], limit: int = 500):
@@ -30,7 +30,10 @@ def audit(codex_home: Path, project: Path) -> dict:
         try: text = path.read_text(encoding="utf-8", errors="replace")
         except OSError: continue
         kinds = [name for name, pattern in PATTERNS.items() if pattern.search(text)]
-        if kinds:
+        # Generic skill prose is not a conflict. Keep only files that mention
+        # LATTICE/MCP behavior or an actual scheduler/heartbeat mechanism.
+        if kinds and ("lattice_startup" in kinds or "lattice_install" in kinds or
+                      ("repeat_workflow" in kinds and re.search(r"heartbeat|automation|schedule", text, re.I))):
             hits.append({"path": str(path), "matches": kinds,
                          "warning": "可能與 LATTICE 安裝後的 MCP/AGENTS/heartbeat 行為重複；未經同意不會修改。"})
     grouped = {}
@@ -38,7 +41,8 @@ def audit(codex_home: Path, project: Path) -> dict:
         for kind in hit["matches"]: grouped[kind] = grouped.get(kind, 0) + 1
     warnings = []
     if grouped.get("lattice_startup", 0) > 1: warnings.append("多個來源可能要求重複執行 lattice_runtime_status")
-    plugin_hits = [hit for hit in hits if "plugins" in Path(hit["path"]).parts]
+    plugin_hits = [hit for hit in hits if "plugins" in Path(hit["path"]).parts and
+                   ("lattice_startup" in hit["matches"] or "lattice_install" in hit["matches"])]
     if plugin_hits: warnings.append("已安裝的 Codex plugin 可能提供與 LATTICE/Graphify 相同的 MCP 或工作流")
     if grouped.get("lattice_install", 0) > 1: warnings.append("多個來源可能重複安裝或初始化 LATTICE/Graphify")
     if grouped.get("repeat_workflow", 0) > 1 and grouped.get("lattice_startup", 0): warnings.append("LATTICE 啟動規則與 heartbeat/automation 可能重複觸發")

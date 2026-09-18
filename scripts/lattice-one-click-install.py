@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Safe single-entry Windows installer for a verified LATTICE bundle."""
 from __future__ import annotations
-import argparse, hashlib, json, os, platform, shutil, subprocess, time
+import argparse, hashlib, json, os, platform, shutil, subprocess, sys, time
 from pathlib import Path
 
 SCHEMA = "lattice.one-click-install.v1"
@@ -33,7 +33,7 @@ def preflight(bundle: Path, state: Path, source: Path, wsl: Path | None) -> dict
         manifest = bundle / "bundle.json"
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
-            checks.append({"check": "manifest", "status": "PASS" if data.get("schema") == "lattice.bundle.v1" else "BLOCKED",
+            checks.append({"check": "manifest", "status": "PASS" if data.get("schema") in ("lattice.bundle.v1", "lattice.windows-dependency-bundle.v1") else "BLOCKED",
                            "schema": data.get("schema"), "cores": data.get("cores"), "full_dependency_portability": data.get("full_dependency_portability")})
         except (OSError, ValueError): checks.append({"check": "manifest", "status": "BLOCKED", "code": "BUNDLE_MANIFEST_UNREADABLE"})
     checks += [{"check": "state", "status": "PASS" if not state.exists() else "BLOCKED", "code": None if not state.exists() else "STATE_ALREADY_EXISTS"},
