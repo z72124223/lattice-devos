@@ -75,6 +75,7 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
         archive_candidates = sorted(platform_root.glob("*.wsl")) if platform_root.is_dir() else []
         if archive_candidates:
             platform_script = bundle / "bin/lattice-wsl-platform.py"
+            state.mkdir(parents=True, exist_ok=True)
             platform_root = state / "wsl-platform"
             # A cancelled WSL import can leave an empty root behind. Preserve it
             # as evidence and allocate a fresh managed root for the retry.
