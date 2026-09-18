@@ -19,6 +19,13 @@ Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher> --install
 報告會寫到 `%LOCALAPPDATA%\\LATTICE\\one-click-report.json`。這個入口不會下載
 未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
 
+Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；它不能取代尚未公開
+的專用 WSL 映像：
+
+```text
+python scripts/lattice-graphify-supply.py --output <全新Graphify供應目錄>
+```
+
 ## 複製給 Codex
 
 ```text
