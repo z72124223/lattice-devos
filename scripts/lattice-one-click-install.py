@@ -76,6 +76,12 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
         if archive_candidates:
             platform_script = bundle / "bin/lattice-wsl-platform.py"
             platform_root = state / "wsl-platform"
+            # A cancelled WSL import can leave an empty root behind. Preserve it
+            # as evidence and allocate a fresh managed root for the retry.
+            if platform_root.exists():
+                index = 2
+                while (state / f"wsl-platform-{index}").exists(): index += 1
+                platform_root = state / f"wsl-platform-{index}"
             launcher_sha = hashlib.sha256(wsl.read_bytes()).hexdigest()
             provision = subprocess.run(
                 [str(python), "-I", "-B", "-S", str(platform_script), "provision",
