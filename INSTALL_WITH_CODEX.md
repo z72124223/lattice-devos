@@ -4,9 +4,20 @@
 把下面這段話交給 Codex，它負責查環境、準備依賴、執行安裝和驗收。
 你只需處理 Windows 授權、必要的重新開機，以及選擇要管理的專案。
 
-**目前是協助安裝入口，不是保證任何新電腦都可完成的一鍵安裝包。**
-v2.0.0 發布頁提供 Runtime 與校驗碼，尚未提供完整已核驗的 Graphify payload。
-若你的電腦沒有該依賴，Codex 應先確認其供應來源，避免先裝大量元件卻無法完成。
+**目前提供安全的一鍵入口，但尚未宣稱任何新電腦都能完成安裝。**
+`Install-LATTICE.cmd` 會先做唯讀預檢，只有完整 bundle、Graphify、WSL 啟動器與
+雜湊驗證都通過時才會建立客戶 Runtime。v2.0.0 尚未提供完整已核驗的公開
+Graphify payload，因此缺件時會安全停止並寫出報告，不會假裝成功。
+
+一般使用者使用方式（先以唯讀模式檢查，再安裝）：
+
+```text
+Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher>
+Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher> --install
+```
+
+報告會寫到 `%LOCALAPPDATA%\\LATTICE\\one-click-report.json`。這個入口不會下載
+未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
 
 ## 複製給 Codex
 
