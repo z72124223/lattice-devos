@@ -13,6 +13,13 @@ def digest(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""): h.update(chunk)
     return h.hexdigest()
 
+def purge_bytecode(bundle: Path) -> None:
+    """Remove only unmanifested Python cache files from the immutable bundle."""
+    for directory in bundle.rglob("__pycache__"):
+        if directory.is_dir():
+            for file in directory.glob("*.pyc"):
+                file.unlink(missing_ok=True)
+
 def command(name: str) -> dict:
     found = shutil.which(name)
     if not found: return {"name": name, "status": "MISSING"}
@@ -58,9 +65,28 @@ def write_workspace_hook(source: Path) -> None:
 
 def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_root: Path | None,
                 codex_config: Path | None, project_name: str) -> dict:
+    purge_bytecode(bundle)
     python = bundle / "python/python.exe"
     if not python.is_file(): return {"status": "BLOCKED", "code": "BUNDLED_PYTHON_MISSING"}
-    command = [str(python), "-I", "-B", str(bundle / "bin/lattice-bundle.py"), "install", "--bundle", str(bundle),
+    # The package carries the pinned WSL archive, but a usable Graphify platform
+    # is a registered WSL distribution with platform.json. Provision it on the
+    # target machine when the caller has not supplied an existing platform root.
+    if platform_root and not (platform_root / "platform.json").is_file():
+        archive_candidates = sorted(platform_root.glob("*.wsl")) if platform_root.is_dir() else []
+        if archive_candidates:
+            platform_script = bundle / "bin/lattice-wsl-platform.py"
+            platform_root = state / "wsl-platform"
+            launcher_sha = hashlib.sha256(wsl.read_bytes()).hexdigest()
+            provision = subprocess.run(
+                [str(python), "-I", "-B", "-S", str(platform_script), "provision",
+                 "--root", str(platform_root), "--archive", str(archive_candidates[0]),
+                 "--wsl", str(wsl), "--wsl-sha256", launcher_sha],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+            if provision.returncode or not (platform_root / "platform.json").is_file():
+                return {"status": "BLOCKED", "code": "WSL_PLATFORM_PROVISION_FAILED",
+                        "output": (provision.stdout + provision.stderr)[-4000:]}
+    command = [str(python), "-I", "-B", "-S", str(bundle / "bin/lattice-bundle.py"), "install", "--bundle", str(bundle),
                "--sha256", digest(bundle / "bundle.json"), "--state", str(state), "--graph-source", str(source), "--wsl", str(wsl)]
     if platform_root: command += ["--graphify-platform", str(platform_root)]
     result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace",
@@ -68,6 +94,7 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
     try: payload = json.loads(result.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError): payload = {"status": "BLOCKED", "code": "INSTALL_OUTPUT_UNREADABLE"}
     payload["exit_code"] = result.returncode
+    purge_bytecode(bundle)
     if result.returncode == 0 and payload.get("status") != "BLOCKED":
         runtime = state / "bin" / "latticed.exe"
         runner = state / "bin" / "lattice-customer-runtime.py"
