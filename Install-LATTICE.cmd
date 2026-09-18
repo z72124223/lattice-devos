@@ -15,4 +15,5 @@ set "MODE=%~3"
 py -3 "%ROOT%scripts\lattice-one-click-install.py" --graph-source "%SOURCE%" --wsl "%WSL%" --report "%LOCALAPPDATA%\LATTICE\one-click-report.json" --overlap-report "%LOCALAPPDATA%\LATTICE\overlap-audit.json" %MODE%
 if errorlevel 2 exit /b %errorlevel%
 py -3 "%ROOT%scripts\lattice-codex-profile.py" --output "%LOCALAPPDATA%\LATTICE\codex-portable-profile.json"
+py -3 "%ROOT%scripts\lattice-environment-manifest.py" collect --bundle "%ROOT%bundle" --manifest "%LOCALAPPDATA%\LATTICE\required-environment.json"
 exit /b %errorlevel%
