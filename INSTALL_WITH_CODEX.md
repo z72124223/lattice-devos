@@ -20,6 +20,8 @@ Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher> --install
 未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
 安裝成功後會自動把 LATTICE MCP 寫入使用者的 Codex 設定，並在 Graphify
 專案加入受管理的 `AGENTS.md` 掛勾；原有 MCP、模型、權限與其他設定會保留。
+安裝器也會產生不含秘密與機器絕對路徑的 `codex-portable-profile.json`，用來
+重建可攜式偏好；不會搬移登入身份、token、密碼或 DPAPI。
 
 Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；它不能取代尚未公開
 的專用 WSL 映像：
