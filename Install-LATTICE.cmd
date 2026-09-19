@@ -3,6 +3,7 @@ setlocal
 set "ROOT=%~dp0"
 set "BUNDLE=%ROOT%bundle"
 if not exist "%BUNDLE%" set "BUNDLE=%ROOT%bundle-v5"
+if not exist "%BUNDLE%" set "BUNDLE=%ROOT%rebuild-bundle-v6"
 set "PYTHON=%BUNDLE%\python\python.exe"
 if not exist "%PYTHON%" (
   echo The verified LATTICE bundle is incomplete: bundled Python is missing.
