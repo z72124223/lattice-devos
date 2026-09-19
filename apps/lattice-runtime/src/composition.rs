@@ -394,6 +394,7 @@ pub enum LatticedErrorKind {
     OfficialLiveBlocked,
     ScriptedFixtureRejected,
     GraphConfiguration,
+    GraphSourceDirty,
     GraphExecution,
     GraphSnapshotExecution,
     GraphifyExecution,
@@ -453,6 +454,7 @@ impl LatticedErrorKind {
             Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED",
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
+            Self::GraphSourceDirty => "LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphSnapshotExecution => "LATTICE_GRAPH_MEMORY_SNAPSHOT_REJECTED",
             Self::GraphifyExecution => "LATTICE_GRAPH_MEMORY_GRAPHIFY_REJECTED",
@@ -11535,6 +11537,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::CodexConfiguration
         | LatticedErrorKind::ReceiptRead
         | LatticedErrorKind::GraphConfiguration
+        | LatticedErrorKind::GraphSourceDirty
         | LatticedErrorKind::TaskControl
         | LatticedErrorKind::WriterLease
         | LatticedErrorKind::ForemanReplayCorrupt
@@ -11766,26 +11769,8 @@ fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String
     let work_root = graph_canonical_directory(&work_root)?;
     let git_executable = PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?);
     let git_sha256 = graph_executable_sha256(&git_executable)?;
+    let commit = graph_source_commit(&git_executable, &repository_root)?;
 
-    let top_level = graph_git_stdout(
-        &git_executable,
-        &repository_root,
-        ["rev-parse", "--show-toplevel"],
-    )?;
-    if graph_canonical_directory(Path::new(&top_level))? != repository_root {
-        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
-    }
-    let clean = graph_git_output(
-        &git_executable,
-        &repository_root,
-        ["status", "--porcelain=v1", "-z"],
-    )?;
-    if !clean.stdout.is_empty() {
-        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
-    }
-    let commit = graph_git_stdout(&git_executable, &repository_root, ["rev-parse", "HEAD"])?;
-    GitObjectId::new(&commit)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     Ok((
         RuntimeGraphSource {
             repository_root,
@@ -11795,6 +11780,40 @@ fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String
         },
         commit,
     ))
+}
+
+fn graph_source_commit(
+    git_executable: &Path,
+    repository_root: &Path,
+) -> Result<String, LatticedError> {
+    let top_level = graph_git_output(
+        git_executable,
+        repository_root,
+        ["rev-parse", "--show-toplevel"],
+    )?;
+    // Git paths may contain spaces. Strip the line terminator, not path bytes;
+    // the commit parser below intentionally retains its stricter token check.
+    let top_level = std::str::from_utf8(&top_level.stdout)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?
+        .trim_end_matches(['\r', '\n']);
+    if top_level.is_empty()
+        || top_level.contains(['\r', '\n', '\0'])
+        || graph_canonical_directory(Path::new(top_level))? != repository_root
+    {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    let clean = graph_git_output(
+        git_executable,
+        repository_root,
+        ["status", "--porcelain=v1", "-z"],
+    )?;
+    if !clean.stdout.is_empty() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphSourceDirty));
+    }
+    let commit = graph_git_stdout(git_executable, repository_root, ["rev-parse", "HEAD"])?;
+    GitObjectId::new(&commit)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    Ok(commit)
 }
 
 fn graph_canonical_directory(path: &Path) -> Result<PathBuf, LatticedError> {
@@ -17199,6 +17218,81 @@ mod tests {
             graphify_wsl_executable_from_value(None, default_wsl.clone()),
             default_wsl
         );
+    }
+
+    #[test]
+    fn runtime_graph_source_accepts_spaces_and_rejects_uncommitted_changes() {
+        static NEXT_GRAPH_SOURCE: AtomicUsize = AtomicUsize::new(0);
+        let fixture = env::temp_dir().join(format!(
+            "lattice graph source {} {}",
+            process::id(),
+            NEXT_GRAPH_SOURCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let repository = fixture.join("repository with spaces");
+        let hooks = fixture.join("empty-hooks");
+        fs::create_dir_all(&repository).expect("create graph source fixture");
+        fs::create_dir_all(&hooks).expect("create empty fixture hooks");
+        let git = Path::new("git");
+        let run = |arguments: &[&str]| {
+            let output = process::Command::new(git)
+                .current_dir(&repository)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .arg("-c")
+                .arg(format!("core.hooksPath={}", hooks.display()))
+                .args(arguments)
+                .output()
+                .expect("run fixture Git");
+            assert!(output.status.success(), "fixture Git failed: {arguments:?}");
+        };
+        run(&["init", "-q"]);
+        fs::write(repository.join("README.md"), b"graph source\n").expect("fixture source");
+        run(&["add", "README.md"]);
+        run(&[
+            "-c",
+            "user.name=LATTICE Test",
+            "-c",
+            "user.email=lattice-test@invalid.example",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "graph source",
+        ]);
+        let root = fs::canonicalize(&repository).expect("canonical graph source");
+        let expected = graph_git_stdout(git, &root, ["rev-parse", "HEAD"]).expect("fixture HEAD");
+        assert_eq!(
+            graph_source_commit(git, &root).expect("path containing spaces"),
+            expected
+        );
+
+        // The installer's workspace hook is untracked; it must be diagnosed as
+        // source state, not misreported as a PostgreSQL configuration failure.
+        fs::write(repository.join("AGENTS.md"), b"managed hook\n").expect("untracked hook");
+        let dirty = graph_source_commit(git, &root).expect_err("untracked source must fail");
+        assert_eq!(dirty.kind(), LatticedErrorKind::GraphSourceDirty);
+        assert_eq!(dirty.code(), "LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED");
+        fs::remove_file(repository.join("AGENTS.md")).expect("remove fixture hook");
+
+        fs::write(repository.join("README.md"), b"changed source\n").expect("dirty tracked source");
+        assert_eq!(
+            graph_source_commit(git, &root)
+                .expect_err("dirty source must fail")
+                .kind(),
+            LatticedErrorKind::GraphSourceDirty
+        );
+        run(&["add", "README.md"]);
+        assert_eq!(
+            graph_source_commit(git, &root)
+                .expect_err("staged source must fail")
+                .kind(),
+            LatticedErrorKind::GraphSourceDirty
+        );
+        fs::remove_dir_all(&fixture).expect("remove graph source fixture");
     }
 
     #[test]

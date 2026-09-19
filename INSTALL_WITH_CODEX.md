@@ -4,30 +4,33 @@
 把下面這段話交給 Codex，它負責查環境、準備依賴、執行安裝和驗收。
 你只需處理 Windows 授權、必要的重新開機，以及選擇要管理的專案。
 
-**目前提供安全的一鍵入口，但尚未宣稱任何新電腦都能完成安裝。**
-`Install-LATTICE.cmd` 會先做唯讀預檢，只有完整 bundle、Graphify、WSL 啟動器與
-雜湊驗證都通過時才會建立客戶 Runtime。v2.0.0 尚未提供完整已核驗的公開
-Graphify payload，因此缺件時會安全停止並寫出報告，不會假裝成功。
+**完整 Windows 封裝仍在驗收，不要把舊版下載檔當成已完成的新機安裝保證。**
+修正後的 `Install-LATTICE.cmd` 會先檢查完整 bundle、Graphify、WSL 啟動器與
+檔案摘要，再建立專用 Runtime。內含 Python、Git、Node、PostgreSQL 與固定
+Graphify 依賴，不要求使用者另外安裝這些命令到全域 PATH。
 
-一般使用者使用方式（先以唯讀模式檢查，再安裝）：
+一般使用者解壓後雙擊入口；不指定專案時會建立專用的歡迎範例：
 
 ```text
 Install-LATTICE.cmd
-Install-LATTICE.cmd <Graphify-source-folder> <WSL-launcher> --install
+Install-LATTICE.cmd <已提交的Git專案> <WSL啟動器>
 ```
 
 報告會寫到 `%LOCALAPPDATA%\\LATTICE\\one-click-report.json`。這個入口不會下載
 未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
-安裝成功後會自動把 LATTICE MCP 寫入使用者的 Codex 設定，並在 Graphify
-專案加入受管理的 `AGENTS.md` 掛勾；原有 MCP、模型、權限與其他設定會保留。
+安裝成功後會自動把 LATTICE MCP 寫入使用者的 Codex 設定，增量加入全域
+`AGENTS.md` 啟動規則（已有等效規則就沿用）。專用歡迎範例只引用全域規則；
+指定既有專案時不會改寫其檔案或代替使用者提交變更。原有 MCP 與權限保留。
 安裝器也會產生不含秘密與機器絕對路徑的 `codex-portable-profile.json`，用來
-重建可攜式偏好；不會搬移登入身份、token、密碼或 DPAPI。
+重建可攜式偏好；不會搬移登入身份、token、密碼或 DPAPI。若下載包附帶
+`codex-preferences.json`，可套用其中模型及推理等有限偏好；已存在不同偏好
+時必須由使用者選擇，不移植安全政策、自訂 provider 或其他帳戶的外掛資格。
 同時會產生 `required-environment.json`，列出 LATTICE 實際需要的固定依賴、版本、
 WSL 映像、Graphify 與必要環境鍵；朋友電腦會依此比對，不會因缺少你已安裝的
 必要元件而在執行到一半才失敗。
 
-Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；它不能取代尚未公開
-的專用 WSL 映像：
+Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；完整執行仍需要
+下一段列出的固定 WSL 映像與相依套件：
 
 ```text
 python scripts/lattice-graphify-supply.py --output <全新Graphify供應目錄>

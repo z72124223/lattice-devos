@@ -198,7 +198,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     for name in ("cmd", "mingw64", "usr"):
         copy_tree(git / name, root / "git" / name, ("etc", "__pycache__"), budget)
     shutil.copyfile(M.regular(git / "LICENSE.txt"), root / "git/LICENSE.txt")
-    copy_tree(graphify, root / "graphify", budget=budget)
+    copy_tree(graphify, root / "graphify", ("__pycache__",), budget)
     (root / "node").mkdir()
     for name in ("node.exe", "LICENSE", "provenance.json"):
         shutil.copyfile(node / name, root / "node" / name)

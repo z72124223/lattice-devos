@@ -8,16 +8,22 @@ SCHEMA = "lattice.required-environment.v1"
 REQUIRED_COMMANDS = ("git", "node", "python", "wsl")
 REQUIRED_ENV = ("LATTICE_RUNTIME_INTEGRATION", "LATTICE_GRAPHIFY_RUNTIME_ROOT", "LATTICE_GRAPHIFY_WSL_EXE")
 
-def version(name: str) -> dict:
-    path = shutil.which(name)
+def version(name: str, bundle: Path | None = None) -> dict:
+    relative = {"git": "git/cmd/git.exe", "node": "node/node.exe", "python": "python/python.exe"}
+    candidate = bundle / relative[name] if bundle and name in relative else None
+    path = str(candidate) if candidate and candidate.is_file() else shutil.which(name)
     if not path: return {"name": name, "status": "MISSING"}
     try:
-        p = subprocess.run([path, "--version"], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=10)
-        return {"name": name, "status": "PASS" if p.returncode == 0 else "UNVERIFIED", "version": (p.stdout or p.stderr).strip()[:160]}
+        p = subprocess.run([path, "--version"], capture_output=True, timeout=10,
+                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        raw = p.stdout or p.stderr
+        output = raw.decode("utf-16-le" if b"\0" in raw else "utf-8", errors="replace")
+        return {"name": name, "status": "PASS" if p.returncode == 0 else "UNVERIFIED", "version": output.strip()[:160],
+                "source": "BUNDLED" if candidate and candidate.is_file() else "SYSTEM"}
     except (OSError, subprocess.TimeoutExpired): return {"name": name, "status": "UNVERIFIED"}
 
 def collect(bundle: Path | None = None) -> dict:
-    commands = [version(name) for name in REQUIRED_COMMANDS]
+    commands = [version(name, bundle) for name in REQUIRED_COMMANDS]
     components = {"control": "bundled", "postgresql": "bundled", "graphify": "bundled", "node": "24.16.0", "python": "3.12", "git": "bundled", "wsl_image": "Ubuntu 26.04.1 pinned"}
     if bundle and (bundle / "bundle.json").is_file():
         try:

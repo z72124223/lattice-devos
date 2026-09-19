@@ -1,14 +1,20 @@
-LATTICE one-click package v2.0.0
+LATTICE Windows 安裝包（驗收中的候選版本）
 
-1. Extract this package to a local folder.
-2. Double-click Install-LATTICE.cmd.
-3. If the overlap audit reports existing Codex plugins or workflows, read the
-   report and choose whether to keep, disable, or change them. The installer
-   never deletes them without explicit approval.
-4. Restart Codex after installation so it reloads the LATTICE MCP server.
+1. 把整個下載包解壓縮到電腦上的資料夾。
+2. 雙擊 Install-LATTICE.cmd，讓安裝視窗保持開啟。
+3. 如 Windows 要求允許安裝 WSL，閱讀提示後選擇是否同意。
+   若要求重新開機，先儲存工作；重新開機後再次雙擊同一個安裝檔。
+4. 安裝完成後重新開啟 Codex，使用你自己的帳號登入。
 
-The package contains the verified Windows x64 LATTICE bundle, PostgreSQL,
-Python, Git, Node.js, Graphify, and the pinned Ubuntu WSL platform. It creates
-new local state and preserves the user's existing Codex settings and MCPs.
-It does not contain an account login, API key, password, DPAPI secret, or
-another person's Codex identity.
+安裝器會準備 LATTICE、PostgreSQL、Graphify，以及必要的 Python、Git、Node。
+會建立自己的範例專案，真正保存任務及查詢程式關係，通過後才顯示成功。
+安裝材料會保留在電腦的本機應用程式資料目錄。
+
+如果發現既有技能、工作流程或 MCP 可能重複，會先跳出提示。
+你可以保留原設定繼續，或停止後再處理；不會偷偷刪除你的東西。
+套用附帶 Codex 偏好時，已有不同設定會先詢問，並保存備份。
+登入、憑證、個人資料及付費外掛資格不會從作者電腦複製給你。
+
+需要 x64 Windows 10 2004 以上／Windows 11、可用的硬體虛擬化、網路與 Codex。
+Windows 首次啟用功能可能需要管理員允許及重新開機。
+目前仍待乾淨 Windows 與不同使用者帳戶的最終驗收；不要把本候選包當成已完成正式交付。

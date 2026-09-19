@@ -55,6 +55,13 @@ Graphify 只分析已提交的乾淨程式版本。`graphify-preflight` 成功�
 執行環境身份符合，`graphify-refresh` 回傳實際持久化收據與筆數。
 現有 refresh 仍使用固定驗收查詢；其結果為零不能宣稱一般程式關係查詢完成。
 
+來源含未提交檔案時會回報 `LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED`。這是來源
+版本檢查失敗，不能解讀成 PostgreSQL 權限問題。安裝器自建範例會先提交
+掛勾與範例程式，再建立圖譜；不要在驗收後自動改寫使用者的來源專案。
+正式功能驗收還須透過 MCP 建立／讀回驗收任務，並以正式專案 ID、相同 commit
+及持久化收據讀回非空的 `lattice_code_relations` 結果。範例驗收任務只保存為
+草稿，不會因安裝器檢查成功而宣稱使用者的工程任務已完成。
+
 Codex 可使用既有 MCP 保存工作、父子／依賴關係及決策。正式本機測試成果沿
 既有 operator importer 保存；新增入口不提供任意「完成」setter：
 

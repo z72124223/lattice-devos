@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Read-only audit for duplicated Codex/LATTICE skills, hooks and workflows."""
 from __future__ import annotations
-import argparse, json, os, re
+import argparse, json, os, re, tomllib
 from pathlib import Path
 
 PATTERNS = {
@@ -9,6 +9,32 @@ PATTERNS = {
     "lattice_install": re.compile(r"lattice.*(install|connect|prepare|bootstrap)|graphify.*(install|refresh)", re.I),
     "repeat_workflow": re.compile(r"heartbeat|schedule|automation|lattice_runtime_status|lattice_task_submit", re.I),
 }
+
+def mcp_duplicates(config: Path) -> list[str]:
+    """Compare configured, enabled MCP transports without exposing credentials."""
+    if not config.exists():
+        return []
+    try:
+        servers = tomllib.loads(config.read_text(encoding="utf-8")).get("mcp_servers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("invalid MCP table")
+    except (OSError, ValueError):
+        return ["無法讀取 Codex MCP 設定，尚未完成重複檢查。"]
+    groups = {}
+    for name, server in servers.items():
+        if not isinstance(server, dict) or server.get("enabled") is False:
+            continue
+        command, url, args = server.get("command"), server.get("url"), server.get("args", [])
+        if isinstance(command, str) and isinstance(args, list) and all(isinstance(arg, str) for arg in args):
+            signature = ("stdio", os.path.normcase(command), tuple(args))
+        elif isinstance(url, str):
+            signature = ("http", url.rstrip("/"))
+        else:
+            continue
+        groups.setdefault(signature, []).append(name)
+    # Never include URLs, arguments, environment or headers in the report.
+    return ["以下啟用中的 MCP 設定指向相同服務，可能重複提供工具：" + ", ".join(names)
+            for names in groups.values() if len(names) > 1]
 
 def files(root: Path, suffixes: tuple[str, ...], limit: int = 500):
     if not root.is_dir(): return []
@@ -39,7 +65,7 @@ def audit(codex_home: Path, project: Path) -> dict:
     grouped = {}
     for hit in hits:
         for kind in hit["matches"]: grouped[kind] = grouped.get(kind, 0) + 1
-    warnings = []
+    warnings = mcp_duplicates(codex_home / "config.toml")
     if grouped.get("lattice_startup", 0) > 1: warnings.append("多個來源可能要求重複執行 lattice_runtime_status")
     plugin_hits = [hit for hit in hits if "plugins" in Path(hit["path"]).parts and
                    ("lattice_startup" in hit["matches"] or "lattice_install" in hit["matches"])]
@@ -49,6 +75,7 @@ def audit(codex_home: Path, project: Path) -> dict:
     return {"schema":"lattice.overlap-audit.v1", "status":"WARNING" if warnings else "CLEAR",
             "warnings": warnings, "matches": hits,
             "user_choice_required": bool(warnings),
+            "assessment": "candidate_overlaps_not_proof_of_duplicate_execution",
             "policy":"read_only_until_user_approves_each_change"}
 
 def main() -> int:
