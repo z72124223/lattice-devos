@@ -40,11 +40,22 @@ class ConfigTests(unittest.TestCase):
         M.change(self.config, "install", self.runtime, self.sha, arguments)
         first = self.config.read_bytes()
         self.assertEqual(M.parse(first)["mcp_servers"]["lattice"]["args"], arguments)
+        self.assertEqual(M.parse(first)["mcp_servers"]["lattice"]["startup_timeout_sec"], 600)
+        self.assertEqual(M.parse(first)["mcp_servers"]["lattice"]["tool_timeout_sec"], 120)
         M.change(self.config, "update", self.runtime2, M.digest(self.runtime2.read_bytes()), arguments + ["version-two"])
         M.change(self.config, "rollback")
         self.assertEqual(self.config.read_bytes(), first)
         M.change(self.config, "remove")
         self.assertEqual(self.config.read_bytes(), before)
+
+    def test_customer_timeout_edits_are_not_overwritten_or_adopted(self):
+        arguments = ["-I", "customer.py", "serve", "--state", str(self.root / "customer")]
+        M.change(self.config, "install", self.runtime, self.sha, arguments)
+        changed = self.config.read_bytes().replace(b"startup_timeout_sec = 600", b"startup_timeout_sec = 900")
+        self.config.write_bytes(changed)
+        with self.assertRaisesRegex(M.Rejected, "MANAGED_TABLE_CHANGED"):
+            M.change(self.config, "install", self.runtime, self.sha, arguments)
+        self.assertEqual(self.config.read_bytes(), changed)
 
     def test_runtime_arguments_reject_control_characters_before_config_write(self):
         with self.assertRaisesRegex(M.Rejected, "RUNTIME_ARGUMENTS_REJECTED"):

@@ -268,6 +268,31 @@ class InstallerTests(unittest.TestCase):
                 with patch.object(I, "mcp_batch", side_effect=altered), self.assertRaisesRegex(I.Rejected, "GRAPH_RESTART_READBACK"):
                     I.verify_mcp(["python", "runner"], self.bundle, self.state, self.source, {"project_id": "project-id"}, graph, managed_sample=True)
 
+    def test_fresh_mcp_acceptance_stops_database_before_new_process_readback(self):
+        graph, replies = self.mcp_fixture()
+        order = []
+        def batch(*args):
+            order.append("mcp")
+            return replies.pop(0)
+        def stop(command):
+            self.assertEqual(command, ["python", "runner", "stop"])
+            order.append("stop")
+            return {"status": "STOPPED", "initialized": True, "run_id": "a" * 32, "exit_code": 0}
+        with patch.object(I, "mcp_batch", side_effect=batch), patch.object(I, "run_json", side_effect=stop):
+            result = I.verify_mcp(["python", "runner"], self.bundle, self.state, self.source,
+                                  {"project_id": "project-id"}, graph, managed_sample=True, restart_postgres=True)
+        self.assertEqual(order, ["mcp", "stop", "mcp"])
+        self.assertEqual(result["postgres_process_restart"], "VERIFIED")
+
+    def test_failed_database_stop_cannot_claim_restart_acceptance(self):
+        graph, replies = self.mcp_fixture()
+        with patch.object(I, "mcp_batch", return_value=replies[0]) as rpc, \
+                patch.object(I, "run_json", return_value={"status": "RUNNING_IDENTITY_VERIFIED", "exit_code": 0}), \
+                self.assertRaisesRegex(I.Rejected, "MCP_POSTGRES_STOP_NOT_VERIFIED"):
+            I.verify_mcp(["python", "runner"], self.bundle, self.state, self.source,
+                         {"project_id": "project-id"}, graph, managed_sample=True, restart_postgres=True)
+        self.assertEqual(rpc.call_count, 1)
+
     def test_mcp_failure_prevents_connect(self):
         with patch.object(I, "prepare_source"), patch.object(I, "run_json", side_effect=self.response), \
                 patch.object(I, "verify_mcp", side_effect=I.Rejected("MCP_TASK_RESTART_READBACK_REJECTED")):
@@ -324,17 +349,31 @@ class InstallerTests(unittest.TestCase):
         for accept in (False, True):
             with self.subTest(accept=accept), patch.object(I.sys, "argv", argv), \
                     patch.object(I, "preflight", return_value={"status": "READY", "blocked_codes": []}), \
-                    patch.object(I, "run_json", side_effect=[{"status": "WARNING", "exit_code": 0}, {"status": "READY", "exit_code": 0}, self.staged()]), \
-                    patch.object(I, "confirm_keep_existing", return_value=accept), \
+                    patch.object(I, "run_json", side_effect=[{"status": "WARNING", "exit_code": 0, "user_acknowledged": accept,
+                                                             "resolution": [{"status": "KEPT"}]},
+                                                            {"status": "READY", "exit_code": 0}, self.staged()]) as commands, \
                     patch.object(I, "run_install", return_value={"status": "INSTALLED"}) as install, contextlib.redirect_stdout(io.StringIO()) as output:
                 self.assertEqual(I.main(), 0 if accept else 2)
             result = json.loads(output.getvalue())
             if accept:
-                self.assertEqual(result["overlap_audit"]["resolution"], "CANDIDATES_RETAINED_NOT_DEDUPLICATED")
+                self.assertEqual(result["overlap_audit"]["resolution"], [{"status": "KEPT"}])
                 install.assert_called_once()
             else:
                 self.assertEqual(result["status"], "WARNING_REVIEW_REQUIRED")
                 install.assert_not_called()
+            self.assertIn("--review", commands.call_args_list[0].args[0])
+            self.assertIn("--interactive", commands.call_args_list[0].args[0])
+
+    def test_missing_codex_home_is_reported_before_expensive_installation(self):
+        argv = ["one-click", "--bundle", str(self.bundle), "--state", str(self.state), "--wsl", str(self.wsl),
+                "--codex-config", str(self.root / "not-started-codex/config.toml"), "--install"]
+        with patch.object(I.sys, "argv", argv), patch.object(I, "preflight", return_value={"status": "READY", "blocked_codes": []}), \
+                patch.object(I, "run_json", side_effect=[{"status": "CLEAR", "exit_code": 0}, {"status": "READY", "exit_code": 0}]) as commands, \
+                patch.object(I, "run_install") as install, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(I.main(), 2)
+        self.assertIn("CODEX_FIRST_RUN_REQUIRED", json.loads(output.getvalue())["blocked_codes"])
+        install.assert_not_called()
+        self.assertEqual(commands.call_count, 2)
 
     def test_staging_failure_prevents_installation(self):
         argv = ["one-click", "--bundle", str(self.bundle), "--state", str(self.state), "--wsl", str(self.wsl),

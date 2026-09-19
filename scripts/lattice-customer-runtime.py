@@ -3,7 +3,7 @@
 
 The installation owns one new directory and one loopback PostgreSQL cluster.
 Credentials and installation identity are protected with the current user's DPAPI.
-Normal STDIO startup verifies the prepared cluster; it never migrates a database.
+Normal STDIO startup restarts only the verified prepared cluster; it never migrates a database.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 import uuid
 
@@ -312,6 +313,22 @@ def start(config: dict, password: str) -> None:
     verify_running(config, password)
 
 
+def start_for_mcp(root: Path, config: dict, password: str) -> None:
+    # Parallel Codex connections may all observe a stopped cluster. Serialize the
+    # bounded start, recheck inside start(), and wait only for another operation's
+    # lock; never retry a rejected cluster identity or a failed PostgreSQL start.
+    deadline = time.monotonic() + 35
+    while True:
+        try:
+            with CONFIG.manager_lock(root / ".operations"):
+                start(config, password)
+            return
+        except Rejected as error:
+            if str(error) != "CONFIG_MANAGER_BUSY" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
 def runtime_action(config: dict, password: str, action: str) -> dict | None:
     result = invoke([config["runtime"], action], env=environment(config, password), timeout=120)
     if result.returncode:
@@ -472,12 +489,19 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
     if action == "serve":
         if not (root / "ready.json").is_file():
             raise Rejected("CUSTOMER_INITIALIZATION_INCOMPLETE")
-        if not running(config):
-            raise Rejected("CUSTOMER_CLUSTER_STOPPED_USE_START")
-        verify_running(config, password)
         # STDIO belongs entirely to the native MCP server. No secret or wrapper log.
         with runtime_lease(root):
             config, password = load(root)
+            ready = json.loads(regular(root / "ready.json").read_bytes())
+            if ready != {"schema": SCHEMA, "run_id": config["run_id"], "system_id": config["system_id"]}:
+                raise Rejected("CUSTOMER_INITIALIZATION_IDENTITY_REJECTED")
+            # load() validates the sealed cluster identity and all dependencies.
+            # The shared lease excludes stop/update while this connection starts
+            # or runs. Normal startup must never run initialize/bootstrap/recover.
+            if not running(config):
+                start_for_mcp(root, config, password)
+            else:
+                verify_running(config, password)
             return subprocess.call([config["runtime"]], env=environment(config, password),
                                    stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)

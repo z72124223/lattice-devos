@@ -86,17 +86,6 @@ def blocked(payload: dict, code: str) -> dict:
     return {**payload, "status": "BLOCKED", "code": payload.get("code", code)}
 
 
-def confirm_keep_existing(audit: dict) -> bool:
-    if os.name != "nt":
-        return False
-    import ctypes
-    warnings = "\n".join(str(item) for item in audit.get("warnings", []))[:5000]
-    text = ("偵測到可能重複的技能、工作流程或 MCP：\n\n" + warnings +
-            "\n\n按「是」：保留原設定並繼續安裝。\n按「否」：停止安裝，先檢視重複檢查報告。"
-            "\n\n本程式不會自動刪除或修改這些候選；繼續不表示重複已解決。")
-    return ctypes.windll.user32.MessageBoxW(None, text, "LATTICE 安裝前確認", 0x124) == 6
-
-
 def overlaps(first: Path, second: Path) -> bool:
     return first == second or first.is_relative_to(second) or second.is_relative_to(first)
 
@@ -296,7 +285,8 @@ def mcp_batch(common: list[str], calls: list[tuple[str, dict]]) -> list[dict]:
 
 
 def verify_mcp(common: list[str], bundle: Path, state: Path, source: Path,
-               locator: dict, graph: dict, *, managed_sample: bool) -> dict:
+               locator: dict, graph: dict, *, managed_sample: bool,
+               restart_postgres: bool = False) -> dict:
     config = json.loads((state / "installation.json").read_text(encoding="utf-8"))
     run_id = config.get("run_id")
     if not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -320,6 +310,14 @@ def verify_mcp(common: list[str], bundle: Path, state: Path, source: Path,
     if (submitted.get("status") != "SUBMITTED" or submitted.get("task_state") != "DRAFT"
             or submitted.get("project_id") != locator["project_id"] or not submitted.get("task_ref")):
         raise Rejected("MCP_TASK_SUBMISSION_NOT_VERIFIED")
+    if restart_postgres:
+        # Only stop a newly created installation, before Codex is connected.
+        # Existing installations may have other clients and must not be interrupted.
+        progress("正在驗證資料庫停止後，Codex 連線能自動重新啟動並讀回資料。")
+        stopped = run_json(common + ["stop"])
+        if (not successful(stopped, "STOPPED") or stopped.get("run_id") != run_id
+                or stopped.get("initialized") is not True):
+            raise Rejected("MCP_POSTGRES_STOP_NOT_VERIFIED")
     # A second native Runtime process must retrieve the durable task and graph.
     retained, relations = mcp_batch(common, [
         ("lattice_task_status", {"task_ref": submitted["task_ref"]}),
@@ -338,13 +336,15 @@ def verify_mcp(common: list[str], bundle: Path, state: Path, source: Path,
     return {"status": "VERIFIED", "task_ref": retained["task_ref"], "project_id": retained["project_id"],
             "task_state": retained["task_state"], "commit": graph["commit"],
             "source_receipt_digest": graph["receipt_digest"], "relation_count": len(relations["records"]),
-            "runtime_process_restart": "VERIFIED", "postgres_process_restart": "NOT_TESTED"}
+            "runtime_process_restart": "VERIFIED",
+            "postgres_process_restart": "VERIFIED" if restart_postgres else "NOT_TESTED_EXISTING_INSTALLATION"}
 
 
 def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_root: Path | None,
                 codex_config: Path | None, project_name: str, *, managed_sample: bool = False,
                 global_hook: bool = False) -> dict:
     steps = []
+    fresh_install = not state.exists()
     try:
         if codex_config is None:
             raise Rejected("CODEX_CONFIG_REQUIRED")
@@ -399,7 +399,8 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
                 if not isinstance(evidence, dict) or evidence.get("component") != "graphify" or evidence.get("status") != "PERSISTED":
                     raise Rejected("GRAPHIFY_REFRESH_NOT_PERSISTED")
         progress("正在透過 MCP 保存任務，並從新程序讀回任務與程式關係。")
-        mcp = verify_mcp(common, bundle, state, source, locator, evidence, managed_sample=managed_sample)
+        mcp = verify_mcp(common, bundle, state, source, locator, evidence,
+                         managed_sample=managed_sample, restart_postgres=fresh_install)
         steps.append({**mcp, "action": "mcp-acceptance"})
         payload = run_json(common + ["connect", "--codex-config", str(codex_config)])
         steps.append({**payload, "action": "connect"})
@@ -438,23 +439,29 @@ def main() -> int:
     bundle, state, wsl = (path.resolve() for path in (args.bundle, args.state, args.wsl))
     source = args.graph_source.resolve() if args.graph_source else state.with_name(state.name + "-sample")
     report = preflight(bundle, state, source, wsl, managed_sample=args.graph_source is None)
+    if args.install and not args.codex_config.parent.is_dir():
+        report["status"] = "BLOCKED"
+        report["blocked_codes"].append("CODEX_FIRST_RUN_REQUIRED")
+        progress("請先安裝並開啟 Codex、登入自己的帳號，再執行本安裝檔。")
     audit = Path(__file__).with_name("lattice-overlap-audit.py")
     overlap_report = args.overlap_report or state.parent / "overlap-audit.json"
-    audit_result = run_json([sys.executable, "-I", "-B", "-S", str(audit), "--codex-home", str(args.codex_config.parent),
-                             "--project", str(source), "--report", str(overlap_report)])
+    audit_command = [sys.executable, "-I", "-B", "-S", str(audit), "--codex-home", str(args.codex_config.parent),
+                     "--project", str(source), "--report", str(overlap_report)]
+    if args.install and args.interactive and not args.ack_overlap_warning:
+        audit_command += ["--review", "--interactive"]
+    audit_result = run_json(audit_command)
     report["overlap_audit"] = audit_result
     if not successful(audit_result, "CLEAR", "WARNING"):
         report["status"] = "BLOCKED"
         report["blocked_codes"].append(audit_result.get("code", "OVERLAP_AUDIT_FAILED"))
     elif audit_result["status"] == "WARNING":
-        accepted = args.ack_overlap_warning or (args.install and args.interactive and confirm_keep_existing(audit_result))
-        if accepted:
+        if args.ack_overlap_warning:
             audit_result["user_acknowledged"] = True
             audit_result["choice"] = "KEEP_EXISTING_AND_CONTINUE"
             audit_result["resolution"] = "CANDIDATES_RETAINED_NOT_DEDUPLICATED"
-        elif report["status"] == "READY":
+        elif audit_result.get("user_acknowledged") is not True and report["status"] == "READY":
             report["status"] = "WARNING_REVIEW_REQUIRED"
-            audit_result["choice"] = "STOP_FOR_REVIEW"
+            audit_result.setdefault("choice", "STOP_FOR_REVIEW")
     if args.install:
         helper = Path(__file__).with_name("lattice-wsl-host.py")
         host_command = [sys.executable, "-I", "-B", "-S", str(helper)]

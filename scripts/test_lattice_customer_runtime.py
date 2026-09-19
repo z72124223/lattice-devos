@@ -1,8 +1,12 @@
 import importlib.util
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager, redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +18,112 @@ SPEC.loader.exec_module(M)
 
 @unittest.skipUnless(os.name == "nt", "Windows customer Runtime")
 class CustomerRuntimeTests(unittest.TestCase):
+    def serve_fixture(self, root):
+        config = {"root": str(root), "runtime": str(root / "latticed.exe"), "run_id": "a" * 32,
+                  "system_id": "123456", "postgres_bin": str(root / "postgres/bin"), "port": 49152}
+        (root / "ready.json").write_text(json.dumps({"schema": M.SCHEMA, "run_id": config["run_id"], "system_id": config["system_id"]}))
+        return config
+
+    def test_mcp_serve_starts_only_prepared_cluster_and_keeps_stdout_for_native_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = self.serve_fixture(root)
+            with patch.object(M, "load", return_value=(config, "test-only")), patch.object(M, "running", return_value=False), \
+                    patch.object(M, "start") as start, patch.object(M, "environment", return_value={}), \
+                    patch.object(M, "runtime_action", side_effect=AssertionError("No initialization or bootstrap")), \
+                    patch.object(M.subprocess, "call", return_value=0) as native, redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(M.operate(root, "serve"), 0)
+            start.assert_called_once_with(config, "test-only")
+            self.assertEqual(native.call_args.args[0], [config["runtime"]])
+            self.assertEqual(output.getvalue(), "")
+
+    def test_mcp_serve_never_initializes_missing_or_foreign_ready_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = self.serve_fixture(root)
+            for contents, code in ((None, "INITIALIZATION_INCOMPLETE"), ("{}", "INITIALIZATION_IDENTITY_REJECTED")):
+                if contents is None:
+                    (root / "ready.json").unlink()
+                else:
+                    (root / "ready.json").write_text(contents)
+                with self.subTest(contents=contents), patch.object(M, "load", return_value=(config, "test-only")), \
+                        patch.object(M, "start_for_mcp", side_effect=AssertionError("No start")), \
+                        patch.object(M.subprocess, "call", side_effect=AssertionError("No native server")), self.assertRaisesRegex(M.Rejected, code):
+                    M.operate(root, "serve")
+
+    def test_mcp_serve_does_not_start_when_sealed_installation_fails_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(M, "load", side_effect=M.Rejected("CUSTOMER_CLUSTER_IDENTITY_REJECTED")), \
+                    patch.object(M, "start_for_mcp", side_effect=AssertionError("No start")), \
+                    patch.object(M.subprocess, "call", side_effect=AssertionError("No native server")), \
+                    self.assertRaisesRegex(M.Rejected, "CLUSTER_IDENTITY_REJECTED"):
+                M.operate(root, "serve")
+
+    def test_mcp_autostart_rejects_non_loopback_effective_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = self.serve_fixture(root)
+            with patch.object(M, "load", return_value=(config, "test-only")), patch.object(M, "running", return_value=False), \
+                    patch.object(M, "checked", return_value="*") as observed, \
+                    patch.object(M.subprocess, "call", side_effect=AssertionError("No native server")), \
+                    self.assertRaisesRegex(M.Rejected, "EFFECTIVE_POSTGRES_CONFIG_REJECTED"):
+                M.operate(root, "serve")
+            self.assertEqual(observed.call_count, 1)
+            self.assertEqual(observed.call_args.args[0][-2:], ["-C", "listen_addresses"])
+
+    def test_mcp_serve_rejects_other_running_cluster_without_starting_or_adopting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = self.serve_fixture(root)
+            observation = {"id": "different", "data": str(root / "cluster"), "port": config["port"], "listen": "127.0.0.1"}
+            with patch.object(M, "load", return_value=(config, "test-only")), patch.object(M, "running", return_value=True), \
+                    patch.object(M, "checked", return_value=json.dumps(observation)), \
+                    patch.object(M, "start_for_mcp", side_effect=AssertionError("No start")), \
+                    patch.object(M.subprocess, "call", side_effect=AssertionError("No native server")), \
+                    self.assertRaisesRegex(M.Rejected, "CLUSTER_IDENTITY_REJECTED"):
+                M.operate(root, "serve")
+
+    def test_concurrent_mcp_connections_start_owned_cluster_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config = self.serve_fixture(root)
+            started, release, contention = threading.Event(), threading.Event(), threading.Event()
+            live = {"running": False, "starts": 0}
+            lock = M.CONFIG.manager_lock
+
+            @contextmanager
+            def observed_lock(folder):
+                try:
+                    with lock(folder):
+                        yield
+                except M.Rejected as error:
+                    if str(error) == "CONFIG_MANAGER_BUSY":
+                        contention.set()
+                    raise
+
+            def checked(command, *args, **kwargs):
+                if command[-1] == "start":
+                    live["starts"] += 1
+                    started.set()
+                    if not release.wait(5):
+                        raise AssertionError("test start was not released")
+                    live["running"] = True
+                    return ""
+                return {"listen_addresses": "127.0.0.1", "port": str(config["port"]), "data_directory": str(root / "cluster")}[command[-1]]
+
+            with patch.object(M, "load", return_value=(config, "test-only")), \
+                    patch.object(M, "running", side_effect=lambda _: live["running"]), \
+                    patch.object(M, "checked", side_effect=checked), patch.object(M, "verify_running"), \
+                    patch.object(M, "environment", return_value={}), patch.object(M.CONFIG, "manager_lock", side_effect=observed_lock), \
+                    patch.object(M, "runtime_action", side_effect=AssertionError("No initialization or bootstrap")), \
+                    patch.object(M.subprocess, "call", return_value=0), ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(M.operate, root, "serve")
+                try:
+                    self.assertTrue(started.wait(5))
+                    second = pool.submit(M.operate, root, "serve")
+                    self.assertTrue(contention.wait(5))
+                finally:
+                    release.set()
+                self.assertEqual(first.result(timeout=5), 0)
+                self.assertEqual(second.result(timeout=5), 0)
+            self.assertEqual(live["starts"], 1)
+
     def test_import_defaults_to_installed_hash_pinned_node(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); request = root / "request.json"; request.write_bytes(b"{}")

@@ -173,7 +173,10 @@ def make_block(runtime: Path, expected_digest: str, arguments: list[str] | None 
             or any(not isinstance(arg, str) or len(arg) > 4096 or any(ord(c) < 32 for c in arg) for arg in arguments)):
         raise Rejected("RUNTIME_ARGUMENTS_REJECTED")
     args = "args = " + json.dumps(arguments, ensure_ascii=False) + "\n" if arguments else ""
-    block = BEGIN.decode() + "[mcp_servers.lattice]\ncommand = " + command + "\n" + args + END.decode()
+    # Customer startup hashes the sealed dependency bundle before its handshake,
+    # and may start the owned PostgreSQL cluster after a Windows restart.
+    timeouts = "startup_timeout_sec = 600\ntool_timeout_sec = 120\n" if arguments and "serve" in arguments and "--state" in arguments else ""
+    block = BEGIN.decode() + "[mcp_servers.lattice]\ncommand = " + command + "\n" + args + timeouts + END.decode()
     parse(block.encode())
     return block
 
