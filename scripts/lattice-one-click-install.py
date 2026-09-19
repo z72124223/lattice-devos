@@ -108,7 +108,8 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
         common = [str(python), "-I", "-B", "-S", str(runner), "--state", str(state)]
         steps = []
         for action, extra in (("register-project", ["--project-root", str(source), "--project-name", project_name]),
-                              ("graphify-preflight", [])):
+                              ("graphify-preflight", []),
+                              ("graphify-refresh", [])):
             step = subprocess.run(common + [action] + extra, capture_output=True, text=True, encoding="utf-8", errors="replace",
                                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             steps.append({"action": action, "exit_code": step.returncode, "output": step.stdout[-2000:]})
