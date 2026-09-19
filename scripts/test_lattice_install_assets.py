@@ -32,7 +32,7 @@ class AssetTests(unittest.TestCase):
         self.manifest = json.dumps(manifest).encode()
         (self.source / "bundle.json").write_bytes(self.manifest)
         self.expected = hashlib.sha256(self.manifest).hexdigest()
-        self.final = self.parent / self.expected
+        self.final = self.parent / self.expected[:24]
         self.calls = []
         self.verifier = patch.object(A, "verify", side_effect=self.fake_verify).start()
         self.addCleanup(patch.stopall)
@@ -50,7 +50,7 @@ class AssetTests(unittest.TestCase):
         result = A.stage(self.source, self.parent)
         self.assertEqual(result, {"status": "STAGED", "bundle": str(self.final), "manifest_sha256": self.expected})
         self.assertEqual(self.calls[0], self.source)
-        self.assertIn(".partial-", self.calls[1].name)
+        self.assertIn(".part-", self.calls[1].name)
         self.assertEqual(self.calls[2], self.final)
         self.assertFalse(self.calls[1].exists())
         self.assertTrue((self.source / "graphify/a.py").is_file())
@@ -83,7 +83,7 @@ class AssetTests(unittest.TestCase):
         self.verifier.side_effect = reject_temporary
         with self.assertRaisesRegex(A.Rejected, "BAD_COPY"):
             A.stage(self.source, self.parent)
-        partials = list(self.parent.glob("*.partial-*"))
+        partials = list(self.parent.glob("*.part-*"))
         self.assertEqual(len(partials), 1)
         self.assertTrue((partials[0] / "graphify/a.py").is_file())
         self.assertFalse(self.final.exists())
@@ -101,7 +101,7 @@ class AssetTests(unittest.TestCase):
     def test_destination_created_during_copy_is_not_overwritten(self):
         def race(original, target, expected):
             self.fake_verify(original, target, expected)
-            if ".partial-" in target.name:
+            if ".part-" in target.name:
                 self.final.mkdir()
                 (self.final / "owner.txt").write_text("preserve", encoding="utf-8")
         self.verifier.side_effect = race
@@ -133,6 +133,47 @@ class AssetTests(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(payload["status"], "BLOCKED")
         self.assertNotIn("internal details", output.getvalue())
+
+    def test_short_addresses_copy_and_really_verify_the_longest_bundle_path(self):
+        relative = "graphify/site-packages/networkx/algorithms/centrality/tests/test_current_flow_betweenness_centrality_subset.py"
+        path = self.source / relative
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"real long-path copy fixture\n")
+        self.contents[relative] = path.read_bytes()
+        entries = {name: {"sha256": hashlib.sha256(body).hexdigest(), "bytes": len(body)} for name, body in self.contents.items()}
+        manifest = {"schema": "lattice.windows-dependency-bundle.v1", "platform": "windows-x86_64",
+                    "files": dict(sorted(entries.items())), "total_bytes": sum(len(body) for body in self.contents.values())}
+        (self.source / "bundle.json").write_bytes(json.dumps(manifest).encode())
+        self.parent = self.root / ("target " + "x" * max(1, 92 - len(str(self.root))))
+        # The old 64-character address cannot be consumed using normal paths.
+        self.assertGreaterEqual(len(str(self.parent / ("d" * 64) / relative)), 260)
+        spec = importlib.util.spec_from_file_location("bundle_verify", Path(__file__).with_name("lattice-bundle.py"))
+        bundle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bundle)
+        self.verifier.side_effect = lambda source, target, expected: bundle.verify(target, expected)
+        result = A.stage(self.source, self.parent)
+        final = Path(result["bundle"])
+        self.assertEqual(len(final.name), 24)
+        self.assertEqual(final.name, result["manifest_sha256"][:24])
+        self.assertEqual((A.regular_path(final / relative)).read_bytes(), self.contents[relative])
+        self.assertEqual(self.verifier.call_count, 3)  # source, fresh copy, final read-back
+
+    def test_overlong_runtime_path_is_rejected_before_verification_or_writes(self):
+        self.parent = self.root / ("a" * (245 - len(str(self.root))))
+        with self.assertRaisesRegex(A.Rejected, "ASSET_DESTINATION_PATH_TOO_LONG"):
+            A.stage(self.source, self.parent)
+        self.verifier.assert_not_called()
+        self.assertFalse(self.parent.exists())
+
+    def test_os_error_retains_numeric_diagnostics_without_paths(self):
+        error = OSError(2, "private directory path")
+        self.verifier.side_effect = error
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            A.main(["--bundle", str(self.source), "--destination-root", str(self.parent)])
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["errno"], 2)
+        self.assertIsNone(result["winerror"])
+        self.assertNotIn("private directory", output.getvalue())
 
 
 class VerifierTests(unittest.TestCase):

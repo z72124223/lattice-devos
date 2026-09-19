@@ -26,6 +26,12 @@ class Rejected(Exception):
     pass
 
 
+def progress(message: str) -> None:
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    print(message, file=sys.stderr, flush=True)
+
+
 def digest(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -259,7 +265,7 @@ def mcp_batch(common: list[str], calls: list[tuple[str, dict]]) -> list[dict]:
         {"jsonrpc": "2.0", "method": "notifications/initialized"}]
     requests += [{"jsonrpc": "2.0", "id": index, "method": "tools/call", "params": {"name": name, "arguments": arguments}}
                  for index, (name, arguments) in enumerate(calls, 2)]
-    result = invoke(common + ["serve"], input_text="".join(json.dumps(request) + "\n" for request in requests), timeout=120)
+    result = invoke(common + ["serve"], input_text="".join(json.dumps(request) + "\n" for request in requests), timeout=600)
     if result.returncode or len(result.stdout) > 2_000_000:
         raise Rejected("INSTALL_MCP_PROCESS_FAILED")
     replies = {}
@@ -347,6 +353,7 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
         bundle_digest = digest(bundle / "bundle.json")
         # Verify before executing Git, provisioning WSL or changing customer state.
         # The bundle is immutable: do not delete even seemingly disposable .pyc files.
+        progress("正在核對已保存的安裝材料，檔案較多，請保持視窗開啟。")
         verification = run_json(python + [bundle_script, "verify", "--bundle", str(bundle), "--sha256", bundle_digest])
         if not successful(verification, "LOCAL_BUNDLE_VERIFIED"):
             return blocked(verification, "BUNDLE_VERIFICATION_FAILED")
@@ -363,10 +370,12 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
             payload = run_json(common + ["recover"])
             action = "recover"
         else:
+            progress("正在建立 LATTICE 專用的 WSL 環境。")
             platform_root = provision_platform(python, bundle, state, wsl, platform_root)
             arguments = python + [bundle_script, "install", "--bundle", str(bundle), "--sha256", bundle_digest,
                                   "--state", str(state), "--graph-source", str(source), "--wsl", str(wsl),
                                   "--graphify-platform", str(platform_root)]
+            progress("正在初始化 LATTICE 與獨立資料庫。")
             payload = run_json(arguments)
             action = "install"
         steps.append({**payload, "action": action})
@@ -377,6 +386,8 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
             ("graphify-preflight", [], (RUNNING,)),
             ("graphify-refresh", [], (RUNNING,)),
         ):
+            progress({"register-project": "正在登記範例或指定的專案。", "graphify-preflight": "正在核對 Graphify 環境。",
+                      "graphify-refresh": "正在分析程式並保存 Graphify 關係資料。"}[action])
             payload = run_json(common + [action] + extra)
             steps.append({**payload, "action": action})
             if not successful(payload, *accepted):
@@ -387,6 +398,7 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
                 evidence = payload.get("operation_evidence")
                 if not isinstance(evidence, dict) or evidence.get("component") != "graphify" or evidence.get("status") != "PERSISTED":
                     raise Rejected("GRAPHIFY_REFRESH_NOT_PERSISTED")
+        progress("正在透過 MCP 保存任務，並從新程序讀回任務與程式關係。")
         mcp = verify_mcp(common, bundle, state, source, locator, evidence, managed_sample=managed_sample)
         steps.append({**mcp, "action": "mcp-acceptance"})
         payload = run_json(common + ["connect", "--codex-config", str(codex_config)])
@@ -464,13 +476,14 @@ def main() -> int:
         # under the installation's local data folder before binding runtime paths.
         destination = state.parent / "bundles"
         helper = Path(__file__).with_name("lattice-install-assets.py")
+        progress("正在驗證並保存安裝包；這一步會檢查一萬多個檔案，可能需要數分鐘。")
         staging = run_json([sys.executable, "-I", "-B", "-S", str(helper), "--bundle", str(bundle),
-                            "--destination-root", str(destination)])
+                            "--destination-root", str(destination)], timeout=3600)
         report["bundle_staging"] = staging
         manifest_sha = staging.get("manifest_sha256")
         valid_path = (isinstance(manifest_sha, str) and re.fullmatch(r"[a-f0-9]{64}", manifest_sha)
                       and isinstance(staging.get("bundle"), str)
-                      and Path(staging["bundle"]).resolve() == (destination / manifest_sha).resolve())
+                      and Path(staging["bundle"]).resolve() == (destination / manifest_sha[:24]).resolve())
         if not successful(staging, "STAGED", "REUSED") or not valid_path:
             report["status"] = "BLOCKED"
             report["blocked_codes"].append(staging.get("code", "BUNDLE_STAGING_NOT_VERIFIED"))

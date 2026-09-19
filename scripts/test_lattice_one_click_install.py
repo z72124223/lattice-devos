@@ -40,7 +40,7 @@ class InstallerTests(unittest.TestCase):
 
     def staged(self):
         return {"status": "STAGED", "exit_code": 0, "manifest_sha256": "a" * 64,
-                "bundle": str(self.state.parent / "bundles" / ("a" * 64))}
+                "bundle": str(self.state.parent / "bundles" / ("a" * 24))}
 
     def response(self, arguments):
         self.calls.append(arguments)

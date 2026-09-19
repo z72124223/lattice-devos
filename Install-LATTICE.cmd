@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul
 set "ROOT=%~dp0"
 set "BUNDLE=%ROOT%bundle"
 if not exist "%BUNDLE%" set "BUNDLE=%ROOT%bundle-v5"

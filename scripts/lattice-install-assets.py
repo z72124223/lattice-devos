@@ -62,19 +62,30 @@ def stage(source_bundle: Path, target_parent: Path) -> dict:
     body = regular_path(source / "bundle.json").read_bytes()
     expected = hashlib.sha256(body).hexdigest()
     data = json.loads(body)
+    # A full digest plus a UUID made otherwise normal Windows copies exceed
+    # MAX_PATH. Keep addresses short; the complete digest still gates every read.
+    final = regular_path(parent / expected[:24])
+    temporary = regular_path(parent / (".part-" + uuid.uuid4().hex[:8]))
+    names = ["bundle.json", *data["files"]]
+    for name in names:
+        relative = PurePosixPath(name)
+        if relative.is_absolute() or ".." in relative.parts or "\\" in name or ":" in name or relative.as_posix() != name:
+            raise Rejected("ASSET_MANIFEST_PATH_REJECTED")
+        # Runtime/WSL still use ordinary paths. Reject overlong destinations
+        # before expensive verification/copy instead of staging unusable assets.
+        for base, code in ((source, "ASSET_SOURCE_PATH_TOO_LONG"), (final, "ASSET_DESTINATION_PATH_TOO_LONG"),
+                           (temporary, "ASSET_DESTINATION_PATH_TOO_LONG")):
+            candidate = base / name
+            if len(str(candidate).encode("utf-16-le")) // 2 >= 260 or len(str(candidate.parent).encode("utf-16-le")) // 2 >= 248:
+                raise Rejected(code)
     verify(source, source, expected)
-    final = regular_path(parent / expected)
     if final.exists():
         verify(source, final, expected)
         return {"status": "REUSED", "bundle": str(final), "manifest_sha256": expected}
     parent.mkdir(parents=True, exist_ok=True)
     regular_path(parent)
-    temporary = regular_path(parent / ("." + expected + ".partial-" + uuid.uuid4().hex))
     temporary.mkdir()  # Never adopt, overwrite, or delete a partial directory.
-    for name in ["bundle.json", *data["files"]]:
-        relative = PurePosixPath(name)
-        if relative.is_absolute() or ".." in relative.parts or "\\" in name or ":" in name or relative.as_posix() != name:
-            raise Rejected("ASSET_MANIFEST_PATH_REJECTED")
+    for name in names:
         original = regular_path(source / name)
         target = regular_path(temporary / name)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         result = stage(args.bundle, args.destination_root)
     except (Rejected, OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as error:
         result = {"status": "BLOCKED", "code": str(error) if isinstance(error, Rejected) else "ASSET_STAGE_FAILED_PARTIAL_PRESERVED"}
+        if isinstance(error, OSError):
+            result.update(errno=error.errno, winerror=getattr(error, "winerror", None))
     print(json.dumps(result))
     return 2 if result["status"] == "BLOCKED" else 0
 
