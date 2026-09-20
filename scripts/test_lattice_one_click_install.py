@@ -428,11 +428,38 @@ class InstallerTests(unittest.TestCase):
             I.install_global_hook(self.codex.parent)
         self.assertEqual(path.read_bytes(), original)
 
+    def test_project_connection_is_installed_without_duplicating_existing_startup(self):
+        path = self.codex.parent / "AGENTS.md"
+        original = b"Before each task, call `lattice_runtime_status`.\n"
+        path.write_bytes(original)
+        result = I.install_global_hook(self.codex.parent, state=self.state, bundle=self.bundle)
+        contents = path.read_text(encoding="utf-8")
+        self.assertEqual(result["status"], "INSTALLED")
+        self.assertTrue(path.read_bytes().startswith(original))
+        self.assertEqual(contents.count("lattice_runtime_status"), 1)
+        lines = [json.loads(line) for line in contents.splitlines() if line.startswith("[")]
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[0][4], str(self.state / "bin/lattice-customer-runtime.py"))
+        self.assertEqual(lines[0][5], "register-project")
+        self.assertEqual(lines[1][5], "graphify-refresh")
+        self.assertIn("--project-id", lines[1])
+        self.assertEqual(I.install_global_hook(self.codex.parent, state=self.state, bundle=self.bundle)["status"], "REUSED")
+        self.assertEqual(len(list(self.codex.parent.glob("AGENTS.md.lattice-backup-*"))), 1)
+
+    def test_invalid_project_connection_block_preserves_entire_file(self):
+        path = self.codex.parent / "AGENTS.md"
+        original = b"custom rule\n<!-- BEGIN LATTICE PROJECT CONNECTION v1 -->\n"
+        path.write_bytes(original)
+        with self.assertRaisesRegex(I.Rejected, "GLOBAL_PROJECT_HOOK_CONFLICT_PRESERVED"):
+            I.install_global_hook(self.codex.parent, state=self.state, bundle=self.bundle)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(list(self.codex.parent.glob("AGENTS.md.lattice-backup-*")), [])
+
     def test_global_hook_only_runs_after_successful_mcp_and_connect(self):
         with patch.object(I, "prepare_source"), patch.object(I, "verify_mcp", return_value={"status": "VERIFIED"}), \
                 patch.object(I, "run_json", side_effect=self.response), patch.object(I, "install_global_hook", return_value={"status": "INSTALLED"}) as hook:
             result = I.run_install(self.bundle, self.state, self.source, self.wsl, None, self.codex, "Test", global_hook=True)
-        hook.assert_called_once_with(self.codex.parent)
+        hook.assert_called_once_with(self.codex.parent, state=self.state, bundle=self.bundle)
         self.assertEqual([step["action"] for step in result["post_install_steps"]][-2:], ["connect", "global-startup-hook"])
 
 

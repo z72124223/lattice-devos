@@ -83,8 +83,31 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             };
         }
-        if argument == "--graphify-refresh" && arguments.next().is_none() {
-            return match lattice_runtime::composition::refresh_runtime_graphify_from_environment() {
+        if argument == "--graphify-refresh" || argument == "--graphify-refresh-project" {
+            let project_id = if argument == "--graphify-refresh-project" {
+                match arguments.next().and_then(|value| value.into_string().ok()) {
+                    Some(value) => Some(value),
+                    None => {
+                        eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                        return ExitCode::from(2);
+                    }
+                }
+            } else {
+                None
+            };
+            if arguments.next().is_some() {
+                eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                return ExitCode::from(2);
+            }
+            let result = if let Some(project_id) = &project_id {
+                lattice_runtime::composition::refresh_registered_project_graphify_from_environment(
+                    project_id,
+                )
+            } else {
+                lattice_runtime::composition::refresh_runtime_graphify_from_environment()
+                    .map_err(|error| error.code())
+            };
+            return match result {
                 Ok(receipt) => {
                     println!(
                         "{}",
@@ -94,13 +117,14 @@ fn main() -> ExitCode {
                             "record_count": receipt.persistence().record_count(),
                             "retrieved_count": receipt.retrieval().results().len(),
                             "receipt_digest": receipt.receipt_digest().as_str(),
+                            "registered_project_id": project_id,
                         })
                     );
                     eprintln!("LATTICE_GRAPHIFY_REFRESH_READY");
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
-                    eprintln!("{}", error.code());
+                    eprintln!("{error}");
                     ExitCode::from(2)
                 }
             };

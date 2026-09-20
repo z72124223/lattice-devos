@@ -5778,19 +5778,26 @@ fn control_product_project<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     project_id: &str,
 ) -> Result<Value, ToolExecutionError> {
-    let id = ProjectId::new(project_id)
-        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
-    let target = StoreMigrationTarget::new(
-        core.delivery.database.database_name(),
-        core.delivery.database.run_id(),
-    )
-    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
-    let client = connect_fixed_runtime_client(
+    registered_graph_project(
         &core.delivery.database,
         &core.delivery.password,
         deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        project_id,
     )
-    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+}
+
+fn registered_graph_project(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    until: Instant,
+    project_id: &str,
+) -> Result<Value, ToolExecutionError> {
+    let id = ProjectId::new(project_id)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let target = StoreMigrationTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let client = connect_fixed_runtime_client(database, password, until)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
     let mut registry = PostgresProjectRegistry::new(client, &target)
         .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
     let loaded = registry
@@ -9364,23 +9371,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .lock()
             .map_err(|_| ToolExecutionError::new("CODE_RELATIONS_UNAVAILABLE"))?;
         let project = control_product_project(&core, &arguments.project_id)?;
-        if project["active"] != json!(true) {
-            return Err(ToolExecutionError::new("CODE_RELATIONS_PROJECT_INACTIVE"));
-        }
-        let root = graph_canonical_directory(Path::new(
-            &required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
-                .map_err(|e| ToolExecutionError::new(e.code()))?,
-        ))
-        .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let registered = project["canonical_path"]
-            .as_str()
-            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"))?;
-        if graph_canonical_directory(Path::new(registered))
-            .map_err(|e| ToolExecutionError::new(e.code()))?
-            != root
-        {
-            return Err(ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"));
-        }
+        let root = registered_graph_source(&project, None).map_err(ToolExecutionError::new)?;
         // Historical commit is explicit. This read neither creates directories,
         // inspects dirty files nor invokes Graphify to fabricate missing evidence.
         let git = PathBuf::from(
@@ -9426,7 +9417,7 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             )
             .map_err(|e| ToolExecutionError::new(e.code()))?;
         }
-        if receipt.is_none() {
+        if receipt.is_none() && source_owns_retained_graph_configurations(&root)? {
             let retained = retained_graph_configurations_from_environment()
                 .map_err(|e| ToolExecutionError::new(e.code()))?
                 .into_iter()
@@ -11759,11 +11750,58 @@ struct RuntimeGraphSource {
     git_sha256: String,
 }
 
+fn registered_graph_source(
+    project: &Value,
+    expected: Option<&Path>,
+) -> Result<PathBuf, &'static str> {
+    if project["active"] != json!(true) {
+        return Err("CODE_RELATIONS_PROJECT_INACTIVE");
+    }
+    let path = project["canonical_path"]
+        .as_str()
+        .ok_or("CODE_RELATIONS_SOURCE_REJECTED")?;
+    let root =
+        graph_canonical_directory(Path::new(path)).map_err(|_| "CODE_RELATIONS_SOURCE_REJECTED")?;
+    if let Some(expected) = expected {
+        if !retained_graph_source_matches(&root, expected) {
+            return Err("CODE_RELATIONS_SOURCE_REJECTED");
+        }
+    }
+    Ok(root)
+}
+
+fn retained_graph_source_matches(root: &Path, configured: &Path) -> bool {
+    graph_canonical_directory(configured).ok().as_deref() == Some(root)
+}
+
+fn source_owns_retained_graph_configurations(root: &Path) -> Result<bool, ToolExecutionError> {
+    // Legacy backup selectors carry no source metadata. They remain usable only
+    // for the sealed default source, never as fallback for another registered repo.
+    let configured = required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    Ok(retained_graph_source_matches(root, Path::new(&configured)))
+}
+
+fn graph_source_work_root(
+    work_root: &Path,
+    repository_root: &Path,
+) -> Result<PathBuf, LatticedError> {
+    let source = digest(
+        "lattice.runtime.graphify-work-source",
+        &CanonicalValue::String(path_text(repository_root)?),
+    )?;
+    // Keep the full source hash: two repositories may have the same Git commit.
+    Ok(work_root.join("sources").join(source.as_str()))
+}
+
 fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String), LatticedError> {
     let repository_root = graph_canonical_directory(Path::new(&required_environment(
         "LATTICE_GRAPHIFY_SOURCE_ROOT",
     )?))?;
-    let work_root = PathBuf::from(required_environment("LATTICE_GRAPHIFY_WORK_ROOT")?);
+    let work_root = graph_source_work_root(
+        Path::new(&required_environment("LATTICE_GRAPHIFY_WORK_ROOT")?),
+        &repository_root,
+    )?;
     fs::create_dir_all(&work_root)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let work_root = graph_canonical_directory(&work_root)?;
@@ -12112,6 +12150,29 @@ pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt,
         return Ok(receipt);
     }
     run_runtime_graph_memory_request(&database, &password, &source, deadline(timeout)?, &request)
+}
+
+/// Refresh one previously registered project using a wrapper-selected source.
+/// The local catalog is only a locator: PostgreSQL must already contain the same
+/// active canonical root. This command never registers a project or creates a task.
+///
+/// # Errors
+/// Rejects missing/inactive Registry entries, source mismatch, dirty sources,
+/// or any existing Graphify identity, execution, and receipt verification failure.
+pub fn refresh_registered_project_graphify_from_environment(
+    project_id: &str,
+) -> Result<GraphMemoryReceipt, &'static str> {
+    let (_unused_delivery, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)
+            .map_err(|error| error.code())?;
+    let until =
+        deadline(Duration::from_secs(DEFAULT_TIMEOUT_SECONDS)).map_err(|error| error.code())?;
+    let project = registered_graph_project(&database, &password, until, project_id)
+        .map_err(|error| error.code())?;
+    let configured =
+        required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT").map_err(|error| error.code())?;
+    registered_graph_source(&project, Some(Path::new(&configured)))?;
+    refresh_runtime_graphify_from_environment().map_err(|error| error.code())
 }
 
 /// Runs the optional Hermes reflection over the current derived Graphify
@@ -17218,6 +17279,54 @@ mod tests {
             graphify_wsl_executable_from_value(None, default_wsl.clone()),
             default_wsl
         );
+    }
+
+    #[test]
+    fn registered_graph_sources_isolate_repositories_and_retained_selectors() {
+        let fixture = env::temp_dir().join(format!("lattice-graph-projects-{}", process::id()));
+        let first = fixture.join("sample");
+        let second = fixture.join("customer project");
+        fs::create_dir_all(&first).expect("first source");
+        fs::create_dir_all(&second).expect("second source");
+        let project = json!({"active": true, "canonical_path": second});
+        let root = registered_graph_source(&project, Some(&second)).expect("registered source");
+        assert_eq!(root, fs::canonicalize(&second).unwrap());
+        assert_eq!(registered_graph_source(&project, None).unwrap(), root);
+        assert_eq!(
+            registered_graph_source(&project, Some(&first)),
+            Err("CODE_RELATIONS_SOURCE_REJECTED")
+        );
+        assert_eq!(
+            registered_graph_source(&json!({"active": false, "canonical_path": second}), None),
+            Err("CODE_RELATIONS_PROJECT_INACTIVE")
+        );
+        assert_eq!(
+            registered_graph_source(&json!({"active": true}), None),
+            Err("CODE_RELATIONS_SOURCE_REJECTED")
+        );
+        assert!(!retained_graph_source_matches(&root, &first));
+        assert!(retained_graph_source_matches(&root, &second));
+        assert!(!retained_graph_source_matches(
+            &root,
+            &fixture.join("missing")
+        ));
+        let first_root = fs::canonicalize(&first).unwrap();
+        let first_work = graph_source_work_root(&fixture, &first_root).unwrap();
+        let second_work = graph_source_work_root(&fixture, &root).unwrap();
+        assert_ne!(first_work, second_work);
+        assert!(first_work.starts_with(&fixture) && second_work.starts_with(&fixture));
+        let first_config =
+            legacy_runtime_graph_configuration_digest(&first_root, &"a".repeat(64)).unwrap();
+        let second_config =
+            legacy_runtime_graph_configuration_digest(&root, &"a".repeat(64)).unwrap();
+        let commit = "a".repeat(40);
+        let first_request = runtime_graph_request("core-61152", &commit, first_config).unwrap();
+        let second_request = runtime_graph_request("core-61152", &commit, second_config).unwrap();
+        assert_ne!(
+            first_request, second_request,
+            "same commit in different repos must never reuse receipts"
+        );
+        fs::remove_dir_all(&fixture).expect("remove only this fixture");
     }
 
     #[test]

@@ -329,11 +329,11 @@ def start_for_mcp(root: Path, config: dict, password: str) -> None:
             time.sleep(0.1)
 
 
-def runtime_action(config: dict, password: str, action: str) -> dict | None:
-    result = invoke([config["runtime"], action], env=environment(config, password), timeout=120)
+def runtime_action(config: dict, password: str, action: str, *arguments: str) -> dict | None:
+    result = invoke([config["runtime"], action, *arguments], env=environment(config, password), timeout=120)
     if result.returncode:
         codes = [line for line in result.stderr.splitlines()
-                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY)_[A-Z0-9_]{1,120}", line)]
+                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY|PROJECT|CODE_RELATIONS)_[A-Z0-9_]{1,120}", line)]
         suffix = ":" + codes[-1] if codes else ""
         raise Rejected("CUSTOMER_RUNTIME_" + action.strip("-").replace("-", "_").upper() + "_REJECTED" + suffix)
     return json.loads(result.stdout) if result.stdout.strip() else None
@@ -484,7 +484,40 @@ def import_result(root: Path, request: Path, node: Path | None = None, expected:
         return json.loads(result.stdout)
 
 
-def operate(root: Path, action: str, config_path: Path | None = None) -> dict | int:
+def project_graph_config(config: dict, project_id: str) -> dict:
+    """Select a locator only; native Runtime must verify its retained Registry identity."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", project_id):
+        raise Rejected("CUSTOMER_PROJECT_ID_REJECTED")
+    path = regular(Path(config["root"]) / "projects.json")
+    if path.stat().st_size > 2 * 1024 * 1024:
+        raise Rejected("CUSTOMER_CATALOG_BOUND_EXCEEDED")
+    catalog = json.loads(path.read_bytes())
+    if (catalog.get("schema") != "lattice.customer-project-catalog.v1"
+            or not isinstance(catalog.get("projects"), list) or len(catalog["projects"]) > 4096):
+        raise Rejected("CUSTOMER_CATALOG_REJECTED")
+    matches = [item for item in catalog["projects"] if isinstance(item, dict) and item.get("id") == project_id]
+    if len(matches) != 1:
+        raise Rejected("CUSTOMER_PROJECT_LOCATOR_NOT_UNIQUE")
+    project = matches[0]
+    if (project.get("schema_version") != catalog["schema"] or project.get("record_kind") != "CUSTOMER_LOCAL_LOCATOR"
+            or project.get("control_project_id") != project_id or project.get("registry_authority") != "NONE"
+            or project.get("registry_project_id") is not None):
+        raise Rejected("CUSTOMER_CATALOG_REJECTED")
+    source = Path(project["canonical_path"])
+    if not source.is_absolute() or regular(source, directory=True).resolve() != source:
+        raise Rejected("CUSTOMER_PROJECT_SOURCE_REJECTED")
+    derived = dict(config)
+    derived["graph_source"] = str(source)
+    # Retained selectors belong to the sealed default source, never another repo.
+    if not config.get("graph_source") or source != Path(config["graph_source"]).resolve():
+        derived.pop("retained_graph_configuration", None)
+        derived.pop("retained_graph_configurations", None)
+    return derived
+
+
+def operate(root: Path, action: str, config_path: Path | None = None, project_id: str | None = None) -> dict | int:
+    if project_id is not None and action != "graphify-refresh":
+        raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
     config, password = load(root)
     if action == "serve":
         if not (root / "ready.json").is_file():
@@ -530,7 +563,11 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
                 verify_running(config, password)
                 if not config.get("graph_source"):
                     raise Rejected("GRAPHIFY_CUSTOMER_SOURCE_NOT_CONFIGURED")
-            operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
+            if project_id is not None:
+                selected = project_graph_config(config, project_id)
+                operation_evidence = runtime_action(selected, password, "--graphify-refresh-project", project_id)
+            else:
+                operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
             if action == "graphify-preflight":
                 operation_evidence = {"component": "graphify", "status": "IDENTITY_VERIFIED", "workflow": "NOT_VERIFIED"}
         elif action in ("connect", "reconnect"):
@@ -568,12 +605,17 @@ def main() -> int:
     parser.add_argument("--codex-config", type=Path)
     parser.add_argument("--project-root", type=Path)
     parser.add_argument("--project-name")
+    parser.add_argument("--project-id", help="refresh an already registered project without changing the sealed default source")
     parser.add_argument("--evidence-request", type=Path)
     parser.add_argument("--node", type=Path)
     parser.add_argument("--node-sha256")
     parser.add_argument("--update-id")
     args = parser.parse_args()
     try:
+        if args.project_id is not None and args.action != "graphify-refresh":
+            raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
+        if args.graph_source is not None and args.action != "prepare":
+            raise Rejected("CUSTOMER_GRAPH_SOURCE_ARGUMENT_REJECTED_USE_PROJECT_ID")
         if args.action == "prepare":
             if not all((args.runtime, args.sha256, args.postgres_bin, args.git)):
                 raise Rejected("CUSTOMER_COMPONENT_ARGUMENTS_REQUIRED")
@@ -598,7 +640,7 @@ def main() -> int:
                 raise Rejected("CUSTOMER_RESULT_ARGUMENTS_REQUIRED")
             result = import_result(args.state, args.evidence_request, args.node, args.node_sha256)
         else:
-            result = operate(args.state, args.action, args.codex_config)
+            result = operate(args.state, args.action, args.codex_config, args.project_id)
         if isinstance(result, int):
             return result
         print(json.dumps(result))

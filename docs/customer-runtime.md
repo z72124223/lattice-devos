@@ -107,12 +107,34 @@ python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> -
 a literal case-insensitive `query` (1–128 characters), and `limit` (1–32).
 It searches symbol names, relationship endpoints, relationship names and source paths.
 For example, query `normalize_name` can return `greeting() calls normalize_name()`.
-The Runtime requires an active registered project whose physical root matches its
-configured Graphify source and replays the original source receipt for that commit.
+The Runtime requires an active registered project, selects its physical root from
+PostgreSQL Registry and replays that project's original source receipt for the commit.
 Missing analysis is an error; this read never runs Graphify or silently selects another commit.
 
 Results remain `DERIVED` / `CANDIDATE` / untrusted. The original source receipt is
 an anchor for the retained analysis, not acceptance evidence for the new query.
+
+## 接入其他本機專案
+
+安裝範例只用於安裝驗收。Codex 接到使用者的實際工作後，以安裝內附的 Python
+及 `lattice-customer-runtime.py` 執行下列步驟；不必再建立另一套資料庫：
+
+1. `register-project --state <安裝目錄> --project-root <Git根目錄> --project-name <名稱>`
+   取得或重用本機 `project_id`。
+2. 使用該 ID 透過 `lattice_task_submit` 提交使用者真正要求的工作。這一步才會
+   由原生 Runtime 核對 Git 並登記至 PostgreSQL；已有任務時應延續，勿重複送件。
+3. `graphify-refresh --state <安裝目錄> --project-id <同一ID>` 分析該專案。
+4. 確認 `operation_evidence.status=PERSISTED`，再用相同 ID、回傳的 commit
+   呼叫 `lattice_code_relations` 讀回結果。
+
+命令會核對正式 Registry 中的專案位置；不接受只修改本機 locator 的替代來源。
+每個來源有獨立圖譜工作目錄與收據選擇，原本封存的安裝來源設定不變。
+全域 Codex 規則會提供本機實際命令位置，並保留原有啟動規則。
+
+此流程要求已提交、乾淨且有分支的 Git 專案；不得為分析而擅自清除或提交使用者
+變更。Graphify 分析失敗時應如實回報，不能用範例圖譜代替客戶專案結果。
+非預設專案搬移位置或還原到另一目錄後，舊圖譜可能須重新分析；目前不承諾
+所有專案的歷史圖譜都能直接在新位置讀回。正式工作事實仍由 PostgreSQL 保存。
 The Runtime verifies the complete record-ID/content-digest set against that receipt,
 then verifies every returned record's content and membership before discarding the
 internal proof. This establishes returned-record integrity, not exhaustive recall or

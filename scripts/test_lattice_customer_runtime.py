@@ -18,6 +18,79 @@ SPEC.loader.exec_module(M)
 
 @unittest.skipUnless(os.name == "nt", "Windows customer Runtime")
 class CustomerRuntimeTests(unittest.TestCase):
+    def graph_project_fixture(self, root):
+        source = root / "another project"; source.mkdir()
+        project_id = "12345678-1234-1234-1234-123456789abc"
+        schema = "lattice.customer-project-catalog.v1"
+        project = {"schema_version": schema, "record_kind": "CUSTOMER_LOCAL_LOCATOR", "id": project_id,
+                   "control_project_id": project_id, "name": "Other", "canonical_path": str(source),
+                   "registry_authority": "NONE", "registry_project_id": None}
+        catalog = {"schema": schema, "projects": [project]}
+        (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
+        config = {**self.serve_fixture(root), "graph_source": str(root / "sample"), "graphify_runtime": "pinned",
+                  "retained_graph_configuration": "a" * 64, "retained_graph_configurations": ["b" * 64]}
+        return config, catalog, project_id, source
+
+    def test_project_refresh_derives_source_without_mutating_sealed_default_or_catalog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, _, project_id, source = self.graph_project_fixture(root)
+            original = json.dumps(config, sort_keys=True)
+            catalog = (root / "projects.json").read_bytes()
+            with patch.object(M, "load", return_value=(config, "fixture-only")), patch.object(M, "verify_running"), \
+                    patch.object(M, "running", return_value=True), patch.object(M, "runtime_action", return_value={"status": "PERSISTED"}) as action:
+                result = M.operate(root, "graphify-refresh", project_id=project_id)
+            self.assertEqual(result["operation_evidence"]["status"], "PERSISTED")
+            selected, _, flag, selected_id = action.call_args.args
+            self.assertEqual((selected["graph_source"], flag, selected_id), (str(source), "--graphify-refresh-project", project_id))
+            self.assertNotIn("retained_graph_configuration", selected)
+            self.assertNotIn("retained_graph_configurations", selected)
+            self.assertEqual(json.dumps(config, sort_keys=True), original)
+            self.assertEqual((root / "projects.json").read_bytes(), catalog)
+
+    def test_project_selector_rejects_unknown_duplicate_tampered_and_relative_locators(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, catalog, project_id, _ = self.graph_project_fixture(root)
+            with self.assertRaisesRegex(M.Rejected, "ID_REJECTED"):
+                M.project_graph_config(config, "../foreign")
+            with self.assertRaisesRegex(M.Rejected, "LOCATOR_NOT_UNIQUE"):
+                M.project_graph_config(config, "00000000-1234-1234-1234-123456789abc")
+            catalog["projects"].append(dict(catalog["projects"][0]))
+            (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
+            with self.assertRaisesRegex(M.Rejected, "LOCATOR_NOT_UNIQUE"):
+                M.project_graph_config(config, project_id)
+            catalog["projects"].pop()
+            catalog["projects"][0]["registry_authority"] = "FORGED"
+            (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
+            with self.assertRaisesRegex(M.Rejected, "CATALOG_REJECTED"):
+                M.project_graph_config(config, project_id)
+            catalog["projects"][0]["registry_authority"] = "NONE"
+            catalog["projects"][0]["canonical_path"] = "relative-path"
+            (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
+            with self.assertRaisesRegex(M.Rejected, "SOURCE_REJECTED"):
+                M.project_graph_config(config, project_id)
+
+    def test_default_project_retains_its_own_backup_selectors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, _, project_id, source = self.graph_project_fixture(root)
+            config["graph_source"] = str(source)
+            self.assertEqual(M.project_graph_config(config, project_id), config)
+
+    def test_native_missing_registration_is_reported_without_fallback_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, _, project_id, _ = self.graph_project_fixture(root)
+            rejected = type("Result", (), {"returncode": 2, "stderr": "PROJECT_IS_NOT_REGISTERED\n", "stdout": ""})()
+            with patch.object(M, "load", return_value=(config, "fixture-only")), patch.object(M, "verify_running"), \
+                    patch.object(M, "environment", return_value={}), patch.object(M, "invoke", return_value=rejected) as invoke:
+                with self.assertRaisesRegex(M.Rejected, "PROJECT_IS_NOT_REGISTERED"):
+                    M.operate(root, "graphify-refresh", project_id=project_id)
+            self.assertEqual(invoke.call_count, 1)
+            self.assertEqual(invoke.call_args.args[0][-2:], ["--graphify-refresh-project", project_id])
+
+    def test_project_selector_cannot_silently_apply_to_another_action(self):
+        with patch.object(M, "load", side_effect=AssertionError("No configuration access")):
+            with self.assertRaisesRegex(M.Rejected, "SELECTOR_ACTION_REJECTED"):
+                M.operate(Path("C:/unused"), "serve", project_id="unused")
+
     def serve_fixture(self, root):
         config = {"root": str(root), "runtime": str(root / "latticed.exe"), "run_id": "a" * 32,
                   "system_id": "123456", "postgres_bin": str(root / "postgres/bin"), "port": 49152}

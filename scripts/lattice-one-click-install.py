@@ -139,7 +139,8 @@ def write_workspace_hook(source: Path) -> None:
         path.write_text(updated, encoding="utf-8")
 
 
-def install_global_hook(codex_home: Path) -> dict:
+def install_global_hook(codex_home: Path, *, state: Path | None = None,
+                        bundle: Path | None = None) -> dict:
     """Manage only our global guidance block; retain all other user instructions."""
     path = codex_home / "AGENTS.md"
     before = path.read_bytes() if path.exists() else b""
@@ -150,18 +151,53 @@ def install_global_hook(codex_home: Path) -> dict:
             "收到工作請求時，先使用可用的 LATTICE 任務工具核對既有工作；延續既有工作，必要時才建立新工作，勿重複送件。\n"
             "LATTICE 固定為 Control、PostgreSQL、Graphify 三核心；Hermes 永久退役，不得啟用反思功能。\n"
             "LATTICE 無法連線時如實說明，不得捏造任務身分、狀態或驗收結果。\n" + end)
+    reused_startup = False
     if begin in existing or end in existing:
         if existing.count(begin) != 1 or existing.count(end) != 1 or existing.index(end) < existing.index(begin):
             raise Rejected("GLOBAL_HOOK_CONFLICT_PRESERVED")
         start, finish = existing.index(begin), existing.index(end) + len(end)
         updated = existing[:start] + hook + existing[finish:]
     elif re.search(r"\blattice_runtime_status\b", existing):
-        return {"status": "REUSED", "path": str(path), "existing_guidance": "PRESERVED"}
+        updated = existing
+        reused_startup = True
     else:
         updated = existing + ("\n\n" if existing else "") + hook + "\n"
+    if (state is None) != (bundle is None):
+        raise Rejected("GLOBAL_PROJECT_HOOK_ARGUMENTS_REQUIRED")
+    if state is not None:
+        # Use the installed copies, so deleting the downloaded EXE has no effect.
+        command = [str(bundle / "python/python.exe"), "-I", "-B", "-S",
+                   str(state / "bin/lattice-customer-runtime.py")]
+        register = command + ["register-project", "--state", str(state),
+                              "--project-root", "<目前工作的 Git 根目錄>", "--project-name", "<專案名稱>"]
+        refresh = command + ["graphify-refresh", "--state", str(state), "--project-id", "<實際回傳的 project_id>"]
+        project_begin = "<!-- BEGIN LATTICE PROJECT CONNECTION v1 -->"
+        project_end = "<!-- END LATTICE PROJECT CONNECTION v1 -->"
+        project_hook = (project_begin + "\n## 接入目前工作的專案\n"
+                        "以下沿用本階段已取得的 LATTICE 啟動結果，不重複啟動檢查。不要把安裝範例當成使用者的工作專案。\n"
+                        "已有此專案的 LATTICE 任務身分時直接延續；首次接入時，先確認目前 Git 根目錄及分支，再以參數陣列執行登記命令：\n"
+                        + json.dumps(register, ensure_ascii=False) + "\n"
+                        "登記會重用既有 project_id，只保存本機位置；尚不代表 PostgreSQL 已登記或 Graphify 已完成。\n"
+                        "使用回傳的 project_id，透過 lattice_task_submit 提交使用者真正要求的工作；不可另建假任務或重複已提交工作。\n"
+                        "任務成功登記後，在需要程式關係資料時執行下列命令，將 project_id 替換成實際值：\n"
+                        + json.dumps(refresh, ensure_ascii=False) + "\n"
+                        "只在 operation_evidence.status 為 PERSISTED 後，使用回傳的 commit 與同一 project_id 呼叫 lattice_code_relations 讀回核驗。\n"
+                        "相同專案及 commit 已有可讀關係時不要重建。Graphify 只分析已提交且乾淨的 Git 工作樹；不可為此擅自清除、暫存或提交使用者變更。\n"
+                        "沒有 Git 初始提交、工作樹尚有改動或分析失敗時，清楚說明圖譜暫不可用，保留工作與任務事實，不假稱三核心驗收成功。\n"
+                        "需要 Node、Python 或 Git 時可使用此安裝內附的執行檔，僅調整當前子程序環境，不覆寫系統設定：\n"
+                        + json.dumps({"node": str(bundle / "node/node.exe"), "python": command[0],
+                                      "git": str(bundle / "git/cmd/git.exe")}, ensure_ascii=False) + "\n" + project_end)
+        if project_begin in updated or project_end in updated:
+            if (updated.count(project_begin) != 1 or updated.count(project_end) != 1
+                    or updated.index(project_end) < updated.index(project_begin)):
+                raise Rejected("GLOBAL_PROJECT_HOOK_CONFLICT_PRESERVED")
+            start, finish = updated.index(project_begin), updated.index(project_end) + len(project_end)
+            updated = updated[:start] + project_hook + updated[finish:]
+        else:
+            updated += ("\n\n" if updated else "") + project_hook + "\n"
     after = updated.encode("utf-8")
     if after == before:
-        return {"status": "UNCHANGED", "path": str(path)}
+        return {"status": "REUSED" if reused_startup else "UNCHANGED", "path": str(path)}
     stamp = str(time.time_ns())
     backup = path.with_name("AGENTS.md.lattice-backup-" + stamp)
     with backup.open("xb") as stream:
@@ -407,7 +443,7 @@ def run_install(bundle: Path, state: Path, source: Path, wsl: Path, platform_roo
         if not successful(payload, RUNNING):
             return {**blocked(payload, "CODEX_CONNECTION_NOT_VERIFIED"), "post_install_steps": steps}
         if global_hook:
-            steps.append({**install_global_hook(codex_config.parent), "action": "global-startup-hook"})
+            steps.append({**install_global_hook(codex_config.parent, state=state, bundle=bundle), "action": "global-startup-hook"})
         # Do not dirty a customer's project after accepting its committed graph.
         # Only our managed sample includes a hook, committed before acceptance.
         return {"status": "INSTALLED", "post_install_steps": steps, "source": str(source)}
