@@ -348,9 +348,10 @@ def start(config: dict, password: str) -> None:
         root = Path(config["root"])
         # PostgreSQL reads auto.conf after postgresql.conf. Validate effective
         # settings before any listener starts, not merely after connecting.
+        # PostgreSQL's Windows admin guard recognizes read-only -C only at argv[1].
         for name, expected in (("listen_addresses", "127.0.0.1"), ("port", str(config["port"])),
                                ("data_directory", str(root / "cluster"))):
-            actual = checked([pg(config, "postgres"), "-D", str(root / "cluster"), "-C", name],
+            actual = checked([pg(config, "postgres"), "-C", name, "-D", str(root / "cluster")],
                              "CUSTOMER_EFFECTIVE_POSTGRES_CONFIG_REJECTED")
             matches = Path(actual) == Path(expected) if name == "data_directory" else actual == expected
             if not matches:

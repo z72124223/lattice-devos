@@ -198,7 +198,7 @@ class CustomerRuntimeTests(unittest.TestCase):
                     self.assertRaisesRegex(M.Rejected, "EFFECTIVE_POSTGRES_CONFIG_REJECTED"):
                 M.operate(root, "serve")
             self.assertEqual(observed.call_count, 1)
-            self.assertEqual(observed.call_args.args[0][-2:], ["-C", "listen_addresses"])
+            self.assertEqual(observed.call_args.args[0][1:3], ["-C", "listen_addresses"])
 
     def test_mcp_serve_rejects_other_running_cluster_without_starting_or_adopting(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -236,7 +236,7 @@ class CustomerRuntimeTests(unittest.TestCase):
                         raise AssertionError("test start was not released")
                     live["running"] = True
                     return ""
-                return {"listen_addresses": "127.0.0.1", "port": str(config["port"]), "data_directory": str(root / "cluster")}[command[-1]]
+                return {"listen_addresses": "127.0.0.1", "port": str(config["port"]), "data_directory": str(root / "cluster")}[command[2]]
 
             with patch.object(M, "load", return_value=(config, "test-only")), \
                     patch.object(M, "running", side_effect=lambda _: live["running"]), \
@@ -320,6 +320,42 @@ class CustomerRuntimeTests(unittest.TestCase):
                 M.start(config, "test-only")
         self.assertEqual(len(calls), 1)
         self.assertNotIn("pg_ctl.exe", calls[0][0])
+
+    def test_readonly_configuration_checks_precede_start_and_every_mismatch_blocks(self):
+        config = {"root": "C:/customer space", "postgres_bin": "C:/PostgreSQL/bin", "port": 49152}
+        cluster = str(Path(config["root"]) / "cluster")
+        expected = {"listen_addresses": "127.0.0.1", "port": "49152", "data_directory": cluster}
+        for invalid in (None, *expected):
+            with self.subTest(invalid=invalid):
+                calls = []; queried = []
+                def invoke(command, **kwargs):
+                    calls.append(command)
+                    if command[0] == M.pg(config, "postgres"):
+                        # Simulate PostgreSQL main.c: elevated read-only queries
+                        # require -C first, otherwise the admin guard rejects them.
+                        if command[1] != "-C":
+                            return M.subprocess.CompletedProcess(command, 1, "", "admin guard")
+                        name = command[2]
+                        self.assertEqual(command[3:], ["-D", cluster])
+                        queried.append(name)
+                        value = "mismatched" if name == invalid else expected[name]
+                        return M.subprocess.CompletedProcess(command, 0, value + "\n", "")
+                    self.assertIsNone(invalid, "never start after a mismatch")
+                    self.assertEqual(queried, list(expected), "all three checks precede pg_ctl")
+                    self.assertEqual(command[0], M.pg(config, "pg_ctl"))
+                    self.assertEqual(command[-1], "start")
+                    return M.subprocess.CompletedProcess(command, 0, "", "")
+                with patch.object(M, "running", return_value=False), patch.object(M, "invoke", side_effect=invoke), \
+                        patch.object(M, "verify_running") as verified:
+                    if invalid:
+                        with self.assertRaisesRegex(M.Rejected, "EFFECTIVE_POSTGRES_CONFIG_REJECTED"):
+                            M.start(config, "test-only")
+                        verified.assert_not_called()
+                        self.assertEqual(queried, list(expected)[:list(expected).index(invalid) + 1])
+                    else:
+                        M.start(config, "test-only")
+                        self.assertEqual(len(calls), 4)
+                        verified.assert_called_once_with(config, "test-only")
 
     def test_postgres_override_file_tampering_rejected_before_process(self):
         with tempfile.TemporaryDirectory(prefix="lattice-customer-override-") as directory:
