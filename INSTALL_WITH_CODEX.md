@@ -4,7 +4,25 @@
 把下面這段話交給 Codex，它負責查環境、準備依賴、執行安裝和驗收。
 你只需處理 Windows 授權、必要的重新開機，以及選擇要管理的專案。
 
-**完整 Windows 封裝仍在驗收，不要把舊版下載檔當成已完成的新機安裝保證。**
+## 單一 EXE 安裝候選包
+
+下載 [rc.4 完整安裝包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.4)
+中的 `LATTICE-Setup-v2.0.1-rc.4-windows-x64.exe`（約 607 MB），直接雙擊。
+先安裝 Codex 並登入自己的帳號；完成後重開 Codex。首次 WSL 啟用可能需要
+Windows 授權與重開機，重開後再雙擊同一檔案。一般使用者不需編譯、尋找依賴或輸入摘要。
+
+給協助安裝的 Codex：下載此固定版本後核對 SHA-256
+`03aa231866ad3cb9e39a7321cc594fa1b3c8a83ce6b4903ff749ee9343e1c8c3`。
+保持互動提示，讓使用者處理 Windows 授權、設定衝突與重複項目的選擇。
+完整安裝結果見 `%LOCALAPPDATA%/LATTICE/sfx-last-result.json` 的本次
+`setup_exit_code`，不能只看外層 EXE 的退出碼；再核對 `one-click-report.json`。
+安裝完成後從新的 Codex 連線實際讀取 `lattice_runtime_status`。
+
+**rc.4 是候選版。** 已通過 Windows 10 同一使用者隔離安裝（約 14 分鐘）、
+三核心、6 筆圖譜關係、Runtime／PostgreSQL 重啟及實際 app-local DLL 載入。
+普通乾淨 Windows 的首次 WSL 啟用／UAC／重開機及跨帳戶驗收仍待補齊。
+依賴已包含於 EXE；以下說明原始碼資料夾入口及進階手動流程。
+
 修正後的 `Install-LATTICE.cmd` 會先檢查完整 bundle、Graphify、WSL 啟動器與
 檔案摘要，再建立專用 Runtime。內含 Python、Git、Node、PostgreSQL 與固定
 Graphify 依賴，不要求使用者另外安裝這些命令到全域 PATH。
@@ -25,8 +43,9 @@ Install-LATTICE.cmd <已提交的Git專案> <WSL啟動器>
 啟動會先核驗並啟動原有專用資料庫；不重新初始化或遷移資料。
 首次新安裝會實際停止該資料庫，再從 MCP 讀回任務與圖譜；重新執行既有安裝
 不會為此中斷其他連線。完整依賴核驗可能較慢，專用 MCP 啟動期限設為 600 秒。
-Graphify 目前綁定安裝時指定的單一原始碼專案；全域啟動規則不代表每個新
-Codex 專案都會自動建立圖譜。不指定專案時驗收的是歡迎範例。
+不指定專案時驗收的是歡迎範例。之後在 Codex 開啟自己的 Git 專案並提出工作要求，
+全域規則會引導本機登記、正式任務提交與依專案 ID 分析；各專案圖譜及收據隔離。
+未登記的專案會被拒絕分析，未提交變更會保留；不因全域規則存在就宣稱圖譜已建立。
 
 重複檢查涵蓋本機全域技能、規則、工作流程與插件檔案。完全相同的 MCP
 設定或技能內容可逐項選擇「保留」或「備份後停用」，至少保留一份啟用項。
@@ -75,7 +94,10 @@ Hermes 已永久退役，不得安裝或啟用。不得改寫產品程式或放�
 
 ## 給執行安裝的 Codex
 
-### 先核對，不依賴作者電腦
+### 進階手動流程：先核對，不依賴作者電腦
+
+以下保留 v2.0.0 個別 Runtime 的手動組裝步驟；選用上方 rc.4 完整 EXE 時，
+依其發布資產及驗收範圍操作，不將舊版 Runtime 或腳本混入新安裝包。
 
 1. 讀取本文件、[客戶 Runtime 操作](docs/customer-runtime.md)及所用腳本的 `--help`。
    第一次安裝尚無 LATTICE MCP 時，記為未安裝並繼續環境檢查；不能假造 Runtime 狀態。
