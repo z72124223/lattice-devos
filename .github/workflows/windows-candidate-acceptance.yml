@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-candidate-rc4
+  group: windows-candidate-rc5
   cancel-in-progress: false
 
 jobs:
@@ -27,9 +27,9 @@ jobs:
       - name: Download and verify the exact public candidate
         shell: pwsh
         run: |
-          $installer = Join-Path $env:RUNNER_TEMP 'LATTICE-Setup-rc4.exe'
-          Invoke-WebRequest -Uri 'https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.4/LATTICE-Setup-v2.0.1-rc.4-windows-x64.exe' -OutFile $installer -TimeoutSec 300
-          $expected = '03aa231866ad3cb9e39a7321cc594fa1b3c8a83ce6b4903ff749ee9343e1c8c3'
+          $installer = Join-Path $env:RUNNER_TEMP 'LATTICE-Setup-rc5.exe'
+          Invoke-WebRequest -Uri 'https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.5/LATTICE-Setup-v2.0.1-rc.5-windows-x64.exe' -OutFile $installer -TimeoutSec 300
+          $expected = 'bab59035b6c9221e66fa4c32b9befe78e39cfb149eb9d1cf8c40c26460da3491'
           if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $expected) {
             throw 'INSTALLER_SHA256_MISMATCH'
           }
@@ -37,8 +37,8 @@ jobs:
         shell: pwsh
         run: |
           & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -File scripts/verify-lattice-windows-installer.ps1 `
-            -InstallerPath (Join-Path $env:RUNNER_TEMP 'LATTICE-Setup-rc4.exe') `
-            -ExpectedSha256 '03aa231866ad3cb9e39a7321cc594fa1b3c8a83ce6b4903ff749ee9343e1c8c3' `
+            -InstallerPath (Join-Path $env:RUNNER_TEMP 'LATTICE-Setup-rc5.exe') `
+            -ExpectedSha256 'bab59035b6c9221e66fa4c32b9befe78e39cfb149eb9d1cf8c40c26460da3491' `
             -TrialRoot (Join-Path $env:RUNNER_TEMP 'lattice independent trial') `
             -Output (Join-Path $env:RUNNER_TEMP 'lattice-installer-result.json')
           exit $LASTEXITCODE
@@ -46,7 +46,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-server-2025-rc4-result
+          name: windows-server-2025-rc5-result
           path: ${{ runner.temp }}/lattice-installer-result.json
           if-no-files-found: warn
           retention-days: 7
