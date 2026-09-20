@@ -9,7 +9,7 @@ LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 Windows 使用者可下載 [rc.6 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.6)，
 雙擊後依畫面操作。它包含三核心、Python、Git、Node、專用 WSL 映像及必要的
 Microsoft 執行元件；Codex 需先用自己的帳號登入。
-[rc.6 獨立 Windows Server 2025 完整安裝](https://github.com/z72124223/lattice-devos/actions/runs/35486487920)
+rc.6 在獨立 Windows Server 2025 的完整安裝
 約 6 分 25 秒通過：三核心、任務／圖譜讀回、程式與資料庫重啟、Codex 全域規則與
 實際元件載入均成功。新版同帳號單專案還原亦已讀回舊任務與圖譜。
 普通 Windows 10/11 首次啟用 WSL、UAC／重開機與 Codex Desktop 登入仍待真機驗收，
