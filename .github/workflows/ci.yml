@@ -32,6 +32,7 @@ jobs:
             'test_lattice_wsl_host.py',
             'test_lattice_bundle.py',
             'test_lattice_customer_backup.py',
+            'test_verify_lattice_loaded_crt.py',
             'test_build_lattice_windows_installer.py'
           )
           foreach ($testFile in $installerTests) {
