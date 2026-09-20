@@ -166,8 +166,18 @@ def install_global_hook(codex_home: Path, *, state: Path | None = None,
         raise Rejected("GLOBAL_PROJECT_HOOK_ARGUMENTS_REQUIRED")
     if state is not None:
         # Use the installed copies, so deleting the downloaded EXE has no effect.
+        # run_install calls this only after connect has verified the sealed state.
+        launcher = state / "bin/lattice-customer-runtime.py"
+        installed = state / "installation.json"
+        if installed.is_file():
+            current = json.loads(installed.read_text(encoding="utf-8"))
+            if current.get("launcher"):
+                launcher = Path(current["launcher"])
+                if (not launcher.is_absolute() or not launcher.resolve().is_relative_to(state.resolve())
+                        or launcher.name != "lattice-customer-runtime.py"):
+                    raise Rejected("GLOBAL_PROJECT_LAUNCHER_REJECTED")
         command = [str(bundle / "python/python.exe"), "-I", "-B", "-S",
-                   str(state / "bin/lattice-customer-runtime.py")]
+                   str(launcher)]
         register = command + ["register-project", "--state", str(state),
                               "--project-root", "<目前工作的 Git 根目錄>", "--project-name", "<專案名稱>"]
         refresh = command + ["graphify-refresh", "--state", str(state), "--project-id", "<實際回傳的 project_id>"]
@@ -175,6 +185,8 @@ def install_global_hook(codex_home: Path, *, state: Path | None = None,
         project_end = "<!-- END LATTICE PROJECT CONNECTION v1 -->"
         project_hook = (project_begin + "\n## 接入目前工作的專案\n"
                         "以下沿用本階段已取得的 LATTICE 啟動結果，不重複啟動檢查。不要把安裝範例當成使用者的工作專案。\n"
+                        "若 Runtime 之後更新過，先讀 " + json.dumps(str(installed), ensure_ascii=False)
+                        + " 的 launcher 欄位，以下兩個命令應改用目前的 launcher；沒有該欄位時才沿用 bin 中的腳本。不要讀取或複製憑證。\n"
                         "已有此專案的 LATTICE 任務身分時直接延續；首次接入時，先確認目前 Git 根目錄及分支，再以參數陣列執行登記命令：\n"
                         + json.dumps(register, ensure_ascii=False) + "\n"
                         "登記會重用既有 project_id，只保存本機位置；尚不代表 PostgreSQL 已登記或 Graphify 已完成。\n"

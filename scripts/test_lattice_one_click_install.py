@@ -455,6 +455,21 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(list(self.codex.parent.glob("AGENTS.md.lattice-backup-*")), [])
 
+    def test_project_hook_uses_upgraded_launcher_and_rejects_foreign_path(self):
+        self.state.mkdir(parents=True)
+        launcher = self.state / "updates" / ("a" * 32) / "lattice-customer-runtime.py"
+        installation = self.state / "installation.json"
+        installation.write_text(json.dumps({"launcher": str(launcher)}), encoding="utf-8")
+        I.install_global_hook(self.codex.parent, state=self.state, bundle=self.bundle)
+        path = self.codex.parent / "AGENTS.md"
+        contents = path.read_bytes()
+        commands = [json.loads(line) for line in contents.decode("utf-8").splitlines() if line.startswith("[")]
+        self.assertEqual([command[4] for command in commands], [str(launcher)] * 2)
+        installation.write_text(json.dumps({"launcher": str(self.root / "foreign/lattice-customer-runtime.py")}), encoding="utf-8")
+        with self.assertRaisesRegex(I.Rejected, "GLOBAL_PROJECT_LAUNCHER_REJECTED"):
+            I.install_global_hook(self.codex.parent, state=self.state, bundle=self.bundle)
+        self.assertEqual(path.read_bytes(), contents)
+
     def test_global_hook_only_runs_after_successful_mcp_and_connect(self):
         with patch.object(I, "prepare_source"), patch.object(I, "verify_mcp", return_value={"status": "VERIFIED"}), \
                 patch.object(I, "run_json", side_effect=self.response), patch.object(I, "install_global_hook", return_value={"status": "INSTALLED"}) as hook:
