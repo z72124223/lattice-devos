@@ -6,23 +6,25 @@ LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 
 ## 讓 Codex 幫你安裝
 
-Windows 使用者可下載 [rc.4 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.4)，
+Windows 使用者可下載 [rc.6 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.6)，
 雙擊後依畫面操作。它包含三核心、Python、Git、Node、專用 WSL 映像及必要的
 Microsoft 執行元件；Codex 需先用自己的帳號登入。
-本機 Windows 10 隔離安裝約 14 分鐘，已通過任務／圖譜讀回、資料庫重啟與
-實際元件載入驗證。普通乾淨 Windows 首次啟用 WSL、UAC／重開機及跨帳戶驗收仍待補齊，
-目前標示為候選版。
+[rc.6 獨立 Windows Server 2025 完整安裝](https://github.com/z72124223/lattice-devos/actions/runs/35486487920)
+約 6 分 25 秒通過：三核心、任務／圖譜讀回、程式與資料庫重啟、Codex 全域規則與
+實際元件載入均成功。新版同帳號單專案還原亦已讀回舊任務與圖譜。
+普通 Windows 10/11 首次啟用 WSL、UAC／重開機與 Codex Desktop 登入仍待真機驗收，
+因此仍標示為候選版；非預設專案還原後的舊圖譜可能需要重新分析。
 
 不熟悉技術設定，可以把下面這段交給自己的 Codex App：
 
 ```text
-請按照 https://github.com/z72124223/lattice-devos/blob/product/lattice-control-mvp/INSTALL_WITH_CODEX.md
-協助我檢查並安裝 LATTICE 與必要依賴，保留我的設定，完成實際驗收。
-先確認相容 Graphify 依賴能否取得；缺少時如實回報，不宣稱三核心安裝完成。
+請按照 https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.6
+協助我核對完整 EXE 的摘要、安裝 LATTICE 與內附依賴，保留我的設定並完成實際驗收。
+保留 Windows 授權及設定衝突的互動提示；任何未通過項目如實回報。
 ```
 
 [完整 Codex 安裝入口](INSTALL_WITH_CODEX.md)包含官方依賴來源、現有安裝命令、
-重新連線及驗收要求。Windows 完整依賴封裝的驗收範圍見上述 rc.4 發布頁；舊下載包不代表
+重新連線及驗收要求。Windows 完整依賴封裝的驗收範圍見上述 rc.6 發布頁；舊下載包不代表
 已通過乾淨電腦的雙擊安裝測試。請依安裝文件核對版本與驗收狀態。
 
 ## 三核心

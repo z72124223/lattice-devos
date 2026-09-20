@@ -6,21 +6,23 @@
 
 ## 單一 EXE 安裝候選包
 
-下載 [rc.4 完整安裝包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.4)
-中的 `LATTICE-Setup-v2.0.1-rc.4-windows-x64.exe`（約 607 MB），直接雙擊。
+下載 [rc.6 完整安裝包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.6)
+中的 `LATTICE-Setup-v2.0.1-rc.6-windows-x64.exe`（約 607 MB），直接雙擊。
 先安裝 Codex 並登入自己的帳號；完成後重開 Codex。首次 WSL 啟用可能需要
 Windows 授權與重開機，重開後再雙擊同一檔案。一般使用者不需編譯、尋找依賴或輸入摘要。
 
 給協助安裝的 Codex：下載此固定版本後核對 SHA-256
-`03aa231866ad3cb9e39a7321cc594fa1b3c8a83ce6b4903ff749ee9343e1c8c3`。
+`091703cf76a02db5a4bbf59c7dc241384a743be625f87163a9f2d0cabe7054ee`。
 保持互動提示，讓使用者處理 Windows 授權、設定衝突與重複項目的選擇。
 完整安裝結果見 `%LOCALAPPDATA%/LATTICE/sfx-last-result.json` 的本次
 `setup_exit_code`，不能只看外層 EXE 的退出碼；再核對 `one-click-report.json`。
 安裝完成後從新的 Codex 連線實際讀取 `lattice_runtime_status`。
 
-**rc.4 是候選版。** 已通過 Windows 10 同一使用者隔離安裝（約 14 分鐘）、
-三核心、6 筆圖譜關係、Runtime／PostgreSQL 重啟及實際 app-local DLL 載入。
-普通乾淨 Windows 的首次 WSL 啟用／UAC／重開機及跨帳戶驗收仍待補齊。
+**rc.6 是候選版。** [獨立 Windows Server 2025 完整 EXE 驗收](https://github.com/z72124223/lattice-devos/actions/runs/35486487920)
+約 6 分 25 秒通過：三核心、6 筆圖譜與 MCP 讀回、Runtime／PostgreSQL 重啟、
+全域規則、偏好及實際 app-local DLL 載入。新版同帳號單專案還原亦保留舊任務、
+圖譜與固定元件。普通 Windows 10/11 首次 WSL 啟用／UAC／重開機與 Codex Desktop
+登入仍待真機驗收；非預設專案搬移或還原後的舊圖譜可能需要重新分析。
 依賴已包含於 EXE；以下說明原始碼資料夾入口及進階手動流程。
 
 修正後的 `Install-LATTICE.cmd` 會先檢查完整 bundle、Graphify、WSL 啟動器與
@@ -96,7 +98,7 @@ Hermes 已永久退役，不得安裝或啟用。不得改寫產品程式或放�
 
 ### 進階手動流程：先核對，不依賴作者電腦
 
-以下保留 v2.0.0 個別 Runtime 的手動組裝步驟；選用上方 rc.4 完整 EXE 時，
+以下保留 v2.0.0 個別 Runtime 的手動組裝步驟；選用上方 rc.6 完整 EXE 時，
 依其發布資產及驗收範圍操作，不將舊版 Runtime 或腳本混入新安裝包。
 
 1. 讀取本文件、[客戶 Runtime 操作](docs/customer-runtime.md)及所用腳本的 `--help`。
