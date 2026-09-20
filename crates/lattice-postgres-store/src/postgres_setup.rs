@@ -8613,11 +8613,19 @@ const CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256: &str =
     "f6c7a6745e64557cace7a2363f29acdf47259c6eebe9b1b3c9a9f068c9c6fe49";
 const CONTROL_PRODUCT_TABLE_CATALOG_SHA256: &str =
     "28c9a3ae3d9038332ab590ab073ba8385b3c4940d82cf54b097a1e7d087569b8";
+/// Append-only graph usage extension installed only by explicit product bootstrap.
+pub const GRAPH_USAGE_SQL: &str =
+    include_str!("../../../db/extensions/control-product/graph-usage-v1.sql");
+const GRAPH_USAGE_FUNCTION_CATALOG_SHA256: &str =
+    "7ff5ba64246f77d49594fae480f13d20acb287bd975d721eccd2caca5392ab2f";
+const GRAPH_USAGE_TABLE_CATALOG_SHA256: &str =
+    "515bdcc8a70a59549184d566b7c3c9390169ef5599024661e56549e408b37a8b";
 
 struct ControlProductPrincipalProfile {
     relation_oids: Vec<i64>,
     function_oids: Vec<i64>,
     code_relations: bool,
+    graph_usage: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8643,9 +8651,15 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
         b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
     )?;
-    let code_relations = functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
+    let graph_usage = functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
+    let code_relations = graph_usage || functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
     if (!code_relations && functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256)
-        || tables != CONTROL_PRODUCT_TABLE_CATALOG_SHA256
+        || tables
+            != if graph_usage {
+                GRAPH_USAGE_TABLE_CATALOG_SHA256
+            } else {
+                CONTROL_PRODUCT_TABLE_CATALOG_SHA256
+            }
     {
         return Err(catalog_error());
     }
@@ -8658,9 +8672,18 @@ fn verify_optional_control_product_extension<C: GenericClient>(
           (SELECT count(*) FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product')",
         &[]).map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     for (index, expected) in [
-        (0, 26_i64),
-        (1, if code_relations { 16 } else { 15 }),
-        (2, 16),
+        (0, if graph_usage { 31_i64 } else { 26 }),
+        (
+            1,
+            if graph_usage {
+                19
+            } else if code_relations {
+                16
+            } else {
+                15
+            },
+        ),
+        (2, if graph_usage { 20 } else { 16 }),
         (3, 0),
         (4, 0),
         (5, 0),
@@ -8698,7 +8721,15 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         relation_oids,
         function_oids,
         code_relations,
+        graph_usage,
     }))
+}
+
+pub(crate) fn verify_graph_usage_extension<C: GenericClient>(
+    client: &mut C,
+) -> Result<bool, PostgresStoreSetupError> {
+    Ok(verify_optional_control_product_extension(client)?
+        .is_some_and(|profile| profile.graph_usage))
 }
 
 /// Installs Control facts only through an explicitly invoked, verified migrator.
@@ -8752,6 +8783,16 @@ pub fn apply_control_product_extension(
             return Err(catalog_error());
         }
     }
+    if !verify_graph_usage_extension(&mut transaction)? {
+        transaction
+            .batch_execute(GRAPH_USAGE_SQL)
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        if !verify_graph_usage_extension(&mut transaction)? {
+            return Err(catalog_error());
+        }
+    }
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
     })?;
@@ -8766,9 +8807,15 @@ fn verify_exact_principal_database_boundary<C: GenericClient>(
     managed_foreman: Option<&ManagedForemanPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     let product = verify_optional_control_product_extension(client)?;
-    let product_functions = product
-        .as_ref()
-        .map_or(0, |p| if p.code_relations { 15 } else { 14 });
+    let product_functions = product.as_ref().map_or(0, |p| {
+        if p.graph_usage {
+            18
+        } else if p.code_relations {
+            15
+        } else {
+            14
+        }
+    });
     if verify_exact_principal_database_core(client)?
         != expected_dangerous_functions + product_functions
     {

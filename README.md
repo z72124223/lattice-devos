@@ -55,6 +55,12 @@ LATTICE 不建立第二套通用代理迴圈或操作平台。
 以 Graphify 函式呼叫計數證明零次執行」的對應測試。
 固定版本、原碼行號、現有測試範圍與缺口見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
 
+新版原始碼另提供 `lattice_graph_usage(project_id, task_ref)`，讀回 Runtime 自動寫入 PostgreSQL 的
+分析、重用及查詢紀錄。`graphify-refresh --project-id … --task-ref …` 與
+`lattice_code_relations` 的 `task_ref` 可將紀錄綁定正式任務；沒綁定就列為未綁定，
+沒有紀錄顯示 `UNKNOWN`，不能當成零次。這不會強迫每項任務使用 Graphify，
+也不證明 AI 已理解結果。舊安裝須先更新 Runtime 並執行資料庫升級；已有下載包不會因此自動更新。
+
 ## 使用方式
 
 2.0 為三核心正式版，移除舊版 Hermes 啟動命令與四核心模式，屬不相容變更。

@@ -5,9 +5,9 @@ use std::rc::Rc;
 use lattice_foreman_state::DependencyBinding;
 use lattice_runtime::composition::fixed_gateway_submission;
 use lattice_runtime::mcp::{
-    DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
-    MAX_STDIO_MESSAGE_BYTES, MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer, StdioLifecycleEvent,
-    TaskStatusArguments, TaskSubmitArguments, ToolExecutionError, serve,
+    CodeRelationsArguments, DeliveryToolArguments, DeliveryToolService, ForemanCheckpointArguments,
+    GraphUsageArguments, MAX_STDIO_MESSAGE_BYTES, MAX_TOOL_INVOCATIONS_PER_SESSION, McpServer,
+    StdioLifecycleEvent, TaskStatusArguments, TaskSubmitArguments, ToolExecutionError, serve,
     serve_legacy_delivery_observer, serve_with_lifecycle_observer,
 };
 use serde_json::{Value, json};
@@ -21,6 +21,49 @@ struct FakeService {
 #[derive(Clone)]
 struct CheckpointService {
     calls: Rc<Cell<u32>>,
+}
+
+struct GraphObservationService {
+    usage_calls: Rc<Cell<u32>>,
+}
+
+impl DeliveryToolService for GraphObservationService {
+    fn run(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        Ok(json!({}))
+    }
+
+    fn status(&mut self, _arguments: &DeliveryToolArguments) -> Result<Value, ToolExecutionError> {
+        Ok(json!({}))
+    }
+
+    fn task_submit(
+        &mut self,
+        _arguments: &TaskSubmitArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new("TEST_TASK_OPERATION_NOT_SUPPORTED"))
+    }
+
+    fn task_status(
+        &mut self,
+        _arguments: &TaskStatusArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Err(ToolExecutionError::new("TEST_TASK_OPERATION_NOT_SUPPORTED"))
+    }
+
+    fn graph_usage(
+        &mut self,
+        _arguments: &GraphUsageArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        self.usage_calls.set(self.usage_calls.get() + 1);
+        Ok(json!({"scope":"OBSERVED_CALLS", "events":[]}))
+    }
+
+    fn code_relations(
+        &mut self,
+        _arguments: &CodeRelationsArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        Ok(json!({"usage_id":TASK_REF,"usage_status":"RECORDED","result_bytes":128,"records":[]}))
+    }
 }
 
 impl DeliveryToolService for CheckpointService {
@@ -237,7 +280,7 @@ fn lifecycle_diagnostics_observe_fixed_mcp_milestones_without_changing_stdout() 
     assert_eq!(responses[0]["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(
         responses[1]["result"]["tools"].as_array().map(Vec::len),
-        Some(10)
+        Some(11)
     );
 }
 
@@ -904,7 +947,8 @@ fn modern_tool_requests_are_stateless_and_preserve_the_server_binding() {
             "lattice_foreman_checkpoint",
             "lattice_control_snapshot",
             "lattice_control_update",
-            "lattice_code_relations"
+            "lattice_code_relations",
+            "lattice_graph_usage"
         ]
     );
     assert_eq!(
@@ -1282,7 +1326,7 @@ fn modern_discovery_does_not_replace_the_legacy_lifecycle() {
         .expect("legacy tool list");
     assert_eq!(
         legacy_list["result"]["tools"].as_array().map(Vec::len),
-        Some(10)
+        Some(11)
     );
 
     for method in ["initialize", "ping"] {
@@ -1309,16 +1353,34 @@ fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
         .expect("tool list");
     let tools = response["result"]["tools"].as_array().expect("tools");
 
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 11);
     let relations = tools
         .iter()
         .find(|t| t["name"] == "lattice_code_relations")
         .expect("relations tool");
     assert_eq!(
         relations["annotations"],
-        json!({"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false})
+        json!({"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false})
     );
     assert_eq!(relations["inputSchema"]["additionalProperties"], false);
+    assert_eq!(
+        relations["inputSchema"]["properties"]["task_ref"]["pattern"],
+        "^[0-9a-f]{64}$"
+    );
+    let usage = tools
+        .iter()
+        .find(|t| t["name"] == "lattice_graph_usage")
+        .expect("usage tool");
+    assert_eq!(usage["inputSchema"]["additionalProperties"], false);
+    assert_eq!(usage["inputSchema"]["required"], json!(["project_id"]));
+    assert_eq!(
+        usage["inputSchema"]["properties"]["task_ref"]["pattern"],
+        "^[0-9a-f]{64}$"
+    );
+    assert_eq!(
+        usage["annotations"],
+        json!({"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false})
+    );
     assert_eq!(
         tools
             .iter()
@@ -1334,7 +1396,8 @@ fn tool_list_keeps_existing_tools_and_adds_closed_product_operations() {
             "lattice_foreman_checkpoint",
             "lattice_control_snapshot",
             "lattice_control_update",
-            "lattice_code_relations"
+            "lattice_code_relations",
+            "lattice_graph_usage"
         ]
     );
     for tool in &tools[..2] {
@@ -1424,11 +1487,166 @@ fn code_relations_dispatches_only_closed_arguments_in_both_protocols() {
             valid["result"]["structuredContent"]["code"],
             "CODE_RELATIONS_UNAVAILABLE"
         );
+        params["arguments"]["task_ref"] = json!(TASK_REF);
+        let associated = server
+            .handle(json!({"jsonrpc":"2.0","id":12,"method":"tools/call","params":params}))
+            .unwrap();
+        assert_eq!(
+            associated["result"]["structuredContent"]["code"],
+            "CODE_RELATIONS_UNAVAILABLE"
+        );
+        params["arguments"]["task_ref"] = json!("A".repeat(64));
+        let invalid_task = server
+            .handle(json!({"jsonrpc":"2.0","id":13,"method":"tools/call","params":params}))
+            .unwrap();
+        assert_eq!(invalid_task["error"]["code"], -32602);
+        params["arguments"]
+            .as_object_mut()
+            .unwrap()
+            .remove("task_ref");
         params["arguments"]["analysis_digest"] = json!("b".repeat(64));
         let invalid = server
             .handle(json!({"jsonrpc":"2.0","id":11,"method":"tools/call","params":params}))
             .unwrap();
         assert_eq!(invalid["error"]["code"], -32602);
+    }
+}
+
+#[test]
+fn graph_usage_dispatches_to_service_and_keeps_query_usage_metadata_in_both_protocols() {
+    for modern in [false, true] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            GraphObservationService {
+                usage_calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        if !modern {
+            initialize(&mut server);
+        }
+        let catalog_params = if modern {
+            json!({"_meta":modern_request_meta()})
+        } else {
+            json!({})
+        };
+        let catalog = server.handle(json!({"jsonrpc":"2.0","id":"catalog","method":"tools/list","params":catalog_params})).unwrap();
+        for (name, read_only) in [
+            ("lattice_code_relations", false),
+            ("lattice_graph_usage", true),
+        ] {
+            let tool = catalog["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], read_only);
+            assert_eq!(tool["annotations"]["idempotentHint"], read_only);
+        }
+        let mut params =
+            json!({"name":"lattice_graph_usage","arguments":{"project_id":"customer-test"}});
+        if modern {
+            params["_meta"] = modern_request_meta();
+        }
+        for associated in [false, true] {
+            if associated {
+                params["arguments"]["task_ref"] = json!(TASK_REF);
+            }
+            let response = server
+                .handle(json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":params}))
+                .unwrap();
+            assert_eq!(response["result"]["isError"], false);
+            assert_eq!(
+                response["result"]["structuredContent"],
+                json!({"scope":"OBSERVED_CALLS","events":[]})
+            );
+        }
+        assert_eq!(calls.get(), 2);
+        for arguments in [
+            json!({}),
+            json!({"project_id":"customer-test","task_ref":null}),
+            json!({"project_id":"customer-test","task_ref":"A".repeat(64)}),
+            json!({"project_id":"customer-test","source_root":"C:/other"}),
+            json!({"project_id":"customer-test","task_ref":TASK_REF,"verified":true}),
+        ] {
+            params["arguments"] = arguments;
+            let rejected = server
+                .handle(json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":params}))
+                .unwrap();
+            assert_eq!(rejected["error"]["code"], -32602);
+        }
+        assert_eq!(calls.get(), 2);
+        params["name"] = json!("lattice_code_relations");
+        params["arguments"] = json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"name","limit":1,"task_ref":TASK_REF});
+        let response = server
+            .handle(json!({"jsonrpc":"2.0","id":22,"method":"tools/call","params":params}))
+            .unwrap();
+        assert_eq!(response["result"]["isError"], false);
+        assert_eq!(
+            response["result"]["structuredContent"],
+            json!({"usage_id":TASK_REF,"usage_status":"RECORDED","result_bytes":128,"records":[]})
+        );
+    }
+}
+
+#[test]
+fn graph_usage_default_service_is_unavailable_and_observation_reserve_remains_usable() {
+    let (mut unavailable, _, _) = server();
+    initialize(&mut unavailable);
+    let request = json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"lattice_graph_usage","arguments":{"project_id":"customer-test"}}});
+    let response = unavailable.handle(request.clone()).unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert_eq!(
+        response["result"]["structuredContent"]["code"],
+        "GRAPH_USAGE_UNAVAILABLE"
+    );
+    for modern in [false, true] {
+        let calls = Rc::new(Cell::new(0));
+        let mut server = McpServer::new(
+            GraphObservationService {
+                usage_calls: calls.clone(),
+            },
+            fixed_binding().clone(),
+        );
+        if !modern {
+            initialize(&mut server);
+        }
+        let mut query_params = json!({"name":"lattice_code_relations","arguments":{"project_id":"customer-test","commit":"a".repeat(40),"query":"name","limit":1}});
+        let mut observation = request.clone();
+        if modern {
+            query_params["_meta"] = modern_request_meta();
+            observation["params"]["_meta"] = modern_request_meta();
+        }
+        for id in 0..(MAX_TOOL_INVOCATIONS_PER_SESSION - 8) {
+            let response = server
+                .handle(
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":query_params}),
+                )
+                .unwrap();
+            assert_eq!(response["result"]["isError"], false);
+        }
+        let denied = server.handle(json!({"jsonrpc":"2.0","id":"denied-query-audit","method":"tools/call","params":query_params})).unwrap();
+        assert_eq!(denied["result"]["isError"], true);
+        let handoff = &denied["result"]["structuredContent"];
+        assert_eq!(handoff["code"], "LATTICE_MCP_BUDGET_HANDOFF_REQUIRED");
+        assert_eq!(handoff["effect_started"], false);
+        assert_eq!(handoff["remaining_read_only_calls"], 8);
+        assert!(
+            handoff["cannot_do"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("lattice_code_relations"))
+        );
+        assert!(
+            handoff["can_do"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("lattice_graph_usage"))
+        );
+        let observed = server.handle(observation).unwrap();
+        assert_eq!(observed["result"]["isError"], false);
+        assert_eq!(calls.get(), 1);
     }
 }
 
@@ -1832,6 +2050,11 @@ fn legacy_observer_neither_mutates_nor_advertises_or_dispatches_task_tools() {
             "lattice_code_relations",
             json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"hello","limit":1}),
         ),
+        (
+            "legacy-usage",
+            "lattice_graph_usage",
+            json!({"project_id":"customer-test"}),
+        ),
     ] {
         let response = legacy_server
             .handle(json!({
@@ -1899,6 +2122,11 @@ fn stateless_legacy_observer_neither_advertises_nor_dispatches_task_tools() {
             "stateless-relations",
             "lattice_code_relations",
             json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"hello","limit":1}),
+        ),
+        (
+            "stateless-usage",
+            "lattice_graph_usage",
+            json!({"project_id":"customer-test"}),
         ),
     ] {
         let response = stateless_server
@@ -3122,7 +3350,7 @@ fn request_metadata_is_allowed_without_widening_tool_arguments() {
             "params":{"_meta":{"progressToken":"list-progress"}}
         }))
         .expect("tool list");
-    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(10));
+    assert_eq!(list["result"]["tools"].as_array().map(Vec::len), Some(11));
 
     let call = server
         .handle(json!({
@@ -3255,7 +3483,11 @@ fn execution_budget_preserves_a_structured_read_only_handoff_reserve() {
     assert_eq!(receipt["can_do"][0], "lattice_runtime_status");
     assert_eq!(
         receipt["cannot_do"],
-        json!(["lattice_delivery_run", "lattice_task_submit"])
+        json!([
+            "lattice_delivery_run",
+            "lattice_task_submit",
+            "lattice_code_relations"
+        ])
     );
     assert_eq!(
         run_calls.get() as usize,

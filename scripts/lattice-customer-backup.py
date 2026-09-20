@@ -308,6 +308,8 @@ def restore(backup_root, expected, key, state, bundle, bundle_sha, platform, run
 def finalize_restore(state):
     config, password = M.load(state, allow_restore=True)
     with M.runtime_lease(state, exclusive=True), M.CONFIG.manager_lock(state / ".operations"):
+        # Revalidate the sealed installation after acquiring both restore locks.
+        config, password = M.load(state, allow_restore=True)
         path = state / "restore.pending.dpapi"
         journal = json.loads(M.dpapi(M.regular(path).read_bytes(), decrypt=True))
         if journal.get("schema") != "lattice.customer-restore.v1" or Path(journal["root"]) != state or journal["installation_sha256"] != M.file_digest(state / "installation.json") or journal["catalog_sha256"] != M.file_digest(state / "projects.json"):
@@ -315,6 +317,9 @@ def finalize_restore(state):
         if not (state / "restore.in-progress").exists():
             M.CONFIG.atomic_write(state / "restore.in-progress", b"lattice.customer-restore.v1\n")
         M.start(config, password)
+        # A backup may predate the new Runtime's additive product extensions.
+        # Bootstrap only this verified restored cluster, before probe or READY.
+        M.runtime_action(config, password, "--postgres-bootstrap")
         spec = importlib.util.spec_from_file_location("update_probe", Path(__file__).with_name("lattice-runtime-update.py"))
         update = importlib.util.module_from_spec(spec); spec.loader.exec_module(update)
         update.probe(config, password)

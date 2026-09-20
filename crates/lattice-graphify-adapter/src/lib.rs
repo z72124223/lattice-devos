@@ -29,6 +29,7 @@ pub use lattice_contracts::{
     GRAPHIFY_LICENSE, GRAPHIFY_PACKAGE, GRAPHIFY_UPSTREAM_COMMIT, GRAPHIFY_VERSION,
     GRAPHIFY_WHEEL_SHA256,
 };
+pub use ports::analysis_call_count;
 pub use process::{
     GraphOutputLimits, GraphifyAnalysis, GraphifyRuntimeConfig, PinnedGraphifyAdapter,
 };

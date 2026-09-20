@@ -381,7 +381,7 @@ def runtime_action(config: dict, password: str, action: str, *arguments: str) ->
     result = invoke([config["runtime"], action, *arguments], env=environment(config, password), timeout=120)
     if result.returncode:
         codes = [line for line in result.stderr.splitlines()
-                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY|PROJECT|CODE_RELATIONS)_[A-Z0-9_]{1,120}", line)]
+                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY|GRAPH_USAGE|PROJECT|CODE_RELATIONS)_[A-Z0-9_]{1,120}", line)]
         suffix = ":" + codes[-1] if codes else ""
         raise Rejected("CUSTOMER_RUNTIME_" + action.strip("-").replace("-", "_").upper() + "_REJECTED" + suffix)
     return json.loads(result.stdout) if result.stdout.strip() else None
@@ -564,9 +564,13 @@ def project_graph_config(config: dict, project_id: str) -> dict:
     return derived
 
 
-def operate(root: Path, action: str, config_path: Path | None = None, project_id: str | None = None) -> dict | int:
+def operate(root: Path, action: str, config_path: Path | None = None, project_id: str | None = None,
+            task_ref: str | None = None) -> dict | int:
     if project_id is not None and action != "graphify-refresh":
         raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
+    if task_ref is not None and (action != "graphify-refresh" or project_id is None
+                                or re.fullmatch(r"[0-9a-f]{64}", task_ref) is None):
+        raise Rejected("GRAPH_USAGE_TASK_ARGUMENT_REJECTED")
     config, password = load(root)
     if action == "serve":
         if not (root / "ready.json").is_file():
@@ -614,7 +618,8 @@ def operate(root: Path, action: str, config_path: Path | None = None, project_id
                     raise Rejected("GRAPHIFY_CUSTOMER_SOURCE_NOT_CONFIGURED")
             if project_id is not None:
                 selected = project_graph_config(config, project_id)
-                operation_evidence = runtime_action(selected, password, "--graphify-refresh-project", project_id)
+                task_args = ["--task-ref", task_ref] if task_ref is not None else []
+                operation_evidence = runtime_action(selected, password, "--graphify-refresh-project", project_id, *task_args)
             else:
                 operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
             if action == "graphify-preflight":
@@ -655,6 +660,7 @@ def main() -> int:
     parser.add_argument("--project-root", type=Path)
     parser.add_argument("--project-name")
     parser.add_argument("--project-id", help="refresh an already registered project without changing the sealed default source")
+    parser.add_argument("--task-ref", help="bind refresh usage to an existing task in --project-id")
     parser.add_argument("--evidence-request", type=Path)
     parser.add_argument("--node", type=Path)
     parser.add_argument("--node-sha256")
@@ -663,6 +669,9 @@ def main() -> int:
     try:
         if args.project_id is not None and args.action != "graphify-refresh":
             raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
+        if args.task_ref is not None and (args.action != "graphify-refresh" or args.project_id is None
+                                         or re.fullmatch(r"[0-9a-f]{64}", args.task_ref) is None):
+            raise Rejected("GRAPH_USAGE_TASK_ARGUMENT_REJECTED")
         if args.graph_source is not None and args.action != "prepare":
             raise Rejected("CUSTOMER_GRAPH_SOURCE_ARGUMENT_REJECTED_USE_PROJECT_ID")
         if args.action == "prepare":
@@ -689,7 +698,7 @@ def main() -> int:
                 raise Rejected("CUSTOMER_RESULT_ARGUMENTS_REQUIRED")
             result = import_result(args.state, args.evidence_request, args.node, args.node_sha256)
         else:
-            result = operate(args.state, args.action, args.codex_config, args.project_id)
+            result = operate(args.state, args.action, args.codex_config, args.project_id, args.task_ref)
         if isinstance(result, int):
             return result
         print(json.dumps(result))

@@ -14,6 +14,17 @@ use crate::identity::GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256;
 use crate::process::{GraphifyAnalysis, PinnedGraphifyAdapter};
 use crate::snapshot::{ExactGitSnapshotMaterializer, MaterializedSnapshot, framed_digest};
 
+thread_local! {
+    static ANALYSIS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Actual analysis-port entries on the current thread, including failed calls.
+/// This does not assert that a child process started or finished successfully.
+#[must_use]
+pub fn analysis_call_count() -> u64 {
+    ANALYSIS_CALLS.with(std::cell::Cell::get)
+}
+
 impl CodeSnapshotPort for ExactGitSnapshotMaterializer {
     fn materialize_snapshot(
         &mut self,
@@ -36,6 +47,17 @@ impl GraphifyAnalysisPort for PinnedGraphifyAdapter {
         request: &GraphMemoryRunRequest,
         snapshot: &CodeSnapshotEvidence,
     ) -> GraphMemoryPortResult<GraphifyRawEvidence> {
+        ANALYSIS_CALLS.with(|calls| {
+            let next = calls.get().checked_add(1).ok_or_else(|| {
+                graph_port_error(
+                    PortErrorKind::Denied,
+                    GraphMemoryFailureCertainty::Known,
+                    "GRAPHIFY_CALL_COUNTER_EXHAUSTED",
+                )
+            })?;
+            calls.set(next);
+            Ok(())
+        })?;
         if snapshot.request() != request {
             return Err(graph_port_error(
                 PortErrorKind::Malformed,

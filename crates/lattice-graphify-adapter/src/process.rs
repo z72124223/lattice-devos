@@ -1944,6 +1944,90 @@ mod tests {
     }
 
     #[test]
+    fn actual_analysis_counter_counts_failed_port_entries_and_is_thread_local() {
+        use lattice_contracts::{
+            AttemptId, CONTRACT_VERSION, CodeSnapshotEvidence, ContentDigest, GitObjectId,
+            GraphMemoryRunRequest, Invocation, ProjectId, ProjectSnapshotId, RequestId, TaskId,
+            TrackedSource,
+        };
+        use lattice_ports::GraphifyAnalysisPort;
+
+        let before = crate::analysis_call_count();
+        let (mut adapter, _, plans) = fixture(FakeMode::Valid);
+        let digest = ContentDigest::from_sha256("a".repeat(64)).expect("digest");
+        let request = |commit: &str| {
+            GraphMemoryRunRequest::new(
+                Invocation::new(
+                    CONTRACT_VERSION,
+                    RequestId::new("request-counted-analysis").expect("request id"),
+                    TaskId::new("task-counted-analysis").expect("task id"),
+                    AttemptId::new("attempt-one").expect("attempt id"),
+                    ProjectSnapshotId::new("snapshot-counted-analysis").expect("snapshot id"),
+                    digest.clone(),
+                )
+                .expect("invocation"),
+                ProjectId::new("counted-analysis").expect("project id"),
+                GitObjectId::new(commit).expect("commit"),
+                digest.clone(),
+                digest.clone(),
+                1,
+            )
+            .expect("request")
+        };
+        let request_a = request(&"a".repeat(40));
+        let request_b = request(&"b".repeat(40));
+        let snapshot = CodeSnapshotEvidence::new(
+            &request_a,
+            GitObjectId::new("c".repeat(40)).expect("tree"),
+            vec![TrackedSource::new("src/lib.rs", digest.clone()).expect("source")],
+            digest.clone(),
+            digest,
+        )
+        .expect("snapshot");
+        assert_eq!(
+            crate::analysis_call_count(),
+            before,
+            "construction is not an analysis call"
+        );
+        let rejected = adapter
+            .analyze(&request_b, &snapshot)
+            .expect_err("wrong request binding");
+        assert_eq!(
+            rejected.code(),
+            "GRAPHIFY_REQUEST_SNAPSHOT_BINDING_REJECTED"
+        );
+        assert_eq!(crate::analysis_call_count(), before + 1);
+        let missing = adapter
+            .analyze(&request_a, &snapshot)
+            .expect_err("no materialized bridge");
+        assert_eq!(missing.code(), "GRAPHIFY_SNAPSHOT_BRIDGE_BINDING_MISSING");
+        assert_eq!(crate::analysis_call_count(), before + 2);
+        assert!(
+            plans.lock().expect("plans").is_empty(),
+            "no child executor was reached"
+        );
+
+        std::thread::spawn(move || {
+            assert_eq!(
+                crate::analysis_call_count(),
+                0,
+                "a fresh thread has no observed calls"
+            );
+            adapter
+                .analyze(&request_a, &snapshot)
+                .expect_err("no bridge on another thread");
+            assert_eq!(crate::analysis_call_count(), 1);
+        })
+        .join()
+        .expect("isolated thread");
+        assert_eq!(
+            crate::analysis_call_count(),
+            before + 2,
+            "other threads cannot inflate this observation"
+        );
+    }
+
+    #[test]
     fn fixed_plan_has_only_bwrap_headless_args_and_minimal_launcher_environment() {
         let (mut adapter, snapshot, _) = fixture(FakeMode::Valid);
         adapter

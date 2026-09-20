@@ -1,6 +1,6 @@
 import importlib.util
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -126,6 +126,52 @@ class CustomerRuntimeTests(unittest.TestCase):
             (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
             with self.assertRaisesRegex(M.Rejected, "SOURCE_REJECTED"):
                 M.project_graph_config(config, project_id)
+
+    def test_task_bound_refresh_forwards_exact_reference_with_selected_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, _, project_id, source = self.graph_project_fixture(root)
+            task_ref = "0123456789abcdef" * 4
+            with patch.object(M, "load", return_value=(config, "fixture-only")), patch.object(M, "verify_running"), \
+                    patch.object(M, "running", return_value=True), patch.object(M, "runtime_action", return_value={"usage_status": "RECORDED"}) as action:
+                result = M.operate(root, "graphify-refresh", project_id=project_id, task_ref=task_ref)
+            self.assertEqual(result["operation_evidence"]["usage_status"], "RECORDED")
+            self.assertEqual(action.call_args.args[0]["graph_source"], str(source))
+            self.assertEqual(action.call_args.args[2:], ("--graphify-refresh-project", project_id, "--task-ref", task_ref))
+            action.assert_called_once()
+
+    def test_usage_native_errors_preserve_only_closed_codes_without_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, _, project_id, _ = self.graph_project_fixture(root)
+            for code in ("GRAPH_USAGE_TASK_BINDING_REJECTED", "GRAPH_USAGE_UPGRADE_REQUIRED", "GRAPH_USAGE_DATABASE_UNAVAILABLE"):
+                rejected = M.subprocess.CompletedProcess([], 2, "", "password=fixture-only\n" + code + "\n")
+                with self.subTest(code=code), patch.object(M, "load", return_value=(config, "fixture-only")), \
+                        patch.object(M, "verify_running"), patch.object(M, "environment", return_value={}), \
+                        patch.object(M, "invoke", return_value=rejected) as invoke:
+                    with self.assertRaises(M.Rejected) as failure:
+                        M.operate(root, "graphify-refresh", project_id=project_id, task_ref="a" * 64)
+                self.assertEqual(str(failure.exception), "CUSTOMER_RUNTIME_GRAPHIFY_REFRESH_PROJECT_REJECTED:" + code)
+                self.assertEqual(invoke.call_count, 1)
+                self.assertEqual(invoke.call_args.args[0][-4:], ["--graphify-refresh-project", project_id, "--task-ref", "a" * 64])
+
+    def test_task_reference_is_rejected_before_configuration_access_in_api_and_cli(self):
+        project_id = "12345678-1234-1234-1234-123456789abc"
+        cases = [("graphify-refresh", project_id, ref) for ref in ("", "a" * 63, "a" * 65, "A" * 64, "g" * 64)]
+        cases += [("graphify-refresh", None, "a" * 64), ("serve", None, "a" * 64)]
+        for action, project, task_ref in cases:
+            with self.subTest(action=action, project=project, task_ref=task_ref), \
+                    patch.object(M, "load", side_effect=AssertionError("No configuration access")):
+                with self.assertRaisesRegex(M.Rejected, "GRAPH_USAGE_TASK_ARGUMENT_REJECTED"):
+                    M.operate(Path("C:/unused"), action, project_id=project, task_ref=task_ref)
+                argv = [str(SCRIPT), action, "--state", "C:/unused", "--task-ref", task_ref]
+                if project is not None:
+                    argv += ["--project-id", project]
+                with patch.object(M.sys, "argv", argv), redirect_stdout(io.StringIO()) as output, \
+                        redirect_stderr(io.StringIO()) as diagnostics:
+                    self.assertEqual(M.main(), 2)
+                rejected = diagnostics.getvalue() if action == "serve" else output.getvalue()
+                self.assertEqual(json.loads(rejected)["code"], "GRAPH_USAGE_TASK_ARGUMENT_REJECTED")
+                if action == "serve":
+                    self.assertEqual(output.getvalue(), "")
 
     def test_default_project_retains_its_own_backup_selectors(self):
         with tempfile.TemporaryDirectory() as directory:

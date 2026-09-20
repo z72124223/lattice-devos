@@ -95,31 +95,40 @@ fn main() -> ExitCode {
             } else {
                 None
             };
+            let task_ref = match arguments.next() {
+                None => None,
+                Some(flag) if flag == "--task-ref" && project_id.is_some() => {
+                    match arguments.next().and_then(|value| value.into_string().ok()) {
+                        Some(value)
+                            if value.len() == 64
+                                && value
+                                    .bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) =>
+                        {
+                            Some(value)
+                        }
+                        _ => {
+                            eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                            return ExitCode::from(2);
+                        }
+                    }
+                }
+                Some(_) => {
+                    eprintln!("LATTICED_ARGUMENTS_REJECTED");
+                    return ExitCode::from(2);
+                }
+            };
             if arguments.next().is_some() {
                 eprintln!("LATTICED_ARGUMENTS_REJECTED");
                 return ExitCode::from(2);
             }
-            let result = if let Some(project_id) = &project_id {
-                lattice_runtime::composition::refresh_registered_project_graphify_from_environment(
-                    project_id,
-                )
-            } else {
-                lattice_runtime::composition::refresh_runtime_graphify_from_environment()
-                    .map_err(|error| error.code())
-            };
+            let result = lattice_runtime::composition::refresh_graphify_usage_from_environment(
+                project_id.as_deref(),
+                task_ref.as_deref(),
+            );
             return match result {
                 Ok(receipt) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "component": "graphify", "status": "PERSISTED",
-                            "commit": receipt.persistence().request().commit_id().as_str(),
-                            "record_count": receipt.persistence().record_count(),
-                            "retrieved_count": receipt.retrieval().results().len(),
-                            "receipt_digest": receipt.receipt_digest().as_str(),
-                            "registered_project_id": project_id,
-                        })
-                    );
+                    println!("{receipt}");
                     eprintln!("LATTICE_GRAPHIFY_REFRESH_READY");
                     ExitCode::SUCCESS
                 }

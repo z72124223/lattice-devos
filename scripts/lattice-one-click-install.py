@@ -180,7 +180,8 @@ def install_global_hook(codex_home: Path, *, state: Path | None = None,
                    str(launcher)]
         register = command + ["register-project", "--state", str(state),
                               "--project-root", "<目前工作的 Git 根目錄>", "--project-name", "<專案名稱>"]
-        refresh = command + ["graphify-refresh", "--state", str(state), "--project-id", "<實際回傳的 project_id>"]
+        refresh = command + ["graphify-refresh", "--state", str(state), "--project-id", "<實際回傳的 project_id>",
+                             "--task-ref", "<實際回傳的 task_ref>"]
         project_begin = "<!-- BEGIN LATTICE PROJECT CONNECTION v1 -->"
         project_end = "<!-- END LATTICE PROJECT CONNECTION v1 -->"
         project_hook = (project_begin + "\n## 接入目前工作的專案\n"
@@ -191,9 +192,10 @@ def install_global_hook(codex_home: Path, *, state: Path | None = None,
                         + json.dumps(register, ensure_ascii=False) + "\n"
                         "登記會重用既有 project_id，只保存本機位置；尚不代表 PostgreSQL 已登記或 Graphify 已完成。\n"
                         "使用回傳的 project_id，透過 lattice_task_submit 提交使用者真正要求的工作；不可另建假任務或重複已提交工作。\n"
-                        "任務成功登記後，在需要程式關係資料時執行下列命令，將 project_id 替換成實際值：\n"
+                        "任務成功登記後，在需要程式關係資料時執行下列命令，將 project_id、task_ref 替換成實際值：\n"
                         + json.dumps(refresh, ensure_ascii=False) + "\n"
-                        "只在 operation_evidence.status 為 PERSISTED 後，使用回傳的 commit 與同一 project_id 呼叫 lattice_code_relations 讀回核驗。\n"
+                        "只在 operation_evidence.status 為 PERSISTED 後，使用回傳的 commit、同一 project_id 與 task_ref 呼叫 lattice_code_relations 讀回核驗。\n"
+                        "使用 lattice_graph_usage(project_id, task_ref) 讀取 Runtime 實際紀錄的分析、重用與查詢次數；沒有紀錄或未完成紀錄不得解讀為零次。這份紀錄不證明 AI 已理解資料，也不代替任務交付驗收。\n"
                         "相同專案及 commit 已有可讀關係時不要重建。Graphify 只分析已提交且乾淨的 Git 工作樹；不可為此擅自清除、暫存或提交使用者變更。\n"
                         "沒有 Git 初始提交、工作樹尚有改動或分析失敗時，清楚說明圖譜暫不可用，保留工作與任務事實，不假稱三核心驗收成功。\n"
                         "需要 Node、Python 或 Git 時可使用此安裝內附的執行檔，僅調整當前子程序環境，不覆寫系統設定：\n"

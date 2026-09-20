@@ -3,6 +3,7 @@
 An optional hash-pinned candidate binary allows upgrade testing before packaging.
 Its evidence distinguishes candidate execution from the actually installed binary.
 No graph refresh, task submission, result import or schema mutation occurs here.
+New Runtime queries do append usage audit receipts; source graph data stays read-only.
 """
 import argparse
 import importlib.util
@@ -15,7 +16,7 @@ SPEC.loader.exec_module(M)
 
 
 def read(config, password, runtime, project, commit, query, path, task):
-    base = {"project_id": project, "commit": commit, "query": query, "limit": 32}
+    base = {"project_id": project, "commit": commit, "query": query, "limit": 32, "task_ref": task}
     calls = [("lattice_code_relations", base),
              ("lattice_code_relations", {**base, "query": path, "limit": 1}),
              ("lattice_code_relations", {**base, "query": "lattice_delivery_fixture"}),
@@ -73,6 +74,25 @@ def read(config, password, runtime, project, commit, query, path, task):
     return replies
 
 
+def stable_replies(replies):
+    """Compare retained graph/task results, preserving per-call receipts as evidence."""
+    values = json.loads(json.dumps(replies))
+    for reply in values:
+        result = reply.get("result", {})
+        body = result.get("structuredContent", {})
+        if body.get("schema_version") != "lattice.code-relations.v1":
+            continue
+        if "usage_id" in body and body.get("usage_status") != "RECORDED":
+            raise RuntimeError("RELATIONS_USAGE_NOT_RECORDED")
+        body.pop("usage_id", None)
+        for content in result.get("content", []):
+            if content.get("type") == "text":
+                text = json.loads(content["text"])
+                text.pop("usage_id", None)
+                content["text"] = json.dumps(text, sort_keys=True)
+    return values
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--state", type=Path, required=True)
@@ -98,7 +118,7 @@ def main():
     M.operate(args.state, "stop")
     M.operate(args.state, "start")
     after = read(*params)
-    if before != after or M.file_digest(runtime) != actual:
+    if stable_replies(before) != stable_replies(after) or M.file_digest(runtime) != actual:
         raise RuntimeError("RELATIONS_RESTART_OR_VERSION_MISMATCH")
     evidence = {"schema": "lattice.code-relations-acceptance.v1", "status": "VERIFIED",
                 "run_id": config["run_id"], "system_id": config["system_id"], "runtime_sha256": actual,
