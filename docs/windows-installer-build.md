@@ -21,6 +21,17 @@
 
 ## 建置命令
 
+先以 `lattice-bundle.py build` 建立完整依賴包。新包必須指定 `--vc-redist`、
+`--vc-license`、`--vc-redist-list`：來源為 Visual Studio 2022 的
+`VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT`，實際檔案版本
+`14.44.35211.0`。十個正式 DLL 與原始授權文件逐一核對固定摘要；不從
+System32 或 debug 目錄取檔。Microsoft 元件依其原有散布條款提供，並非
+LATTICE 專案授權的一部分。
+
+Runtime 與 PostgreSQL 的 EXE 旁皆放置 DLL；安裝、更新及還原時保留其摘要。
+只清空 PATH 的測試仍可能載入主機 System32 元件，因此完整驗收另須核對
+實際程序載入的 DLL 路徑，並保留獨立 Windows 環境的測試範圍。
+
 在 repository 根目錄執行。先將 `$Candidate` 設成已驗收的完整候選資料夾，
 將 `$Output` 設成已存在輸出目錄中的新 `.exe` 路徑：
 

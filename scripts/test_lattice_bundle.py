@@ -11,6 +11,45 @@ SPEC.loader.exec_module(B)
 
 
 class BundleTests(unittest.TestCase):
+    def test_vc_runtime_is_pinned_in_both_executable_directories(self):
+        source = self.root / "redist"; source.mkdir()
+        payloads = {"vcruntime140.dll": b"official-fixture-crt", "msvcp140.dll": b"official-fixture-cpp"}
+        for name, payload in payloads.items(): (source / name).write_bytes(payload)
+        pinned = {name: B.sha(source / name) for name in payloads}
+        license_path = source / "license.docx"; license_path.write_bytes(b"official-license-fixture")
+        redist_list = source / "Redist.txt"; redist_list.write_bytes(b"official-redist-fixture")
+        (self.root / "postgres/bin").mkdir(parents=True)
+        with patch.dict(B.M.VC_RUNTIME_FILES, pinned, clear=True), \
+                patch.multiple(B, VC_LICENSE_SHA256=B.sha(license_path), VC_REDIST_LIST_SHA256=B.sha(redist_list)):
+            B.bundle_vc_redist(self.root, source, license_path, redist_list)
+            for location in ("bin", "postgres/bin"):
+                for name, payload in payloads.items():
+                    self.assertEqual((self.root / location / name).read_bytes(), payload)
+            self.manifest["vc_runtime"] = B.vc_redist_provenance()
+            self.manifest["files"], self.manifest["total_bytes"] = B.inventory(self.root)
+            self.digest = self.save()
+            B.verify(self.root, self.digest)
+            metadata = self.manifest.pop("vc_runtime")
+            with self.assertRaisesRegex(B.M.Rejected, "VC_RUNTIME_PROVENANCE_REQUIRED"):
+                B.verify(self.root, self.save())
+            self.manifest["vc_runtime"] = metadata
+            public = (self.root / "licenses/visual-cpp-runtime/provenance.json").read_text()
+            self.assertNotIn(str(source), public)
+            self.assertIn("Microsoft.VC143.CRT", public)
+            # Even a recomputed manifest cannot authorize a substituted vendor DLL.
+            (self.root / "postgres/bin/msvcp140.dll").write_bytes(b"replacement")
+            self.manifest["files"], self.manifest["total_bytes"] = B.inventory(self.root)
+            with self.assertRaisesRegex(B.M.Rejected, "VC_RUNTIME_SOURCE_REJECTED"):
+                B.verify(self.root, self.save())
+
+    def test_vc_runtime_missing_source_blocks_new_bundle_before_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); source = base / "source"; source.mkdir()
+            runtime = source / "runtime.exe"; runtime.write_bytes(b"fixture")
+            with patch.object(B, "verify_node"), self.assertRaisesRegex(B.M.Rejected, "VC_RUNTIME_SUPPLY_REQUIRED"):
+                B.build(base / "bundle", runtime, B.sha(runtime), source, source, source, source, source)
+            self.assertFalse((base / "bundle").exists())
+
     def test_bundle_rejects_wrong_wsl_image_before_creating_output(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)

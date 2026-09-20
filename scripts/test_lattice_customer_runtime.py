@@ -18,6 +18,46 @@ SPEC.loader.exec_module(M)
 
 @unittest.skipUnless(os.name == "nt", "Windows customer Runtime")
 class CustomerRuntimeTests(unittest.TestCase):
+    def test_app_local_crt_copy_is_complete_pinned_and_sealable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            target = root / "target"; target.mkdir()
+            # Old installations with no CRT group retain their previous behavior.
+            self.assertEqual(M.copy_vc_runtime(source, target), {})
+            payloads = {"vcruntime140.dll": b"crt", "msvcp140.dll": b"cpp"}
+            for name, payload in payloads.items(): (source / name).write_bytes(payload)
+            pinned = {name: M.file_digest(source / name) for name in payloads}
+            trusted = {str(source / name): digest for name, digest in pinned.items()}
+            with patch.dict(M.VC_RUNTIME_FILES, pinned, clear=True):
+                with self.assertRaisesRegex(M.Rejected, "VC_RUNTIME_SOURCE_REJECTED"):
+                    M.copy_vc_runtime(source, target, trusted_files={})
+                self.assertEqual(list(target.iterdir()), [])
+                copied = M.copy_vc_runtime(source, target, trusted_files=trusted)
+                self.assertEqual(copied, {str(target / name): digest for name, digest in pinned.items()})
+                self.assertTrue(all(M.file_digest(Path(path)) == digest for path, digest in copied.items()))
+                with self.assertRaisesRegex(M.Rejected, "TARGET_EXISTS"):
+                    M.copy_vc_runtime(source, target, trusted_files=trusted)
+
+    def test_partial_crt_group_is_rejected_before_any_copy(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source"; source.mkdir()
+            target = root / "target"; target.mkdir()
+            (source / "vcruntime140.dll").write_bytes(b"crt")
+            pinned = {"vcruntime140.dll": M.file_digest(source / "vcruntime140.dll"), "msvcp140.dll": "0" * 64}
+            with patch.dict(M.VC_RUNTIME_FILES, pinned, clear=True), self.assertRaises(M.Rejected):
+                M.copy_vc_runtime(source, target)
+            self.assertEqual(list(target.iterdir()), [])
+
+    def test_debug_or_unknown_crt_cannot_be_treated_as_an_old_installation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            for name in ("vcruntime140d.dll", "msvcp999.dll"):
+                with self.subTest(name=name):
+                    path = source / name; path.write_bytes(b"unapproved")
+                    with self.assertRaisesRegex(M.Rejected, "VC_RUNTIME_SET_REJECTED"):
+                        M.vc_runtime_files(source)
+                    path.unlink()
+
     def graph_project_fixture(self, root):
         source = root / "another project"; source.mkdir()
         # Match register_project(): Windows temp roots can use a short-path alias.

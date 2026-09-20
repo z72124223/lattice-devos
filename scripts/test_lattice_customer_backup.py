@@ -10,6 +10,49 @@ M = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(M)
 
 
 class BackupTests(unittest.TestCase):
+    def test_restore_copies_verified_crt_and_seals_destination_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve(); bundle = root / 'bundle'; state = root / 'restored'
+            platform = root / 'platform'; old_root = root / 'original'
+            crt = {'vcruntime140.dll': b'fixture vc runtime', 'msvcp140.dll': b'fixture cpp runtime'}
+            fixtures = {'bundle/bin/latticed.exe': b'runtime', 'bundle/python/python.exe': b'python',
+                        'bundle/postgres/bin/postgres.exe': b'postgres', 'platform/platform.json': b'{}',
+                        'windows/System32/wsl.exe': b'wsl', **{'bundle/bin/' + name: data for name, data in crt.items()}}
+            for name, data in fixtures.items():
+                path = root / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(data)
+            manifest = {'runtime_sha256': M.M.file_digest(bundle / 'bin/latticed.exe'),
+                        'files': {p.relative_to(bundle).as_posix(): {'sha256': M.M.file_digest(p)}
+                                  for p in bundle.rglob('*') if p.is_file()}}
+            configs = ('postgresql.conf', 'postgresql.auto.conf', 'pg_hba.conf', 'pg_ident.conf')
+            old = {'root': str(old_root), 'postgres_bin': str(old_root / 'pg'), 'run_id': 'a' * 32,
+                   'system_id': 'fixture-system', 'files': {
+                       str(old_root / 'pg/postgres.exe'): manifest['files']['postgres/bin/postgres.exe']['sha256'],
+                       **{str(old_root / 'cluster' / name): M.M.CONFIG.digest(b'config') for name in configs}}}
+            metadata = {'source': old, 'password': 'fixture-secret', 'catalog': {'projects': []}, 'registry': {}}
+            def decrypt_fixture(*args):
+                (state / 'cluster').mkdir(parents=True)
+                for name in configs: (state / 'cluster' / name).write_bytes(b'config')
+                return metadata
+            with (patch.object(M.B, 'verify', return_value=manifest),
+                  patch.object(M.sys, 'executable', str(bundle / 'python/python.exe')),
+                  patch.dict(M.os.environ, {'SystemRoot': str(root / 'windows')}),
+                  patch.object(M, 'decrypt_backup', side_effect=decrypt_fixture),
+                  patch.object(M.M, 'platform_for_config'), patch.object(M.M, 'checked'),
+                  patch.object(M.M, 'control_identifier', return_value='fixture-system'),
+                  patch.object(M.M, 'free_port', return_value=55432), patch.object(M.M, 'SCRIPTS', ()),
+                  patch.object(M.M, 'VC_RUNTIME_FILES', {name: M.M.CONFIG.digest(data) for name, data in crt.items()}),
+                  patch.object(M.M, 'dpapi', side_effect=lambda data, **kwargs: data),
+                  patch.object(M, 'finalize_restore', return_value={'status': 'fixture'}) as finalize):
+                M.restore(root / 'archive', 'archive-sha', root / 'keys/key', state, bundle, 'bundle-sha', platform)
+            finalize.assert_called_once_with(state)
+            public = (state / 'installation.json').read_bytes(); config = json.loads(public)
+            sealed = json.loads((state / 'credentials.dpapi').read_bytes())
+            self.assertEqual(sealed['installation_sha256'], M.M.CONFIG.digest(public))
+            for name, data in crt.items():
+                target = state / 'bin' / name
+                self.assertEqual(target.read_bytes(), data)
+                self.assertEqual(config['files'][str(target)], M.M.CONFIG.digest(data))
+
     def test_snapshot_head_must_match_accepted_project_branch(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / '.git').mkdir()

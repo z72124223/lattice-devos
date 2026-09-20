@@ -188,7 +188,7 @@ Git 系統設定、使用者設定及憑證。每個檔案都有雜湊與大小�
 
 ```text
 python -I -B -S scripts/lattice-bundle.py supply-node --node <全新Node供應目錄>
-python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄> --node <Node供應目錄> --archive <官方ubuntu-26.04.1-wsl-amd64.wsl>
+python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄> --node <Node供應目錄> --archive <官方ubuntu-26.04.1-wsl-amd64.wsl> --vc-redist <正式VS2022的Microsoft.VC143.CRT目錄> --vc-license <原始Microsoft授權docx> --vc-redist-list <原始Redist.txt>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py verify --bundle <封裝目錄> --sha256 <bundle.json可信摘要>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py install --bundle <封裝目錄> --sha256 <bundle.json可信摘要> --state <封裝外的全新私有目錄> --graph-source <封裝外的客戶Git專案> --wsl <已核驗wsl.exe>
 ```

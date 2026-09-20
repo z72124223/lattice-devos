@@ -36,6 +36,19 @@ TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "pg_controldata")
 SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py", "lattice-wsl-platform.py",
            "lattice-bundle.py", "lattice-customer-backup.py", "lattice-backup-crypto.mjs")
 BASE_ENV = ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA")
+VC_RUNTIME_VERSION = "14.44.35211.0"
+VC_RUNTIME_FILES = {
+    "concrt140.dll": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376",
+    "msvcp140_1.dll": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d",
+    "msvcp140_2.dll": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9",
+    "msvcp140_atomic_wait.dll": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479",
+    "msvcp140_codecvt_ids.dll": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18",
+    "msvcp140.dll": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    "vccorlib140.dll": "19839407c3fdbc824e5bce189bf68ddf8097f12ec28b757797ffa0415c144ddd",
+    "vcruntime140_1.dll": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+    "vcruntime140_threads.dll": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa",
+    "vcruntime140.dll": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+}
 
 
 @contextmanager
@@ -82,6 +95,40 @@ def regular(path: Path, *, directory: bool = False) -> Path:
 def file_digest(path: Path) -> str:
     regular(path)
     return CONFIG.digest(path.read_bytes())
+
+
+def vc_runtime_files(source: Path, *, required=False, trusted_files=None) -> dict[Path, str]:
+    """Accept the pinned release CRT as a complete group; old bundles have none."""
+    regular(source, directory=True)
+    present = {path.name.casefold() for path in source.iterdir()
+               if path.name.casefold().endswith(".dll") and path.name.casefold() != "msvcrt.dll"
+               and path.name.casefold().startswith(("vcruntime", "msvcp", "msvcr", "concrt", "vccorlib"))}
+    if not required and not present:
+        return {}
+    if present != set(VC_RUNTIME_FILES):
+        raise Rejected("VC_RUNTIME_SET_REJECTED")
+    result = {}
+    for name, expected in VC_RUNTIME_FILES.items():
+        path = source / name
+        if (file_digest(path) != expected
+                or (trusted_files is not None and trusted_files.get(str(path)) != expected)):
+            raise Rejected("VC_RUNTIME_SOURCE_REJECTED")
+        result[path] = expected
+    return result
+
+
+def copy_vc_runtime(source: Path, target: Path, *, required=False, trusted_files=None) -> dict[str, str]:
+    sources = vc_runtime_files(source, required=required, trusted_files=trusted_files)
+    if any((target / path.name).exists() for path in sources):
+        raise Rejected("VC_RUNTIME_TARGET_EXISTS")
+    copied = {}
+    for original, expected in sources.items():
+        destination = target / original.name
+        shutil.copyfile(original, destination)
+        if file_digest(original) != expected or file_digest(destination) != expected:
+            raise Rejected("VC_RUNTIME_COPY_CHANGED")
+        copied[str(destination)] = expected
+    return copied
 
 
 def dpapi(data: bytes, *, decrypt: bool = False) -> bytes:
@@ -372,6 +419,7 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
     shutil.copyfile(runtime, target)
     if file_digest(target) != expected:
         raise Rejected("RUNTIME_COPY_CHANGED")
+    runtime_crt = copy_vc_runtime(runtime.parent, target.parent, trusted_files=dependency_files)
     for name in SCRIPTS:
         source = regular(Path(__file__).resolve().with_name(name))
         copied = root / "bin" / name
@@ -404,7 +452,7 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
         paths.append(graphify_platform / "platform.json")
     config = {"schema": SCHEMA, "root": str(root), "runtime": str(target), "postgres_bin": str(postgres_bin),
               "git": str(git), "node": str(node) if node else None, "python": str(Path(sys.executable)), "port": port, "run_id": secrets.token_hex(16), "system_id": system_id,
-              "files": {**(dependency_files or {}), **{str(file): file_digest(file) for file in paths}},
+              "files": {**(dependency_files or {}), **runtime_crt, **{str(file): file_digest(file) for file in paths}},
               "dependency_root": str(dependency_root) if dependency_root else None,
               "graphify_platform": str(graphify_platform) if graphify_platform else None,
               "graphify_runtime": str(graphify_runtime) if graphify_runtime else None,
