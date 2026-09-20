@@ -99,6 +99,17 @@ class BuilderTests(unittest.TestCase):
         with self.assertRaisesRegex(B.Rejected, "PACKAGE_OUTPUT_OVERLAP"):
             self.build()
 
+    def test_bare_lf_batch_is_rejected_before_outputs_or_compression(self):
+        batch = self.package / "Install-LATTICE.cmd"
+        for content in ("@echo off\necho 中文\nexit /b 2\n", "@echo off\r\necho 中文\nexit /b 2\r\n"):
+            with self.subTest(content=content):
+                batch.write_bytes(content.encode("utf-8"))
+                with self.assertRaisesRegex(B.Rejected, "BATCH_CRLF_REQUIRED"):
+                    self.build()
+                self.assertEqual(self.calls, [])
+                self.assertFalse(self.output.exists())
+                self.assertFalse(self.output.with_suffix(".sfx-files").exists())
+
 
 @unittest.skipUnless(os.name == "nt", "Windows bootstrap")
 class BootstrapTests(unittest.TestCase):

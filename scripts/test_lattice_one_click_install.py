@@ -2,7 +2,9 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,6 +16,18 @@ SPEC.loader.exec_module(I)
 
 
 class InstallerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "requires the real Windows CMD parser")
+    def test_actual_cmd_with_chinese_text_preserves_missing_bundle_failure(self):
+        with tempfile.TemporaryDirectory(prefix="lattice-cmd-entry-") as directory:
+            entry = Path(directory) / "Install-LATTICE.cmd"
+            shutil.copyfile(Path(__file__).resolve().parents[1] / entry.name, entry)
+            result = subprocess.run([str(Path(os.environ["SystemRoot"]) / "System32/cmd.exe"),
+                                     "/d", "/c", str(entry)], capture_output=True,
+                                    env=dict(os.environ, LATTICE_INSTALL_UNATTENDED="1"), timeout=15)
+            self.assertEqual(result.returncode, 2, result.stdout.decode("utf-8", errors="replace"))
+            self.assertIn("缺少內附 Python".encode("utf-8"), result.stdout)
+            self.assertNotIn(b"is not recognized", result.stdout + result.stderr)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="lattice-installer-test-")
         self.addCleanup(self.temp.cleanup)

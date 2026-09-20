@@ -130,6 +130,10 @@ def build(package: Path, output: Path, sevenzip: Path, module: Path) -> dict:
     for name in ("Install-LATTICE.cmd", "bundle/python/python.exe"):
         if not (package / name).is_file():
             raise Rejected("INSTALLER_ENTRY_MISSING")
+    # UTF-8 batch files with bare LF can be misparsed by cmd.exe. Check bytes,
+    # without universal-newline translation, before creating any build output.
+    if b"\n" in (package / "Install-LATTICE.cmd").read_bytes().replace(b"\r\n", b""):
+        raise Rejected("BATCH_CRLF_REQUIRED")
     archive, config = output.with_suffix(".7z"), output.with_suffix(".config.txt")
     receipt, extra = output.with_suffix(".build.json"), output.with_suffix(".sfx-files")
     stub = output.with_suffix(".stub.sfx")
