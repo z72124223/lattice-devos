@@ -43,6 +43,18 @@ Hermes 反思功能已自正式產品退休，沒有登入、設定或命令可�
 Codex 負責推理、執行、工作視窗、進度顯示、核准及封存。
 LATTICE 不建立第二套通用代理迴圈或操作平台。
 
+## Graphify 何時會執行？
+
+要求 Codex 使用 LATTICE、設定 `GRAPHIFY` 模式，以及每個任務一定使用圖譜，是不同的事。
+安裝程式的「全域掛鉤」是寫入 `AGENTS.md` 的工作指示；目前沒有「未查圖譜就拒收任務」的硬性關卡。
+`graphify-refresh` 產生或更新圖譜；`lattice_code_relations` 查詢 PostgreSQL 已保存的圖譜，
+不會在缺少分析時偷偷重建。任務提交與關係查詢是不同入口，不能只因提交成功就宣稱已使用 Graphify。
+
+`runtime-health`／`receipt-state` 的結果不能證明真正任務流程呼叫過或跳過 Graphify。
+已查核版本的關係查詢入口沒有 `CORE_ONLY` 模式攔截，也尚未找到「CORE_ONLY 下執行真正任務、
+以 Graphify 函式呼叫計數證明零次執行」的對應測試。
+固定版本、原碼行號、現有測試範圍與缺口見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
+
 ## 使用方式
 
 2.0 為三核心正式版，移除舊版 Hermes 啟動命令與四核心模式，屬不相容變更。
