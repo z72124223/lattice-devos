@@ -1,0 +1,59 @@
+name: Windows PostgreSQL readonly config probe
+
+on:
+  push:
+    branches:
+      - docs/codex-assisted-install-20260915
+    paths:
+      - .github/workflows/windows-postgres-config-probe.yml
+
+permissions:
+  contents: read
+
+jobs:
+  compare-query-order:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - name: Probe the exact bundled PostgreSQL without starting a server
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:RUNNER_TEMP 'rc4.exe'
+          Invoke-WebRequest -Uri 'https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.4/LATTICE-Setup-v2.0.1-rc.4-windows-x64.exe' -OutFile $exe -TimeoutSec 300
+          if ((Get-FileHash $exe).Hash -ne '03aa231866ad3cb9e39a7321cc594fa1b3c8a83ce6b4903ff749ee9343e1c8c3') { throw 'INSTALLER_SHA256_MISMATCH' }
+          $root = Join-Path $env:RUNNER_TEMP 'postgres order probe'
+          & 'C:\Program Files\7-Zip\7z.exe' x $exe "-o$root" 'bundle/postgres/*' -y -bd -bso0
+          if ($LASTEXITCODE -ne 0) { throw 'POSTGRES_EXTRACT_FAILED' }
+          $bin = Join-Path $root 'bundle\postgres\bin'
+          $data = Join-Path $root 'fixture-cluster'
+          & "$bin\initdb.exe" -D $data --auth=trust --encoding=UTF8 --locale=C --username=lattice_probe *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_INITDB_FAILED' }
+          Add-Content -LiteralPath "$data\postgresql.conf" -Value "`nlisten_addresses='127.0.0.1'`nport=65123`n"
+          $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+          $checks = @()
+          foreach ($name in @('listen_addresses', 'port', 'data_directory')) {
+            $old = & "$bin\postgres.exe" -D $data -C $name 2>&1
+            $oldCode = $LASTEXITCODE
+            $oldRefusal = ($old | Out-String) -match 'administrative permissions'
+            $new = & "$bin\postgres.exe" -C $name -D $data 2>&1
+            $newCode = $LASTEXITCODE
+            $value = ($new | Out-String).Trim()
+            $matches = switch ($name) {
+              'listen_addresses' { $value -eq '127.0.0.1' }
+              'port' { $value -eq '65123' }
+              'data_directory' { $newCode -eq 0 -and [IO.Path]::GetFullPath($value) -eq [IO.Path]::GetFullPath($data) }
+            }
+            $checks += @{ setting=$name; old_exit=$oldCode; old_admin_refusal=$oldRefusal; corrected_exit=$newCode; corrected_value_matches=[bool]$matches }
+          }
+          $verified = $admin -and @($checks | Where-Object { $_.old_exit -eq 0 -or -not $_.old_admin_refusal -or $_.corrected_exit -ne 0 -or -not $_.corrected_value_matches }).Count -eq 0
+          @{schema='lattice.postgres-config-order-probe.v1'; status=$(if($verified){'VERIFIED'}else{'NOT_CONFIRMED'}); administrator=$admin; postgres_version=(& "$bin\postgres.exe" --version); server_started=$false; checks=$checks} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$env:RUNNER_TEMP\postgres-order-result.json" -Encoding utf8
+          Get-Content -LiteralPath "$env:RUNNER_TEMP\postgres-order-result.json"
+          if (-not $verified) { exit 2 }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: postgres-config-order-result
+          path: ${{ runner.temp }}/postgres-order-result.json
+          if-no-files-found: warn
+          retention-days: 7
