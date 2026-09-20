@@ -103,8 +103,10 @@ python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> -
 完成狀態，也不把這個範例的完成當成整個下載版完成。
 ## Retained code relationship queries
 
-`lattice_code_relations` takes exactly `project_id`, an exact retained Git `commit`,
+`lattice_code_relations` requires `project_id`, an exact retained Git `commit`,
 a literal case-insensitive `query` (1–128 characters), and `limit` (1–32).
+An optional `task_ref` binds its usage receipt to an existing task in the same project;
+PostgreSQL verifies that association. Omission remains explicitly `UNBOUND`.
 It searches symbol names, relationship endpoints, relationship names and source paths.
 For example, query `normalize_name` can return `greeting() calls normalize_name()`.
 The Runtime requires an active registered project, selects its physical root from
@@ -113,6 +115,10 @@ Missing analysis is an error; this read never runs Graphify or silently selects 
 
 Results remain `DERIVED` / `CANDIDATE` / untrusted. The original source receipt is
 an anchor for the retained analysis, not acceptance evidence for the new query.
+Each call also appends a separate usage receipt, so the complete tool is not read-only
+or idempotent. `lattice_graph_usage(project_id, task_ref)` reads observed counts,
+returned records and inner JSON bytes without starting analysis. No observations means
+`UNKNOWN`, not zero use throughout a Codex task. See [usage evidence](graphify-execution-evidence.md#6-後續實作由-runtime-產生使用紀錄).
 
 ## 接入其他本機專案
 
@@ -123,9 +129,9 @@ an anchor for the retained analysis, not acceptance evidence for the new query.
    取得或重用本機 `project_id`。
 2. 使用該 ID 透過 `lattice_task_submit` 提交使用者真正要求的工作。這一步才會
    由原生 Runtime 核對 Git 並登記至 PostgreSQL；已有任務時應延續，勿重複送件。
-3. `graphify-refresh --state <安裝目錄> --project-id <同一ID>` 分析該專案。
+3. `graphify-refresh --state <安裝目錄> --project-id <同一ID> --task-ref <任務回傳值>` 分析該專案。
 4. 確認 `operation_evidence.status=PERSISTED`，再用相同 ID、回傳的 commit
-   呼叫 `lattice_code_relations` 讀回結果。
+   及 `task_ref` 呼叫 `lattice_code_relations` 讀回結果，並用 `lattice_graph_usage` 核對使用紀錄。
 
 命令會核對正式 Registry 中的專案位置；不接受只修改本機 locator 的替代來源。
 每個來源有獨立圖譜工作目錄與收據選擇，原本封存的安裝來源設定不變。
