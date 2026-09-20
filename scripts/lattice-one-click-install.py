@@ -524,6 +524,9 @@ def main() -> int:
                 report.update(refreshed)
         report["wsl_host"] = host
         if not successful(host, "READY"):
+            message = host.get("message")
+            if isinstance(message, str) and message:
+                progress(message)
             report["status"] = "REBOOT_REQUIRED" if host.get("status") == "REBOOT_REQUIRED" and host.get("exit_code") == 3 else "BLOCKED"
             report["blocked_codes"].append(host.get("code", "WSL_HOST_NOT_READY"))
     if args.install and report["status"] == "READY":

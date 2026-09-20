@@ -335,6 +335,49 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(I.run_json(["host"], allow_reboot=True)["status"], "REBOOT_REQUIRED")
             self.assertEqual(I.run_json(["other"])["status"], "BLOCKED")
 
+    def test_host_failure_messages_are_readable_utf8_and_preserve_exit_codes(self):
+        argv = ["one-click", "--bundle", str(self.bundle), "--state", str(self.state), "--wsl", str(self.wsl),
+                "--codex-config", str(self.codex), "--install", "--interactive"]
+        for code, message, exit_code in (
+            ("WSL_CONSENT_DECLINED", "您取消了 WSL 安裝。可再次雙擊 LATTICE 安裝包繼續。", 2),
+            ("UAC_CANCELLED", "Windows 未允許啟動 WSL 安裝。請再次執行並確認管理員提示。", 2),
+            ("WSL_REBOOT_REQUIRED", "必要功能已安裝。請儲存工作並重新開機，再雙擊 LATTICE 安裝包。", 3),
+        ):
+            with self.subTest(code=code):
+                host = {"status": "REBOOT_REQUIRED" if exit_code == 3 else "BLOCKED",
+                        "code": code, "message": message, "exit_code": exit_code}
+                replies = [{"status": "CLEAR", "exit_code": 0},
+                           {"status": "BLOCKED", "code": "WSL_SETUP_REQUIRED", "exit_code": 2}, host]
+                raw = io.BytesIO()
+                stderr = io.TextIOWrapper(raw, encoding="ascii")
+                self.addCleanup(stderr.close)
+                with patch.object(I.sys, "argv", argv), \
+                        patch.object(I, "preflight", return_value={"status": "READY", "blocked_codes": []}), \
+                        patch.object(I, "run_json", side_effect=replies) as commands, \
+                        patch.object(I, "run_install") as install, \
+                        contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(stderr):
+                    self.assertEqual(I.main(), exit_code)
+                stderr.flush()
+                self.assertEqual(raw.getvalue().decode("utf-8").splitlines(), [message])
+                self.assertEqual(json.loads(output.getvalue())["wsl_host"], host)
+                self.assertIn("ensure", commands.call_args_list[-1].args[0])
+                self.assertEqual(commands.call_count, 3)
+                install.assert_not_called()
+
+    def test_ready_host_message_does_not_add_failure_progress(self):
+        argv = ["one-click", "--bundle", str(self.bundle), "--state", str(self.state), "--wsl", str(self.wsl),
+                "--codex-config", str(self.codex), "--install"]
+        message = "WSL 主機檢查通過；接著安裝並驗證 LATTICE 專用環境。"
+        replies = [{"status": "CLEAR", "exit_code": 0},
+                   {"status": "READY", "message": message, "exit_code": 0}, self.staged()]
+        with patch.object(I.sys, "argv", argv), \
+                patch.object(I, "preflight", return_value={"status": "READY", "blocked_codes": []}), \
+                patch.object(I, "run_json", side_effect=replies), \
+                patch.object(I, "run_install", return_value={"status": "INSTALLED"}), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            self.assertEqual(I.main(), 0)
+        self.assertNotIn(message, stderr.getvalue())
+
     def test_unattended_host_setup_never_requests_uac(self):
         argv = ["one-click", "--bundle", str(self.bundle), "--state", str(self.state), "--wsl", str(self.wsl),
                 "--codex-config", str(self.codex), "--install"]
