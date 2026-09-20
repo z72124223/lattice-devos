@@ -20,6 +20,8 @@ SPEC.loader.exec_module(M)
 class CustomerRuntimeTests(unittest.TestCase):
     def graph_project_fixture(self, root):
         source = root / "another project"; source.mkdir()
+        # Match register_project(): Windows temp roots can use a short-path alias.
+        source = source.resolve()
         project_id = "12345678-1234-1234-1234-123456789abc"
         schema = "lattice.customer-project-catalog.v1"
         project = {"schema_version": schema, "record_kind": "CUSTOMER_LOCAL_LOCATOR", "id": project_id,
@@ -30,6 +32,22 @@ class CustomerRuntimeTests(unittest.TestCase):
         config = {**self.serve_fixture(root), "graph_source": str(root / "sample"), "graphify_runtime": "pinned",
                   "retained_graph_configuration": "a" * 64, "retained_graph_configurations": ["b" * 64]}
         return config, catalog, project_id, source
+
+    def test_registration_canonicalizes_path_alias_before_project_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); config, catalog, _, source = self.graph_project_fixture(root)
+            alias = source / ".." / source.name
+            self.assertNotEqual(alias, alias.resolve())
+            catalog["projects"] = []
+            (root / "projects.json").write_text(json.dumps(catalog), encoding="utf-8")
+            config["git"] = "fixture-git.exe"
+            with patch.object(M, "load", return_value=(config, "fixture-only")), \
+                    patch.object(M, "checked", side_effect=[str(source), "refs/heads/main", "a" * 40]):
+                registered = M.register_project(root, alias, "Customer")
+            saved = json.loads((root / "projects.json").read_bytes())["projects"][0]
+            self.assertEqual(saved["canonical_path"], str(source))
+            selected = M.project_graph_config(config, registered["project_id"])
+            self.assertEqual(selected["graph_source"], str(source))
 
     def test_project_refresh_derives_source_without_mutating_sealed_default_or_catalog(self):
         with tempfile.TemporaryDirectory() as directory:
