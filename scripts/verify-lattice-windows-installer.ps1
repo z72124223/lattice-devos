@@ -80,7 +80,10 @@ function Test-LatticeInstallerReports([string]$Root, [long]$Started) {
     }
     $report = Read-LatticeEvidence "$base\one-click-report.json" 'THREE_CORES'
     if ($report.status -ne 'INSTALLED') {
-        $blocked = @($report.blocked_codes | Where-Object { $_ -cmatch '^[A-Z][A-Z0-9_]{0,95}$' })
+        # run_install failures live inside installation; top-level preflight codes
+        # may be empty. Preserve only a bounded symbolic code, never raw detail.
+        $blocked = @((@($report.installation.code) + @($report.blocked_codes)) |
+            Where-Object { $_ -is [string] -and $_ -cmatch '^[A-Z][A-Z0-9_]{0,95}$' })
         $code = if ($blocked.Count) { $blocked[0] } else { 'INSTALL_NOT_VERIFIED' }
         throw "THREE_CORES|$code"
     }

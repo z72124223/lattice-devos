@@ -7,6 +7,7 @@ on:
       - docs/codex-assisted-install-20260915
     paths:
       - .github/workflows/windows-candidate-acceptance.yml
+      - scripts/verify-lattice-windows-installer.ps1
 
 permissions:
   contents: read
