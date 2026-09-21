@@ -409,47 +409,6 @@ impl PostgresControlProduct {
     }
 }
 
-#[cfg(test)]
-mod graph_call_counter_tests {
-    use super::{CODE_RELATIONS_CALL_COUNT, PostgresControlProduct, record_code_relations_call};
-
-    #[test]
-    fn relation_entry_counts_are_thread_local_and_monotonic() {
-        let before = PostgresControlProduct::code_relations_call_count();
-        record_code_relations_call().unwrap();
-        assert_eq!(
-            PostgresControlProduct::code_relations_call_count(),
-            before + 1
-        );
-        std::thread::spawn(|| {
-            assert_eq!(PostgresControlProduct::code_relations_call_count(), 0);
-            record_code_relations_call().unwrap();
-            assert_eq!(PostgresControlProduct::code_relations_call_count(), 1);
-        })
-        .join()
-        .unwrap();
-        assert_eq!(
-            PostgresControlProduct::code_relations_call_count(),
-            before + 1
-        );
-    }
-
-    #[test]
-    fn exhausted_relation_counter_fails_without_wrapping() {
-        let before = PostgresControlProduct::code_relations_call_count();
-        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(u64::MAX));
-        assert_eq!(
-            record_code_relations_call(),
-            Err("CODE_RELATIONS_CALL_COUNTER_EXHAUSTED")
-        );
-        assert_eq!(
-            PostgresControlProduct::code_relations_call_count(),
-            u64::MAX
-        );
-        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(before));
-    }
-}
-
 // Consumes the driver error as a map_err callback; only a stable code escapes.
 #[allow(clippy::needless_pass_by_value)]
 fn product_error(error: postgres::Error) -> &'static str {
@@ -502,5 +461,46 @@ fn product_error(error: postgres::Error) -> &'static str {
         "CONTROL_PRODUCT_UNEXPECTED_QUESTION" => "CONTROL_PRODUCT_UNEXPECTED_QUESTION",
         "CONTROL_PRODUCT_DECISION_SCOPE_REJECTED" => "CONTROL_PRODUCT_DECISION_SCOPE_REJECTED",
         _ => "CONTROL_PRODUCT_DATABASE_REJECTED",
+    }
+}
+
+#[cfg(test)]
+mod graph_call_counter_tests {
+    use super::{CODE_RELATIONS_CALL_COUNT, PostgresControlProduct, record_code_relations_call};
+
+    #[test]
+    fn relation_entry_counts_are_thread_local_and_monotonic() {
+        let before = PostgresControlProduct::code_relations_call_count();
+        record_code_relations_call().unwrap();
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            before + 1
+        );
+        std::thread::spawn(|| {
+            assert_eq!(PostgresControlProduct::code_relations_call_count(), 0);
+            record_code_relations_call().unwrap();
+            assert_eq!(PostgresControlProduct::code_relations_call_count(), 1);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn exhausted_relation_counter_fails_without_wrapping() {
+        let before = PostgresControlProduct::code_relations_call_count();
+        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(u64::MAX));
+        assert_eq!(
+            record_code_relations_call(),
+            Err("CODE_RELATIONS_CALL_COUNTER_EXHAUSTED")
+        );
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            u64::MAX
+        );
+        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(before));
     }
 }
