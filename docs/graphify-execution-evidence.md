@@ -180,3 +180,18 @@ Runtime/CLI 底層入口為 `latticed --graphify-refresh-project <project_id> --
 未進查詢入口 0 次、入口拒絕 1 次、成功 SQL 1 次；固定測試圖譜回傳 1 筆、672 bytes，與使用紀錄一致，PostgreSQL 重啟後摘要不變。
 該測試以合成圖譜驗證真資料庫與真函式入口，沒有執行正式 Graphify 新分析；也不是完整 Codex 任務零呼叫驗收。
 `cargo build`、`npm run check` 通過；嚴格 `clippy -D warnings` 仍受既有 lint 錯誤阻擋，未宣稱全面靜態檢查通過。
+
+## 7. rc.7 實際交付驗收（2026-09-21）
+
+[rc.7 下載包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7) 的 Runtime、SQL 與安裝腳本固定於
+`499b30a141be5cb7e1e7d320f000f2de5c42e23b`。後續提交更新文件、CI 及測試模組的位置，下載檔保持上述固定版本。
+安裝器 SHA-256：`563da24e170fedda5362b3643154684ac26cd5bea58e38b3fe4be35aea44613e`。
+
+- [獨立 Windows Server 2025 安裝](https://github.com/z72124223/lattice-devos/actions/runs/35595328948)：匿名下載並核對同一 EXE，375 秒完成。三核心、6 筆圖譜／MCP 讀回、Runtime／PostgreSQL 重啟、全域規則、偏好及必要元件的實際載入通過。
+- [正式 Graphify 分析證據](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/graphify-release-499b30a-acceptance-public-20260921.json)：使用真正 Graphify 分析自有 Python 範例。原生 Runtime 新分析 62.047 秒／6 筆，再次呼叫 1.718 秒重用同一收據，任務綁定查詢 3 筆。三筆觀測均完成，實際分析入口 1 次、查詢入口 1 次；PostgreSQL 重啟前後摘要逐位元組一致。
+- 正式安裝啟動程式另外分析新 commit：43.094 秒／9 筆，保留原有 120 秒期限；任務綁定查詢 3 筆，兩筆觀測均完成、沒有 pending。這是新的真分析，不是 SQL 範例或健康檢查。
+- 2026-09-20 中斷的舊驗收任務仍保留 1 筆 pending；整個測試專案 coverage 因此仍為 `INCOMPLETE`。本次成功沒有抹掉失敗歷史，也不宣稱所有任務都被完整監測。
+- [一般 CI](https://github.com/z72124223/lattice-devos/actions/runs/35595730881)：Windows 安裝測試、npm verify、Rust 格式、PostgreSQL 測試及該工作流程指定的嚴格 clippy 均通過。此結果不等於整個 workspace 的所有 clippy 目標都已驗證。
+
+普通 Windows 10/11 首次 WSL 啟用、UAC／重開機及 Codex Desktop 登入仍未完成乾淨真機驗收，故完整 EXE 保持候選版。
+這些證據不把全域文字指示變成強制攔截器，也不證明 AI 理解或使用了查詢內容。
