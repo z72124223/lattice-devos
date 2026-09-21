@@ -10,6 +10,36 @@ permissions:
   contents: read
 
 jobs:
+  windows-installer-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Test installer and guarded configuration changes
+        shell: pwsh
+        run: |
+          $installerTests = @(
+            'test_lattice_one_click_install.py',
+            'test_lattice_customer_runtime.py',
+            'test_lattice_mcp_config.py',
+            'test_lattice_runtime_update.py',
+            'test_lattice_install_assets.py',
+            'test_lattice_codex_profile.py',
+            'test_lattice_overlap_audit.py',
+            'test_lattice_wsl_host.py',
+            'test_lattice_bundle.py',
+            'test_lattice_customer_backup.py',
+            'test_verify_lattice_loaded_crt.py',
+            'test_build_lattice_windows_installer.py'
+          )
+          foreach ($testFile in $installerTests) {
+            python -I -B -S -m unittest discover -s scripts -p $testFile -q
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
   verify:
     runs-on: ubuntu-latest
     timeout-minutes: 10

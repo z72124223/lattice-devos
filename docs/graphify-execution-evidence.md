@@ -137,3 +137,61 @@ Hermes 已退休；歷史型別或文件出現舊名稱，不代表有可啟用�
 - [9f3984c：移除正式 Runtime 的 Hermes 反思](https://github.com/z72124223/lattice-devos/commit/9f3984c39aeda65621a930715f0cf1658c78da66)
 
 以上是分次演進的程式，不是一次更新就證明所有路徑與宣稱均已驗收。
+
+## 6. 後續實作：由 Runtime 產生使用紀錄
+
+前面各節保留固定 commit 的歷史查核。以下是本版新增行為，不回填或推測舊任務的使用紀錄。
+
+- [Runtime 觀測](../apps/lattice-runtime/src/graph_usage.rs)：操作前先保存 START，操作後保存 FINISH。FINISH 失敗不回成功；程序中斷留下待完成紀錄。
+- [分析函式入口](../crates/lattice-graphify-adapter/src/ports.rs) 與 [查詢函式入口](../crates/lattice-postgres-store/src/control_product.rs) 各自計數；同步 Runtime 操作讀取同執行緒的前後差值。計數包含進入函式後的失敗，不等於子程序成功啟動。
+- [真實工具與 refresh 流程](../apps/lattice-runtime/src/composition.rs) 將結果寫入 [獨立的 PostgreSQL 表](../db/extensions/control-product/graph-usage-v1.sql)。原 `code_relations_v1` SQL 查詢維持唯讀；整體工具呼叫會另寫稽核紀錄。
+- [MCP](../apps/lattice-runtime/src/mcp.rs) 新增 `lattice_graph_usage`；可依專案、或專案加任務讀回全量統計及最近 20 筆。讀使用紀錄本身不新增紀錄。
+
+使用方式：對真正提交的任務，將回傳的 `task_ref` 同時傳給 `lattice_code_relations`，或傳給
+customer launcher 的 `graphify-refresh --project-id <project_id> --task-ref <task_ref>`。
+Runtime/CLI 底層入口為 `latticed --graphify-refresh-project <project_id> --task-ref <task_ref>`。
+任務必須存在且屬於該專案，PostgreSQL 會驗證；不自動猜測目前任務。舊呼叫省略 `task_ref` 仍可執行，但顯示 `UNBOUND`。
+
+| 欄位或結果 | 可證明的範圍 |
+|---|---|
+| `analysis_calls` / `query_calls` | 本次受觀測操作內，實際分析／圖譜查詢函式進入次數；不代表模型理解或採用資料 |
+| `ANALYZED` / `REUSED` / `QUERIED` / `FAILED` | 新分析、重用既存分析、查詢或失敗；重用不增加分析次數 |
+| `query_records` | 成功查詢實際回傳筆數的合計；不是整個圖譜大小 |
+| `result_bytes` / `measured_results` | 有量測的內層結果 JSON UTF-8 位元組合計／結果數；不含 MCP/JSON-RPC 包裝，也不是 token 數；失敗未量測結果大小 |
+| `duration_ms` | 已完成觀測的耗時合計；不含 START 寫入及 FINISH 落盤時間 |
+| `UNKNOWN` | 沒有觀測紀錄；不能宣稱沒使用過 Graphify |
+| `INCOMPLETE` | 有 START 沒有 FINISH；已知統計不完整 |
+| `OBSERVED_CALLS_ONLY` | 已記錄的呼叫完成；仍不代表整個 Codex 對話或所有外部程式都被監測 |
+
+重送同一筆資料庫寫入以 `usage_id` 保持冪等；重新呼叫工具是另一個真實操作，會產生新的 `usage_id`。
+建立 START 前的參數／專案／來源設定拒絕不列入操作統計。沒有憑證、完整查詢文字或完整圖譜寫入此紀錄，查詢只保存摘要。
+
+這項變更沒有增加「未查 Graphify 就不准完成任務」的閘門，也沒有將 `CORE_ONLY` 改成全域禁止 Graphify 的開關。
+它不涵蓋健康檢查、舊 delivery 路徑或任意外部 Graphify 呼叫；不能用此摘要證明 CORE_ONLY 任務全程零呼叫。
+
+驗收腳本 [verify-lattice-graph-usage.py](../scripts/verify-lattice-graph-usage.py) 在獨立 PostgreSQL 中測試任務綁定、重播、失敗、權限與重啟讀回。
+測試範圍以腳本實際輸出的 scope/status 為準；SQL 測試寫入的 ANALYZED／REUSED 範例不是 Graphify 成功分析證據。
+新版原始碼、已安裝 Runtime 與 GitHub 下載包是不同交付狀態；須經更新及 `--postgres-bootstrap` 後才有新資料表，不能以此文件視為安裝包已發布。
+
+本地驗收（2026-09-20）：MCP 51 項、參數解析 3 項、資料庫使用紀錄單元測試 3 項、查詢計數器 2 項、
+真分析介面失敗呼叫計數 1 項、customer launcher 31 項、備份 10 項及安裝流程 38 項通過。
+隔離 PostgreSQL 的 20 項 SQL 檢查、舊結構升級與真 MCP 失敗／重試／程序重啟讀回均通過。
+`composition::tests::graph_usage_records_real_relation_entry_and_sql_when_provisioned` 明確執行後通過：
+未進查詢入口 0 次、入口拒絕 1 次、成功 SQL 1 次；固定測試圖譜回傳 1 筆、672 bytes，與使用紀錄一致，PostgreSQL 重啟後摘要不變。
+該測試以合成圖譜驗證真資料庫與真函式入口，沒有執行正式 Graphify 新分析；也不是完整 Codex 任務零呼叫驗收。
+`cargo build`、`npm run check` 通過；嚴格 `clippy -D warnings` 仍受既有 lint 錯誤阻擋，未宣稱全面靜態檢查通過。
+
+## 7. rc.7 實際交付驗收（2026-09-21）
+
+[rc.7 下載包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7) 的 Runtime、SQL 與安裝腳本固定於
+`499b30a141be5cb7e1e7d320f000f2de5c42e23b`。後續提交更新文件、CI 及測試模組的位置，下載檔保持上述固定版本。
+安裝器 SHA-256：`563da24e170fedda5362b3643154684ac26cd5bea58e38b3fe4be35aea44613e`。
+
+- [獨立 Windows Server 2025 安裝](https://github.com/z72124223/lattice-devos/actions/runs/35595328948)：匿名下載並核對同一 EXE，375 秒完成。三核心、6 筆圖譜／MCP 讀回、Runtime／PostgreSQL 重啟、全域規則、偏好及必要元件的實際載入通過。
+- [正式 Graphify 分析證據](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/graphify-release-499b30a-acceptance-public-20260921.json)：使用真正 Graphify 分析自有 Python 範例。原生 Runtime 新分析 62.047 秒／6 筆，再次呼叫 1.718 秒重用同一收據，任務綁定查詢 3 筆。三筆觀測均完成，實際分析入口 1 次、查詢入口 1 次；PostgreSQL 重啟前後摘要逐位元組一致。
+- 正式安裝啟動程式另外分析新 commit：43.094 秒／9 筆，保留原有 120 秒期限；任務綁定查詢 3 筆，兩筆觀測均完成、沒有 pending。這是新的真分析，不是 SQL 範例或健康檢查。
+- 2026-09-20 中斷的舊驗收任務仍保留 1 筆 pending；整個測試專案 coverage 因此仍為 `INCOMPLETE`。本次成功沒有抹掉失敗歷史，也不宣稱所有任務都被完整監測。
+- [一般 CI](https://github.com/z72124223/lattice-devos/actions/runs/35595730881)：Windows 安裝測試、npm verify、Rust 格式、PostgreSQL 測試及該工作流程指定的嚴格 clippy 均通過。此結果不等於整個 workspace 的所有 clippy 目標都已驗證。
+
+普通 Windows 10/11 首次 WSL 啟用、UAC／重開機及 Codex Desktop 登入仍未完成乾淨真機驗收，故完整 EXE 保持候選版。
+這些證據不把全域文字指示變成強制攔截器，也不證明 AI 理解或使用了查詢內容。

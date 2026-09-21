@@ -6,17 +6,26 @@ LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 
 ## 讓 Codex 幫你安裝
 
+Windows 使用者可下載 [rc.7 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)，
+雙擊後依畫面操作。它包含三核心、Python、Git、Node、專用 WSL 映像及必要的
+Microsoft 執行元件；Codex 需先用自己的帳號登入。
+rc.7 在獨立 Windows Server 2025 的完整安裝
+約 6 分 15 秒通過：三核心、任務／圖譜讀回、程式與資料庫重啟、Codex 全域規則與
+實際元件載入均成功。先前版本的同帳號單專案還原另已讀回舊任務與圖譜。
+普通 Windows 10/11 首次啟用 WSL、UAC／重開機與 Codex Desktop 登入仍待真機驗收，
+因此仍標示為候選版；非預設專案還原後的舊圖譜可能需要重新分析。
+
 不熟悉技術設定，可以把下面這段交給自己的 Codex App：
 
 ```text
-請按照 https://github.com/z72124223/lattice-devos/blob/product/lattice-control-mvp/INSTALL_WITH_CODEX.md
-協助我檢查並安裝 LATTICE 與必要依賴，保留我的設定，完成實際驗收。
-先確認相容 Graphify 依賴能否取得；缺少時如實回報，不宣稱三核心安裝完成。
+請按照 https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7
+協助我核對完整 EXE 的摘要、安裝 LATTICE 與內附依賴，保留我的設定並完成實際驗收。
+保留 Windows 授權及設定衝突的互動提示；任何未通過項目如實回報。
 ```
 
 [完整 Codex 安裝入口](INSTALL_WITH_CODEX.md)包含官方依賴來源、現有安裝命令、
-重新連線及驗收要求。目前 v2.0.0 只有 Runtime 下載檔，尚未提供完整已核驗的
-Graphify 依賴包；此流程是協助安裝，不是任何電腦皆可完成的一鍵安裝承諾。
+重新連線及驗收要求。Windows 完整依賴封裝的驗收範圍見上述 rc.7 發布頁；舊下載包不代表
+已通過乾淨電腦的雙擊安裝測試。請依安裝文件核對版本與驗收狀態。
 
 ## 三核心
 
@@ -45,6 +54,12 @@ LATTICE 不建立第二套通用代理迴圈或操作平台。
 已查核版本的關係查詢入口沒有 `CORE_ONLY` 模式攔截，也尚未找到「CORE_ONLY 下執行真正任務、
 以 Graphify 函式呼叫計數證明零次執行」的對應測試。
 固定版本、原碼行號、現有測試範圍與缺口見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
+
+rc.7 另提供 `lattice_graph_usage(project_id, task_ref)`，讀回 Runtime 自動寫入 PostgreSQL 的
+分析、重用及查詢紀錄。`graphify-refresh --project-id … --task-ref …` 與
+`lattice_code_relations` 的 `task_ref` 可將紀錄綁定正式任務；沒綁定就列為未綁定，
+沒有紀錄顯示 `UNKNOWN`，不能當成零次。這不會強迫每項任務使用 Graphify，
+也不證明 AI 已理解結果。舊安裝須先更新 Runtime 並執行資料庫升級；已有下載包不會因此自動更新。
 
 ## 使用方式
 

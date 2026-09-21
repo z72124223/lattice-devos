@@ -394,6 +394,7 @@ pub enum LatticedErrorKind {
     OfficialLiveBlocked,
     ScriptedFixtureRejected,
     GraphConfiguration,
+    GraphSourceDirty,
     GraphExecution,
     GraphSnapshotExecution,
     GraphifyExecution,
@@ -453,6 +454,7 @@ impl LatticedErrorKind {
             Self::OfficialLiveBlocked => "LATTICE_OFFICIAL_CODEX_IDENTITY_REJECTED",
             Self::ScriptedFixtureRejected => "LATTICE_SCRIPTED_FIXTURE_REJECTED",
             Self::GraphConfiguration => "LATTICE_GRAPH_MEMORY_CONFIGURATION_REJECTED",
+            Self::GraphSourceDirty => "LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED",
             Self::GraphExecution => "LATTICE_GRAPH_MEMORY_RUN_REJECTED",
             Self::GraphSnapshotExecution => "LATTICE_GRAPH_MEMORY_SNAPSHOT_REJECTED",
             Self::GraphifyExecution => "LATTICE_GRAPH_MEMORY_GRAPHIFY_REJECTED",
@@ -2460,7 +2462,7 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
             .is_ok()
             && migrator
                 .query_one(
-                    "SELECT pg_catalog.to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL",
+                    "SELECT pg_catalog.to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL AND pg_catalog.to_regprocedure('control_product.graph_usage_begin_v1(jsonb)') IS NOT NULL",
                     &[],
                 )
                 .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?
@@ -4804,6 +4806,14 @@ impl RuntimeIntegrationMode {
     }
 }
 
+const fn integration_mode_name(mode: RuntimeIntegrationMode) -> &'static str {
+    match mode {
+        RuntimeIntegrationMode::CoreOnly => "CORE_ONLY",
+        RuntimeIntegrationMode::Graphify => "GRAPHIFY",
+        RuntimeIntegrationMode::GraphifyHermes => "GRAPHIFY_HERMES",
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Task050AcceptanceProfile {
     AskUser,
@@ -5752,6 +5762,18 @@ fn task_lifecycle_at<H: FullChainHermesPort>(
     )
 }
 
+fn graph_usage_client(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    timeout: Duration,
+) -> Result<postgres::Client, &'static str> {
+    record_observed_effect(ObservedEffectKind::Database)
+        .and_then(|()| record_observed_effect(ObservedEffectKind::Network))
+        .map_err(|_| "LATTICE_MCP_OBSERVED_EFFECT_REJECTED")?;
+    connect_fixed_runtime_client(database, password, deadline(timeout).map_err(|e| e.code())?)
+        .map_err(|_| "GRAPH_USAGE_DATABASE_UNAVAILABLE")
+}
+
 fn connect_control_product<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
 ) -> Result<PostgresControlProduct, ToolExecutionError> {
@@ -5776,19 +5798,26 @@ fn control_product_project<H: FullChainHermesPort>(
     core: &FullChainCore<H>,
     project_id: &str,
 ) -> Result<Value, ToolExecutionError> {
-    let id = ProjectId::new(project_id)
-        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
-    let target = StoreMigrationTarget::new(
-        core.delivery.database.database_name(),
-        core.delivery.database.run_id(),
-    )
-    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
-    let client = connect_fixed_runtime_client(
+    registered_graph_project(
         &core.delivery.database,
         &core.delivery.password,
         deadline(core.delivery.timeout).map_err(|error| ToolExecutionError::new(error.code()))?,
+        project_id,
     )
-    .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
+}
+
+fn registered_graph_project(
+    database: &DeliveryDatabaseBinding,
+    password: &str,
+    until: Instant,
+    project_id: &str,
+) -> Result<Value, ToolExecutionError> {
+    let id = ProjectId::new(project_id)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let target = StoreMigrationTarget::new(database.database_name(), database.run_id())
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_REJECTED"))?;
+    let client = connect_fixed_runtime_client(database, password, until)
+        .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
     let mut registry = PostgresProjectRegistry::new(client, &target)
         .map_err(|_| ToolExecutionError::new("PROJECT_REGISTRY_UNAVAILABLE"))?;
     let loaded = registry
@@ -9362,123 +9391,172 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             .lock()
             .map_err(|_| ToolExecutionError::new("CODE_RELATIONS_UNAVAILABLE"))?;
         let project = control_product_project(&core, &arguments.project_id)?;
-        if project["active"] != json!(true) {
-            return Err(ToolExecutionError::new("CODE_RELATIONS_PROJECT_INACTIVE"));
-        }
-        let root = graph_canonical_directory(Path::new(
-            &required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
-                .map_err(|e| ToolExecutionError::new(e.code()))?,
-        ))
-        .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let registered = project["canonical_path"]
-            .as_str()
-            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"))?;
-        if graph_canonical_directory(Path::new(registered))
-            .map_err(|e| ToolExecutionError::new(e.code()))?
-            != root
-        {
-            return Err(ToolExecutionError::new("CODE_RELATIONS_SOURCE_REJECTED"));
-        }
-        // Historical commit is explicit. This read neither creates directories,
-        // inspects dirty files nor invokes Graphify to fabricate missing evidence.
-        let git = PathBuf::from(
-            required_environment("LATTICE_DELIVERY_GIT_EXE")
-                .map_err(|e| ToolExecutionError::new(e.code()))?,
-        );
-        let git_sha256 =
-            graph_executable_sha256(&git).map_err(|e| ToolExecutionError::new(e.code()))?;
-        let configuration = runtime_graph_configuration_digest(&root, &git_sha256)
-            .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let mut request = runtime_graph_request(
-            core.delivery.database.run_id(),
-            &arguments.commit,
-            configuration,
+        let query_digest = digest_query_text(&arguments.query)
+            .map_err(|_| ToolExecutionError::new("GRAPH_USAGE_QUERY_REJECTED"))?;
+        let usage = crate::graph_usage::GraphUsage::begin(
+            graph_usage_client(
+                &core.delivery.database,
+                &core.delivery.password,
+                core.delivery.timeout,
+            )
+            .map_err(ToolExecutionError::new)?,
+            json!({
+                "project_id": arguments.project_id,
+                "task_ref": arguments.task_ref,
+                "commit": arguments.commit,
+                "operation": "QUERY",
+                "integration_mode": integration_mode_name(core.integration_mode),
+                "query_digest": query_digest.as_str(),
+            }),
         )
-        .map_err(|e| ToolExecutionError::new(e.code()))?;
-        let mut receipt = load_runtime_graph_receipt(
-            &core.delivery.database,
-            &core.delivery.password,
-            deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
-            &request,
-        )
-        .map_err(|e| ToolExecutionError::new(e.code()))?;
-        // Historical reads may replay the retained legacy receipt. Refresh never
-        // uses this fallback: it must analyze under the selected platform identity.
-        if receipt.is_none()
-            && graphify_platform_from_environment()
-                .map_err(|e| ToolExecutionError::new(e.code()))?
-                .is_portable()
-        {
-            request = runtime_graph_request(
+        .map_err(ToolExecutionError::new)?;
+        let result = (|| {
+            let root = registered_graph_source(&project, None).map_err(ToolExecutionError::new)?;
+            // Historical commit is explicit. This read neither creates directories,
+            // inspects dirty files nor invokes Graphify to fabricate missing evidence.
+            let git = PathBuf::from(
+                required_environment("LATTICE_DELIVERY_GIT_EXE")
+                    .map_err(|e| ToolExecutionError::new(e.code()))?,
+            );
+            let git_sha256 =
+                graph_executable_sha256(&git).map_err(|e| ToolExecutionError::new(e.code()))?;
+            let configuration = runtime_graph_configuration_digest(&root, &git_sha256)
+                .map_err(|e| ToolExecutionError::new(e.code()))?;
+            let mut request = runtime_graph_request(
                 core.delivery.database.run_id(),
                 &arguments.commit,
-                legacy_runtime_graph_configuration_digest(&root, &git_sha256)
-                    .map_err(|e| ToolExecutionError::new(e.code()))?,
+                configuration,
             )
             .map_err(|e| ToolExecutionError::new(e.code()))?;
-            receipt = load_runtime_graph_receipt(
+            let mut receipt = load_runtime_graph_receipt(
                 &core.delivery.database,
                 &core.delivery.password,
                 deadline(core.delivery.timeout).map_err(|e| ToolExecutionError::new(e.code()))?,
                 &request,
             )
             .map_err(|e| ToolExecutionError::new(e.code()))?;
-        }
-        if receipt.is_none() {
-            let retained = retained_graph_configurations_from_environment()
-                .map_err(|e| ToolExecutionError::new(e.code()))?
-                .into_iter()
-                .map(|digest| {
-                    runtime_graph_request(
-                        core.delivery.database.run_id(),
-                        &arguments.commit,
-                        digest,
-                    )
-                    .map_err(|e| ToolExecutionError::new(e.code()))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if let Some((selected, source)) = select_retained_receipt(retained, |selected| {
-                load_runtime_graph_receipt(
+            // Historical reads may replay the retained legacy receipt. Refresh never
+            // uses this fallback: it must analyze under the selected platform identity.
+            if receipt.is_none()
+                && graphify_platform_from_environment()
+                    .map_err(|e| ToolExecutionError::new(e.code()))?
+                    .is_portable()
+            {
+                request = runtime_graph_request(
+                    core.delivery.database.run_id(),
+                    &arguments.commit,
+                    legacy_runtime_graph_configuration_digest(&root, &git_sha256)
+                        .map_err(|e| ToolExecutionError::new(e.code()))?,
+                )
+                .map_err(|e| ToolExecutionError::new(e.code()))?;
+                receipt = load_runtime_graph_receipt(
                     &core.delivery.database,
                     &core.delivery.password,
                     deadline(core.delivery.timeout)
                         .map_err(|e| ToolExecutionError::new(e.code()))?,
-                    selected,
+                    &request,
                 )
-                .map_err(|e| ToolExecutionError::new(e.code()))
-            })? {
-                request = selected;
-                receipt = Some(source);
+                .map_err(|e| ToolExecutionError::new(e.code()))?;
+            }
+            if receipt.is_none() && source_owns_retained_graph_configurations(&root)? {
+                let retained = retained_graph_configurations_from_environment()
+                    .map_err(|e| ToolExecutionError::new(e.code()))?
+                    .into_iter()
+                    .map(|digest| {
+                        runtime_graph_request(
+                            core.delivery.database.run_id(),
+                            &arguments.commit,
+                            digest,
+                        )
+                        .map_err(|e| ToolExecutionError::new(e.code()))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if let Some((selected, source)) = select_retained_receipt(retained, |selected| {
+                    load_runtime_graph_receipt(
+                        &core.delivery.database,
+                        &core.delivery.password,
+                        deadline(core.delivery.timeout)
+                            .map_err(|e| ToolExecutionError::new(e.code()))?,
+                        selected,
+                    )
+                    .map_err(|e| ToolExecutionError::new(e.code()))
+                })? {
+                    request = selected;
+                    receipt = Some(source);
+                }
+            }
+            let receipt = receipt.ok_or_else(|| {
+                ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE")
+            })?;
+            let mut product = connect_control_product(&core)?;
+            let mut page = product
+                .code_relations(&receipt, &arguments.query, arguments.limit)
+                .map_err(ToolExecutionError::new)?;
+            crate::code_relations::verify_page(
+                &mut page,
+                receipt.persistence().record_set_digest().as_str(),
+                receipt.persistence().record_count(),
+                arguments.limit,
+            )
+            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_RECORD_INTEGRITY_REJECTED"))?;
+            let mut response = json!({
+                "schema_version":"lattice.code-relations.v1","authority":"DERIVED","trusted_context":false,
+                "registered_project_id":arguments.project_id,"commit":arguments.commit,"source_selection":"EXACT_RETAINED_COMMIT",
+                "source_memory_project_id":request.project_id().as_str(),
+                "source_project_snapshot_id":request.invocation().project_snapshot_id().as_str(),
+                "source_receipt_digest":receipt.receipt_digest().as_str(),
+                "analysis_digest":receipt.persistence().analysis_digest().as_str(),
+                "query":arguments.query,"limit":arguments.limit,"records":page["records"],"truncated":page["truncated"],
+            });
+            usage.identify_result(&mut response);
+            if response.to_string().len() > 750_000 {
+                return Err(ToolExecutionError::new(
+                    "CODE_RELATIONS_RESPONSE_LIMIT_EXCEEDED",
+                ));
+            }
+            Ok(response)
+        })();
+        match result {
+            Ok(value) => {
+                usage
+                    .finish(
+                        "QUERIED",
+                        value["source_receipt_digest"].as_str(),
+                        value["records"].as_array().map(Vec::len),
+                        Some(&value),
+                        None,
+                    )
+                    .map_err(ToolExecutionError::new)?;
+                Ok(value)
+            }
+            Err(error) => {
+                usage
+                    .finish("FAILED", None, None, None, Some(error.code()))
+                    .map_err(ToolExecutionError::new)?;
+                Err(error)
             }
         }
-        let receipt = receipt
-            .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_SOURCE_RECEIPT_UNAVAILABLE"))?;
-        let mut product = connect_control_product(&core)?;
-        let mut page = product
-            .code_relations(&receipt, &arguments.query, arguments.limit)
-            .map_err(ToolExecutionError::new)?;
-        crate::code_relations::verify_page(
-            &mut page,
-            receipt.persistence().record_set_digest().as_str(),
-            receipt.persistence().record_count(),
-            arguments.limit,
+    }
+
+    fn graph_usage(
+        &mut self,
+        arguments: &mcp::GraphUsageArguments,
+    ) -> Result<Value, ToolExecutionError> {
+        let core = self
+            .inner
+            .lock()
+            .map_err(|_| ToolExecutionError::new("GRAPH_USAGE_UNAVAILABLE"))?;
+        let client = graph_usage_client(
+            &core.delivery.database,
+            &core.delivery.password,
+            core.delivery.timeout,
         )
-        .ok_or_else(|| ToolExecutionError::new("CODE_RELATIONS_RECORD_INTEGRITY_REJECTED"))?;
-        let response = json!({
-            "schema_version":"lattice.code-relations.v1","authority":"DERIVED","trusted_context":false,
-            "registered_project_id":arguments.project_id,"commit":arguments.commit,"source_selection":"EXACT_RETAINED_COMMIT",
-            "source_memory_project_id":request.project_id().as_str(),
-            "source_project_snapshot_id":request.invocation().project_snapshot_id().as_str(),
-            "source_receipt_digest":receipt.receipt_digest().as_str(),
-            "analysis_digest":receipt.persistence().analysis_digest().as_str(),
-            "query":arguments.query,"limit":arguments.limit,"records":page["records"],"truncated":page["truncated"],
-        });
-        if response.to_string().len() > 750_000 {
-            return Err(ToolExecutionError::new(
-                "CODE_RELATIONS_RESPONSE_LIMIT_EXCEEDED",
-            ));
-        }
-        Ok(response)
+        .map_err(ToolExecutionError::new)?;
+        let mut usage = lattice_postgres_store::PostgresGraphUsage::new(client)
+            .map_err(ToolExecutionError::new)?;
+        usage
+            .summary(&arguments.project_id, arguments.task_ref.as_deref())
+            .map_err(ToolExecutionError::new)
     }
 
     fn control_snapshot(
@@ -11535,6 +11613,7 @@ const fn gateway_error_kind(kind: LatticedErrorKind) -> PortErrorKind {
         | LatticedErrorKind::CodexConfiguration
         | LatticedErrorKind::ReceiptRead
         | LatticedErrorKind::GraphConfiguration
+        | LatticedErrorKind::GraphSourceDirty
         | LatticedErrorKind::TaskControl
         | LatticedErrorKind::WriterLease
         | LatticedErrorKind::ForemanReplayCorrupt
@@ -11756,36 +11835,65 @@ struct RuntimeGraphSource {
     git_sha256: String,
 }
 
+fn registered_graph_source(
+    project: &Value,
+    expected: Option<&Path>,
+) -> Result<PathBuf, &'static str> {
+    if project["active"] != json!(true) {
+        return Err("CODE_RELATIONS_PROJECT_INACTIVE");
+    }
+    let path = project["canonical_path"]
+        .as_str()
+        .ok_or("CODE_RELATIONS_SOURCE_REJECTED")?;
+    let root =
+        graph_canonical_directory(Path::new(path)).map_err(|_| "CODE_RELATIONS_SOURCE_REJECTED")?;
+    if let Some(expected) = expected {
+        if !retained_graph_source_matches(&root, expected) {
+            return Err("CODE_RELATIONS_SOURCE_REJECTED");
+        }
+    }
+    Ok(root)
+}
+
+fn retained_graph_source_matches(root: &Path, configured: &Path) -> bool {
+    graph_canonical_directory(configured).ok().as_deref() == Some(root)
+}
+
+fn source_owns_retained_graph_configurations(root: &Path) -> Result<bool, ToolExecutionError> {
+    // Legacy backup selectors carry no source metadata. They remain usable only
+    // for the sealed default source, never as fallback for another registered repo.
+    let configured = required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT")
+        .map_err(|error| ToolExecutionError::new(error.code()))?;
+    Ok(retained_graph_source_matches(root, Path::new(&configured)))
+}
+
+fn graph_source_work_root(
+    work_root: &Path,
+    repository_root: &Path,
+) -> Result<PathBuf, LatticedError> {
+    let source = digest(
+        "lattice.runtime.graphify-work-source",
+        &CanonicalValue::String(path_text(repository_root)?),
+    )?;
+    // Keep the full source hash: two repositories may have the same Git commit.
+    Ok(work_root.join("sources").join(source.as_str()))
+}
+
 fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String), LatticedError> {
     let repository_root = graph_canonical_directory(Path::new(&required_environment(
         "LATTICE_GRAPHIFY_SOURCE_ROOT",
     )?))?;
-    let work_root = PathBuf::from(required_environment("LATTICE_GRAPHIFY_WORK_ROOT")?);
+    let work_root = graph_source_work_root(
+        Path::new(&required_environment("LATTICE_GRAPHIFY_WORK_ROOT")?),
+        &repository_root,
+    )?;
     fs::create_dir_all(&work_root)
         .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let work_root = graph_canonical_directory(&work_root)?;
     let git_executable = PathBuf::from(required_environment("LATTICE_DELIVERY_GIT_EXE")?);
     let git_sha256 = graph_executable_sha256(&git_executable)?;
+    let commit = graph_source_commit(&git_executable, &repository_root)?;
 
-    let top_level = graph_git_stdout(
-        &git_executable,
-        &repository_root,
-        ["rev-parse", "--show-toplevel"],
-    )?;
-    if graph_canonical_directory(Path::new(&top_level))? != repository_root {
-        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
-    }
-    let clean = graph_git_output(
-        &git_executable,
-        &repository_root,
-        ["status", "--porcelain=v1", "-z"],
-    )?;
-    if !clean.stdout.is_empty() {
-        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
-    }
-    let commit = graph_git_stdout(&git_executable, &repository_root, ["rev-parse", "HEAD"])?;
-    GitObjectId::new(&commit)
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     Ok((
         RuntimeGraphSource {
             repository_root,
@@ -11795,6 +11903,40 @@ fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String
         },
         commit,
     ))
+}
+
+fn graph_source_commit(
+    git_executable: &Path,
+    repository_root: &Path,
+) -> Result<String, LatticedError> {
+    let top_level = graph_git_output(
+        git_executable,
+        repository_root,
+        ["rev-parse", "--show-toplevel"],
+    )?;
+    // Git paths may contain spaces. Strip the line terminator, not path bytes;
+    // the commit parser below intentionally retains its stricter token check.
+    let top_level = std::str::from_utf8(&top_level.stdout)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?
+        .trim_end_matches(['\r', '\n']);
+    if top_level.is_empty()
+        || top_level.contains(['\r', '\n', '\0'])
+        || graph_canonical_directory(Path::new(top_level))? != repository_root
+    {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
+    let clean = graph_git_output(
+        git_executable,
+        repository_root,
+        ["status", "--porcelain=v1", "-z"],
+    )?;
+    if !clean.stdout.is_empty() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphSourceDirty));
+    }
+    let commit = graph_git_stdout(git_executable, repository_root, ["rev-parse", "HEAD"])?;
+    GitObjectId::new(&commit)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    Ok(commit)
 }
 
 fn graph_canonical_directory(path: &Path) -> Result<PathBuf, LatticedError> {
@@ -12076,23 +12218,131 @@ fn run_graph_memory_request(
 ///
 /// Returns a bounded configuration, database, Graphify, or persistence error;
 /// it never creates a delivery receipt or substitutes a different source.
-pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt, LatticedError> {
-    let (_unused_delivery, database, password) =
-        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)?;
-    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
-        Ok(value) => parse_timeout(&value)?,
-        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
-        Err(env::VarError::NotUnicode(_)) => {
-            return Err(LatticedError::new(LatticedErrorKind::Configuration));
-        }
-    };
-    let (source, request) = runtime_graph_source_request(&database)?;
-    if let Some(receipt) =
-        load_runtime_graph_receipt(&database, &password, deadline(timeout)?, &request)?
-    {
-        return Ok(receipt);
+pub fn refresh_runtime_graphify_from_environment() -> Result<GraphMemoryReceipt, &'static str> {
+    refresh_graphify_observed(None, None).map(|(receipt, _)| receipt)
+}
+
+/// Refresh one previously registered project using a wrapper-selected source.
+/// The local catalog is only a locator: PostgreSQL must already contain the same
+/// active canonical root. This command never registers a project or creates a task.
+///
+/// # Errors
+/// Rejects missing/inactive Registry entries, source mismatch, dirty sources,
+/// or any existing Graphify identity, execution, and receipt verification failure.
+pub fn refresh_registered_project_graphify_from_environment(
+    project_id: &str,
+) -> Result<GraphMemoryReceipt, &'static str> {
+    refresh_graphify_observed(Some(project_id), None).map(|(receipt, _)| receipt)
+}
+
+/// Refreshes the configured source and returns program-observed usage metadata.
+/// An optional task must belong to the explicitly registered project.
+///
+/// # Errors
+/// Rejects invalid source/task bindings or unavailable usage persistence; never
+/// returns a successful unrecorded result.
+pub fn refresh_graphify_usage_from_environment(
+    project_id: Option<&str>,
+    task_ref: Option<&str>,
+) -> Result<Value, &'static str> {
+    refresh_graphify_observed(project_id, task_ref).map(|(_, value)| value)
+}
+
+fn refresh_graphify_observed(
+    project_id: Option<&str>,
+    task_ref: Option<&str>,
+) -> Result<(GraphMemoryReceipt, Value), &'static str> {
+    if task_ref.is_some() && project_id.is_none() {
+        return Err("GRAPH_USAGE_TASK_REQUIRES_PROJECT");
     }
-    run_runtime_graph_memory_request(&database, &password, &source, deadline(timeout)?, &request)
+    let (_unused_delivery, database, password) =
+        delivery_environment_for_mode(FullChainRunMode::ResumeExisting)
+            .map_err(|error| error.code())?;
+    let timeout = match env::var("LATTICE_DELIVERY_TIMEOUT_SECONDS") {
+        Ok(value) => parse_timeout(&value).map_err(|error| error.code())?,
+        Err(env::VarError::NotPresent) => Duration::from_secs(DEFAULT_TIMEOUT_SECONDS),
+        Err(env::VarError::NotUnicode(_)) => return Err(LatticedErrorKind::Configuration.code()),
+    };
+    if let Some(project_id) = project_id {
+        let project = registered_graph_project(
+            &database,
+            &password,
+            deadline(timeout).map_err(|error| error.code())?,
+            project_id,
+        )
+        .map_err(|error| error.code())?;
+        let configured =
+            required_environment("LATTICE_GRAPHIFY_SOURCE_ROOT").map_err(|error| error.code())?;
+        registered_graph_source(&project, Some(Path::new(&configured)))?;
+    }
+    let (source, request) =
+        runtime_graph_source_request(&database).map_err(|error| error.code())?;
+    let mode = runtime_integration_mode_from_environment().map_err(|error| error.code())?;
+    let usage = crate::graph_usage::GraphUsage::begin(
+        graph_usage_client(&database, &password, timeout)?,
+        json!({
+            "project_id": project_id.unwrap_or(request.project_id().as_str()),
+            "task_ref": task_ref,
+            "commit": request.commit_id().as_str(),
+            "operation": "REFRESH",
+            "integration_mode": integration_mode_name(mode),
+            "query_digest": null,
+        }),
+    )?;
+    let result = (|| {
+        if let Some(receipt) = load_runtime_graph_receipt(
+            &database,
+            &password,
+            deadline(timeout).map_err(|error| error.code())?,
+            &request,
+        )
+        .map_err(|error| error.code())?
+        {
+            return Ok(receipt);
+        }
+        run_runtime_graph_memory_request(
+            &database,
+            &password,
+            &source,
+            deadline(timeout).map_err(|error| error.code())?,
+            &request,
+        )
+        .map_err(|error| error.code())
+    })();
+    match result {
+        Ok(receipt) => {
+            let analysis_calls = usage.analysis_calls();
+            let outcome = if analysis_calls == 0 {
+                "REUSED"
+            } else {
+                "ANALYZED"
+            };
+            let mut value = json!({
+                "component": "graphify", "status": "PERSISTED",
+                "commit": receipt.persistence().request().commit_id().as_str(),
+                "record_count": receipt.persistence().record_count(),
+                "retrieved_count": receipt.retrieval().results().len(),
+                "receipt_digest": receipt.receipt_digest().as_str(),
+                "registered_project_id": project_id,
+                "usage_project_id": project_id.unwrap_or(request.project_id().as_str()),
+                "task_ref": task_ref, "usage_outcome": outcome,
+                "analysis_calls": analysis_calls,
+            });
+            usage.identify_result(&mut value);
+            usage.finish(
+                outcome,
+                Some(receipt.receipt_digest().as_str()),
+                Some(receipt.persistence().record_count() as usize),
+                Some(&value),
+                None,
+            )?;
+            Ok((receipt, value))
+        }
+        Err(error) => {
+            usage.finish("FAILED", None, None, None, Some(error))?;
+            Err(error)
+        }
+    }
 }
 
 /// Runs the optional Hermes reflection over the current derived Graphify
@@ -17202,6 +17452,129 @@ mod tests {
     }
 
     #[test]
+    fn registered_graph_sources_isolate_repositories_and_retained_selectors() {
+        let fixture = env::temp_dir().join(format!("lattice-graph-projects-{}", process::id()));
+        let first = fixture.join("sample");
+        let second = fixture.join("customer project");
+        fs::create_dir_all(&first).expect("first source");
+        fs::create_dir_all(&second).expect("second source");
+        let project = json!({"active": true, "canonical_path": second});
+        let root = registered_graph_source(&project, Some(&second)).expect("registered source");
+        assert_eq!(root, fs::canonicalize(&second).unwrap());
+        assert_eq!(registered_graph_source(&project, None).unwrap(), root);
+        assert_eq!(
+            registered_graph_source(&project, Some(&first)),
+            Err("CODE_RELATIONS_SOURCE_REJECTED")
+        );
+        assert_eq!(
+            registered_graph_source(&json!({"active": false, "canonical_path": second}), None),
+            Err("CODE_RELATIONS_PROJECT_INACTIVE")
+        );
+        assert_eq!(
+            registered_graph_source(&json!({"active": true}), None),
+            Err("CODE_RELATIONS_SOURCE_REJECTED")
+        );
+        assert!(!retained_graph_source_matches(&root, &first));
+        assert!(retained_graph_source_matches(&root, &second));
+        assert!(!retained_graph_source_matches(
+            &root,
+            &fixture.join("missing")
+        ));
+        let first_root = fs::canonicalize(&first).unwrap();
+        let first_work = graph_source_work_root(&fixture, &first_root).unwrap();
+        let second_work = graph_source_work_root(&fixture, &root).unwrap();
+        assert_ne!(first_work, second_work);
+        assert!(first_work.starts_with(&fixture) && second_work.starts_with(&fixture));
+        let first_config =
+            legacy_runtime_graph_configuration_digest(&first_root, &"a".repeat(64)).unwrap();
+        let second_config =
+            legacy_runtime_graph_configuration_digest(&root, &"a".repeat(64)).unwrap();
+        let commit = "a".repeat(40);
+        let first_request = runtime_graph_request("core-61152", &commit, first_config).unwrap();
+        let second_request = runtime_graph_request("core-61152", &commit, second_config).unwrap();
+        assert_ne!(
+            first_request, second_request,
+            "same commit in different repos must never reuse receipts"
+        );
+        fs::remove_dir_all(&fixture).expect("remove only this fixture");
+    }
+
+    #[test]
+    fn runtime_graph_source_accepts_spaces_and_rejects_uncommitted_changes() {
+        static NEXT_GRAPH_SOURCE: AtomicUsize = AtomicUsize::new(0);
+        let fixture = env::temp_dir().join(format!(
+            "lattice graph source {} {}",
+            process::id(),
+            NEXT_GRAPH_SOURCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let repository = fixture.join("repository with spaces");
+        let hooks = fixture.join("empty-hooks");
+        fs::create_dir_all(&repository).expect("create graph source fixture");
+        fs::create_dir_all(&hooks).expect("create empty fixture hooks");
+        let git = Path::new("git");
+        let run = |arguments: &[&str]| {
+            let output = process::Command::new(git)
+                .current_dir(&repository)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    if cfg!(windows) { "NUL" } else { "/dev/null" },
+                )
+                .arg("-c")
+                .arg(format!("core.hooksPath={}", hooks.display()))
+                .args(arguments)
+                .output()
+                .expect("run fixture Git");
+            assert!(output.status.success(), "fixture Git failed: {arguments:?}");
+        };
+        run(&["init", "-q"]);
+        fs::write(repository.join("README.md"), b"graph source\n").expect("fixture source");
+        run(&["add", "README.md"]);
+        run(&[
+            "-c",
+            "user.name=LATTICE Test",
+            "-c",
+            "user.email=lattice-test@invalid.example",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "graph source",
+        ]);
+        let root = fs::canonicalize(&repository).expect("canonical graph source");
+        let expected = graph_git_stdout(git, &root, ["rev-parse", "HEAD"]).expect("fixture HEAD");
+        assert_eq!(
+            graph_source_commit(git, &root).expect("path containing spaces"),
+            expected
+        );
+
+        // The installer's workspace hook is untracked; it must be diagnosed as
+        // source state, not misreported as a PostgreSQL configuration failure.
+        fs::write(repository.join("AGENTS.md"), b"managed hook\n").expect("untracked hook");
+        let dirty = graph_source_commit(git, &root).expect_err("untracked source must fail");
+        assert_eq!(dirty.kind(), LatticedErrorKind::GraphSourceDirty);
+        assert_eq!(dirty.code(), "LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED");
+        fs::remove_file(repository.join("AGENTS.md")).expect("remove fixture hook");
+
+        fs::write(repository.join("README.md"), b"changed source\n").expect("dirty tracked source");
+        assert_eq!(
+            graph_source_commit(git, &root)
+                .expect_err("dirty source must fail")
+                .kind(),
+            LatticedErrorKind::GraphSourceDirty
+        );
+        run(&["add", "README.md"]);
+        assert_eq!(
+            graph_source_commit(git, &root)
+                .expect_err("staged source must fail")
+                .kind(),
+            LatticedErrorKind::GraphSourceDirty
+        );
+        fs::remove_dir_all(&fixture).expect("remove graph source fixture");
+    }
+
+    #[test]
     fn runtime_graph_request_is_bound_to_the_configured_git_commit() {
         let configuration = test_content_digest('a');
         let first = runtime_graph_request(
@@ -18180,6 +18553,189 @@ mod tests {
         let query = MemoryQuery::new(&request, query_text, 5).expect("memory query");
         let plan = plan_retrieval(&analysis, &query).expect("retrieval plan");
         (analysis, plan)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires an explicitly owned disposable customer graph-usage cluster"]
+    #[allow(clippy::too_many_lines)]
+    fn graph_usage_records_real_relation_entry_and_sql_when_provisioned() {
+        use crate::graph_usage::GraphUsage;
+        use lattice_postgres_store::{PostgresControlProduct, PostgresGraphUsage};
+
+        assert_eq!(
+            required_environment("LATTICE_GRAPH_USAGE_LIVE").expect("live gate"),
+            "1"
+        );
+        let state = PathBuf::from(
+            required_environment("LATTICE_GRAPH_USAGE_STATE").expect("owned fixture state"),
+        );
+        let marker = state.join("usage-acceptance-owned.json");
+        assert!(fs::metadata(&marker).expect("fixture marker").len() < 8192);
+        let owned: Value = serde_json::from_slice(&fs::read(marker).expect("fixture marker bytes"))
+            .expect("fixture marker JSON");
+        assert_eq!(owned["schema"], "lattice.graph-usage-acceptance.v1");
+        let database = DeliveryDatabaseBinding::new(
+            required_environment("LATTICE_TASK019_HOST").expect("host"),
+            required_environment("LATTICE_TASK019_PORT")
+                .expect("port")
+                .parse()
+                .expect("port integer"),
+            required_environment("LATTICE_TASK019_RUN_ID").expect("run identity"),
+        )
+        .expect("marker-owned binding");
+        assert_eq!(owned["run_id"], database.run_id());
+        let password = required_environment("LATTICE_TASK019_PASSWORD")
+            .expect("fixture credential supplied privately");
+        let connect = || {
+            connect_fixed_runtime_client(
+                &database,
+                &password,
+                Instant::now() + Duration::from_secs(30),
+            )
+            .expect("fixture runtime connection")
+        };
+
+        // Typed synthetic graph data only. This test never invokes Graphify or Hermes.
+        let analysis_before = lattice_graphify_adapter::analysis_call_count();
+        let (analysis, plan) = task068_graph_memory_fixture();
+        let mut memory = PostgresCodebaseMemory::new(
+            connect(),
+            ExtensionTarget::new(database.database_name(), database.run_id()).unwrap(),
+        )
+        .unwrap();
+        let persisted = memory
+            .persist_analysis(&analysis)
+            .expect("persist fixture analysis");
+        let receipt = memory
+            .retrieve(&persisted, plan)
+            .expect("persist fixture retrieval receipt");
+        let project = analysis.request().project_id().as_str();
+        let mut journal = PostgresGraphUsage::new(connect()).expect("verified usage extension");
+        let baseline = journal.summary(project, None).expect("before observations");
+        let metadata = || {
+            json!({"project_id":project,"task_ref":null,
+            "commit":analysis.request().commit_id().as_str(),"operation":"QUERY",
+            "integration_mode":"CORE_ONLY","query_digest":analysis.request().query_digest().as_str()})
+        };
+        let target =
+            StoreMigrationTarget::new(database.database_name(), database.run_id()).unwrap();
+        let mut product =
+            PostgresControlProduct::new(connect(), &target).expect("real product adapter");
+
+        let skipped = GraphUsage::begin(connect(), metadata()).expect("skipped START");
+        let mut skipped_id = json!({});
+        skipped.identify_result(&mut skipped_id);
+        skipped
+            .finish("FAILED", None, None, None, Some("FIXTURE_BEFORE_QUERY"))
+            .expect("skipped FINISH");
+
+        let rejected = GraphUsage::begin(connect(), metadata()).expect("invalid-query START");
+        let mut rejected_id = json!({});
+        rejected.identify_result(&mut rejected_id);
+        let before_call = PostgresControlProduct::code_relations_call_count();
+        let error = product
+            .code_relations(&receipt, "", 1)
+            .expect_err("real method rejects empty query");
+        assert_eq!(error, "CODE_RELATIONS_ARGUMENTS_REJECTED");
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count() - before_call,
+            1
+        );
+        rejected
+            .finish(
+                "FAILED",
+                Some(receipt.receipt_digest().as_str()),
+                None,
+                None,
+                Some(error),
+            )
+            .expect("invalid-query FINISH");
+
+        let queried = GraphUsage::begin(connect(), metadata()).expect("SQL START");
+        let before_call = PostgresControlProduct::code_relations_call_count();
+        let mut page = product
+            .code_relations(&receipt, "TASK068CanonicalHermesReflection", 1)
+            .expect("real read-only SQL");
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count() - before_call,
+            1
+        );
+        crate::code_relations::verify_page(
+            &mut page,
+            receipt.persistence().record_set_digest().as_str(),
+            receipt.persistence().record_count(),
+            1,
+        )
+        .expect("verify real database page");
+        assert_eq!(page["records"].as_array().unwrap().len(), 1);
+        queried.identify_result(&mut page);
+        let bytes = page.to_string().len();
+        queried
+            .finish(
+                "QUERIED",
+                Some(receipt.receipt_digest().as_str()),
+                Some(1),
+                Some(&page),
+                None,
+            )
+            .expect("SQL FINISH");
+        let summary = journal
+            .summary(project, None)
+            .expect("durable observed calls");
+        for (key, delta) in [
+            ("started", 3),
+            ("finished", 3),
+            ("failed", 2),
+            ("queried", 1),
+            ("query_calls", 2),
+            ("analysis_calls", 0),
+            ("query_records", 1),
+            ("result_bytes", u64::try_from(bytes).unwrap()),
+        ] {
+            assert_eq!(
+                summary["counts"][key].as_u64().unwrap()
+                    - baseline["counts"][key].as_u64().unwrap(),
+                delta,
+                "{key}"
+            );
+        }
+        assert_eq!(summary["coverage"], "OBSERVED_CALLS_ONLY");
+        for (id, calls, outcome) in [
+            (&skipped_id["usage_id"], 0, "FAILED"),
+            (&rejected_id["usage_id"], 1, "FAILED"),
+            (&page["usage_id"], 1, "QUERIED"),
+        ] {
+            let row = summary["recent"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| &row["usage_id"] == id)
+                .expect("this exact call retained");
+            assert_eq!(row["start"]["integration_mode"], "CORE_ONLY");
+            assert_eq!(row["task_binding"], "UNBOUND");
+            assert_eq!(row["finish"]["query_calls"], calls);
+            assert_eq!(row["finish"]["analysis_calls"], 0);
+            assert_eq!(row["finish"]["outcome"], outcome);
+            if outcome == "QUERIED" {
+                assert_eq!(
+                    row["finish"]["result_bytes"].as_u64(),
+                    Some(u64::try_from(bytes).unwrap())
+                );
+            }
+        }
+        assert_eq!(
+            lattice_graphify_adapter::analysis_call_count(),
+            analysis_before
+        );
+        let mut summary_sha256 = String::with_capacity(64);
+        for byte in Sha256::digest(summary.to_string().as_bytes()) {
+            use std::fmt::Write as _;
+            write!(&mut summary_sha256, "{byte:02x}").expect("write digest to string");
+        }
+        println!(
+            "GRAPH_USAGE_REAL_QUERY_OK project={project} query_calls=2 analysis_calls=0 records=1 bytes={bytes} summary_sha256={summary_sha256} source=FIXTURE_GRAPH_NOT_ANALYZED"
+        );
     }
 
     fn task068_reflection_candidate(

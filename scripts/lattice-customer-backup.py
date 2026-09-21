@@ -260,6 +260,8 @@ def restore(backup_root, expected, key, state, bundle, bundle_sha, platform, run
         stream.write("\n# Verified customer restore to a new owned location\nlisten_addresses='127.0.0.1'\nport=" + str(port) + "\n")
     for name in ("bin", "graph-work", "dependencies", "restore-proofs"): (state / name).mkdir(exist_ok=True)
     target = state / "bin/latticed.exe"; shutil.copyfile(runtime, target)
+    runtime_crt = M.copy_vc_runtime(bundle / "bin", target.parent,
+                                  trusted_files={str(bundle / name): entry["sha256"] for name, entry in manifest["files"].items()})
     for name in M.SCRIPTS:
         shutil.copyfile(Path(__file__).with_name(name), state / "bin" / name)
     catalog = metadata["catalog"]; mapping = {}
@@ -277,6 +279,7 @@ def restore(backup_root, expected, key, state, bundle, bundle_sha, platform, run
     graph_source = mapping.get(Path(old["graph_source"])) if old.get("graph_source") else None
     if old.get("graph_source") and not graph_source: raise M.Rejected("RESTORE_GRAPH_SOURCE_NOT_REGISTERED")
     files = {str(bundle / name): entry["sha256"] for name, entry in manifest["files"].items()}
+    files.update(runtime_crt)
     paths = [target, *(state / "bin" / name for name in M.SCRIPTS), state / "cluster/postgresql.conf", state / "cluster/postgresql.auto.conf",
              state / "cluster/pg_hba.conf", state / "cluster/pg_ident.conf", platform / "platform.json", wsl]
     files.update({str(path): M.file_digest(path) for path in paths}); files[str(bundle / "bundle.json")] = bundle_sha
@@ -305,6 +308,8 @@ def restore(backup_root, expected, key, state, bundle, bundle_sha, platform, run
 def finalize_restore(state):
     config, password = M.load(state, allow_restore=True)
     with M.runtime_lease(state, exclusive=True), M.CONFIG.manager_lock(state / ".operations"):
+        # Revalidate the sealed installation after acquiring both restore locks.
+        config, password = M.load(state, allow_restore=True)
         path = state / "restore.pending.dpapi"
         journal = json.loads(M.dpapi(M.regular(path).read_bytes(), decrypt=True))
         if journal.get("schema") != "lattice.customer-restore.v1" or Path(journal["root"]) != state or journal["installation_sha256"] != M.file_digest(state / "installation.json") or journal["catalog_sha256"] != M.file_digest(state / "projects.json"):
@@ -312,6 +317,9 @@ def finalize_restore(state):
         if not (state / "restore.in-progress").exists():
             M.CONFIG.atomic_write(state / "restore.in-progress", b"lattice.customer-restore.v1\n")
         M.start(config, password)
+        # A backup may predate the new Runtime's additive product extensions.
+        # Bootstrap only this verified restored cluster, before probe or READY.
+        M.runtime_action(config, password, "--postgres-bootstrap")
         spec = importlib.util.spec_from_file_location("update_probe", Path(__file__).with_name("lattice-runtime-update.py"))
         update = importlib.util.module_from_spec(spec); spec.loader.exec_module(update)
         update.probe(config, password)

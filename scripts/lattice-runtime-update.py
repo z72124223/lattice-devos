@@ -160,6 +160,10 @@ def apply(root, runtime=None, expected=None, *, recover=False, rollback=None):
             paths = [(runtime, version / "latticed.exe")]
             paths += [(Path(__file__).with_name(name), version / name) for name in M.SCRIPTS]
             files = dict(config["files"])
+            # The new EXE may be a standalone build artifact. Keep the verified
+            # installed CRT beside it; never discover DLLs through PATH/System32.
+            files.update(M.copy_vc_runtime(Path(config["runtime"]).parent, version,
+                                          trusted_files=config["files"]))
             for source, target in paths:
                 before_hash = M.file_digest(source)
                 shutil.copyfile(source, target)

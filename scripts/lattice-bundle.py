@@ -30,6 +30,51 @@ NODE_EXE_SHA256 = "b3094d0b49f9ad602262a9921551737bb97637c05dd357a06ae98188d7290
 NODE_LICENSE_SHA256 = "8efdacdc1cfa3460aeb7fe98e3c54337b971d5da70e6eee292b73b981acb220c"
 WSL_IMAGE_SHA256 = "48d56724b5c8e60f24893e83e73bbb58c60b3ca22fba3da977075420acd54104"
 NODE_URL = "https://nodejs.org/download/release/v24.16.0/node-v24.16.0-win-x64.zip"
+VC_REDIST_SOURCE = "VC/Redist/MSVC/14.44.35112/x64/Microsoft.VC143.CRT"
+VC_LICENSE_SHA256 = "2f66b86a00e8d9833789897ce23d05a4a2dbea370cf39c8c1098dbc17d0e7bdc"
+VC_REDIST_LIST_SHA256 = "da53b097e02b08e0fc69706102a60bc384fe756426ae4dc4a855e96f95cb2b9c"
+VC_REDIST_DOCUMENTS = {
+    "application_local": "https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files",
+    "redistribution_list": "https://aka.ms/vs/17/redist.txt",
+    "redistribution_terms": "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution",
+    "license": "https://visualstudio.microsoft.com/license-terms/vs2022-ga-diagnosticbuildtools/",
+    "supplemental_license_document": "https://visualstudio.microsoft.com/wp-content/uploads/2024/03/Visual-Studio-2022-Diagnostic-Build-Tools-Agent-License_Update-March-2024_EN.docx",
+}
+
+
+def vc_redist_provenance():
+    return {"schema": "lattice.vc-runtime.v1", "product": "Microsoft Visual C++ 2022 x64 release CRT",
+            "version": M.VC_RUNTIME_VERSION, "source_subdirectory": VC_REDIST_SOURCE,
+            "license_classification": "Microsoft proprietary redistributable, subject to licensed Visual Studio distribution terms",
+            "documents": VC_REDIST_DOCUMENTS, "files": M.VC_RUNTIME_FILES,
+            "license_sha256": VC_LICENSE_SHA256, "redistribution_list_sha256": VC_REDIST_LIST_SHA256}
+
+
+def verify_vc_documents(license_path, redist_list):
+    if license_path is None or redist_list is None:
+        raise M.Rejected("VC_RUNTIME_LICENSE_DOCUMENTS_REQUIRED")
+    if sha(license_path) != VC_LICENSE_SHA256 or sha(redist_list) != VC_REDIST_LIST_SHA256:
+        raise M.Rejected("VC_RUNTIME_LICENSE_DOCUMENTS_REJECTED")
+
+
+def bundle_vc_redist(root, source, license_path, redist_list):
+    """Copy exact official release bytes app-locally; never read System32."""
+    verify_vc_documents(license_path, redist_list)
+    M.copy_vc_runtime(source, root / "bin", required=True)
+    M.copy_vc_runtime(source, root / "postgres/bin", required=True)
+    notices = root / "licenses/visual-cpp-runtime"
+    notices.mkdir(parents=True)
+    shutil.copyfile(license_path, notices / "Visual-Studio-2022-Build-Tools-License.docx")
+    shutil.copyfile(redist_list, notices / "Redist.txt")
+    verify_vc_documents(notices / "Visual-Studio-2022-Build-Tools-License.docx", notices / "Redist.txt")
+    (notices / "provenance.json").write_bytes(M.CONFIG.json_bytes(vc_redist_provenance()))
+    (notices / "NOTICE.txt").write_text(
+        "Microsoft Visual C++ 2022 x64 release CRT\n"
+        "Copyright Microsoft Corporation. All rights reserved.\n"
+        "Unmodified app-local binaries distributed under the applicable Microsoft Visual Studio terms.\n"
+        "These Microsoft binaries are not covered by the LATTICE project license.\n"
+        + "\n".join(name + ": " + url for name, url in VC_REDIST_DOCUMENTS.items()) + "\n",
+        encoding="utf-8")
 
 
 def supply_node(root):
@@ -135,6 +180,20 @@ def verify(root, expected):
     actual, size = inventory(root)
     if actual != data["files"] or size != data["total_bytes"]:
         raise M.Rejected("BUNDLE_CONTENT_CHANGED")
+    crt_directories = (root / "bin", root / "postgres/bin")
+    if "vc_runtime" not in data:
+        for directory in crt_directories:
+            if directory.exists() and M.vc_runtime_files(directory):
+                raise M.Rejected("VC_RUNTIME_PROVENANCE_REQUIRED")
+    if "vc_runtime" in data:
+        if data["vc_runtime"] != vc_redist_provenance():
+            raise M.Rejected("VC_RUNTIME_PROVENANCE_REJECTED")
+        for directory in crt_directories:
+            M.vc_runtime_files(directory, required=True)
+        verify_vc_documents(root / "licenses/visual-cpp-runtime/Visual-Studio-2022-Build-Tools-License.docx",
+                            root / "licenses/visual-cpp-runtime/Redist.txt")
+        if json.loads((root / "licenses/visual-cpp-runtime/provenance.json").read_bytes()) != data["vc_runtime"]:
+            raise M.Rejected("VC_RUNTIME_PROVENANCE_REJECTED")
     return data
 
 
@@ -154,7 +213,8 @@ def copy_tree(source, target, excluded=(), budget=None):
             raise M.Rejected("BUNDLE_SOURCE_CHANGED")
 
 
-def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None, archive=None):
+def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None, archive=None,
+          vc_redist=None, vc_license=None, vc_redist_list=None):
     if sha(runtime) != runtime_sha:
         raise M.Rejected("RUNTIME_DIGEST_MISMATCH")
     if not root.is_absolute():
@@ -179,6 +239,14 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     if archive is not None:
         if M.file_digest(archive) != WSL_IMAGE_SHA256:
             raise M.Rejected("WSL_IMAGE_DIGEST_REJECTED")
+    if vc_redist is None:
+        raise M.Rejected("VC_RUNTIME_SUPPLY_REQUIRED")
+    M.regular(vc_redist, directory=True)
+    vc_redist = vc_redist.resolve(strict=True)
+    if root == vc_redist or root.is_relative_to(vc_redist) or vc_redist.is_relative_to(root):
+        raise M.Rejected("BUNDLE_SOURCE_OUTPUT_OVERLAP")
+    M.vc_runtime_files(vc_redist, required=True)
+    verify_vc_documents(vc_license, vc_redist_list)
     M.private_new_root(root)
     (root / "bin").mkdir()
     shutil.copyfile(runtime, root / "bin/latticed.exe")
@@ -191,6 +259,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
         copy_tree(postgres / name, root / "postgres" / name, budget=budget)
     for name in ("server_license.txt", "commandlinetools_3rd_party_licenses.txt"):
         shutil.copyfile(M.regular(postgres / name), root / "postgres" / name)
+    bundle_vc_redist(root, vc_redist, vc_license, vc_redist_list)
     for name in ("DLLs", "Lib", "tcl"):
         copy_tree(python / name, root / "python" / name, ("site-packages", "__pycache__"), budget)
     for name in ("python.exe", "python3.dll", "python312.dll", "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE.txt"):
@@ -198,7 +267,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     for name in ("cmd", "mingw64", "usr"):
         copy_tree(git / name, root / "git" / name, ("etc", "__pycache__"), budget)
     shutil.copyfile(M.regular(git / "LICENSE.txt"), root / "git/LICENSE.txt")
-    copy_tree(graphify, root / "graphify", budget=budget)
+    copy_tree(graphify, root / "graphify", ("__pycache__",), budget)
     (root / "node").mkdir()
     for name in ("node.exe", "LICENSE", "provenance.json"):
         shutil.copyfile(node / name, root / "node" / name)
@@ -213,8 +282,8 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     if files["bin/latticed.exe"]["sha256"] != runtime_sha:
         raise M.Rejected("BUNDLE_RUNTIME_CHANGED")
     data = {"schema": SCHEMA, "platform": "windows-x86_64", "distribution_status": "LOCAL_CANDIDATE",
-            "files": files, "total_bytes": size, "runtime_sha256": runtime_sha,
-            "bundled": ["LATTICE Runtime and launchers", "PostgreSQL software and licenses", "CPython 3.12 standard library and native DLLs", "Git software and license", "Graphify reviewed payload", "Node.js 24.16.0 runtime and license"],
+            "files": files, "total_bytes": size, "runtime_sha256": runtime_sha, "vc_runtime": vc_redist_provenance(),
+            "bundled": ["LATTICE Runtime and launchers", "PostgreSQL software and licenses", "CPython 3.12 standard library and native DLLs", "Git software and license", "Graphify reviewed payload", "Node.js 24.16.0 runtime and license", "Microsoft Visual C++ 2022 x64 app-local CRT 14.44.35211.0"],
             "external_requirements": (["Enabled Windows WSL2 with virtualization and an authenticated Microsoft WSL launcher"] if archive is not None else ["Reviewed WSL launcher and Ubuntu system"])
                 + ["Codex client and its existing account authorization"],
             "full_dependency_portability": "NOT_VERIFIED", "cores": ["control", "postgresql", "graphify"]}
@@ -256,6 +325,9 @@ def main():
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--node", type=Path)
     parser.add_argument("--archive", type=Path)
+    parser.add_argument("--vc-redist", type=Path, help="reviewed Microsoft.VC143.CRT x64 release directory (never System32)")
+    parser.add_argument("--vc-license", type=Path, help="pinned Microsoft Build Tools supplemental license document")
+    parser.add_argument("--vc-redist-list", type=Path, help="pinned unmodified Visual Studio Redist.txt")
     parser.add_argument("--sha256")
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--runtime-sha256")
@@ -277,7 +349,8 @@ def main():
     elif args.action == "build":
         if not all((args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node)):
             raise M.Rejected("BUNDLE_BUILD_ARGUMENTS_REQUIRED")
-        result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node, args.archive)
+        result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify,
+                       args.node, args.archive, args.vc_redist, args.vc_license, args.vc_redist_list)
     elif args.action == "install":
         if not all((args.sha256, args.state, args.graph_source, args.wsl)):
             raise M.Rejected("BUNDLE_INSTALL_ARGUMENTS_REQUIRED")

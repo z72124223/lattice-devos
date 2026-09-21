@@ -42,6 +42,27 @@ class RuntimeUpdateTests(unittest.TestCase):
     def update(self):
         return U.apply(self.root, self.new, M.file_digest(self.new))
 
+    def test_standalone_binary_update_retains_sealed_app_local_crt(self):
+        config, password = M.load(self.root)
+        payloads = {"vcruntime140.dll": b"crt-fixture", "msvcp140.dll": b"cpp-fixture"}
+        for name, payload in payloads.items(): (self.root / name).write_bytes(payload)
+        pinned = {name: M.file_digest(self.root / name) for name in payloads}
+        config["files"].update({str(self.root / name): digest for name, digest in pinned.items()})
+        public = M.CONFIG.json_bytes(config)
+        (self.root / "installation.json").write_bytes(public)
+        (self.root / "credentials.dpapi").write_bytes(M.dpapi(M.CONFIG.json_bytes({
+            "password": password, "installation_sha256": M.CONFIG.digest(public)})))
+        with patch.dict(M.VC_RUNTIME_FILES, pinned, clear=True):
+            self.update()
+        updated, _ = M.load(self.root)
+        destination = Path(updated["runtime"]).parent
+        for name, digest in pinned.items():
+            self.assertEqual(updated["files"][str(destination / name)], digest)
+            self.assertEqual((destination / name).read_bytes(), payloads[name])
+        (destination / "vcruntime140.dll").write_bytes(b"tampered")
+        with self.assertRaisesRegex(M.Rejected, "COMPONENT_CHANGED"):
+            M.load(self.root)
+
     def interrupt_update(self):
         atomic = M.CONFIG.atomic_write
         def interrupted(path, data):

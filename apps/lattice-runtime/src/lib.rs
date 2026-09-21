@@ -7,6 +7,7 @@ pub mod coordination;
 pub mod delivery_ledger;
 mod external_result_import;
 pub mod git_delivery;
+mod graph_usage;
 mod local_result_import;
 mod managed_execution_environment;
 mod managed_file_identity;

@@ -3,7 +3,7 @@
 
 The installation owns one new directory and one loopback PostgreSQL cluster.
 Credentials and installation identity are protected with the current user's DPAPI.
-Normal STDIO startup verifies the prepared cluster; it never migrates a database.
+Normal STDIO startup restarts only the verified prepared cluster; it never migrates a database.
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import socket
 import stat
 import subprocess
 import sys
+import time
 import unicodedata
 import uuid
 
@@ -35,6 +36,19 @@ TOOLS = ("initdb", "pg_ctl", "postgres", "psql", "pg_controldata")
 SCRIPTS = ("lattice-customer-runtime.py", "lattice-mcp-config.py", "lattice-runtime-update.py", "lattice-wsl-platform.py",
            "lattice-bundle.py", "lattice-customer-backup.py", "lattice-backup-crypto.mjs")
 BASE_ENV = ("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA")
+VC_RUNTIME_VERSION = "14.44.35211.0"
+VC_RUNTIME_FILES = {
+    "concrt140.dll": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376",
+    "msvcp140_1.dll": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d",
+    "msvcp140_2.dll": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9",
+    "msvcp140_atomic_wait.dll": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479",
+    "msvcp140_codecvt_ids.dll": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18",
+    "msvcp140.dll": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9",
+    "vccorlib140.dll": "19839407c3fdbc824e5bce189bf68ddf8097f12ec28b757797ffa0415c144ddd",
+    "vcruntime140_1.dll": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f",
+    "vcruntime140_threads.dll": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa",
+    "vcruntime140.dll": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066",
+}
 
 
 @contextmanager
@@ -81,6 +95,40 @@ def regular(path: Path, *, directory: bool = False) -> Path:
 def file_digest(path: Path) -> str:
     regular(path)
     return CONFIG.digest(path.read_bytes())
+
+
+def vc_runtime_files(source: Path, *, required=False, trusted_files=None) -> dict[Path, str]:
+    """Accept the pinned release CRT as a complete group; old bundles have none."""
+    regular(source, directory=True)
+    present = {path.name.casefold() for path in source.iterdir()
+               if path.name.casefold().endswith(".dll") and path.name.casefold() != "msvcrt.dll"
+               and path.name.casefold().startswith(("vcruntime", "msvcp", "msvcr", "concrt", "vccorlib"))}
+    if not required and not present:
+        return {}
+    if present != set(VC_RUNTIME_FILES):
+        raise Rejected("VC_RUNTIME_SET_REJECTED")
+    result = {}
+    for name, expected in VC_RUNTIME_FILES.items():
+        path = source / name
+        if (file_digest(path) != expected
+                or (trusted_files is not None and trusted_files.get(str(path)) != expected)):
+            raise Rejected("VC_RUNTIME_SOURCE_REJECTED")
+        result[path] = expected
+    return result
+
+
+def copy_vc_runtime(source: Path, target: Path, *, required=False, trusted_files=None) -> dict[str, str]:
+    sources = vc_runtime_files(source, required=required, trusted_files=trusted_files)
+    if any((target / path.name).exists() for path in sources):
+        raise Rejected("VC_RUNTIME_TARGET_EXISTS")
+    copied = {}
+    for original, expected in sources.items():
+        destination = target / original.name
+        shutil.copyfile(original, destination)
+        if file_digest(original) != expected or file_digest(destination) != expected:
+            raise Rejected("VC_RUNTIME_COPY_CHANGED")
+        copied[str(destination)] = expected
+    return copied
 
 
 def dpapi(data: bytes, *, decrypt: bool = False) -> bytes:
@@ -300,9 +348,10 @@ def start(config: dict, password: str) -> None:
         root = Path(config["root"])
         # PostgreSQL reads auto.conf after postgresql.conf. Validate effective
         # settings before any listener starts, not merely after connecting.
+        # PostgreSQL's Windows admin guard recognizes read-only -C only at argv[1].
         for name, expected in (("listen_addresses", "127.0.0.1"), ("port", str(config["port"])),
                                ("data_directory", str(root / "cluster"))):
-            actual = checked([pg(config, "postgres"), "-D", str(root / "cluster"), "-C", name],
+            actual = checked([pg(config, "postgres"), "-C", name, "-D", str(root / "cluster")],
                              "CUSTOMER_EFFECTIVE_POSTGRES_CONFIG_REJECTED")
             matches = Path(actual) == Path(expected) if name == "data_directory" else actual == expected
             if not matches:
@@ -312,11 +361,27 @@ def start(config: dict, password: str) -> None:
     verify_running(config, password)
 
 
-def runtime_action(config: dict, password: str, action: str) -> dict | None:
-    result = invoke([config["runtime"], action], env=environment(config, password), timeout=120)
+def start_for_mcp(root: Path, config: dict, password: str) -> None:
+    # Parallel Codex connections may all observe a stopped cluster. Serialize the
+    # bounded start, recheck inside start(), and wait only for another operation's
+    # lock; never retry a rejected cluster identity or a failed PostgreSQL start.
+    deadline = time.monotonic() + 35
+    while True:
+        try:
+            with CONFIG.manager_lock(root / ".operations"):
+                start(config, password)
+            return
+        except Rejected as error:
+            if str(error) != "CONFIG_MANAGER_BUSY" or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.1)
+
+
+def runtime_action(config: dict, password: str, action: str, *arguments: str) -> dict | None:
+    result = invoke([config["runtime"], action, *arguments], env=environment(config, password), timeout=120)
     if result.returncode:
         codes = [line for line in result.stderr.splitlines()
-                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY)_[A-Z0-9_]{1,120}", line)]
+                 if re.fullmatch(r"(?:LATTICE|GRAPHIFY|GRAPH_USAGE|PROJECT|CODE_RELATIONS)_[A-Z0-9_]{1,120}", line)]
         suffix = ":" + codes[-1] if codes else ""
         raise Rejected("CUSTOMER_RUNTIME_" + action.strip("-").replace("-", "_").upper() + "_REJECTED" + suffix)
     return json.loads(result.stdout) if result.stdout.strip() else None
@@ -355,6 +420,7 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
     shutil.copyfile(runtime, target)
     if file_digest(target) != expected:
         raise Rejected("RUNTIME_COPY_CHANGED")
+    runtime_crt = copy_vc_runtime(runtime.parent, target.parent, trusted_files=dependency_files)
     for name in SCRIPTS:
         source = regular(Path(__file__).resolve().with_name(name))
         copied = root / "bin" / name
@@ -387,7 +453,7 @@ def prepare(root: Path, runtime: Path, expected: str, postgres_bin: Path, git: P
         paths.append(graphify_platform / "platform.json")
     config = {"schema": SCHEMA, "root": str(root), "runtime": str(target), "postgres_bin": str(postgres_bin),
               "git": str(git), "node": str(node) if node else None, "python": str(Path(sys.executable)), "port": port, "run_id": secrets.token_hex(16), "system_id": system_id,
-              "files": {**(dependency_files or {}), **{str(file): file_digest(file) for file in paths}},
+              "files": {**(dependency_files or {}), **runtime_crt, **{str(file): file_digest(file) for file in paths}},
               "dependency_root": str(dependency_root) if dependency_root else None,
               "graphify_platform": str(graphify_platform) if graphify_platform else None,
               "graphify_runtime": str(graphify_runtime) if graphify_runtime else None,
@@ -467,17 +533,61 @@ def import_result(root: Path, request: Path, node: Path | None = None, expected:
         return json.loads(result.stdout)
 
 
-def operate(root: Path, action: str, config_path: Path | None = None) -> dict | int:
+def project_graph_config(config: dict, project_id: str) -> dict:
+    """Select a locator only; native Runtime must verify its retained Registry identity."""
+    if not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", project_id):
+        raise Rejected("CUSTOMER_PROJECT_ID_REJECTED")
+    path = regular(Path(config["root"]) / "projects.json")
+    if path.stat().st_size > 2 * 1024 * 1024:
+        raise Rejected("CUSTOMER_CATALOG_BOUND_EXCEEDED")
+    catalog = json.loads(path.read_bytes())
+    if (catalog.get("schema") != "lattice.customer-project-catalog.v1"
+            or not isinstance(catalog.get("projects"), list) or len(catalog["projects"]) > 4096):
+        raise Rejected("CUSTOMER_CATALOG_REJECTED")
+    matches = [item for item in catalog["projects"] if isinstance(item, dict) and item.get("id") == project_id]
+    if len(matches) != 1:
+        raise Rejected("CUSTOMER_PROJECT_LOCATOR_NOT_UNIQUE")
+    project = matches[0]
+    if (project.get("schema_version") != catalog["schema"] or project.get("record_kind") != "CUSTOMER_LOCAL_LOCATOR"
+            or project.get("control_project_id") != project_id or project.get("registry_authority") != "NONE"
+            or project.get("registry_project_id") is not None):
+        raise Rejected("CUSTOMER_CATALOG_REJECTED")
+    source = Path(project["canonical_path"])
+    if not source.is_absolute() or regular(source, directory=True).resolve() != source:
+        raise Rejected("CUSTOMER_PROJECT_SOURCE_REJECTED")
+    derived = dict(config)
+    derived["graph_source"] = str(source)
+    # Retained selectors belong to the sealed default source, never another repo.
+    if not config.get("graph_source") or source != Path(config["graph_source"]).resolve():
+        derived.pop("retained_graph_configuration", None)
+        derived.pop("retained_graph_configurations", None)
+    return derived
+
+
+def operate(root: Path, action: str, config_path: Path | None = None, project_id: str | None = None,
+            task_ref: str | None = None) -> dict | int:
+    if project_id is not None and action != "graphify-refresh":
+        raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
+    if task_ref is not None and (action != "graphify-refresh" or project_id is None
+                                or re.fullmatch(r"[0-9a-f]{64}", task_ref) is None):
+        raise Rejected("GRAPH_USAGE_TASK_ARGUMENT_REJECTED")
     config, password = load(root)
     if action == "serve":
         if not (root / "ready.json").is_file():
             raise Rejected("CUSTOMER_INITIALIZATION_INCOMPLETE")
-        if not running(config):
-            raise Rejected("CUSTOMER_CLUSTER_STOPPED_USE_START")
-        verify_running(config, password)
         # STDIO belongs entirely to the native MCP server. No secret or wrapper log.
         with runtime_lease(root):
             config, password = load(root)
+            ready = json.loads(regular(root / "ready.json").read_bytes())
+            if ready != {"schema": SCHEMA, "run_id": config["run_id"], "system_id": config["system_id"]}:
+                raise Rejected("CUSTOMER_INITIALIZATION_IDENTITY_REJECTED")
+            # load() validates the sealed cluster identity and all dependencies.
+            # The shared lease excludes stop/update while this connection starts
+            # or runs. Normal startup must never run initialize/bootstrap/recover.
+            if not running(config):
+                start_for_mcp(root, config, password)
+            else:
+                verify_running(config, password)
             return subprocess.call([config["runtime"]], env=environment(config, password),
                                    stdin=sys.stdin, stdout=sys.stdout, stderr=sys.stderr,
                                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
@@ -506,7 +616,12 @@ def operate(root: Path, action: str, config_path: Path | None = None) -> dict | 
                 verify_running(config, password)
                 if not config.get("graph_source"):
                     raise Rejected("GRAPHIFY_CUSTOMER_SOURCE_NOT_CONFIGURED")
-            operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
+            if project_id is not None:
+                selected = project_graph_config(config, project_id)
+                task_args = ["--task-ref", task_ref] if task_ref is not None else []
+                operation_evidence = runtime_action(selected, password, "--graphify-refresh-project", project_id, *task_args)
+            else:
+                operation_evidence = runtime_action(config, password, "--graphify-runtime-preflight" if action == "graphify-preflight" else "--graphify-refresh")
             if action == "graphify-preflight":
                 operation_evidence = {"component": "graphify", "status": "IDENTITY_VERIFIED", "workflow": "NOT_VERIFIED"}
         elif action in ("connect", "reconnect"):
@@ -544,12 +659,21 @@ def main() -> int:
     parser.add_argument("--codex-config", type=Path)
     parser.add_argument("--project-root", type=Path)
     parser.add_argument("--project-name")
+    parser.add_argument("--project-id", help="refresh an already registered project without changing the sealed default source")
+    parser.add_argument("--task-ref", help="bind refresh usage to an existing task in --project-id")
     parser.add_argument("--evidence-request", type=Path)
     parser.add_argument("--node", type=Path)
     parser.add_argument("--node-sha256")
     parser.add_argument("--update-id")
     args = parser.parse_args()
     try:
+        if args.project_id is not None and args.action != "graphify-refresh":
+            raise Rejected("CUSTOMER_PROJECT_SELECTOR_ACTION_REJECTED")
+        if args.task_ref is not None and (args.action != "graphify-refresh" or args.project_id is None
+                                         or re.fullmatch(r"[0-9a-f]{64}", args.task_ref) is None):
+            raise Rejected("GRAPH_USAGE_TASK_ARGUMENT_REJECTED")
+        if args.graph_source is not None and args.action != "prepare":
+            raise Rejected("CUSTOMER_GRAPH_SOURCE_ARGUMENT_REJECTED_USE_PROJECT_ID")
         if args.action == "prepare":
             if not all((args.runtime, args.sha256, args.postgres_bin, args.git)):
                 raise Rejected("CUSTOMER_COMPONENT_ARGUMENTS_REQUIRED")
@@ -574,7 +698,7 @@ def main() -> int:
                 raise Rejected("CUSTOMER_RESULT_ARGUMENTS_REQUIRED")
             result = import_result(args.state, args.evidence_request, args.node, args.node_sha256)
         else:
-            result = operate(args.state, args.action, args.codex_config)
+            result = operate(args.state, args.action, args.codex_config, args.project_id, args.task_ref)
         if isinstance(result, int):
             return result
         print(json.dumps(result))

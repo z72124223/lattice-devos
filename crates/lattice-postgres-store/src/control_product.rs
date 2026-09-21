@@ -5,6 +5,22 @@ use lattice_contracts::ContentDigest;
 use postgres::{Client, IsolationLevel};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use std::cell::Cell;
+
+thread_local! {
+    static CODE_RELATIONS_CALL_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+fn record_code_relations_call() -> Result<(), &'static str> {
+    CODE_RELATIONS_CALL_COUNT.with(|counter| {
+        let next = counter
+            .get()
+            .checked_add(1)
+            .ok_or("CODE_RELATIONS_CALL_COUNTER_EXHAUSTED")?;
+        counter.set(next);
+        Ok(())
+    })
+}
 
 /// Closed product commands. None can set a task's formal completion state.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +165,13 @@ pub struct PostgresControlProduct {
 }
 
 impl PostgresControlProduct {
+    /// Number of relation-method entries on the current thread, including failures.
+    /// This is an operation-delta counter, not proof of SQL success or other threads.
+    #[must_use]
+    pub fn code_relations_call_count() -> u64 {
+        CODE_RELATIONS_CALL_COUNT.with(Cell::get)
+    }
+
     /// Reads derived records anchored to an independently replayed source receipt.
     ///
     /// # Errors
@@ -159,6 +182,7 @@ impl PostgresControlProduct {
         query: &str,
         limit: i32,
     ) -> Result<Value, &'static str> {
+        record_code_relations_call()?;
         if query.is_empty()
             || query.len() > 512
             || query.chars().count() > 128
@@ -437,5 +461,46 @@ fn product_error(error: postgres::Error) -> &'static str {
         "CONTROL_PRODUCT_UNEXPECTED_QUESTION" => "CONTROL_PRODUCT_UNEXPECTED_QUESTION",
         "CONTROL_PRODUCT_DECISION_SCOPE_REJECTED" => "CONTROL_PRODUCT_DECISION_SCOPE_REJECTED",
         _ => "CONTROL_PRODUCT_DATABASE_REJECTED",
+    }
+}
+
+#[cfg(test)]
+mod graph_call_counter_tests {
+    use super::{CODE_RELATIONS_CALL_COUNT, PostgresControlProduct, record_code_relations_call};
+
+    #[test]
+    fn relation_entry_counts_are_thread_local_and_monotonic() {
+        let before = PostgresControlProduct::code_relations_call_count();
+        record_code_relations_call().unwrap();
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            before + 1
+        );
+        std::thread::spawn(|| {
+            assert_eq!(PostgresControlProduct::code_relations_call_count(), 0);
+            record_code_relations_call().unwrap();
+            assert_eq!(PostgresControlProduct::code_relations_call_count(), 1);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            before + 1
+        );
+    }
+
+    #[test]
+    fn exhausted_relation_counter_fails_without_wrapping() {
+        let before = PostgresControlProduct::code_relations_call_count();
+        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(u64::MAX));
+        assert_eq!(
+            record_code_relations_call(),
+            Err("CODE_RELATIONS_CALL_COUNTER_EXHAUSTED")
+        );
+        assert_eq!(
+            PostgresControlProduct::code_relations_call_count(),
+            u64::MAX
+        );
+        CODE_RELATIONS_CALL_COUNT.with(|counter| counter.set(before));
     }
 }

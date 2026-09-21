@@ -55,6 +55,13 @@ Graphify 只分析已提交的乾淨程式版本。`graphify-preflight` 成功�
 執行環境身份符合，`graphify-refresh` 回傳實際持久化收據與筆數。
 現有 refresh 仍使用固定驗收查詢；其結果為零不能宣稱一般程式關係查詢完成。
 
+來源含未提交檔案時會回報 `LATTICE_GRAPHIFY_SOURCE_UNCOMMITTED`。這是來源
+版本檢查失敗，不能解讀成 PostgreSQL 權限問題。安裝器自建範例會先提交
+掛勾與範例程式，再建立圖譜；不要在驗收後自動改寫使用者的來源專案。
+正式功能驗收還須透過 MCP 建立／讀回驗收任務，並以正式專案 ID、相同 commit
+及持久化收據讀回非空的 `lattice_code_relations` 結果。範例驗收任務只保存為
+草稿，不會因安裝器檢查成功而宣稱使用者的工程任務已完成。
+
 Codex 可使用既有 MCP 保存工作、父子／依賴關係及決策。正式本機測試成果沿
 既有 operator importer 保存；新增入口不提供任意「完成」setter：
 
@@ -96,16 +103,44 @@ python scripts/verify-lattice-customer-restart.py --state <隔離安裝目錄> -
 完成狀態，也不把這個範例的完成當成整個下載版完成。
 ## Retained code relationship queries
 
-`lattice_code_relations` takes exactly `project_id`, an exact retained Git `commit`,
+`lattice_code_relations` requires `project_id`, an exact retained Git `commit`,
 a literal case-insensitive `query` (1–128 characters), and `limit` (1–32).
+An optional `task_ref` binds its usage receipt to an existing task in the same project;
+PostgreSQL verifies that association. Omission remains explicitly `UNBOUND`.
 It searches symbol names, relationship endpoints, relationship names and source paths.
 For example, query `normalize_name` can return `greeting() calls normalize_name()`.
-The Runtime requires an active registered project whose physical root matches its
-configured Graphify source and replays the original source receipt for that commit.
+The Runtime requires an active registered project, selects its physical root from
+PostgreSQL Registry and replays that project's original source receipt for the commit.
 Missing analysis is an error; this read never runs Graphify or silently selects another commit.
 
 Results remain `DERIVED` / `CANDIDATE` / untrusted. The original source receipt is
 an anchor for the retained analysis, not acceptance evidence for the new query.
+Each call also appends a separate usage receipt, so the complete tool is not read-only
+or idempotent. `lattice_graph_usage(project_id, task_ref)` reads observed counts,
+returned records and inner JSON bytes without starting analysis. No observations means
+`UNKNOWN`, not zero use throughout a Codex task. See [usage evidence](graphify-execution-evidence.md#6-後續實作由-runtime-產生使用紀錄).
+
+## 接入其他本機專案
+
+安裝範例只用於安裝驗收。Codex 接到使用者的實際工作後，以安裝內附的 Python
+及 `lattice-customer-runtime.py` 執行下列步驟；不必再建立另一套資料庫：
+
+1. `register-project --state <安裝目錄> --project-root <Git根目錄> --project-name <名稱>`
+   取得或重用本機 `project_id`。
+2. 使用該 ID 透過 `lattice_task_submit` 提交使用者真正要求的工作。這一步才會
+   由原生 Runtime 核對 Git 並登記至 PostgreSQL；已有任務時應延續，勿重複送件。
+3. `graphify-refresh --state <安裝目錄> --project-id <同一ID> --task-ref <任務回傳值>` 分析該專案。
+4. 確認 `operation_evidence.status=PERSISTED`，再用相同 ID、回傳的 commit
+   及 `task_ref` 呼叫 `lattice_code_relations` 讀回結果，並用 `lattice_graph_usage` 核對使用紀錄。
+
+命令會核對正式 Registry 中的專案位置；不接受只修改本機 locator 的替代來源。
+每個來源有獨立圖譜工作目錄與收據選擇，原本封存的安裝來源設定不變。
+全域 Codex 規則會提供本機實際命令位置，並保留原有啟動規則。
+
+此流程要求已提交、乾淨且有分支的 Git 專案；不得為分析而擅自清除或提交使用者
+變更。Graphify 分析失敗時應如實回報，不能用範例圖譜代替客戶專案結果。
+非預設專案搬移位置或還原到另一目錄後，舊圖譜可能須重新分析；目前不承諾
+所有專案的歷史圖譜都能直接在新位置讀回。正式工作事實仍由 PostgreSQL 保存。
 The Runtime verifies the complete record-ID/content-digest set against that receipt,
 then verifies every returned record's content and membership before discarding the
 internal proof. This establishes returned-record integrity, not exhaustive recall or
@@ -159,7 +194,7 @@ Git 系統設定、使用者設定及憑證。每個檔案都有雜湊與大小�
 
 ```text
 python -I -B -S scripts/lattice-bundle.py supply-node --node <全新Node供應目錄>
-python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄> --node <Node供應目錄> --archive <官方ubuntu-26.04.1-wsl-amd64.wsl>
+python -I -B -S scripts/lattice-bundle.py build --bundle <全新封裝目錄> --runtime <latticed.exe> --runtime-sha256 <可信摘要> --postgres <PostgreSQL軟體根目錄> --python <CPython3.12根目錄> --git <Git軟體根目錄> --graphify <已核對Graphify目錄> --node <Node供應目錄> --archive <官方ubuntu-26.04.1-wsl-amd64.wsl> --vc-redist <正式VS2022的Microsoft.VC143.CRT目錄> --vc-license <原始Microsoft授權docx> --vc-redist-list <原始Redist.txt>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py verify --bundle <封裝目錄> --sha256 <bundle.json可信摘要>
 <封裝目錄>/python/python.exe -I -B -S <封裝目錄>/bin/lattice-bundle.py install --bundle <封裝目錄> --sha256 <bundle.json可信摘要> --state <封裝外的全新私有目錄> --graph-source <封裝外的客戶Git專案> --wsl <已核驗wsl.exe>
 ```

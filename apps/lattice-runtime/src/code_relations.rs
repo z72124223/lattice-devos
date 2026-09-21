@@ -107,14 +107,16 @@ pub struct CodeRelationsArguments {
     pub(crate) commit: String,
     pub(crate) query: String,
     pub(crate) limit: i32,
+    pub(crate) task_ref: Option<String>,
 }
 
 impl CodeRelationsArguments {
     pub(crate) fn from_value(value: Option<&Value>) -> Option<Self> {
         let o = value?.as_object()?;
-        if o.len() != 4
-            || o.keys()
-                .any(|k| !["project_id", "commit", "query", "limit"].contains(&k.as_str()))
+        if !(4..=5).contains(&o.len())
+            || o.keys().any(|k| {
+                !["project_id", "commit", "query", "limit", "task_ref"].contains(&k.as_str())
+            })
         {
             return None;
         }
@@ -140,8 +142,49 @@ impl CodeRelationsArguments {
             commit: commit.to_owned(),
             query: query.to_owned(),
             limit,
+            task_ref: optional_task_ref(o.get("task_ref"))?,
         })
     }
+}
+
+/// Selects server-observed usage; task/project authority must be checked in PostgreSQL.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GraphUsageArguments {
+    pub(crate) project_id: String,
+    pub(crate) task_ref: Option<String>,
+}
+
+impl GraphUsageArguments {
+    pub(crate) fn from_value(value: Option<&Value>) -> Option<Self> {
+        let o = value?.as_object()?;
+        if !(1..=2).contains(&o.len())
+            || o.keys()
+                .any(|k| !["project_id", "task_ref"].contains(&k.as_str()))
+        {
+            return None;
+        }
+        let project_id = o.get("project_id")?.as_str()?;
+        ProjectId::new(project_id).ok()?;
+        Some(Self {
+            project_id: project_id.to_owned(),
+            task_ref: optional_task_ref(o.get("task_ref"))?,
+        })
+    }
+}
+
+fn optional_task_ref(value: Option<&Value>) -> Option<Option<String>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    let task_ref = value.as_str()?;
+    if task_ref.len() != 64
+        || !task_ref
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return None;
+    }
+    Some(Some(task_ref.to_owned()))
 }
 
 pub(crate) fn schema() -> Value {
@@ -149,12 +192,91 @@ pub(crate) fn schema() -> Value {
         "project_id":{"type":"string","minLength":2,"maxLength":64,"pattern":"^[a-z0-9][a-z0-9._-]{1,63}$"},
         "commit":{"type":"string","pattern":"^([0-9a-f]{40}|[0-9a-f]{64})$"},
         "query":{"type":"string","minLength":1,"maxLength":128,"description":"Literal case-insensitive substring of subject, object, relation or source path."},
-        "limit":{"type":"integer","minimum":1,"maximum":32}}})
+        "limit":{"type":"integer","minimum":1,"maximum":32},
+        "task_ref":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$","description":"Optional task association; Runtime verifies the task belongs to project_id."}}})
+}
+
+pub(crate) fn graph_usage_schema() -> Value {
+    json!({"type":"object","additionalProperties":false,"required":["project_id"],"properties":{
+        "project_id":{"type":"string","minLength":2,"maxLength":64,"pattern":"^[a-z0-9][a-z0-9._-]{1,63}$"},
+        "task_ref":{"type":"string","minLength":64,"maxLength":64,"pattern":"^[0-9a-f]{64}$","description":"Optional task filter; Runtime verifies the task belongs to project_id."}}})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn graph_selectors_validate_optional_task_ref_without_accepting_authority_fields() {
+        let relations =
+            json!({"project_id":"customer-test","commit":"a".repeat(40),"query":"name","limit":1});
+        let usage = json!({"project_id":"customer-test"});
+        assert_eq!(
+            CodeRelationsArguments::from_value(Some(&relations))
+                .unwrap()
+                .task_ref,
+            None
+        );
+        assert_eq!(
+            GraphUsageArguments::from_value(Some(&usage))
+                .unwrap()
+                .task_ref,
+            None
+        );
+        for task_ref in [json!("0123456789abcdef".repeat(4)), json!("0".repeat(64))] {
+            let mut r = relations.clone();
+            let mut u = usage.clone();
+            r["task_ref"] = task_ref.clone();
+            u["task_ref"] = task_ref.clone();
+            assert_eq!(
+                CodeRelationsArguments::from_value(Some(&r))
+                    .unwrap()
+                    .task_ref
+                    .as_deref(),
+                task_ref.as_str()
+            );
+            let parsed = GraphUsageArguments::from_value(Some(&u)).unwrap();
+            assert_eq!(parsed.task_ref.as_deref(), task_ref.as_str());
+            assert_eq!(parsed.project_id, "customer-test");
+        }
+        for task_ref in [
+            Value::Null,
+            json!(1),
+            json!("A".repeat(64)),
+            json!("g".repeat(64)),
+            json!("a".repeat(63)),
+            json!("a".repeat(65)),
+            json!(" a".repeat(32)),
+        ] {
+            let mut r = relations.clone();
+            let mut u = usage.clone();
+            r["task_ref"] = task_ref.clone();
+            u["task_ref"] = task_ref;
+            assert!(CodeRelationsArguments::from_value(Some(&r)).is_none());
+            assert!(GraphUsageArguments::from_value(Some(&u)).is_none());
+        }
+        for value in [
+            Value::Null,
+            json!([]),
+            json!({}),
+            json!({"task_ref":"a".repeat(64)}),
+            json!({"project_id":"../other"}),
+            json!({"project_id":"customer-test","source_root":"C:/other"}),
+            json!({"project_id":"customer-test","task_ref":"a".repeat(64),"verified":true}),
+        ] {
+            assert!(
+                GraphUsageArguments::from_value(Some(&value)).is_none(),
+                "{value}"
+            );
+        }
+        assert!(GraphUsageArguments::from_value(None).is_none());
+        assert_eq!(
+            schema()["required"],
+            json!(["project_id", "commit", "query", "limit"])
+        );
+        assert_eq!(graph_usage_schema()["required"], json!(["project_id"]));
+        assert_eq!(graph_usage_schema()["additionalProperties"], false);
+    }
+
     #[test]
     fn code_relations_checks_real_record_content_membership_and_proof() {
         let fixture: Value =

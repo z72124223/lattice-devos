@@ -4,9 +4,81 @@
 把下面這段話交給 Codex，它負責查環境、準備依賴、執行安裝和驗收。
 你只需處理 Windows 授權、必要的重新開機，以及選擇要管理的專案。
 
-**目前是協助安裝入口，不是保證任何新電腦都可完成的一鍵安裝包。**
-v2.0.0 發布頁提供 Runtime 與校驗碼，尚未提供完整已核驗的 Graphify payload。
-若你的電腦沒有該依賴，Codex 應先確認其供應來源，避免先裝大量元件卻無法完成。
+## 單一 EXE 安裝候選包
+
+下載 [rc.7 完整安裝包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)
+中的 `LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe`（約 607 MB），直接雙擊。
+先安裝 Codex 並登入自己的帳號；完成後重開 Codex。首次 WSL 啟用可能需要
+Windows 授權與重開機，重開後再雙擊同一檔案。一般使用者不需編譯、尋找依賴或輸入摘要。
+
+給協助安裝的 Codex：下載此固定版本後核對 SHA-256
+`563da24e170fedda5362b3643154684ac26cd5bea58e38b3fe4be35aea44613e`。
+保持互動提示，讓使用者處理 Windows 授權、設定衝突與重複項目的選擇。
+完整安裝結果見 `%LOCALAPPDATA%/LATTICE/sfx-last-result.json` 的本次
+`setup_exit_code`，不能只看外層 EXE 的退出碼；再核對 `one-click-report.json`。
+安裝完成後從新的 Codex 連線實際讀取 `lattice_runtime_status`。
+
+rc.7 新增 `lattice_graph_usage(project_id, task_ref)`，讀取 Runtime 自動記錄的分析、重用與查詢次數。
+呼叫 `lattice_code_relations` 或 `graphify-refresh` 時傳入正式 `task_ref` 才會綁定任務；
+沒有觀測紀錄時顯示 `UNKNOWN`，不代表從未使用過 Graphify。詳見
+[執行方式與實際驗收](docs/graphify-execution-evidence.md#7-rc7-實際交付驗收2026-09-21)。
+
+**rc.7 是候選版。** [獨立 Windows Server 2025 完整 EXE 驗收](https://github.com/z72124223/lattice-devos/actions/runs/35595328948)
+約 6 分 15 秒通過：三核心、6 筆圖譜與 MCP 讀回、Runtime／PostgreSQL 重啟、
+全域規則、偏好及實際 app-local DLL 載入。先前版本的同帳號單專案還原另已保留舊任務、
+圖譜與固定元件。普通 Windows 10/11 首次 WSL 啟用／UAC／重開機與 Codex Desktop
+登入仍待真機驗收；非預設專案搬移或還原後的舊圖譜可能需要重新分析。
+依賴已包含於 EXE；以下說明原始碼資料夾入口及進階手動流程。
+
+修正後的 `Install-LATTICE.cmd` 會先檢查完整 bundle、Graphify、WSL 啟動器與
+檔案摘要，再建立專用 Runtime。內含 Python、Git、Node、PostgreSQL 與固定
+Graphify 依賴，不要求使用者另外安裝這些命令到全域 PATH。
+
+一般使用者解壓後雙擊入口；不指定專案時會建立專用的歡迎範例：
+
+```text
+Install-LATTICE.cmd
+Install-LATTICE.cmd <已提交的Git專案> <WSL啟動器>
+```
+
+報告會寫到 `%LOCALAPPDATA%\\LATTICE\\one-click-report.json`。這個入口不會下載
+未固定版本的依賴，也不會覆寫既有 Runtime 或刪除使用者資料。
+安裝成功後會自動把 LATTICE MCP 寫入使用者的 Codex 設定，增量加入全域
+`AGENTS.md` 啟動規則（已有等效規則就沿用）。專用歡迎範例只引用全域規則；
+指定既有專案時不會改寫其檔案或代替使用者提交變更。原有 MCP 與權限保留。
+安裝後的 MCP 使用本機保存的依賴，不依賴下載包。資料庫停止後，下次 MCP
+啟動會先核驗並啟動原有專用資料庫；不重新初始化或遷移資料。
+首次新安裝會實際停止該資料庫，再從 MCP 讀回任務與圖譜；重新執行既有安裝
+不會為此中斷其他連線。完整依賴核驗可能較慢，專用 MCP 啟動期限設為 600 秒。
+不指定專案時驗收的是歡迎範例。之後在 Codex 開啟自己的 Git 專案並提出工作要求，
+全域規則會引導本機登記、正式任務提交與依專案 ID 分析；各專案圖譜及收據隔離。
+未登記的專案會被拒絕分析，未提交變更會保留；不因全域規則存在就宣稱圖譜已建立。
+
+重複檢查涵蓋本機全域技能、規則、工作流程與插件檔案。完全相同的 MCP
+設定或技能內容可逐項選擇「保留」或「備份後停用」，至少保留一份啟用項。
+名稱相似、未知插件格式與原生排程只提示人工確認，不猜測修改方式。
+
+安裝器也會產生不含秘密與機器絕對路徑的 `codex-portable-profile.json`，用來
+重建可攜式偏好；不會搬移登入身份、token、密碼或 DPAPI。若下載包附帶
+`codex-preferences.json`，可套用其中模型及推理等有限偏好；已存在不同偏好
+時必須由使用者選擇，不移植安全政策、自訂 provider 或其他帳戶的外掛資格。
+同時會產生 `required-environment.json`，列出 LATTICE 實際需要的固定依賴、版本、
+WSL 映像、Graphify 與必要環境鍵；朋友電腦會依此比對，不會因缺少你已安裝的
+必要元件而在執行到一半才失敗。
+
+Graphify 的公開 wheel 可由維護者用以下入口取得並驗證；完整執行仍需要
+下一段列出的固定 WSL 映像與相依套件：
+
+```text
+python scripts/lattice-graphify-supply.py --output <全新Graphify供應目錄>
+```
+
+Ubuntu 26.04.1 WSL 映像也有 Canonical 公開來源與固定摘要，可由維護者用以下
+入口下載；下載約 400 MB，完成後才能建立真正可攜的三核心 bundle：
+
+```text
+python scripts/lattice-wsl-supply.py --output <全新目錄>\\ubuntu-26.04.1-wsl-amd64.wsl
+```
 
 ## 複製給 Codex
 
@@ -29,7 +101,10 @@ Hermes 已永久退役，不得安裝或啟用。不得改寫產品程式或放�
 
 ## 給執行安裝的 Codex
 
-### 先核對，不依賴作者電腦
+### 進階手動流程：先核對，不依賴作者電腦
+
+以下保留 v2.0.0 個別 Runtime 的手動組裝步驟；選用上方 rc.7 完整 EXE 時，
+依其發布資產及驗收範圍操作，不將舊版 Runtime 或腳本混入新安裝包。
 
 1. 讀取本文件、[客戶 Runtime 操作](docs/customer-runtime.md)及所用腳本的 `--help`。
    第一次安裝尚無 LATTICE MCP 時，記為未安裝並繼續環境檢查；不能假造 Runtime 狀態。
