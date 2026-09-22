@@ -27,7 +27,9 @@ test("public GitHub surface reflects the current local product", async () => {
 
   const staleClaims =
     /COMPLETE \/ DELIVERY_PENDING|未推送、未開 PR|未合併產品分支|CURRENT TASK-\d+|目前步驟|GitHub 有 \d+ 個非預設公開分支|CI 的 push 觸發仍指向不存在的 `main`|\b[0-9a-f]{8,40}\b/u;
-  assert.doesNotMatch(readme, staleClaims);
+  // Immutable evidence links can contain commit hashes, run IDs, and dates.
+  // Keep the stale-status check on prose without rejecting those link targets.
+  assert.doesNotMatch(readme.replace(/\]\(https?:\/\/[^)\s]+\)/gu, "]"), staleClaims);
   assert.doesNotMatch(handoff, staleClaims);
   assert.doesNotMatch(plans, staleClaims);
   assert.ok(Buffer.byteLength(handoff, "utf8") < 4_096);
@@ -41,7 +43,8 @@ test("relative README links resolve inside the repository", async () => {
     .filter((target) => !/^(?:https?:|#)/u.test(target));
 
   for (const target of links) {
-    const resolved = path.resolve(root, decodeURIComponent(target));
+    // A Markdown heading fragment is not part of the filesystem path.
+    const resolved = path.resolve(root, decodeURIComponent(target.split("#", 1)[0]));
     assert.ok(resolved.startsWith(root + path.sep), `link escapes repository: ${target}`);
     await stat(resolved);
   }

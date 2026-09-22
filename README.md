@@ -1,4 +1,4 @@
-# LATTICE — Codex 的三核心工作後台
+# LATTICE — Codex App 的三核心後台
 
 **讓 Codex 的工作有正式任務、可查證的紀錄，以及程式碼關係圖譜。**
 
@@ -38,6 +38,7 @@ LATTICE 在背景提供資料與工具，不另建通用 AI 代理迴圈，也�
 
 **Hermes 反思功能已永久退役**，沒有登入、設定或命令可以重新啟用。
 主產品使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`。
+有效值只有 `CORE_ONLY` 和 `GRAPHIFY`；舊名稱 `FULL_CHAIN`、`GRAPHIFY_HERMES` 已拒絕，請勿沿用舊版設定。
 
 ## 下載與安裝
 
@@ -89,7 +90,7 @@ Runtime 在受觀測操作開始與結束時寫入 PostgreSQL，並記錄實際�
 `CORE_ONLY` 也不是所有圖譜入口的全域禁用開關；尚未有完整任務全程零 Graphify 呼叫的驗收證據。
 
 健康檢查、使用紀錄與工作完成是不同證據。紀錄能證明受觀測的呼叫及結果，不能證明 AI 理解或採用了資料。
-原始碼位置、計數方式及測試範圍見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
+原始碼位置、計數方式及測試範圍見 [Graphify 固定版本查核入口](docs/graphify-execution-evidence.md#固定版本查核入口)。
 
 ## 已驗證的範圍
 
@@ -141,5 +142,5 @@ npm.cmd run control:project -- read --project-name "My Project"
 
 ## 授權
 
-目前尚未選定專案 `LICENSE`。GitHub 公開可見與可下載不等於開源授權；第三方依賴保留各自的授權與散布文件。
+目前尚未選定 `LICENSE`。GitHub 公開可見性與 `git clone` 功能不等於開源授權；第三方依賴保留各自的授權與散布文件。
 目前提供本機使用方式，沒有公開雲端服務。

@@ -1,10 +1,10 @@
 ---
 module_id: latticed
 name: LATTICE Normal Composition Root
-version: 3.9
+version: 3.10
 status: active
 owner: LATTICE maintainers
-last_reviewed: 2026-08-31
+last_reviewed: 2026-09-22
 ---
 
 ## Mission
@@ -65,7 +65,7 @@ bootstrap gate while keeping normal MCP startup verify-only.
   read-only `runtime-health` and `receipt-state` commands. They accept the same
   fixed marker-owned PostgreSQL binding as Delivery Status. `runtime-health`
   reports control-core readiness, PostgreSQL connection availability, and the
-  configured independent Graphify/Hermes mode; it always keeps
+  configured Graphify mode; Hermes is retired. It always keeps
   `delivery_receipt=NOT_INSPECTED`. `receipt-state` reports only the verified
   durable receipt projection. Neither command creates or reinterprets a
   receipt, and neither alters the seven-tool MCP surface.
@@ -84,11 +84,8 @@ bootstrap gate while keeping normal MCP startup verify-only.
   Submitting an objective grants no execution authority. In managed `ACTIVE`
   mode the supervisor may dispatch asynchronously only after the independent
   task/spec/budget-bound gate; in `DISABLED` mode general intake is create-only.
-- Through canonical `latticed --hermes-launch`, expose one exact
-  process-start-only Hermes lifecycle entry. It accepts no additional CLI
-  arguments, reuses the production Hermes configuration and runner from the
-  full-chain composition, reports only fixed redacted failures, grants no MCP
-  or task authority, and owns the runner until bounded shutdown.
+- Hermes activation, including `latticed --hermes-launch`, is retired and
+  rejected. Historical launch contracts below are not current setup instructions.
 - Through canonical `latticed --graphify-runtime-preflight`, expose one
   read-only identity check for a separately configured, pinned Graphify
   runtime. It never starts Graphify, PostgreSQL, Hermes, or a delivery run;
@@ -99,24 +96,15 @@ bootstrap gate while keeping normal MCP startup verify-only.
   clean Git root at its exact HEAD and persists or replays only the matching
   PostgreSQL Graphify receipt. It creates no delivery receipt, does not
   dispatch Codex or mutate Git, and grants no Hermes authority.
-- Through canonical no-argument `latticed`, accept only process-owned
-  `LATTICE_HERMES_MODE=TASK_ONLY|PRODUCTION`. The default and `TASK_ONLY`
-  preserve the task-only composition. `PRODUCTION` configures one lazy Hermes
-  owner: only `lattice_delivery_run` may activate it, before writer effects;
-  Delivery Status and both Task tools perform zero Hermes activation. MCP EOF
-  explicitly reaps an activated runner, and teardown ambiguity cannot exit 0.
 - Through canonical `latticed`, default the process-owned
-  `LATTICE_RUNTIME_INTEGRATION` setting to `CORE_ONLY`. `GRAPHIFY` adds only
-  the independently verifiable Graphify projection. `GRAPHIFY_HERMES` adds
-  Hermes reflection after Graphify; legacy `FULL_CHAIN` remains its alias for
-  compatibility. A Graphify or Hermes failure is reported as that component's
-  bounded `DEGRADED` status and error code; it never erases or replaces a
-  verified PostgreSQL delivery receipt.
-- Production Hermes configuration requires exactly the twelve executed-input
-  settings for preparation, runtime, containment, API bearer, Codex launcher
-  and home, broker run root, and deadline. Legacy
-  `LATTICE_HERMES_BROKER_HELPER{,_SHA256}` values are ignored and must not be
-  read, validated, echoed, or allowed to affect launch classification.
+  `LATTICE_RUNTIME_INTEGRATION` setting to `CORE_ONLY`. The only other valid
+  value is `GRAPHIFY`, selected by the main product. `FULL_CHAIN` and
+  `GRAPHIFY_HERMES` are rejected with a Configuration error, not aliases.
+  Graphify degradation never erases or replaces verified PostgreSQL facts.
+  This setting does not enforce zero Graphify calls throughout a task: explicit
+  relationship queries and refresh use separate entrypoints. Their observed
+  usage is recorded independently of health and task completion; see
+  [source and test evidence](../../graphify-execution-evidence.md).
 - For executable delivery/canary work, select every project, snapshot,
   repository/base, scope, verification, capability, budget, approval, prompt,
   workspace, and downstream binding from process-start composition
@@ -445,6 +433,9 @@ CLI paths from becoming a second official workspace/adapter entry or being
 misrecorded as an MCP tunnel actor. The four canonical `latticed` tools and
 their schemas are unchanged.
 
+The versioned paragraphs below preserve historical design changes. Their Hermes
+and four-core descriptions are superseded by the current three-core rules above.
+
 Version 1.5 adds an exact standalone Hermes process-lifecycle flag to canonical
 `latticed`. It changes neither the four-tool MCP contract nor durable task
 truth, provider credentials, dependency direction, or orchestration order.
@@ -535,8 +526,7 @@ add an MCP authority or protected-action permission.
 | Delivery acceptance | official Codex turn, isolated scope/test/commit, durable outcome and separate restart/status replay | Engineering | yes |
 | Failure closure | startup/framing/adapter/timeout/unknown-effect cases never report success | Engineering | yes |
 | Historical terminal status | cross-binary Failed replay, tamper rejection, exact task-ref check, and zero durable mutation | Engineering and security review | yes |
-| Standalone Hermes lifecycle | exact CLI routing, runner liveness, explicit bounded teardown, redacted errors, and local live-start evidence | Engineering and security review | yes |
-| Hermes executed-input closure | exact twelve-setting preflight, ignored legacy-helper sentinels, v2 adapter receipt and direct launcher plan | Engineering and security review | yes |
+| Retired integration modes | parser accepts only CORE_ONLY/GRAPHIFY and rejects FULL_CHAIN/GRAPHIFY_HERMES; retired Hermes CLI cannot launch | Engineering | yes |
 
 ## Change Policy
 
@@ -550,6 +540,7 @@ constitution cannot be weakened merely to excuse implementation drift.
 
 | Version | Date | Decision reference | Summary | Approver |
 |---|---|---|---|---|
+| 3.10 | 2026-09-22 | Current three-core product direction | Correct obsolete integration aliases and Hermes activation requirements; retain historical descriptions as history | User-authorized documentation synchronization |
 | 3.9 | 2026-08-31 | ADR-029 managed-foreman deployment repair | Serialize the exact Store-v8 runtime successor, Writer-v5 and Foreman-v1 rebinds, stopped failure retry, and fresh-runtime verification without widening MCP startup | User-authorized deployment repair |
 | 3.7 | 2026-08-27 | SPEC-011 durable-core review, ADR-028 | Add supervisor-owned durable intake preparation, immutable pre-successor source intent, unpromoted v4 blocker replay, and process-lifetime effect/Git containment | Delegated product owner |
 | 3.6 | 2026-08-27 | SPEC-011 v1.2, ADR-028 | Require replay-verified unique ACTIVE and CONTINUE Foreman Runtime state before formal managed identity, task claim, or provider dispatch | Delegated product owner |

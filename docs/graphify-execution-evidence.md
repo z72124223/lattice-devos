@@ -2,7 +2,28 @@
 
 本頁回答：要求 Codex 使用 LATTICE，是否代表每個任務一定執行 Graphify？**目前沒有這項保證。**
 
-查核日期：2026-09-20。以下原碼與行號固定於
+## 固定版本查核入口
+
+2026-09-22 重新核對公開預設分支。使用紀錄的實作提交為
+[`499b30a141be5cb7e1e7d320f000f2de5c42e23b`](https://github.com/z72124223/lattice-devos/commit/499b30a141be5cb7e1e7d320f000f2de5c42e23b)。
+下表固定於已包含該實作的 `198f38fa3bf9c3e4acd904b512aa45157ecceb94`，不需開啟 GitHub 資料夾列表或依靠搜尋索引。
+該版 [README 原文](https://raw.githubusercontent.com/z72124223/lattice-devos/198f38fa3bf9c3e4acd904b512aa45157ecceb94/README.md) 已有「rc.7 新增：Graphify 使用紀錄」，主產品模式是 `GRAPHIFY`。
+
+| 查核項目 | 固定原始碼與行號 | 可證明的範圍 |
+|---|---|---|
+| 模式名稱 | [composition.rs 5131–5147](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/apps/lattice-runtime/src/composition.rs#L5131-L5147) | 正式組裝解析只接受 `CORE_ONLY`／`GRAPHIFY`；`FULL_CHAIN` 不是別名，會回 Configuration 錯誤 |
+| 使用收據 | [graph_usage.rs 20–78](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/apps/lattice-runtime/src/graph_usage.rs#L20-L78) | 先保存 START，再以真實函式計數差值保存 FINISH、筆數、大小及耗時 |
+| 真正操作路徑 | [關係查詢 9385–9538](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/apps/lattice-runtime/src/composition.rs#L9385-L9538)、[更新／重用 12251–12345](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/apps/lattice-runtime/src/composition.rs#L12251-L12345) | 收據包住實際關係查詢與圖譜更新操作；不是 runtime-health 路徑 |
+| 真函式入口計數 | [分析 ports.rs 44–75](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/crates/lattice-graphify-adapter/src/ports.rs#L44-L75)、[查詢 control_product.rs 168–224](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/crates/lattice-postgres-store/src/control_product.rs#L168-L224) | 在真正函式入口累加，不是靠回傳文字推測；進入函式不等於分析成功 |
+| 分析入口測試 | [process.rs 1946–2027](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/crates/lattice-graphify-adapter/src/process.rs#L1946-L2027) | 實際呼叫 analyze，驗證失敗呼叫也計數、執行緒互不混計；此測試不啟動分析子程序 |
+| 查詢與持久化測試 | [composition.rs 18558–18730](https://github.com/z72124223/lattice-devos/blob/198f38fa3bf9c3e4acd904b512aa45157ecceb94/apps/lattice-runtime/src/composition.rs#L18558-L18730) | 合成圖譜、真查詢函式與 SQL，驗證跳過入口 0、入口拒絕 1、成功 SQL 1；需指定隔離 PostgreSQL 的 Windows ignored 測試，不會由一般測試指令自動執行 |
+
+**沒有查到「CORE_ONLY 下執行完整真任務，Graphify 全程零呼叫」的測試。**
+上表資料庫測試的 `CORE_ONLY` 是紀錄欄位，`task_ref=null`；不能替代完整任務的驗收。
+本次是原始碼與測試範圍查核，沒有重跑 Graphify 分析；先前實際執行結果與公開附件在第 6、7 節。
+若 blob 頁被工具擋住，可用對應的 `raw.githubusercontent.com/z72124223/lattice-devos/<完整 commit>/<檔案路徑>` 讀原文。
+
+以下第 1–5 節保留 2026-09-20 的歷史查核，原碼與行號固定於
 [`b786408fb0b9e3772596dca4120d6bf58d043f53`](https://github.com/z72124223/lattice-devos/tree/b786408fb0b9e3772596dca4120d6bf58d043f53)。
 這是包含 Windows 候選安裝程式的開發分支快照；不是宣稱預設分支、所有下載包或已安裝執行檔都具有相同內容。
 本次是原碼與既有測試內容查核，沒有新增或執行動態任務測試。發布本說明不代表功能修復或安裝候選版轉正式。
