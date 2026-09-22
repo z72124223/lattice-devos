@@ -1,130 +1,145 @@
-# LATTICE DevOS 2.0
+# LATTICE — Codex 的三核心工作後台
 
-LATTICE 是支援 **Codex App 的三核心後台**。使用者只操作 Codex App；
-LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
-獨立網頁平台、視覺工作樹／圖譜、聊天畫面及 Windows 桌面外殼已移除。
+**讓 Codex 的工作有正式任務、可查證的紀錄，以及程式碼關係圖譜。**
 
-## 讓 Codex 幫你安裝
+LATTICE 是為 **Codex App** 設計的本機工作後台。你在 Codex 裡提出需求、查看進度與核准操作；
+LATTICE 透過 MCP 提供任務與專案查詢，將正式工作、決策和驗證結果保存在 PostgreSQL，
+並用 Graphify 分析程式碼關係。重新連線後，可以用正式任務編號讀回既有狀態與證據。
 
-**[直接下載最新 Windows 安裝包：rc.7（607 MB）](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe)**
+[下載 Windows 安裝包](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe) · [安裝指南](INSTALL_WITH_CODEX.md) · [版本與驗收附件](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)
 
-Windows 使用者可下載 [rc.7 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)，
-雙擊後依畫面操作。它包含三核心、Python、Git、Node、專用 WSL 映像及必要的
-Microsoft 執行元件；Codex 需先用自己的帳號登入。
-rc.7 在獨立 Windows Server 2025 的完整安裝
-約 6 分 15 秒通過：三核心、任務／圖譜讀回、程式與資料庫重啟、Codex 全域規則與
-實際元件載入均成功。先前版本的同帳號單專案還原另已讀回舊任務與圖譜。
-普通 Windows 10/11 首次啟用 WSL、UAC／重開機與 Codex Desktop 登入仍待真機驗收，
-因此仍標示為候選版；非預設專案還原後的舊圖譜可能需要重新分析。
+> **目前版本（2026-09-22）**：三核心產品為 **2.0**；最新 Windows 完整安裝包為 **v2.0.1-rc.7 候選版**，約 **607 MB**。
+> 已通過獨立 Windows Server 2025 安裝驗收；普通 Windows 10／11 首次啟用 WSL、UAC／重開機及 Codex Desktop 登入仍待乾淨真機驗證。
 
-不熟悉技術設定，可以把下面這段交給自己的 Codex App：
+## LATTICE 能幫你做什麼？
 
-```text
-請按照 https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7
-協助我核對完整 EXE 的摘要、安裝 LATTICE 與內附依賴，保留我的設定並完成實際驗收。
-保留 Windows 授權及設定衝突的互動提示；任何未通過項目如實回報。
-```
+| 你想知道的事 | LATTICE 提供的能力 |
+|---|---|
+| 這個工作屬於哪個專案、目前做到哪裡？ | 正式任務身分、狀態，以及父子任務與相依關係查詢 |
+| 先前做過什麼決定，依據在哪裡？ | PostgreSQL 保存決策、來源與可讀回的工作紀錄 |
+| 修改這段程式可能影響哪些地方？ | Graphify 分析程式碼，再查詢已保存的關係圖譜 |
+| 這次任務到底有沒有查圖譜？ | Runtime 自動記錄受觀測的分析、重用與查詢，可按任務讀回次數、結果筆數及大小 |
+| 所謂「完成」有沒有實際驗證？ | 支援由 Runtime 執行指定 Node 測試、保存證據並匯入正式任務結果的本機驗證流程 |
 
-[完整 Codex 安裝入口](INSTALL_WITH_CODEX.md)包含官方依賴來源、現有安裝命令、
-重新連線及驗收要求。Windows 完整依賴封裝的驗收範圍見上述 rc.7 發布頁；舊下載包不代表
-已通過乾淨電腦的雙擊安裝測試。請依安裝文件核對版本與驗收狀態。
+任務完成狀態、測試通過、GitHub 合併、部署與真人驗收，各自需要對應證據；
+單一 `COMPLETED` 或健康檢查結果不能代替全部交付階段。
 
-## 三核心
+## 三核心如何分工？
 
 | 核心 | 責任 |
 |---|---|
-| LATTICE 控制 | 正式工作身分、關係、授權、驗收與可重播狀態 |
-| PostgreSQL | 唯一權威資料來源，保存工作、決策與證據 |
-| Graphify | 可重建的程式關係與影響查詢 |
+| **LATTICE 控制** | 正式工作身分、專案與任務關係、授權、決策、驗證結果及可重播狀態 |
+| **PostgreSQL** | 唯一權威資料來源，持久保存工作、決策與證據 |
+| **Graphify** | 從程式碼產生可重建的關係資料，供查詢呼叫關係與影響範圍 |
 
-Hermes 反思功能已自正式產品退休，沒有登入、設定或命令可以重新啟用它。
-主版本使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`。推理與檢查由 Codex 執行。
+**Codex App 是使用者唯一操作介面**，負責模型推理、執行工具、工作視窗、進度、核准與封存。
+LATTICE 在背景提供資料與工具，不另建通用 AI 代理迴圈，也沒有獨立網頁或桌面操作平台。
+工作樹關係及圖譜資料仍保存在後台。
 
-工作樹的上下層關係和程式圖譜的呼叫關係仍保存在後台。
-移除的是觀看介面，沒有刪除工作資料、驗收結果、程式分析或核心契約。
-Codex 負責推理、執行、工作視窗、進度顯示、核准及封存。
-LATTICE 不建立第二套通用代理迴圈或操作平台。
+**Hermes 反思功能已永久退役**，沒有登入、設定或命令可以重新啟用。
+主產品使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`。
 
-## Graphify 何時會執行？
+## 下載與安裝
 
-要求 Codex 使用 LATTICE、設定 `GRAPHIFY` 模式，以及每個任務一定使用圖譜，是不同的事。
-安裝程式的「全域掛鉤」是寫入 `AGENTS.md` 的工作指示；目前沒有「未查圖譜就拒收任務」的硬性關卡。
-`graphify-refresh` 產生或更新圖譜；`lattice_code_relations` 查詢 PostgreSQL 已保存的圖譜，
-不會在缺少分析時偷偷重建。任務提交與關係查詢是不同入口，不能只因提交成功就宣稱已使用 Graphify。
+**[直接下載 LATTICE rc.7 Windows x64 安裝包（607 MB）](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe)**
 
-`runtime-health`／`receipt-state` 的結果不能證明真正任務流程呼叫過或跳過 Graphify。
-已查核版本的關係查詢入口沒有 `CORE_ONLY` 模式攔截，也尚未找到「CORE_ONLY 下執行真正任務、
-以 Graphify 函式呼叫計數證明零次執行」的對應測試。
-固定版本、原碼行號、現有測試範圍與缺口見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
+1. 在自己的 Windows 電腦安裝 Codex App，並登入自己的帳號。
+2. 下載並雙擊 `LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe`。
+3. 依畫面處理 Windows 授權、必要的重開機，以及設定衝突選擇；需要重開機時，之後再雙擊同一檔案。
+4. 安裝完成後重新開啟 Codex，依[安裝指南](INSTALL_WITH_CODEX.md)實際讀回 Runtime、任務與圖譜結果。
 
-rc.7 另提供 `lattice_graph_usage(project_id, task_ref)`，讀回 Runtime 自動寫入 PostgreSQL 的
-分析、重用及查詢紀錄。`graphify-refresh --project-id … --task-ref …` 與
-`lattice_code_relations` 的 `task_ref` 可將紀錄綁定正式任務；沒綁定就列為未綁定，
-沒有紀錄顯示 `UNKNOWN`，不能當成零次。這不會強迫每項任務使用 Graphify，
-也不證明 AI 已理解結果。舊安裝須先更新 Runtime 並執行資料庫升級；已有下載包不會因此自動更新。
+安裝包包含三核心，以及固定版本的 **Python、Git、Node、PostgreSQL、Graphify 依賴、專用 Ubuntu WSL 映像和必要 Microsoft 執行元件**。
+一般使用者不需自行編譯或另外尋找這些依賴；Windows 的 WSL／虛擬化條件仍須符合要求。
+沒有指定專案時，安裝器會用專用歡迎範例驗收；自己的專案需另行登記及分析。
 
-## 使用方式
+安裝器也會設定 Codex 的 LATTICE MCP 連線與全域工作指示，並檢查既有技能、工作流程和 MCP／插件可能重複的項目。
+可處理的重複項目須使用者同意才備份停用；未知格式或僅名稱相似的項目只提示確認。
+可攜偏好與必要環境設定會保留適用項目，**不複製登入身份、token、密碼或帳戶資格**；換電腦仍需登入自己的 Codex。
 
-2.0 為三核心正式版，移除舊版 Hermes 啟動命令與四核心模式，屬不相容變更。
-目前支援已配置依賴的 Windows 本機環境；新機安裝與備份／還原步驟見
-[本機 Runtime 安裝說明](docs/customer-runtime.md)。完整依賴的一鍵可攜封裝仍是候選功能，
-不包含在本次正式版保證內。
+不熟悉技術設定，可以把這段交給自己的 Codex：
 
-在 Codex App 透過已設定的 LATTICE MCP 連線使用 latticed。
-新工作先呼叫 lattice_runtime_status，再讀取或登記正式工作。
-單純讀取狀態不會自行呼叫模型；就緒狀態也不代表任務已驗收完成。
+```text
+請依照 https://github.com/z72124223/lattice-devos/blob/product/lattice-control-mvp/INSTALL_WITH_CODEX.md
+協助安裝目前的 LATTICE 三核心完整候選包，先核對版本、摘要與電腦環境。
+保留我的既有設定，讓我處理 Windows 授權、重開機與設定衝突選擇。
+完成後實測任務、Graphify 圖譜及重新連線讀回；未通過的項目請如實回報。
+```
 
-Codex 執行工作後，可用 `--local-result-import` 提交可驗證的本機交付：
-Runtime 實際執行指定的 Node 測試、保存證據，再由正式工作帳本記錄完成。
-重新連線後用 `lattice_task_status` 讀回結果。此流程不會另啟模型；
-舊的受控模型示範流程及歷史失敗收據不能替代這項交付驗收。
+安裝包的固定來源、SHA-256、進階手動安裝，以及備份／還原方式，見[安裝指南](INSTALL_WITH_CODEX.md)與[Runtime 操作文件](docs/customer-runtime.md)。
 
-升級前保留設定與資料庫備份。移除 LATTICE 設定中的 `LATTICE_HERMES_*` 欄位，
-使用 `GRAPHIFY` 模式，並明確設定 `LATTICE_DELIVERY_LAUNCHER`；
-更新執行檔後讓 Codex 重新連線，既有程序不會自動換成新版本。
+## rc.7 新增：Graphify 使用紀錄
 
-既有本機相容 API 仍供後台工具使用，可用以下命令啟動：
+現在可以查詢這個任務**已被 Runtime 記錄的圖譜分析與查詢次數**，並讀回結果大小及耗時。
+
+| 操作 | 實際行為 |
+|---|---|
+| `graphify-refresh` | 產生新分析或重用符合條件的既有分析 |
+| `lattice_code_relations` | 查詢 PostgreSQL 已保存的圖譜；不自動建立缺少的分析 |
+| `lattice_graph_usage` | 讀回已記錄的分析、重用、查詢、失敗、結果筆數、位元組與耗時 |
+
+Runtime 在受觀測操作開始與結束時寫入 PostgreSQL，並記錄實際分析／查詢函式的進入次數。
+將正式 `task_ref` 傳給 refresh 或關係查詢，即可綁定任務；省略時記為未綁定。
+
+- **`UNKNOWN`**：沒有觀測紀錄，不能當成從未使用過 Graphify。
+- **`INCOMPLETE`**：有開始但沒有結束紀錄，統計不完整。
+- **`OBSERVED_CALLS_ONLY`**：已記錄的呼叫完成；不代表整個 Codex 對話或所有外部程式都被監測。
+
+`lattice_task_submit` 與 `lattice_task_status` 不會因為管理任務就自動查圖譜。
+安裝時的「全域掛鉤」是寫入 `AGENTS.md` 的工作指示，**目前沒有「未查 Graphify 就拒收任務」的硬性關卡**。
+`CORE_ONLY` 也不是所有圖譜入口的全域禁用開關；尚未有完整任務全程零 Graphify 呼叫的驗收證據。
+
+健康檢查、使用紀錄與工作完成是不同證據。紀錄能證明受觀測的呼叫及結果，不能證明 AI 理解或採用了資料。
+原始碼位置、計數方式及測試範圍見 [Graphify 執行方式與證據](docs/graphify-execution-evidence.md)。
+
+## 已驗證的範圍
+
+| 驗收 | 實際結果與證據 |
+|---|---|
+| 完整 EXE 獨立安裝 | Windows Server 2025 約 **6 分 15 秒**通過；三核心、6 筆圖譜／MCP 讀回、Runtime／PostgreSQL 重啟、全域規則、偏好與必要元件載入均通過。[安裝驗收](https://github.com/z72124223/lattice-devos/actions/runs/35595328948) |
+| 正式 Graphify 新分析 | 正式安裝啟動程式分析新 commit 約 **43.094 秒／9 筆**；原生流程另驗證新分析、重用、任務綁定查詢，以及 PostgreSQL 重啟後紀錄一致。[去敏證據](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/graphify-release-499b30a-acceptance-public-20260921.json) |
+| 備份與還原 | 先前版本已驗證同主機、同帳號的單專案還原；不擴稱跨帳號或多專案還原已通過。[歷史驗收附件](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.6) |
+| 原始碼檢查 | Windows 安裝測試、npm 驗證、Rust 格式、PostgreSQL 測試及指定範圍的嚴格 Clippy 通過。[程式驗證](https://github.com/z72124223/lattice-devos/actions/runs/35624848630) |
+
+普通 Windows 10／11 **首次 WSL 啟用、UAC／重開機與 Codex Desktop 登入**仍未完成乾淨真機驗收，完整安裝包因此保留候選版標示。
+非預設專案搬移或還原後，舊圖譜可能需要重新分析。曾中斷的測試紀錄仍保留，不因後續成功而抹除。
+
+PostgreSQL 故障時，正式工作不可用；Graphify 可獨立降級及修復。
+`PREPARED` 只代表配置已存在，不能當成分析或交付已成功。
+
+## 文件與維護
+
+- [安裝指南與必要環境](INSTALL_WITH_CODEX.md)
+- [Runtime 啟用、更新、備份與還原](docs/customer-runtime.md)
+- [Graphify 程式碼、行為及驗收證據](docs/graphify-execution-evidence.md)
+- [目前產品方向](AGENTS.md)與[工程協定](docs/contracts/ENGINEERING_PROTOCOL_V1.md)
+
+<details>
+<summary>從原始碼操作與既有本機 API</summary>
+
+Node.js 需要 24.15 或更新版本；Runtime 使用儲存庫固定的 Rust 工具鏈和 PostgreSQL。
 
 ```powershell
 npm.cmd ci --ignore-scripts
-npm.cmd run backend:start
+npm.cmd run control:test
+npm.cmd test
+npm.cmd run check
 ```
 
-只監聽 127.0.0.1:4317，不提供網頁。舊畫面網址回傳
-LATTICE_VISUAL_PLATFORM_REMOVED，提示從 Codex App 操作。
-啟動後台不會預先建立另一個聊天連線；已有工作必要的恢復流程保留。
-
-本機專案目錄和非權威安裝觀察保存在
-%LOCALAPPDATA%\LATTICE\control\lattice-control.db。
-這個 SQLite 檔案不是 PostgreSQL 正式工作的替代品，移除介面時仍保留。
-
-既有專案登記與讀回命令保留：
+既有本機 API 可用 `npm.cmd run backend:start` 啟動，只監聽 `127.0.0.1:4317`，不提供網頁。
+本機 locator 與非權威安裝觀察仍保存在 `%LOCALAPPDATA%\LATTICE\control\lattice-control.db`；
+正式任務與證據以 PostgreSQL 為準。
 
 ```powershell
 npm.cmd run control:project -- register --name "My Project" --path "C:\absolute\project"
 npm.cmd run control:project -- read --project-name "My Project"
 ```
 
-目錄登記只保存本機 locator；正式身分仍須由 Runtime 的 PostgreSQL
-Project Registry 綁定。既有 Codex MCP 設定與憑證不隨介面移除而更改。
+目錄登記後，正式專案身分仍須由 Runtime 的 PostgreSQL Project Registry 綁定。
+更新既有安裝前先備份設定與資料庫，依 Runtime 文件執行升級；舊 Codex 連線需重新連線才會使用新版本。
 
-## 驗證與限制
+</details>
 
-Node.js 需要 24.15 或更新版本；Runtime 使用儲存庫固定的 Rust 工具鏈和 PostgreSQL。
+## 授權
 
-```powershell
-npm.cmd run control:test
-npm.cmd test
-npm.cmd run check
-```
-
-PostgreSQL 故障時，正式工作不可用。Graphify 可以獨立降級及修復，不能拿其
-失敗或「就緒」狀態改寫正式工作結果。
-狀態查詢中的 PREPARED 只代表配置存在；Graphify 的完整身分檢查仍在
-實際分析時執行。測試通過只證明受測路徑；GitHub 推送、合併及發布另依使用者
-當次指示處理。
-
-現行產品方向以 [AGENTS.md](AGENTS.md) 為準；歷史文件與提交保留作追溯，
-其中的網頁、桌面安裝及截圖步驟不再是目前產品要求。
-
-目前沒有公開雲端服務。目前尚未選定 `LICENSE`；GitHub 的公開可見性與 `git clone` 功能不等於開源授權。
+目前尚未選定專案 `LICENSE`。GitHub 公開可見與可下載不等於開源授權；第三方依賴保留各自的授權與散布文件。
+目前提供本機使用方式，沒有公開雲端服務。

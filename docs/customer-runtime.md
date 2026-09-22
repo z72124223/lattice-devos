@@ -5,7 +5,8 @@
 
 `scripts/lattice-customer-runtime.py` 在客戶指定的新目錄建立獨立 PostgreSQL
 cluster、Runtime 身份及加密憑證，並把啟動器複製到安裝目錄。
-目前是可驗證的本機元件，**不是已完成的三核心下載包**。
+這個腳本是維護者使用的手動元件入口。一般使用者可下載
+[rc.7 三核心完整安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)，其驗收範圍見發布頁。
 它不讀作者的 Codex 設定、資料庫密碼、記憶或營運總部。
 
 ## 環境與安裝
