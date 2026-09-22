@@ -11,6 +11,10 @@ LATTICE 透過 MCP 提供任務與專案查詢，將正式工作、決策和驗�
 > **目前版本（2026-09-22）**：三核心產品為 **2.0**；最新 Windows 完整安裝包為 **v2.0.1-rc.7 候選版**，約 **607 MB**。
 > 已通過獨立 Windows Server 2025 安裝驗收；普通 Windows 10／11 首次啟用 WSL、UAC／重開機及 Codex Desktop 登入仍待乾淨真機驗證。
 
+> **閱讀版本**：目前產品文件在預設分支 [`product/lattice-control-mvp`](https://github.com/z72124223/lattice-devos/tree/product/lattice-control-mvp)。
+> 分支名稱沿用早期名稱；評估目前功能請核對本文、[產品規則](AGENTS.md)與[安裝指南](INSTALL_WITH_CODEX.md)的同一版本。
+> 若網頁摘要與本文不同，可直接讀取[目前 README 原文](https://raw.githubusercontent.com/z72124223/lattice-devos/product/lattice-control-mvp/README.md)，並用[提交紀錄](https://github.com/z72124223/lattice-devos/commits/product/lattice-control-mvp/README.md)核對日期與版本。
+
 ## LATTICE 能幫你做什麼？
 
 | 你想知道的事 | LATTICE 提供的能力 |
@@ -39,6 +43,31 @@ LATTICE 在背景提供資料與工具，不另建通用 AI 代理迴圈，也�
 **Hermes 反思功能已永久退役**，沒有登入、設定或命令可以重新啟用。
 主產品使用 `LATTICE_RUNTIME_INTEGRATION="GRAPHIFY"`。
 有效值只有 `CORE_ONLY` 和 `GRAPHIFY`；舊名稱 `FULL_CHAIN`、`GRAPHIFY_HERMES` 已拒絕，請勿沿用舊版設定。
+
+## 舊版說明與目前產品的差別
+
+早期的 [2026-08-24 README](https://github.com/z72124223/lattice-devos/blob/86c25bf4f2731c83521cfa32d44437cf06a03bdf/README.md)
+同時描述了網頁 MVP、固定 `gpt-5.6-terra`、包含 Hermes 的四元件，以及「舊 Rust／PostgreSQL 全鏈路」的歷史程式。
+這些是**當時版本的範圍**；引用舊分支、舊提交或搜尋摘要時，不能直接套用到目前產品。
+
+| 項目 | 目前範圍 |
+|---|---|
+| 產品用途 | 在 Codex App 背後保存正式任務、決策與可查證結果，並提供程式碼關係查詢；完成證據管理是其中一項能力。 |
+| 核心與介面 | LATTICE 控制、PostgreSQL、Graphify 三核心；Hermes 已退役，使用者在 Codex App 操作。 |
+| Rust／PostgreSQL | Rust Runtime 與 PostgreSQL 儲存層仍是現行實作；保留的舊全鏈路驗收文件不代表這兩者已停用。 |
+| 模型 | 沒有全產品固定使用 `gpt-5.6-terra` 的規則；原生工作與歷史受管流程的模型約束不同，詳見下文。 |
+| 安裝 | 已有包含依賴的 Windows x64 EXE 候選包；一般使用者不需先學會 Rust 或 Node.js 才能依指南安裝。 |
+| 平台與成熟度 | 目前交付目標為 Windows／WSL；尚無完整 macOS 或 Linux 桌面安裝驗收。2.0 三核心產品與 rc.7 安裝候選包的驗證範圍須分開判讀。 |
+
+可用模型須以實際執行入口與 Codex 帳號能力為準。現行原生工作 claim 路徑續用已保存的模型，
+沒有既有模型時預設 `gpt-6-astra`；[專案規則](AGENTS.md)也要求保留既有對話模型。
+部分歷史受管執行與語意審查合約仍包含 `gpt-5.6-terra` 或限定模型列舉，
+不能把它們說成全產品的固定模型，也不能宣稱所有路徑都支援任意模型。
+可查核 [Runtime 模型選擇](apps/lattice-runtime/src/composition.rs)、[歷史受管審查](apps/lattice-runtime/src/managed_semantic_reviewer.rs)，
+以及目前使用中的 [Rust Runtime](apps/lattice-runtime/)與 [PostgreSQL 儲存層](crates/lattice-postgres-store/)。
+
+安裝觀察收據的 `NON_AUTHORITATIVE` 邊界仍然有效：它能記錄當時的觀察，不能單獨證明部署成功。
+同樣，公開原始碼、安裝測試、正式任務完成與真人使用驗收各有不同範圍；相關限制見下方驗收與授權說明。
 
 ## 下載與安裝
 
@@ -144,3 +173,10 @@ npm.cmd run control:project -- read --project-name "My Project"
 
 目前尚未選定 `LICENSE`。GitHub 公開可見性與 `git clone` 功能不等於開源授權；第三方依賴保留各自的授權與散布文件。
 目前提供本機使用方式，沒有公開雲端服務。
+
+## 聯絡作者
+
+- 作者／維護者：[z72124223](https://github.com/z72124223)
+- 聯絡信箱：[z72124223@gmail.com](mailto:z72124223@gmail.com)
+
+歡迎來信交流 LATTICE、詢問安裝與使用問題，或洽談合作及授權。
