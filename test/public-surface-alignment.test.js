@@ -40,7 +40,8 @@ test("relative README links resolve inside the repository", async () => {
   const readme = await read("README.md");
   const links = [...readme.matchAll(/\[[^\]]+\]\(([^)]+)\)/gu)]
     .map((match) => match[1])
-    .filter((target) => !/^(?:https?:|#)/u.test(target));
+    // Web/email links and same-document fragments are not local file paths.
+    .filter((target) => !/^(?:https?:|mailto:|#)/u.test(target));
 
   for (const target of links) {
     // A Markdown heading fragment is not part of the filesystem path.
