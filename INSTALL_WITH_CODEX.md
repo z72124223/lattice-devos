@@ -6,6 +6,8 @@
 
 ## 單一 EXE 安裝候選包
 
+**[直接下載最新 Windows 安裝包：rc.7（607 MB）](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe)**
+
 下載 [rc.7 完整安裝包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)
 中的 `LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe`（約 607 MB），直接雙擊。
 先安裝 Codex 並登入自己的帳號；完成後重開 Codex。首次 WSL 啟用可能需要

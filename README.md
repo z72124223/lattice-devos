@@ -6,6 +6,8 @@ LATTICE 保存正式工作與驗收紀錄，提供程式關係查詢。
 
 ## 讓 Codex 幫你安裝
 
+**[直接下載最新 Windows 安裝包：rc.7（607 MB）](https://github.com/z72124223/lattice-devos/releases/download/v2.0.1-rc.7/LATTICE-Setup-v2.0.1-rc.7-windows-x64.exe)**
+
 Windows 使用者可下載 [rc.7 單一 EXE 安裝候選包](https://github.com/z72124223/lattice-devos/releases/tag/v2.0.1-rc.7)，
 雙擊後依畫面操作。它包含三核心、Python、Git、Node、專用 WSL 映像及必要的
 Microsoft 執行元件；Codex 需先用自己的帳號登入。
