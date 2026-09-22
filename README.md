@@ -1,5 +1,11 @@
 # LATTICE — Codex App 的三核心後台
 
+> **Claude／AI 閱讀入口：[CLAUDE.md](CLAUDE.md)** · [共用工程規則](AGENTS.md)
+>
+> **一眼看懂目前版本**：LATTICE 控制＋PostgreSQL＋Graphify 三核心，Hermes 已退役；Rust／PostgreSQL 仍在使用。
+> Codex App 是操作介面；全產品並非鎖定單一模型。已有 Windows 安裝候選包，尚未選定 LICENSE。
+> Claude Code 可透過 `CLAUDE.md` 載入共用規則；只讀 GitHub 網頁的 AI，請直接開啟上方導讀連結。
+
 **讓 Codex 的工作有正式任務、可查證的紀錄，以及程式碼關係圖譜。**
 
 LATTICE 是為 **Codex App** 設計的本機工作後台。你在 Codex 裡提出需求、查看進度與核准操作；
