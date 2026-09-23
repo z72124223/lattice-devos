@@ -173,6 +173,44 @@ npm.cmd run control:project -- read --project-name "My Project"
 目錄登記後，正式專案身分仍須由 Runtime 的 PostgreSQL Project Registry 綁定。
 更新既有安裝前先備份設定與資料庫，依 Runtime 文件執行升級；舊 Codex 連線需重新連線才會使用新版本。
 
+### Node 相對模組缺失的唯讀診斷（LH-DELIVERY-01）
+
+明示專案、匯入檔及來源快照後，可使用獨立入口；不連線 Control／DB、不修復或執行專案程式：
+
+```powershell
+node --experimental-vm-modules apps/lattice-control/src/relative-module-diagnostic-cli.mjs C:\work\diagnosis-request.json
+```
+
+`diagnosis-request.json` 的形狀如下；路徑皆為明示絕對路徑，雜湊是原檔完整 bytes 的 SHA-256：
+
+```js
+{ projectRoot, importer, evidenceFile, evidenceSha256,
+  context: { projectId, taskId, projectScope: "matched", authority: "authorized",
+    lifecycle: "active", freshness: "current", circuitOpen: false, validUntil } }
+```
+
+`validUntil` 是呼叫端設定的當下有效 ISO 時間。`evidenceFile` 必須是以下完整快照，
+`event` 保留來源事件的 id、type、status、command、aggregatedOutput、exitCode：
+
+```js
+{ schema: "lattice.relative-module-evidence.v1",
+  subject: { projectId, taskId, projectRoot, importer, importerSha256 }, event }
+```
+
+**呼叫端／來源轉接器仍須獨立核對原生事件、正式身分與當下讀取授權。**
+此入口只核對資料、檔案和路徑一致性；JSON、雜湊及 `authorized` 宣告不是權限證明。
+所有結果皆為 `advisoryOnly=true`、`adopted=false`，兩項 `nativeProvenanceVerified`／
+`authorizationVerified` 固定為 false。非適用狀態排除，來源漂移、缺證據或不支援形式會棄答，
+回傳具體原因；選中時回傳 importer、specifier、目標與最近既存父層及唯讀提示。
+
+僅以 Node 內建 V8 parser 解析 `.mjs`／`.js` 的靜態 ESM 相依（含 re-export），不 link／evaluate；
+註解／字串不算匯入，dynamic import、CJS／TypeScript、import attributes、URL 編碼／query 等保守棄答。
+缺少實驗旗標時回傳 `PARSER_UNAVAILABLE`。專案根、匯入檔、目標及缺失目標的既存祖先都拒絕連結跳轉；
+檔案重驗是當次觀察，不是敵意並行檔案系統的原子隔離保證。
+聚焦檢查：`node --experimental-vm-modules --test apps/lattice-control/test/relative-module-diagnostic.test.mjs`。
+本機 Windows／Node 24.16.0 實測 42 項中 41 項通過、1 項因檔案符號連結建立回傳 `EPERM` 略過；
+三種 junction（目錄連結）邊界實測通過。Linux／macOS 尚未實測。
+
 </details>
 
 ## 授權
