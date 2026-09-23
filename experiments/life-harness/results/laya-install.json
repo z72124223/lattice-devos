@@ -1,0 +1,97 @@
+{
+  "schema_version": 1,
+  "status": "blocked_two_install_failures",
+  "sdk_revision": "010bacef009c855ccba814b51f7c8e1d38ab5e3f",
+  "model_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+  "python": "3.12.14",
+  "installed_dependency_versions": {
+    "torch": "2.7.1+cpu",
+    "transformers": "5.0.0",
+    "huggingface_hub": "1.3.5",
+    "tokenizers": "0.22.2",
+    "numpy": "2.3.5",
+    "safetensors": "0.7.0",
+    "setuptools": "80.9.0",
+    "hf-xet": "1.6.0",
+    "httpx": "0.28.1",
+    "httpcore": "1.0.9",
+    "fsspec": "2026.9.0",
+    "h11": "0.16.0",
+    "packaging": "26.3",
+    "PyYAML": "6.0.3",
+    "regex": "2026.9.10",
+    "sympy": "1.14.0",
+    "mpmath": "1.3.0",
+    "tqdm": "4.70.1",
+    "typing_extensions": "4.16.0",
+    "anyio": "4.15.1",
+    "idna": "3.20",
+    "certifi": "2026.7.22",
+    "colorama": "0.4.6",
+    "filelock": "4.0.1",
+    "Jinja2": "3.1.6",
+    "MarkupSafe": "3.0.3",
+    "networkx": "3.7",
+    "shellingham": "1.5.4",
+    "typer-slim": "0.24.0",
+    "typer": "0.27.2",
+    "annotated-doc": "0.0.5",
+    "rich": "15.0.0",
+    "Pygments": "2.21.0",
+    "markdown-it-py": "4.2.0",
+    "mdurl": "0.1.2"
+  },
+  "installed_dependency_count": 35,
+  "sdk_installed": false,
+  "model_loaded": false,
+  "smoke_attempts": 0,
+  "advisory_attempts": 0,
+  "model_load_seconds": null,
+  "inference_seconds": null,
+  "inference_peak_rss_bytes": null,
+  "project_bytes": 2317854182,
+  "disk_free_bytes": 18197262336,
+  "attempts": [
+    {
+      "attempt": 1,
+      "exit_code": 1,
+      "failed_step": "pip-install",
+      "error": "ENOENT extracting PyTorch ATen header; pip warns possible Windows long-path limitation",
+      "log": "pip-install.txt"
+    },
+    {
+      "attempt": 2,
+      "exit_code": 1,
+      "dependency_install_exit_code": 0,
+      "failed_step": "sdk-install",
+      "error": "WinError 206 while creating SDK wheel build temporary directory",
+      "log": "sdk-install.txt",
+      "applied_change": "Use existing NTFS short alias for the same venv; TEMP remained long"
+    }
+  ],
+  "raw_logs": {
+    "pip-resolve.txt": {
+      "sha256": "432a0a317e0bde5b26f3c9b7bdd842debe8d580eeae1997f97b38ccd4edaef4e",
+      "bytes": 5028
+    },
+    "venv-create.txt": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "bytes": 0
+    },
+    "pip-install.txt": {
+      "sha256": "abd4865fdccf3cd2a162c8823b24ed3a703bca338a93a7dab63061bdda873788",
+      "bytes": 4057
+    },
+    "pip-install-2.txt": {
+      "sha256": "400280006e8b4de4c9a96b1280290a1159fd24b32e5dbb6406d44d38529c0909",
+      "bytes": 4706
+    },
+    "sdk-install.txt": {
+      "sha256": "097ac8940bbb9c6f4b9435a697407fc7105ef476f65c0710c5240ff0417e823d",
+      "bytes": 3174
+    }
+  },
+  "raw_log_directory": ".lattice/life-harness/laya-local",
+  "stop_reason": "Two failed installation attempts on the same local feasibility path. No third attempt or model execution.",
+  "next_fix_unexecuted": "Use existing NTFS short alias for TEMP/TMP as well; requires a separately authorized acceptance attempt."
+}

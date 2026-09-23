@@ -2,7 +2,7 @@
 
 本目錄是獨立實驗，不會改正式 DB、ActivityKind、PROGRESS 或執行恢復流程。
 重播不執行案例命令；受控採集只使用下述三條隔離 fixture 命令。
-不建立任務、不安裝、不傳送外部資料。LATTICE MCP 本次不可用；
+不建立正式任務、不傳送案例至外部。前三增量無套件安裝；第四增量僅在工作樹隔離目錄進行授權的 CPU 依賴安裝。LATTICE MCP 本次不可用；
 沒有正式任務身分。Control／PostgreSQL／Graphify 三核心及 Codex 原生執行迴圈不變。
 
 ## 執行
@@ -99,7 +99,7 @@ B 與 A 相同；原 20 案沒有合格原生失敗，兩個新增受控集合�
 獨立程式審查已確認兩項溯源修正，最終驗收仍由原協調任務負責。
 
 `results/laya-readiness.json` 僅記錄當時硬體／可用資源與 Python 套件盤點：
-未下載或載入模型，encoder/tokenizer 與精確依賴相容性仍未知。
+當時未下載或載入模型，encoder/tokenizer 與精確依賴相容性仍未知；第四增量的新盤點與失敗另存，不覆寫這份歷史紀錄。
 沒有修改正式 DB／恢復流程、外部推論、推送、合併、發布或清理編譯快取。
 
 ## 第二增量：三個受控原生切片（2026-09-23）
@@ -194,3 +194,58 @@ A 已正確，所以 B 不修改檢索或診斷，仍為 no_change；`results/re
 與 `resolver-advisories.jsonl` 可重播 A/B。同一四案各跑 A/B 共 8 筆建議，仍只有四個案例。
 新集合只驗證既有兩程序的受控適用路徑；沒有真實生產案例、診斷改善量、泛化或模型品質證據。
 Codex Desktop 解析成功路徑、App Server 啟動及正式恢復仍未在這個增量驗證。
+
+## 第四增量：Laya 本機 CPU 可行性，停於安裝失敗
+
+從已驗收的 `792e0104f84d0132d84f23a506ad1ae176c1812b` 開始，僅準備隔離的
+local choice 路徑。**35 個固定相依套件已安裝成功；Laya SDK 尚未安裝成功；
+模型尚未載入，smoke 與三組 advisory 均未執行。** 兩次安裝皆退出 1，已依同一路徑
+兩次失敗即停的界線停止。原協調任務收到阻礙後明示先封存，不進行第三次安裝、
+修改 TEMP、重建 venv 或刪除既有下載。
+
+`laya-environment.json` 保存全部 35 個 wheel 的精確版本、官方 URL、尺寸及 SHA-256；
+`laya-requirements.lock.txt` 是對應的固定依賴清單。使用 bundled Python **3.12.14**，
+關鍵套件為 torch **2.7.1+cpu**、transformers **5.0.0**、numpy **2.3.5**、
+tokenizers **0.22.2**、huggingface-hub **1.3.5**、safetensors **0.7.0**。
+已透過安裝目錄 metadata 逐一確認版本，尚未以匯入／載入模型證明執行相容性。
+
+- [SDK 固定原始碼](https://github.com/NandhaKishorM/laya/tree/010bacef009c855ccba814b51f7c8e1d38ab5e3f)：
+  `010bacef009c855ccba814b51f7c8e1d38ab5e3f`，宣告版本 0.3.7、Apache-2.0。
+- [模型固定 snapshot](https://huggingface.co/convaiinnovations/laya-multilingual/tree/b4a904d1a2a54c822b829e24291d4b8f280fe43e)：
+  `b4a904d1a2a54c822b829e24291d4b8f280fe43e`，模型卡宣告 Apache-2.0。
+  六個檔案含模型卡共 **678,209,751 bytes**，均已下載並驗證。
+- Encoder 上游名稱是 `jhu-clsp/mmBERT-base`，此次實際 encoder config 與 tokenizer
+  都取自上述固定 Laya snapshot，沒有另外下載未鎖版的 base encoder weights。
+  SDK CPU 路徑使用 FP32；config 中的 BF16 設定不是本機 CPU 已驗收的 dtype。
+
+第一次 `pip-install` 在 PyTorch ATen 深層標頭檔遇到 ENOENT，pip 提示可能是 Windows 路徑長度限制。
+第二次只將 pip 的 Python 路徑改用**已存在、且 samefile 核對相同的 NTFS 8.3 別名**，
+沒有改全域 PATH、registry 或建立磁碟映射；相依套件安裝成功。接著 SDK wheel 建置
+在仍為長路徑的 TEMP 目錄遇到 **WinError 206**，因此第二次整體安裝仍退出 1。
+可能的 TEMP 短別名修正尚未套用，也未再次執行。
+
+`results/laya-install.json` 保存兩次失敗、精確已安裝版本、原文 digest 與資源盤點。
+原始 stdout/stderr 保留於被忽略的 `.lattice/life-harness/laya-local/`：
+`pip-install.txt`、`pip-install-2.txt`、`sdk-install.txt`；下載、snapshot 與 venv 也在同處。
+下載前保守額外估算 **4,227,578,028 bytes**；停止時新增檔案 **2,317,854,182 bytes**，
+C 槽可用 **18,197,262,336 bytes**，符合新增不超過 6 GiB／可用至少 10 GiB。
+未清除編譯快取或任何使用者資料。模型載入時間、推論時間與推論峰值 RSS 都是 null，
+不能把未執行解讀成零成本。
+
+已準備但**未做真實模型驗收**的執行路徑為 `laya-run.mjs`／`laya_choice.py`：
+先套用 Windows Job Object 的程序及整體 8 GiB 提交記憶體限制，再加入本機套件路徑；
+`-I -S -B` 停用 site／.pth 啟動，外層 300 秒逾時與磁碟監控，另讀 Windows 峰值 RSS。
+本機 snapshot 驗證後使用完整工作副本，避免 SDK 改 tokenizer config 時修改原件。
+Hub 與 tokenizer/config loader 僅接受本機目錄；停用 Python socket 與子程序、移除繼承的
+token／proxy 環境。這是已審查 SDK 的 Python 層離線控制，**不是作業系統防火牆**。
+
+`laya-inputs.mjs` 先重用來源校驗、排除條件與固定檢索，不讀 gold。27 案中 16 案排除、
+3 案空候選直接棄答、8 案產生請求；後者仍須由真實 tokenizer 證明無截斷，超長即棄答。
+保留兩種明示棄答與原始 SDK 分數，分數不當作校準信心或採用門檻。未執行模型，
+所以目前沒有 C/D 成績；若後續有授權且完成執行，A=B 時只保存一次相同輸入的 C=D
+觀察，不宣稱獨立實驗、因果改善或產品效益。`laya-summarize.mjs` 為該後續評估的未執行程式。
+
+新增前置輸入 7 項測試與原有 26 項合計 **33 項 Node 測試通過**；
+**4 項 Python 限制測試通過**，涵蓋 OS 限制讀回、失敗拒跑及 socket 阻擋。
+這些結果只證明輸入與限制，不證明模型可用。精確命令及獨立來源／舊資料核對
+保存在 `results/laya-verification.json`；原三組案例、標註、程序、原文與 A/B 結果均保持不變。
