@@ -1,0 +1,138 @@
+{
+  "schema_version": 1,
+  "experiment": "offline-pilot-v1",
+  "node_version": "v24.16.0",
+  "inputs": {
+    "harness.mjs": "cf10c28631a703cb85df19105375703cec545f02d230fbf54e547e0217e96dc9",
+    "prepare.mjs": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+    "procedures.json": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+    "cases.jsonl": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+    "annotations/alpha.jsonl": "84fdb80c23a67056ad901a4e9e22b2b5665bf2be854a4bed734b3e25d1a84b61",
+    "annotations/beta.jsonl": "fd9cd6f60abff2abb4e606144e01a8a314ad5c4d72fa9604f0bd774806b7130c",
+    "annotations/gold.jsonl": "434158adef150d9d072d1c2336be9ee00cee21d315c818c734324aa89ec00c66",
+    "annotations/adjudication.json": "5f4644da195a290189cedc93018426460fd9e5d87af7f079dbd362166961b304"
+  },
+  "procedure_sources": {
+    "apps/lattice-control/src/project-inspector.mjs": "6091eb484d7b7f3a6a0253640d88d3765b59ea0f80e2c5b471559f1336ad9ce3",
+    "apps/lattice-control/src/codex-runtime-resolution.mjs": "8366ccaaad2981cfda53ee037173d3562d61cdfbbb1ec982e9c2094d976a858b",
+    "apps/lattice-control/src/execution-recovery.mjs": "8d17b4ff9d7328be7470024ef3156eeb232603d969fcd9014d951f6a09fd655a"
+  },
+  "bindings": {
+    "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+    "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+    "implementation_sha256": "a60bbebc63a1778cadc0dfaaafa825bbc6afeb63444163285e18751ffb5f3f59"
+  },
+  "comparison": {
+    "status": "no_change",
+    "applied_change": null,
+    "qualifying_native_failure_count": 0,
+    "real_diagnostic_increment": null,
+    "explanation": "No qualifying native launch/dependency failure found; B equals frozen pilot A. No product or end-to-end benefit evaluated."
+  },
+  "A": {
+    "real": {
+      "cases": 0,
+      "valid_cases": 0,
+      "retrieval_hits": 0,
+      "retrieval_misses": 0,
+      "selection_hits": 0,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 0,
+      "boundary_violations": 0,
+      "correct_labels": 0,
+      "none_applicable": 0,
+      "insufficient_information": 0,
+      "retrieval_recall": null,
+      "selection_accuracy_given_recall": null,
+      "label_accuracy": null
+    },
+    "controlled_replay": {
+      "cases": 1,
+      "valid_cases": 0,
+      "retrieval_hits": 0,
+      "retrieval_misses": 0,
+      "selection_hits": 0,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 1,
+      "boundary_violations": 0,
+      "correct_labels": 1,
+      "none_applicable": 0,
+      "insufficient_information": 0,
+      "retrieval_recall": null,
+      "selection_accuracy_given_recall": null,
+      "label_accuracy": 1
+    },
+    "synthetic": {
+      "cases": 19,
+      "valid_cases": 4,
+      "retrieval_hits": 4,
+      "retrieval_misses": 0,
+      "selection_hits": 4,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 12,
+      "boundary_violations": 0,
+      "correct_labels": 19,
+      "none_applicable": 2,
+      "insufficient_information": 1,
+      "retrieval_recall": 1,
+      "selection_accuracy_given_recall": 1,
+      "label_accuracy": 1
+    }
+  },
+  "B": {
+    "real": {
+      "cases": 0,
+      "valid_cases": 0,
+      "retrieval_hits": 0,
+      "retrieval_misses": 0,
+      "selection_hits": 0,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 0,
+      "boundary_violations": 0,
+      "correct_labels": 0,
+      "none_applicable": 0,
+      "insufficient_information": 0,
+      "retrieval_recall": null,
+      "selection_accuracy_given_recall": null,
+      "label_accuracy": null
+    },
+    "controlled_replay": {
+      "cases": 1,
+      "valid_cases": 0,
+      "retrieval_hits": 0,
+      "retrieval_misses": 0,
+      "selection_hits": 0,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 1,
+      "boundary_violations": 0,
+      "correct_labels": 1,
+      "none_applicable": 0,
+      "insufficient_information": 0,
+      "retrieval_recall": null,
+      "selection_accuracy_given_recall": null,
+      "label_accuracy": 1
+    },
+    "synthetic": {
+      "cases": 19,
+      "valid_cases": 4,
+      "retrieval_hits": 4,
+      "retrieval_misses": 0,
+      "selection_hits": 4,
+      "ranking_errors": 0,
+      "abstentions_with_recall": 0,
+      "excluded": 12,
+      "boundary_violations": 0,
+      "correct_labels": 19,
+      "none_applicable": 2,
+      "insufficient_information": 1,
+      "retrieval_recall": 1,
+      "selection_accuracy_given_recall": 1,
+      "label_accuracy": 1
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"deterministic_replay":"PASS (excluding measured evaluator elapsed_ms)","advisories":40,"eligible_native_failures":0,"real_increment":null,"synthetic_correct":19,"synthetic_total":19,"controlled_excluded":1}

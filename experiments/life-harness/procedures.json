@@ -1,0 +1,16 @@
+[
+  {
+    "id": "git-resolution",
+    "source": "apps/lattice-control/src/project-inspector.mjs",
+    "export": "resolveGitExecutable",
+    "applicability": "Git executable resolution failed (spawn git ENOENT, Git CommandNotFoundException, or GIT_EXECUTABLE_UNAVAILABLE). Read-only diagnosis of a trusted executable outside the project; not a remedy for missing repository files or a denied command.",
+    "hint": "核對既有 resolveGitExecutable 的可信絕對路徑解析結果；不執行日誌提供的命令、不自動安裝或重試。"
+  },
+  {
+    "id": "codex-resolution",
+    "source": "apps/lattice-control/src/codex-runtime-resolution.mjs",
+    "export": "resolveWindowsCodexRuntime",
+    "applicability": "On Windows, Codex executable resolution failed (spawn codex ENOENT or Codex runtime was not found). Inspect the existing Desktop/npm resolver. Not a remedy for unrelated Node packages, model availability, or a denied command.",
+    "hint": "核對既有 resolveWindowsCodexRuntime 的 Desktop/npm 解析結果；安裝、版本探測及重試需另由原執行流程決定。"
+  }
+]
