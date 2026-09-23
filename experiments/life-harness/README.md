@@ -313,3 +313,21 @@ insufficient 0.1173；SDK confidence 0.1568。保留原值，不把可執行當�
 本增量新增 **4 項 fake-SDK 來源綁定測試通過**；沿用已獨立驗收的 33 項 Node 與
 4 項記憶體／網路限制測試，不重跑相同模型試驗。原三組資料、標註、程序、封存與
 A/B 逐一核對保持不變。未採納、未執行恢復、未改正式 DB、未推送或發布。
+
+## 相對模組缺失：新增離線候選
+
+執行 `node experiments/life-harness/relative-module.mjs`，只讀既有受控事件與固定
+fixture，結果另存 `results/relative-module.json`。新候選獨立存於
+`relative-module-candidate.json`，不修改原程序庫或 gold。
+
+已見過的受控相依模組缺失得到唯讀提示：核對 `dependency-failure.mjs` 中的
+`./intentionally-absent-dependency.mjs`，以匯入檔目錄解析預期檔案，檢查大小寫、
+副檔名、漏存或改名；cwd 不取代相對 import 的解析基準。入口缺失仍棄答，成功案排除。
+16 個預先列出答案的合成開發情境全部符合預期；聚焦測試命令
+`node --test experiments/life-harness/relative-module.test.mjs` 為 18 項通過。
+來源變造、任意日誌路徑、第三方 package、資訊不足與非適用狀態均不產生新提示。
+日誌附帶的命令只當資料，沒有執行、安裝、修復或重試。
+
+這是對固定 fixture 的候選覆蓋擴充；舊 A 對原 Git／Codex 程序庫的
+`none_applicable` 仍正確。這些是開發案例，不是保留集、泛化或生產效益證據。
+舊案例、程序、標註、封存、A/B 與 Laya 結果保持不變；沒有正式接入或採納。
