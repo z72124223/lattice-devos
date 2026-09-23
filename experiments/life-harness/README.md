@@ -11,9 +11,10 @@
 
 ```powershell
 node experiments/life-harness/prepare.mjs
-node --test experiments/life-harness/capture.test.mjs experiments/life-harness/harness.test.mjs apps/lattice-control/test/execution-recovery.test.mjs apps/lattice-control/test/codex-runtime-resolution.test.mjs
+node --test experiments/life-harness/capture.test.mjs experiments/life-harness/resolver-capture.test.mjs experiments/life-harness/harness.test.mjs apps/lattice-control/test/execution-recovery.test.mjs apps/lattice-control/test/codex-runtime-resolution.test.mjs
 node experiments/life-harness/harness.mjs
 node experiments/life-harness/harness.mjs --controlled
+node experiments/life-harness/harness.mjs --resolvers
 ```
 
 `prepare` 重建固定案例，`harness` 驗證案例、來源、標註，重播 A/B，寫入
@@ -78,20 +79,21 @@ procedures_sha256、annotator、label、valid_procedures、reason；仲裁額外
 本次未取得可直接套用此介面的現有產品診斷推薦基準，因此 A 是本次凍結的**離線確定性基準**，
 不是完整 Codex 原生任務完成率：以固定關鍵字檢索兩個已有程序，按明確錯誤特徵
 選擇第一個有效候選或棄答，重用現有拒絕辨識。程序提示只是資料，不是操作授權。
-B 與 A 相同；在沒有合格原生失敗證據時，不強造改善。summary 明示 no_change，
+B 與 A 相同；原 20 案沒有合格原生失敗，兩個新增受控集合也未觀察到 A 的診斷錯誤，
+因此不強造改善。summary 明示 no_change，
 不能據此宣稱產品退化、改善、模型品質、端到端效率或正式任務完成率。
-這些都是開發先導案例，不提供泛化、校準或統計採用證據。後續須有已授權且可確認
-當下適用性的原生失敗切片，才有理由選定一項改善，再跑真正有差異的 A/B。
+這些都是開發先導案例，不提供泛化、校準或統計採用證據。後續若在已授權且可確認
+當下適用性的原生切片發現可重現的診斷錯誤或有效程序漏召回，才選定改善並重跑 A/B。
 
 ## 已執行結果與限制
 
-`results/verification.txt`：原 16 項加新增 7 項，共 23 項聚焦測試通過。新增封存保護回歸在隔離目錄驗證：
+`results/verification.txt`：原 16 項、Node 採集 7 項及解析器集合 3 項，共 26 項聚焦測試通過。封存保護回歸在隔離目錄驗證：
 已有凍結投影但無本機原文時，採集在寫入前拒絕，既有檔案逐位元組不變且不建立 raw/index。
 兩個既有診斷函式另有受控本機
 失敗重播，未將函式錯誤冒充 commandExecution。`results/summary.json` 分開保存
 19 合成／1 原生受控成功／0 真實案例；同一 20 案各跑 A/B，共 40 筆離線建議紀錄，
 不是 40 個獨立樣本。
-`results/replay-verification.txt` 記錄兩組資料重播與已驗收基準一致（程式雜湊與實際耗時除外）；
+`results/replay-verification.txt` 記錄舊兩組重播與已驗收基準一致，並核對新四案重播（程式雜湊與實際耗時另列）；
 耗時只屬這個離線評估器，不能當作任務效率。候選有效4例、皆不適用2例、
 資訊不足1例、排除13例；兩名 AI 盲標無分歧，主代理第三角色逐筆核對。
 獨立程式審查已確認兩項溯源修正，最終驗收仍由原協調任務負責。
@@ -147,3 +149,48 @@ A 與標註一致，無分歧，B 維持 no_change；來源校驗的修正不充
 的 6 筆紀錄，原 20 案仍是先導回歸資料，不能當保留集。
 本輪證明受控原生來源可以誠實取得；沒有證明診斷改善、產品無改善空間、
 真實效益或模型品質，也未設定真實生產樣本數門檻。
+
+## 第三增量：Git／Codex 解析器受控切片
+
+從 `13c5478cc044e0e81efe4e68645c40f5b08f1e50` 開始，舊 20 案、Node 3 案、
+標註、程序及原始封存保持凍結。新集合為 `resolver-cases.jsonl`，原生去識別投影為
+`resolver-fixtures/captured-events.jsonl`，結果與標註使用 `resolver-` 前綴。
+
+只在 `resolver-fixtures/` 執行下列四條命令，每條都是獨立原生命令事件：
+
+```powershell
+node ./resolve.mjs git missing
+node ./resolve.mjs codex missing
+node ./resolve.mjs git success
+node ./resolve.mjs codex success
+```
+
+fixture 直接呼叫既有 `resolveGitExecutable`／`resolveWindowsCodexRuntime`，
+不攔截或重寫例外。Git 失敗案僅傳 `pathValue: ''`，Codex 失敗案僅傳 `env: {}`；
+原生輸出保留這些參數。這證明受限搜尋範圍內解析失敗，不表示電腦未安裝工具。
+沒有更改 process.env、使用者或機器 PATH，沒有安裝、帳號、憑證或 DB 變動。
+兩筆失敗的實際原生狀態均為 failed／1，兩筆成功為 completed／0；來源是本任務
+同一回合、唯一命令與 cwd 的原始 `CommandExecution`，不從退出碼推定 failed。
+
+成功案使用既有環境，只做解析。Git 回傳 `git.exe`；Codex 回傳 `node.exe`，
+表示既有 npm fallback 找到 script。Codex 解析器可能做內建 `--version` 探測，
+fixture 不執行回傳命令或 `app-server --stdio`，所以成功不代表 App Server 已啟動或可用。
+
+本機原文位於被 Git 忽略的 `.lattice/life-harness/native-resolvers-20260923/`
+`raw-capture.jsonl`，相鄰 `source-index.json` 記錄來源 rollout、回合及行號。
+原文包含四個事件、原始 task_started 和 turn_context；只讀本任務自己的明確來源。
+新投影另綁定 fixture 及兩個實際解析器原始碼的雜湊；原文與投影會逐筆核對。
+既有封存保護同樣適用新集合，`--resolvers` 重播不執行 fixture 命令。
+
+投影 SHA-256 為 `b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f`，
+案例 SHA-256 為 `1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2`。
+兩名 AI 獨立標註者只讀凍結事件、fixture 及程序條件；標註與第三角色仲裁完成後才跑 A。
+四案為 valid 2、excluded 2，無分歧。A 的有效程序召回為 **2/2**，已召回後選擇正確為
+**2/2**，成功排除為 **2/2**；漏召回、排序錯誤與越界皆 0。這些分母各自獨立，
+不能拿整體標籤正確率替代診斷準確率。此小集合有零個 none_applicable；舊 Node
+兩個 none_applicable 仍是棄答反例，不計入召回漏失。
+
+A 已正確，所以 B 不修改檢索或診斷，仍為 no_change；`results/resolver-summary.json`
+與 `resolver-advisories.jsonl` 可重播 A/B。同一四案各跑 A/B 共 8 筆建議，仍只有四個案例。
+新集合只驗證既有兩程序的受控適用路徑；沒有真實生產案例、診斷改善量、泛化或模型品質證據。
+Codex Desktop 解析成功路徑、App Server 啟動及正式恢復仍未在這個增量驗證。

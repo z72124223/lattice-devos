@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+  "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+  "roles": {
+    "alpha": "/root/annotator_alpha",
+    "beta": "/root/annotator_beta",
+    "adjudicator": "/root"
+  },
+  "method": "Independent AI annotations of the frozen four-event resolver slice, fixture and unchanged Git/Codex procedure conditions before A/B scoring; not human experts.",
+  "reviewed_cases": 4,
+  "disagreements": [],
+  "original_answers": [
+    "annotations/resolver-alpha.jsonl",
+    "annotations/resolver-beta.jsonl"
+  ],
+  "gold": "annotations/resolver-gold.jsonl",
+  "annotation_completion_is_product_acceptance": false
+}

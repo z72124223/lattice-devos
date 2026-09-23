@@ -1,19 +1,54 @@
 {
-  "baseline_revision": "0a1c42c48e34eadb36cffaf23c8345ac59bf98c4",
-  "archive_preflight_regression": "isolated existing projection without raw rejected before writes; bytes and directory entries unchanged",
+  "baseline_revision": "13c5478cc044e0e81efe4e68645c40f5b08f1e50",
   "focused_tests": {
-    "tests": 23,
-    "pass": 23,
+    "tests": 26,
+    "pass": 26,
     "fail": 0
   },
-  "frozen_inputs": "cases, candidates, annotations and native fixtures byte-identical to baseline",
-  "local_raw_and_index": "SHA-256 unchanged",
-  "replay": "both datasets retain baseline A/B metrics, comparison and advisories except implementation binding and elapsed_ms",
-  "manifests": "updated capture implementation binding; all input hashes verified",
-  "capture_verification": {
-    "portable_projection": "verified",
-    "native_original": "verified_from_local_raw_capture"
+  "previous_frozen_files": {
+    "count": 15,
+    "bytes": "unchanged"
   },
-  "diagnostic_benefit": "not demonstrated",
-  "production_benefit": "not evaluated"
+  "raw_and_indexes": "both slices unchanged after capture and replay",
+  "previous_replay": "20-case and 3-case A/B metrics, comparison and advisories unchanged except implementation binding and elapsed_ms",
+  "resolver_replay": "matches first A-only evaluation; second replay summary identical, advisories identical except elapsed_ms",
+  "resolver_cases": 4,
+  "resolver_advisories": 8,
+  "controlled_valid_cases": 2,
+  "retrieval": {
+    "hits": 2,
+    "valid_cases": 2,
+    "misses": 0
+  },
+  "selection_given_recall": {
+    "hits": 2,
+    "retrieved_valid_cases": 2,
+    "ranking_errors": 0
+  },
+  "success_controls": {
+    "excluded": 2,
+    "total": 2,
+    "boundary_violations": 0
+  },
+  "manifests": "all three input manifests match file bytes",
+  "capture_verification": {
+    "node": {
+      "portable_projection": "verified",
+      "native_original": "verified_from_local_raw_capture"
+    },
+    "resolvers": {
+      "portable_projection": "verified",
+      "native_original": "verified_from_local_raw_capture"
+    }
+  },
+  "comparison": {
+    "status": "no_change",
+    "applied_change": null,
+    "qualifying_native_failure_count": 2,
+    "real_diagnostic_increment": null,
+    "explanation": "Controlled native development slice; compare metrics against independently frozen labels. B unchanged. No production benefit evaluated."
+  },
+  "real_production_cases": 0,
+  "production_benefit": "not evaluated",
+  "diagnostic_improvement": "not demonstrated"
 }

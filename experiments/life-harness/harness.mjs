@@ -97,7 +97,7 @@ export function diagnose(c, candidates) {
 
 export function advise(c, group, bindings, retrieval = retrieve, annotationPrefix = '') {
   validateCase(c); member(group, ['A', 'B']);
-  member(annotationPrefix, ['', 'controlled-']);
+  member(annotationPrefix, ['', 'controlled-', 'resolver-']);
   const started = performance.now();
   const reason = exclusion(c);
   const candidates = reason ? [] : retrieval(c);
@@ -128,7 +128,7 @@ export function validateAdvisory(a) {
   Object.values(a.model).forEach(v => assert.equal(v, null));
   assert.equal(a.raw_score, null); assert.equal(a.calibrated_score, null);
   assert.ok(Number.isFinite(a.elapsed_ms) && a.elapsed_ms >= 0);
-  member(a.outcome_ref, [`annotations/gold.jsonl#${a.case_id}`, `annotations/controlled-gold.jsonl#${a.case_id}`]);
+  member(a.outcome_ref, ['', 'controlled-', 'resolver-'].map(prefix => `annotations/${prefix}gold.jsonl#${a.case_id}`));
   assert.equal(a.advisory_only, true);
   list(a.candidates, ids); member(a.decision, ['selected', 'abstain', 'excluded']);
   if (a.decision === 'selected') {
@@ -154,12 +154,15 @@ export function validateAnnotations(rows, cases, datasetHash, proceduresHash, an
 }
 
 export function validateSources(cases) {
-  // Only the fixed pilot sources and the explicitly captured controlled slice.
+  // Only the fixed pilot sources and the two explicitly captured controlled slices.
   // New sources require deliberate
   // import/redaction and reannotation, not a fabricated ref or a caller's hash.
   const expected = new Map(buildCases().map(c => [c.case_id, c]));
   if (cases.some(c => c.source.reference === 'experiments/life-harness/native-fixtures/captured-events.jsonl')) {
     for (const c of buildControlledCases()) expected.set(c.case_id, c);
+  }
+  if (cases.some(c => c.source.reference === 'experiments/life-harness/resolver-fixtures/captured-events.jsonl')) {
+    for (const c of buildControlledCases({ resolvers: true })) expected.set(c.case_id, c);
   }
   for (const c of cases) {
     assert.ok(expected.has(c.case_id), 'unsupported source/case');
@@ -221,8 +224,11 @@ export function evaluate(cases, gold, advisories) {
   return metrics;
 }
 
-export function replay({ controlled = false } = {}) {
-  const prefix = controlled ? 'controlled-' : '';
+export function replay({ controlled = false, resolvers = false } = {}) {
+  assert.ok(!(controlled && resolvers), 'select one fixed controlled slice');
+  const prefix = resolvers ? 'resolver-' : controlled ? 'controlled-' : '';
+  const nativeSlice = controlled || resolvers;
+  const fixtureName = resolvers ? 'resolver-fixtures' : 'native-fixtures';
   const dataset = read(path.join(here, `${prefix}cases.jsonl`));
   const cases = jsonl(path.join(here, `${prefix}cases.jsonl`));
   cases.forEach(validateCase);
@@ -230,7 +236,7 @@ export function replay({ controlled = false } = {}) {
   validateSources(cases);
   const inputFiles = ['harness.mjs', 'prepare.mjs', 'capture.mjs', 'procedures.json', `${prefix}cases.jsonl`,
     ...['alpha.jsonl', 'beta.jsonl', 'gold.jsonl', 'adjudication.json'].map(name => `annotations/${prefix}${name}`),
-    ...(controlled ? ['native-fixtures/captured-events.jsonl'] : [])];
+    ...(nativeSlice ? [`${fixtureName}/captured-events.jsonl`] : [])];
   const inputs = Object.fromEntries(inputFiles.map(file => [file, hash(read(path.join(here, file)))]));
   const procedureSources = Object.fromEntries([...procedures.map(p => p.source), 'apps/lattice-control/src/execution-recovery.mjs']
     .map(file => [file, hash(read(path.join(root, file)).replaceAll('\r\n', '\n'))]));
@@ -243,11 +249,12 @@ export function replay({ controlled = false } = {}) {
   const advisories = ['A', 'B'].flatMap(group => cases.map(c => advise(c, group, bindings, retrieve, prefix)));
   const A = evaluate(cases, gold, advisories.filter(a => a.group === 'A'));
   const B = evaluate(cases, gold, advisories.filter(a => a.group === 'B'));
-  const summary = { schema_version: 1, experiment: controlled ? 'controlled-native-node-v1' : 'offline-pilot-v1', node_version: process.version,
+  const summary = { schema_version: 1,
+    experiment: resolvers ? 'controlled-native-resolvers-v1' : controlled ? 'controlled-native-node-v1' : 'offline-pilot-v1', node_version: process.version,
     inputs, procedure_sources: procedureSources, bindings,
-    ...(controlled ? { capture_verification: verifyLocalCapture() } : {}),
+    ...(nativeSlice ? { capture_verification: verifyLocalCapture(undefined, { resolvers }) } : {}),
     comparison: { status: 'no_change', applied_change: null, qualifying_native_failure_count: cases.filter(c => c.source.kind !== 'synthetic' && c.source.native_observed && !exclusion(c)).length,
-      real_diagnostic_increment: null, explanation: controlled
+      real_diagnostic_increment: null, explanation: nativeSlice
         ? 'Controlled native development slice; compare metrics against independently frozen labels. B unchanged. No production benefit evaluated.'
         : 'No qualifying native launch/dependency failure found in the original pilot; B equals frozen pilot A. No product or end-to-end benefit evaluated.' }, A, B };
   const out = path.join(here, 'results'); fs.mkdirSync(out, { recursive: true });
@@ -258,6 +265,6 @@ export function replay({ controlled = false } = {}) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  assert.ok(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === '--controlled'));
-  replay({ controlled: process.argv[2] === '--controlled' });
+  assert.ok(process.argv.length === 2 || (process.argv.length === 3 && ['--controlled', '--resolvers'].includes(process.argv[2])));
+  replay({ controlled: process.argv[2] === '--controlled', resolvers: process.argv[2] === '--resolvers' });
 }
