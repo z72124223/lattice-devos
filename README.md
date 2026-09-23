@@ -219,6 +219,15 @@ node --experimental-vm-modules apps/lattice-control/src/relative-module-diagnost
 `.lattice/life-harness/delivery-02/run-20260924-01/`，可只讀核對，無須重做修復。
 此為一次預先安排的工程可行性流程，不證明泛化、生產收益或診斷的因果改善；未接入正式恢復流程。
 
+Control 接入核對（LH-DELIVERY-03）：**正式接入尚未完成**。既有
+[`FormalWorkStore.detail`](apps/lattice-control/src/formal-work-store.mjs) 從 `lattice_control_snapshot`
+取得 PostgreSQL 專案／任務／claim；[`FormalTaskService`](apps/lattice-control/src/formal-task-service.mjs)
+透過既有 Codex App Server 讀取回合並處理拒絕與驗收，應沿用這些入口。
+這條流程目前沒有提供診斷器可消費、綁定當下 session／claim／指定檔案的讀取授權；
+過去啟動對話的 sandbox 設定及保存的 claim 不能自行轉成 `authorizationVerified=true`。
+下一步須先確定此受限授權的真實來源與撤銷／過期核對，再接入原生事件及明示 importer。
+獨立 CLI 仍可在呼叫端授權範圍使用；Control 尚未呼叫它，預設啟動命令也未啟用所需 VM Modules 旗標。
+
 </details>
 
 ## 授權
