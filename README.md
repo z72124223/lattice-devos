@@ -211,6 +211,14 @@ node --experimental-vm-modules apps/lattice-control/src/relative-module-diagnost
 本機 Windows／Node 24.16.0 實測 42 項中 41 項通過、1 項因檔案符號連結建立回傳 `EPERM` 略過；
 三種 junction（目錄連結）邊界實測通過。Linux／macOS 尚未實測。
 
+一次受控流程（LH-DELIVERY-02）的[可攜結果](experiments/life-harness/delivery-02-result.json)已記錄：
+原生缺失模組失敗 → 此唯讀入口定位 → Codex 僅新增允許的檔案 → 相同命令／目錄成功，
+並核對預先固定的 `LH-DELIVERY-02 total=42` 輸出及程式內功能斷言。
+修復後重查已棄答 `TARGET_EXISTS_NOW`，真實成功事件被排除，獨立控制輸入的來源漂移也被拒絕。
+結果包含修復前後內容／雜湊、明示的原生形狀轉接及原始事件雜湊；本機私有來源索引位於
+`.lattice/life-harness/delivery-02/run-20260924-01/`，可只讀核對，無須重做修復。
+此為一次預先安排的工程可行性流程，不證明泛化、生產收益或診斷的因果改善；未接入正式恢復流程。
+
 </details>
 
 ## 授權

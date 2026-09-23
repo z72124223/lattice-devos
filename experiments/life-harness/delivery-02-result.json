@@ -1,0 +1,211 @@
+{
+  "schema": "lattice.controlled-delivery-result.v1",
+  "delivery": "LH-DELIVERY-02",
+  "kind": "one_controlled_engineering_feasibility_run",
+  "diagnosticRevision": "03a6ff3fbd1ecab6dc0d8ca9c50696fb6765b657",
+  "environment": {
+    "platform": "win32",
+    "node": "v24.16.0"
+  },
+  "scope": {
+    "project": "[PROJECT]",
+    "command": "node ./entry.mjs",
+    "cwd": "[PROJECT]",
+    "allowedRepair": "create lib/total.mjs only",
+    "formalProjectId": null,
+    "formalTaskId": null,
+    "identities": "offline controlled IDs; original Codex thread/turn retained only in ignored source indexes",
+    "authority": "explicit task scope, asserted by caller; diagnostic does not verify authority"
+  },
+  "predeclared": {
+    "source": {
+      "archive": "setup-native-raw.jsonl",
+      "archiveSha256": "aafe759e3efde2e0a1ff7b52714592bf818b3a6a56dccb658ecddbda5e1802ad",
+      "sourceLine": 2303,
+      "originalEventSha256": "76e9bef4cd84235d60d8a9e535eaf43cf7cc3668e2d23057c99ab2595bd30dac"
+    },
+    "scopeFile": "scope-before.json",
+    "scopeFileSha256": "65be06394b67121f1af5f2ab40824098ff5c32b7d2ef31f4c2b07baec34fdded",
+    "expectedStdout": "LH-DELIVERY-02 total=42\n",
+    "functionalAssertion": "total([17, 25]) === 42; Node strict assertion in unchanged entry.mjs",
+    "importer": {
+      "file": "entry.mjs",
+      "beforeContent": "import assert from \"node:assert/strict\";\nimport { total } from \"./lib/total.mjs\";\nconst answer = total([17, 25]);\nassert.equal(answer, 42);\nprocess.stdout.write(`LH-DELIVERY-02 total=${answer}\\n`);\n",
+      "beforeSha256": "42e86abf8995562216bf6e4c65b5b9ee22547a371f4215d47184cacd63d47fbe",
+      "afterSha256": "42e86abf8995562216bf6e4c65b5b9ee22547a371f4215d47184cacd63d47fbe"
+    },
+    "targetInitiallyAbsent": true
+  },
+  "nativeAdapter": {
+    "source": "own Codex rollout event_msg/item_completed/CommandExecution",
+    "checks": [
+      "session ID, thread ID and turn ID match own task",
+      "exact command and cwd match predeclared scope",
+      "task_started and turn_context precede events; no terminal event before success",
+      "setup < failure < diagnostic < repair < success"
+    ],
+    "mapping": {
+      "id": "item.id unchanged in local input; portable alias only",
+      "type": "CommandExecution -> commandExecution",
+      "status": "item.status unchanged",
+      "command": "item.command last string; original argv in ignored raw archive",
+      "aggregatedOutput": "item.aggregated_output unchanged in local input; project paths and file URLs replaced only in this portable projection",
+      "exitCode": "item.exit_code unchanged"
+    },
+    "portableProjectionIsDiagnosticInput": false
+  },
+  "failure": {
+    "source": {
+      "archive": "failure-native-raw.jsonl",
+      "archiveSha256": "334fb9a6670d2a3823b38574277ec45f567ee835c67a9d9d2229dac03b997080",
+      "sourceLine": 2308,
+      "originalEventSha256": "2b958fbb1c1d6ad4cfd5141912cc432e5c35d3142997a7a5788042c95f90e275"
+    },
+    "event": {
+      "id": "[FAILURE_EVENT]",
+      "type": "commandExecution",
+      "status": "failed",
+      "command": "node ./entry.mjs",
+      "aggregatedOutput": "node:internal/modules/esm/resolve:271\r\n    throw new ERR_MODULE_NOT_FOUND(\r\n          ^\r\n\r\nError [ERR_MODULE_NOT_FOUND]: Cannot find module '[PROJECT]\\lib\\total.mjs' imported from [PROJECT]\\entry.mjs\r\n    at finalizeResolution (node:internal/modules/esm/resolve:271:11)\r\n    at moduleResolve (node:internal/modules/esm/resolve:865:10)\r\n    at defaultResolve (node:internal/modules/esm/resolve:992:11)\r\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:691:20)\r\n    at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:708:38)\r\n    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:740:52)\r\n    at #resolve (node:internal/modules/esm/loader:673:17)\r\n    at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:593:35)\r\n    at ModuleJob.syncLink (node:internal/modules/esm/module_job:163:33)\r\n    at ModuleJob.link (node:internal/modules/esm/module_job:253:17) {\r\n  code: 'ERR_MODULE_NOT_FOUND',\r\n  url: '[PROJECT]/lib/total.mjs'\r\n}\r\n\r\nNode.js v24.16.0\r\n",
+      "exitCode": 1
+    },
+    "evidenceSha256": "d2b9fbdc027e6afd72a9534a880d88a8de0b3b282af26f020c71be7429ac6635"
+  },
+  "diagnostic": {
+    "source": {
+      "archive": "diagnostic-native-raw.jsonl",
+      "archiveSha256": "88ec48f895adcfc10273389f2938964043a00ee7e3287fcf9c4b66ab89620d60",
+      "sourceLine": 2325,
+      "originalEventSha256": "a123e3ffef5a3dedc54c4148245488e86bde75fb0847e638b63aaa3c78b8b2a6"
+    },
+    "output": {
+      "schema": "lattice.relative-module-diagnostic.v1",
+      "decision": "selected",
+      "reason": null,
+      "advisoryOnly": true,
+      "adopted": false,
+      "location": {
+        "projectRoot": "[PROJECT]",
+        "importer": "[PROJECT]\\entry.mjs",
+        "specifier": "./lib/total.mjs",
+        "target": "[PROJECT]\\lib\\total.mjs",
+        "nearestExistingParent": "[PROJECT]\\lib",
+        "targetExistsNow": false
+      },
+      "hints": [
+        "核對相對模組名稱、大小寫、副檔名及是否漏存或改名。",
+        "相對路徑以匯入檔所在目錄解析；命令的工作目錄不能取代此基準。",
+        "本結果僅為唯讀檢查提示，未驗證正式授權，不執行安裝、修復或重試。"
+      ],
+      "trust": {
+        "source": "caller_supplied_snapshot",
+        "context": "caller_asserted_current",
+        "sourceBytesVerified": true,
+        "importerBytesVerified": true,
+        "nativeProvenanceVerified": false,
+        "authorizationVerified": false
+      }
+    }
+  },
+  "repair": {
+    "source": {
+      "archive": "repair-native-raw.jsonl",
+      "archiveSha256": "3f71015353f1799b767e5f29a9f7291ce701cef9f835c5a40366c9445f28290f",
+      "sourceLine": 2339,
+      "originalEventSha256": "73c83b8e5aa529dd562ef9e956a56b43afd7578a35e7eb02463b528d6dd5e960"
+    },
+    "executor": "Codex native tool within predeclared authorization",
+    "diagnosticExecutedRepair": false,
+    "file": "lib/total.mjs",
+    "before": {
+      "exists": false,
+      "content": null,
+      "sha256": null
+    },
+    "after": {
+      "exists": true,
+      "content": "export function total(numbers) {\n  return numbers.reduce((sum, value) => sum + value, 0);\n}\n",
+      "sha256": "6ad43f48440a0650827421cc2ae3eb36ced0475297af818b5e6dce2986e02250"
+    },
+    "diff": "--- /dev/null\n+++ lib/total.mjs\n@@ -0,0 +1,3 @@\n+export function total(numbers) {\n+  return numbers.reduce((sum, value) => sum + value, 0);\n+}\n"
+  },
+  "success": {
+    "source": {
+      "archive": "success-native-raw.jsonl",
+      "archiveSha256": "6aad6c1e6bf37c4a7ec44ffae7c60af37204cd18c7319ef13381f9a14de6cac4",
+      "sourceLine": 2344,
+      "originalEventSha256": "3e7d9279b5d0a8ab09fd950c88bb9c0e4b0d5316e0a012b13017279b4e989199"
+    },
+    "event": {
+      "id": "[SUCCESS_EVENT]",
+      "type": "commandExecution",
+      "status": "completed",
+      "command": "node ./entry.mjs",
+      "aggregatedOutput": "LH-DELIVERY-02 total=42\n",
+      "exitCode": 0
+    },
+    "sameCommandAndCwd": true,
+    "exactNativeAggregatedOutputMatchesExpected": true,
+    "functionalAssertionPassed": true,
+    "outputChannelLimit": "Native CommandExecution exposes aggregated_output, not separate stdout/stderr; unchanged fixture writes expected text via process.stdout.write."
+  },
+  "postRepairChecks": {
+    "source": {
+      "archive": "post-checks-native-raw.jsonl",
+      "archiveSha256": "024a1c77762a61ed7bb90650fb1346f5e399de9ac0af082c15aa9ebdfdb85839",
+      "sourceLine": 2356,
+      "originalEventSha256": "5bb1d696d8240900c6e957d715136d44998e9ebcec6911eb30644d591bc8d296"
+    },
+    "checks": [
+      {
+        "name": "current-target-recheck",
+        "inputKind": "actual current files/native event",
+        "decision": "abstain",
+        "reason": "TARGET_EXISTS_NOW",
+        "advisoryOnly": true,
+        "adopted": false,
+        "nativeProvenanceVerified": false,
+        "authorizationVerified": false
+      },
+      {
+        "name": "native-success-excluded",
+        "inputKind": "actual current files/native event",
+        "decision": "excluded",
+        "reason": "NOT_FAILED_COMMAND",
+        "advisoryOnly": true,
+        "adopted": false,
+        "nativeProvenanceVerified": false,
+        "authorizationVerified": false
+      },
+      {
+        "name": "controlled-evidence-drift",
+        "inputKind": "controlled input: separate copy plus one space, old digest retained",
+        "decision": "abstain",
+        "reason": "SOURCE_INTEGRITY_MISMATCH",
+        "advisoryOnly": true,
+        "adopted": false,
+        "nativeProvenanceVerified": false,
+        "authorizationVerified": false
+      }
+    ]
+  },
+  "readOnlyVerification": {
+    "privateArchiveDirectory": ".lattice/life-harness/delivery-02/run-20260924-01",
+    "sourceLocator": "failure-source-index.json identifies the exact own rollout, turn, lines and prefix hash; other *-source-index.json files identify subsequent events",
+    "contextSha256": "df17ee05ccfa55b35c073c6d4bf3512ae3e66e69fe8d4eb95beae86e4992402e",
+    "method": "Read archives and source indexes; compare SHA-256 with this result, original lines and file snapshots. Do not rerun fixture or repair."
+  },
+  "preservation": {
+    "frozenFilesChecked": 71,
+    "changed": [],
+    "oldTestsOrModelsRerun": false
+  },
+  "limits": [
+    "One deliberately arranged missing-relative-module run, not held-out/generalization/production-benefit evidence.",
+    "No causal comparison proves that the diagnostic improved the repair; Codex already knew the controlled scope.",
+    "JSON/hashes/current-context declarations do not prove native provenance or formal authorization; both diagnostic verification flags stay false.",
+    "No LATTICE MCP formal identity was available; no PostgreSQL/recovery integration.",
+    "Node VM Modules remains experimental; Windows only; no new symlink privilege attempt.",
+    "No dependency installation, model call, push, merge, deployment or release."
+  ]
+}
