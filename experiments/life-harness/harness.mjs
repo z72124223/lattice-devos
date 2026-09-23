@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import assert from 'node:assert/strict';
 import { isExecutionDenied } from '../../apps/lattice-control/src/execution-recovery.mjs';
 import { buildCases } from './prepare.mjs';
+import { buildControlledCases, verifyLocalCapture } from './capture.mjs';
 
 export const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
@@ -94,8 +95,9 @@ export function diagnose(c, candidates) {
     : { decision: 'abstain', selected_procedure: null, abstention_reason: 'none_applicable' };
 }
 
-export function advise(c, group, bindings, retrieval = retrieve) {
+export function advise(c, group, bindings, retrieval = retrieve, annotationPrefix = '') {
   validateCase(c); member(group, ['A', 'B']);
+  member(annotationPrefix, ['', 'controlled-']);
   const started = performance.now();
   const reason = exclusion(c);
   const candidates = reason ? [] : retrieval(c);
@@ -107,7 +109,7 @@ export function advise(c, group, bindings, retrieval = retrieve) {
     model: { sdk: null, weights: null, encoder: null, tokenizer: null },
     candidates, ...decision, raw_score: null, calibrated_score: null,
     elapsed_ms: Number((performance.now() - started).toFixed(4)),
-    outcome_ref: `annotations/gold.jsonl#${c.case_id}`, advisory_only: true };
+    outcome_ref: `annotations/${annotationPrefix}gold.jsonl#${c.case_id}`, advisory_only: true };
   validateAdvisory(result);
   return result;
 }
@@ -126,7 +128,8 @@ export function validateAdvisory(a) {
   Object.values(a.model).forEach(v => assert.equal(v, null));
   assert.equal(a.raw_score, null); assert.equal(a.calibrated_score, null);
   assert.ok(Number.isFinite(a.elapsed_ms) && a.elapsed_ms >= 0);
-  assert.equal(a.outcome_ref, `annotations/gold.jsonl#${a.case_id}`); assert.equal(a.advisory_only, true);
+  member(a.outcome_ref, [`annotations/gold.jsonl#${a.case_id}`, `annotations/controlled-gold.jsonl#${a.case_id}`]);
+  assert.equal(a.advisory_only, true);
   list(a.candidates, ids); member(a.decision, ['selected', 'abstain', 'excluded']);
   if (a.decision === 'selected') {
     member(a.selected_procedure, a.candidates); assert.equal(a.abstention_reason, null);
@@ -151,9 +154,13 @@ export function validateAnnotations(rows, cases, datasetHash, proceduresHash, an
 }
 
 export function validateSources(cases) {
-  // This pilot has exactly two fixed sources. New sources require deliberate
+  // Only the fixed pilot sources and the explicitly captured controlled slice.
+  // New sources require deliberate
   // import/redaction and reannotation, not a fabricated ref or a caller's hash.
   const expected = new Map(buildCases().map(c => [c.case_id, c]));
+  if (cases.some(c => c.source.reference === 'experiments/life-harness/native-fixtures/captured-events.jsonl')) {
+    for (const c of buildControlledCases()) expected.set(c.case_id, c);
+  }
   for (const c of cases) {
     assert.ok(expected.has(c.case_id), 'unsupported source/case');
     assert.deepEqual(c, expected.get(c.case_id), 'source revision, selector or projection drift');
@@ -214,35 +221,43 @@ export function evaluate(cases, gold, advisories) {
   return metrics;
 }
 
-export function replay() {
-  const dataset = read(path.join(here, 'cases.jsonl'));
-  const cases = jsonl(path.join(here, 'cases.jsonl'));
+export function replay({ controlled = false } = {}) {
+  const prefix = controlled ? 'controlled-' : '';
+  const dataset = read(path.join(here, `${prefix}cases.jsonl`));
+  const cases = jsonl(path.join(here, `${prefix}cases.jsonl`));
   cases.forEach(validateCase);
   assert.equal(new Set(cases.map(c => c.case_id)).size, cases.length);
   validateSources(cases);
-  const inputFiles = ['harness.mjs', 'prepare.mjs', 'procedures.json', 'cases.jsonl',
-    'annotations/alpha.jsonl', 'annotations/beta.jsonl', 'annotations/gold.jsonl', 'annotations/adjudication.json'];
+  const inputFiles = ['harness.mjs', 'prepare.mjs', 'capture.mjs', 'procedures.json', `${prefix}cases.jsonl`,
+    ...['alpha.jsonl', 'beta.jsonl', 'gold.jsonl', 'adjudication.json'].map(name => `annotations/${prefix}${name}`),
+    ...(controlled ? ['native-fixtures/captured-events.jsonl'] : [])];
   const inputs = Object.fromEntries(inputFiles.map(file => [file, hash(read(path.join(here, file)))]));
   const procedureSources = Object.fromEntries([...procedures.map(p => p.source), 'apps/lattice-control/src/execution-recovery.mjs']
     .map(file => [file, hash(read(path.join(root, file)).replaceAll('\r\n', '\n'))]));
   const bindings = { dataset_sha256: hash(dataset), procedures_sha256: inputs['procedures.json'],
-    implementation_sha256: hash(JSON.stringify({ harness: inputs['harness.mjs'], procedureSources })) };
-  for (const who of ['alpha', 'beta', 'gold']) validateAnnotations(jsonl(path.join(here, `annotations/${who}.jsonl`)), cases, bindings.dataset_sha256, bindings.procedures_sha256, who);
-  const gold = jsonl(path.join(here, 'annotations/gold.jsonl'));
-  validateAdjudication(JSON.parse(read(path.join(here, 'annotations/adjudication.json'))),
-    jsonl(path.join(here, 'annotations/alpha.jsonl')), jsonl(path.join(here, 'annotations/beta.jsonl')), gold, bindings);
-  const advisories = ['A', 'B'].flatMap(group => cases.map(c => advise(c, group, bindings)));
+    implementation_sha256: hash(JSON.stringify({ harness: inputs['harness.mjs'], capture: inputs['capture.mjs'], procedureSources })) };
+  for (const who of ['alpha', 'beta', 'gold']) validateAnnotations(jsonl(path.join(here, `annotations/${prefix}${who}.jsonl`)), cases, bindings.dataset_sha256, bindings.procedures_sha256, who);
+  const gold = jsonl(path.join(here, `annotations/${prefix}gold.jsonl`));
+  validateAdjudication(JSON.parse(read(path.join(here, `annotations/${prefix}adjudication.json`))),
+    jsonl(path.join(here, `annotations/${prefix}alpha.jsonl`)), jsonl(path.join(here, `annotations/${prefix}beta.jsonl`)), gold, bindings);
+  const advisories = ['A', 'B'].flatMap(group => cases.map(c => advise(c, group, bindings, retrieve, prefix)));
   const A = evaluate(cases, gold, advisories.filter(a => a.group === 'A'));
   const B = evaluate(cases, gold, advisories.filter(a => a.group === 'B'));
-  const summary = { schema_version: 1, experiment: 'offline-pilot-v1', node_version: process.version,
+  const summary = { schema_version: 1, experiment: controlled ? 'controlled-native-node-v1' : 'offline-pilot-v1', node_version: process.version,
     inputs, procedure_sources: procedureSources, bindings,
+    ...(controlled ? { capture_verification: verifyLocalCapture() } : {}),
     comparison: { status: 'no_change', applied_change: null, qualifying_native_failure_count: cases.filter(c => c.source.kind !== 'synthetic' && c.source.native_observed && !exclusion(c)).length,
-      real_diagnostic_increment: null, explanation: 'No qualifying native launch/dependency failure found; B equals frozen pilot A. No product or end-to-end benefit evaluated.' }, A, B };
+      real_diagnostic_increment: null, explanation: controlled
+        ? 'Controlled native development slice; compare metrics against independently frozen labels. B unchanged. No production benefit evaluated.'
+        : 'No qualifying native launch/dependency failure found in the original pilot; B equals frozen pilot A. No product or end-to-end benefit evaluated.' }, A, B };
   const out = path.join(here, 'results'); fs.mkdirSync(out, { recursive: true });
-  fs.writeFileSync(path.join(out, 'advisories.jsonl'), advisories.map(a => JSON.stringify(a)).join('\n') + '\n');
-  fs.writeFileSync(path.join(out, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
+  fs.writeFileSync(path.join(out, `${prefix}advisories.jsonl`), advisories.map(a => JSON.stringify(a)).join('\n') + '\n');
+  fs.writeFileSync(path.join(out, `${prefix}summary.json`), JSON.stringify(summary, null, 2) + '\n');
   console.log(JSON.stringify({ cases: cases.length, advisories: advisories.length, comparison: summary.comparison, A, B }));
   return summary;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) replay();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  assert.ok(process.argv.length === 2 || (process.argv.length === 3 && process.argv[2] === '--controlled'));
+  replay({ controlled: process.argv[2] === '--controlled' });
+}

@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+  "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+  "roles": {
+    "alpha": "/root/annotator_alpha",
+    "beta": "/root/annotator_beta",
+    "adjudicator": "/root"
+  },
+  "method": "Independent AI annotations of the frozen three-event controlled slice and unchanged Git/Codex procedure set before A/B scoring; not human experts.",
+  "reviewed_cases": 3,
+  "disagreements": [],
+  "original_answers": [
+    "annotations/controlled-alpha.jsonl",
+    "annotations/controlled-beta.jsonl"
+  ],
+  "gold": "annotations/controlled-gold.jsonl",
+  "annotation_completion_is_product_acceptance": false
+}
