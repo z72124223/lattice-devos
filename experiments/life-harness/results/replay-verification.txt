@@ -1,1 +1,19 @@
-{"original_20_case_bytes":"unchanged from 3d4aa7d","original_20_AB_metrics":"unchanged from 3d4aa7d","controlled_replay":"second replay identical except elapsed_ms","controlled_cases":3,"controlled_advisories":6,"original_advisories":40,"qualifying_controlled_native_failures":2,"native_original":"verified_from_local_raw_capture","change":"no_change","diagnostic_benefit":"not demonstrated","production_benefit":"not evaluated"}
+{
+  "baseline_revision": "0a1c42c48e34eadb36cffaf23c8345ac59bf98c4",
+  "archive_preflight_regression": "isolated existing projection without raw rejected before writes; bytes and directory entries unchanged",
+  "focused_tests": {
+    "tests": 23,
+    "pass": 23,
+    "fail": 0
+  },
+  "frozen_inputs": "cases, candidates, annotations and native fixtures byte-identical to baseline",
+  "local_raw_and_index": "SHA-256 unchanged",
+  "replay": "both datasets retain baseline A/B metrics, comparison and advisories except implementation binding and elapsed_ms",
+  "manifests": "updated capture implementation binding; all input hashes verified",
+  "capture_verification": {
+    "portable_projection": "verified",
+    "native_original": "verified_from_local_raw_capture"
+  },
+  "diagnostic_benefit": "not demonstrated",
+  "production_benefit": "not evaluated"
+}

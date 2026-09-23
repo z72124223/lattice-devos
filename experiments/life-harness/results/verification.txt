@@ -1,30 +1,31 @@
-✔ default runtime uses the newest valid desktop CLI even when npm is installed (24.8461ms)
-✔ npm remains a fallback when no valid desktop CLI exists (9.8736ms)
-✔ missing or relative installation roots cannot resolve against the working directory (0.5859ms)
-✔ only native failed tool evidence triggers recovery, not quotations or successful reads (1.2099ms)
-✔ replayed native item identifiers count once (0.1954ms)
-✔ controlled projection retains native statuses and codes; does not relabel failures from exit codes (10.3914ms)
-✔ collector rejects wrong task/turn/cwd, missing context, duplicated event and already terminal turn (3.2108ms)
-✔ a platform completed/nonzero event remains completed and is excluded by the existing contract (1.4843ms)
-✔ portable raw absence is explicit; local original is checked when available (4.2594ms)
-✔ reviewed capture binding rejects edited status, kind and raw contents (0.883ms)
-✔ scope contains no formal identity, and the three small scenario commands are fixed (0.2196ms)
-✔ source hashes and native projection are verified; arbitrary source paths and fabricated refs fail (25.1549ms)
-✔ strict schema rejects extra instructions, wrong types, oversize output and evidence mutation (5.1663ms)
-✔ denied, terminal, expired, identity and circuit boundaries stop before retrieval in both groups (3.5997ms)
-✔ synthetic native-shaped items cannot be promoted to a native observed case (2.7855ms)
-✔ malicious log text is data and only a fixed procedure ID can be selected (1.1228ms)
-✔ misleading package keyword and insufficient evidence do not force a candidate (0.6403ms)
-✔ retrieval misses, ranking mistakes and abstentions have distinct denominators (0.5753ms)
-✔ frozen B differs from A only in group and measured local evaluator timing (2.3403ms)
-✔ annotation binding rejects dataset/procedure drift and duplicated/missing case IDs (0.6789ms)
-✔ adjudication rejects concealed disagreements and unrecorded gold overrides (0.6751ms)
-✔ controlled local replay exercises existing diagnostic failures without native event fabrication (6.7847ms)
-ℹ tests 22
+✔ default runtime uses the newest valid desktop CLI even when npm is installed (25.435ms)
+✔ npm remains a fallback when no valid desktop CLI exists (11.0804ms)
+✔ missing or relative installation roots cannot resolve against the working directory (0.5907ms)
+✔ only native failed tool evidence triggers recovery, not quotations or successful reads (1.1341ms)
+✔ replayed native item identifiers count once (0.4571ms)
+✔ controlled projection retains native statuses and codes; does not relabel failures from exit codes (10.7563ms)
+✔ collector refuses a frozen projection without local raw before creating or changing any files (18.0778ms)
+✔ collector rejects wrong task/turn/cwd, missing context, duplicated event and already terminal turn (2.6282ms)
+✔ a platform completed/nonzero event remains completed and is excluded by the existing contract (2.4483ms)
+✔ portable raw absence is explicit; local original is checked when available (4.6198ms)
+✔ reviewed capture binding rejects edited status, kind and raw contents (1.1249ms)
+✔ scope contains no formal identity, and the three small scenario commands are fixed (0.2501ms)
+✔ source hashes and native projection are verified; arbitrary source paths and fabricated refs fail (25.891ms)
+✔ strict schema rejects extra instructions, wrong types, oversize output and evidence mutation (6.359ms)
+✔ denied, terminal, expired, identity and circuit boundaries stop before retrieval in both groups (3.6651ms)
+✔ synthetic native-shaped items cannot be promoted to a native observed case (2.9469ms)
+✔ malicious log text is data and only a fixed procedure ID can be selected (1.0291ms)
+✔ misleading package keyword and insufficient evidence do not force a candidate (0.6258ms)
+✔ retrieval misses, ranking mistakes and abstentions have distinct denominators (0.6451ms)
+✔ frozen B differs from A only in group and measured local evaluator timing (2.6393ms)
+✔ annotation binding rejects dataset/procedure drift and duplicated/missing case IDs (0.7469ms)
+✔ adjudication rejects concealed disagreements and unrecorded gold overrides (0.604ms)
+✔ controlled local replay exercises existing diagnostic failures without native event fabrication (6.6021ms)
+ℹ tests 23
 ℹ suites 0
-ℹ pass 22
+ℹ pass 23
 ℹ fail 0
 ℹ cancelled 0
 ℹ skipped 0
 ℹ todo 0
-ℹ duration_ms 168.7713
+ℹ duration_ms 174.9263

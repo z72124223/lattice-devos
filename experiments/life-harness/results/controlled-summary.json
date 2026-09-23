@@ -5,7 +5,7 @@
   "inputs": {
     "harness.mjs": "16056d6ca9b9c4560a9e7b631016d93677b0207c8c057e819841cbd9c64be7cc",
     "prepare.mjs": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
-    "capture.mjs": "ff2c9af845e8e21f8040b2f07960362b09653c972136eb1cb7f9ea03398d4eb8",
+    "capture.mjs": "93826708b876f1eb1123963a5098920978f8082a2bb3dde6daa95e7ac8300e1b",
     "procedures.json": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
     "controlled-cases.jsonl": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
     "annotations/controlled-alpha.jsonl": "a61fbde4017514acda8ee2728cc34fd3f1443276c0346bb8b1467ae11a48662d",
@@ -22,7 +22,7 @@
   "bindings": {
     "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
     "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
-    "implementation_sha256": "8a242926b1e78aa27bfaabadaa0a341696796ea7d9d21a337bce6ff504700ef4"
+    "implementation_sha256": "d2a0a4bebfe64b19fe93020ec02fab9e3fdd5463139b33f8f7551b26ef2ac868"
   },
   "capture_verification": {
     "portable_projection": "verified",

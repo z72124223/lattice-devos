@@ -63,11 +63,16 @@ function deidentify(record, threadId, turnId, fixtureRoot, caseId) {
 }
 
 export function capture(rollout, threadId, turnId) {
+  const rawPath = localRaw;
+  const indexPath = path.join(path.dirname(rawPath), 'source-index.json');
+  const casesPath = path.join(here, 'controlled-cases.jsonl');
+  for (const output of [captureFile, rawPath, indexPath, casesPath]) {
+    assert.ok(!fs.existsSync(output), `capture archive already exists: ${output}`);
+  }
   assert.ok(path.isAbsolute(rollout));
   assert.ok(path.basename(rollout).endsWith(`-${threadId}.jsonl`), 'explicit own-task rollout required');
   const { selected, start, context, cliVersion } = selectNative(readLines(rollout), threadId, turnId, fixture);
   const raw = [start, context, ...selected].sort((a, b) => a.line - b.line).map(r => r.raw).join('\n') + '\n';
-  const rawPath = localRaw;
   fs.mkdirSync(path.dirname(rawPath), { recursive: true });
   fs.writeFileSync(rawPath, raw, { flag: 'wx' }); // Preserve an existing raw capture.
   const baseline = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
@@ -83,10 +88,10 @@ export function capture(rollout, threadId, turnId) {
       formal_project: null, formal_task: null },
     record: deidentify(record, threadId, turnId, fixture, `offline-controlled-${scenario.id}`),
   }));
-  fs.writeFileSync(captureFile, captured.map(r => JSON.stringify(r)).join('\n') + '\n');
-  fs.writeFileSync(path.join(path.dirname(rawPath), 'source-index.json'), JSON.stringify({ rollout,
-    threadId, turnId, sourceLines: [start.line, context.line, ...selected.map(r => r.line)], raw_capture_sha256: hash(raw) }, null, 2) + '\n');
-  fs.writeFileSync(path.join(here, 'controlled-cases.jsonl'), buildControlledCases().map(r => JSON.stringify(r)).join('\n') + '\n');
+  fs.writeFileSync(captureFile, captured.map(r => JSON.stringify(r)).join('\n') + '\n', { flag: 'wx' });
+  fs.writeFileSync(indexPath, JSON.stringify({ rollout,
+    threadId, turnId, sourceLines: [start.line, context.line, ...selected.map(r => r.line)], raw_capture_sha256: hash(raw) }, null, 2) + '\n', { flag: 'wx' });
+  fs.writeFileSync(casesPath, buildControlledCases().map(r => JSON.stringify(r)).join('\n') + '\n', { flag: 'wx' });
   console.log(JSON.stringify(captured.map(c => ({ scenario: c.scenario, native_type: c.record.payload.item.type,
     status: c.record.payload.item.status, exit_code: c.record.payload.item.exit_code, raw_sha256: c.source.raw_event_sha256 }))));
 }

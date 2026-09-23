@@ -85,11 +85,13 @@ B 與 A 相同；在沒有合格原生失敗證據時，不強造改善。summar
 
 ## 已執行結果與限制
 
-`results/verification.txt`：原 16 項加新增 6 項，共 22 項聚焦測試通過。兩個既有診斷函式另有受控本機
+`results/verification.txt`：原 16 項加新增 7 項，共 23 項聚焦測試通過。新增封存保護回歸在隔離目錄驗證：
+已有凍結投影但無本機原文時，採集在寫入前拒絕，既有檔案逐位元組不變且不建立 raw/index。
+兩個既有診斷函式另有受控本機
 失敗重播，未將函式錯誤冒充 commandExecution。`results/summary.json` 分開保存
 19 合成／1 原生受控成功／0 真實案例；同一 20 案各跑 A/B，共 40 筆離線建議紀錄，
 不是 40 個獨立樣本。
-`results/replay-verification.txt` 記錄二次重播一致（排除評估器實際耗時）；
+`results/replay-verification.txt` 記錄兩組資料重播與已驗收基準一致（程式雜湊與實際耗時除外）；
 耗時只屬這個離線評估器，不能當作任務效率。候選有效4例、皆不適用2例、
 資訊不足1例、排除13例；兩名 AI 盲標無分歧，主代理第三角色逐筆核對。
 獨立程式審查已確認兩項溯源修正，最終驗收仍由原協調任務負責。
@@ -121,7 +123,8 @@ completed／0。沒有更改 PATH、全域環境、安裝或既有專案依賴�
 `capture.mjs` 只讀明示的單一 rollout 與 thread/turn ID，核對該回合原始
 task_started／turn_context、唯一命令事件、精確 fixture cwd 及事件前未終止。
 首次封存介面為 `node experiments/life-harness/capture.mjs <own-rollout> <own-task-id> <turn-id>`；
-既有原文拒絕覆寫。本輪已封存，日常重播使用 `--controlled`，無需重採集。
+任何封存輸出（投影、原文、source-index 或案例）已存在，就在建立目錄或寫檔前拒絕；
+寫檔也只允許新建。本輪已封存，日常重播使用 `--controlled`，無需重採集。
 後續新採集須另保存來源並明示更新已審查投影 digest，不能覆寫這個凍結集合。
 
 原始三事件及當時回合範圍保留在本工作樹被 Git 忽略的

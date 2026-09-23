@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { selectNative, buildControlledCases, verifyLocalCapture, verifyRawCapture, reviewedCapture, scenarios } from './capture.mjs';
 import { validateCase, validateSources, advise, hash } from './harness.mjs';
@@ -31,6 +32,33 @@ function parserFixture() {
       r.payload.item.cwd = pathToFileURL(fixture).href; return r; }) ];
 }
 const select = rows => selectNative(rows.map(JSON.stringify), 'own-task', 'own-turn', fixture);
+
+test('collector refuses a frozen projection without local raw before creating or changing any files', async t => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'life-harness-capture-'));
+  t.after(() => {
+    assert.equal(path.dirname(path.resolve(tempRoot)), path.resolve(os.tmpdir()));
+    assert.ok(path.basename(tempRoot).startsWith('life-harness-capture-'));
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+  const isolatedHere = path.join(tempRoot, 'experiments/life-harness');
+  const isolatedFixture = path.join(isolatedHere, 'native-fixtures');
+  fs.mkdirSync(isolatedFixture, { recursive: true });
+  for (const file of ['capture.mjs', 'controlled-cases.jsonl', 'native-fixtures/captured-events.jsonl']) {
+    fs.copyFileSync(path.join(here, file), path.join(isolatedHere, file));
+  }
+  const rows = parserFixture();
+  for (const row of rows.slice(3)) row.payload.item.cwd = pathToFileURL(isolatedFixture).href;
+  const rollout = path.join(tempRoot, 'rollout-own-task.jsonl');
+  fs.writeFileSync(rollout, rows.map(JSON.stringify).join('\n') + '\n');
+  const entries = fs.readdirSync(tempRoot, { recursive: true }).sort();
+  const before = entries.filter(file => fs.statSync(path.join(tempRoot, file)).isFile())
+    .map(file => [file, fs.readFileSync(path.join(tempRoot, file))]);
+  const { capture } = await import(pathToFileURL(path.join(isolatedHere, 'capture.mjs')).href);
+  assert.throws(() => capture(rollout, 'own-task', 'own-turn'), /capture archive already exists: .*captured-events\.jsonl/u);
+  assert.deepEqual(fs.readdirSync(tempRoot, { recursive: true }).sort(), entries);
+  for (const [file, content] of before) assert.deepEqual(fs.readFileSync(path.join(tempRoot, file)), content);
+  assert.equal(fs.existsSync(path.join(tempRoot, '.lattice')), false, 'no raw/index directory was created');
+});
 
 test('collector rejects wrong task/turn/cwd, missing context, duplicated event and already terminal turn', () => {
   const rows = parserFixture(); assert.equal(select(rows).selected.length, 3);
