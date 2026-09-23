@@ -18,6 +18,9 @@ const inside = (root, value) => {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 };
 const samePath = (a, b) => inside(a, b) && inside(b, a);
+// Keep both PowerShell literals and the native shlex display in one quote form.
+// Paths needing mixed shlex chunks or PowerShell smart-quote handling fail closed.
+const unsupportedQuote = /['"\u2018-\u201f$`!^]/u;
 export function rejectDiagnostic(reason) {
   throw Object.assign(new Error(`唯讀診斷結果無法核對：${reason}`), { code: `CONTROL_DIAGNOSTIC_${reason}`, status: 409 });
 }
@@ -30,11 +33,28 @@ export function failureEventDigest(event) {
     command: event.command, aggregatedOutput: event.aggregatedOutput, exitCode: event.exitCode }));
 }
 export function diagnosticReceiptCommand(requestPath, requestSha256) {
-  if (!text(requestPath) || !path.isAbsolute(requestPath) || /['\r\n\0]/u.test(requestPath)
+  if (!text(requestPath) || !path.isAbsolute(requestPath) || unsupportedQuote.test(requestPath)
       || !digest(requestSha256)) rejectDiagnostic('REQUEST_REJECTED');
   const cli = fileURLToPath(new URL('./relative-module-diagnostic-cli.mjs', import.meta.url));
-  if (cli.includes("'")) rejectDiagnostic('REQUEST_REJECTED');
+  if (!text(cli) || unsupportedQuote.test(cli)) rejectDiagnostic('REQUEST_REJECTED');
   return `node --experimental-vm-modules --disable-warning=ExperimentalWarning '${cli}' '${requestPath}' --receipt ${requestSha256}`;
+}
+function matchesNativeCommand(item, inner) {
+  if (!text(item.command, 16384) || !Array.isArray(item.commandActions) || item.commandActions.length !== 1
+      || !keys(item.commandActions[0], ['type', 'command']) || item.commandActions[0].type !== 'unknown'
+      || item.commandActions[0].command !== inner) return false;
+  // Native v2 uses shlex::try_join(argv), not PowerShell command-line quoting.
+  // Pinned upstream: comex/rust-shlex 4a0724b0/src/bytes.rs (1.3.0),
+  // used by openai/codex 851d9e95/codex-rs/shell-command/src/parse_command.rs.
+  // On this restricted alphabet both executable and inner script use one double
+  // quoted token, escaping only backslash and double quote, exactly as JSON does.
+  // Decode only the executable token; never parse/evaluate the supplied script.
+  const prefix = /^("[^"]+") -Command /u.exec(item.command);
+  if (!prefix) return false;
+  let shell;
+  try { shell = JSON.parse(prefix[1]); } catch { return false; }
+  if (!/^[A-Za-z]:\\(?:[\p{L}\p{N} ._()-]+\\)*(?:pwsh|powershell)\.exe$/iu.test(shell)) return false;
+  return item.command === `${JSON.stringify(shell)} -Command ${JSON.stringify(inner)}`;
 }
 export function createDiagnosticReceipt(request, evidence, result, requestPath, requestSha256) {
   const binding = request.receiptBinding;
@@ -60,7 +80,7 @@ export function verifyDiagnosticReceipt(item, failure, binding, workspace, now =
     'failureEventSha256', 'validUntil', 'subject', 'result']) || receipt.schema !== receiptSchema
       || !keys(receipt.binding, bindingKeys) || !bindingKeys.every(key => receipt.binding[key] === binding[key])
       || !digest(receipt.evidenceSha256) || receipt.failureEventSha256 !== failureEventDigest(failure)) rejectDiagnostic('BINDING_REJECTED');
-  if (item.command !== diagnosticReceiptCommand(receipt.requestPath, receipt.requestSha256)) rejectDiagnostic('COMMAND_REJECTED');
+  if (!matchesNativeCommand(item, diagnosticReceiptCommand(receipt.requestPath, receipt.requestSha256))) rejectDiagnostic('COMMAND_REJECTED');
   const expires = Date.parse(receipt.validUntil);
   if (typeof receipt.validUntil !== 'string' || !Number.isFinite(expires) || expires <= now
       || expires > now + 300000) rejectDiagnostic('EXPIRED');

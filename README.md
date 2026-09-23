@@ -228,9 +228,14 @@ Control 結果接入（LH-DELIVERY-03）：已有唯讀入口
 `{ projectId, taskRef, claimId, threadId, turnId, inputId, failureItemId }`，`context.taskId`
 須等於正式 `taskRef`，`validUntil` 設在五分鐘內。完整 request bytes 計算 SHA-256 後，
 使用 [`diagnosticReceiptCommand(requestPath, requestSha256)`](apps/lattice-control/src/relative-module-receipt.mjs)
-取得確切原生命令；CLI 的選用參數 `--receipt <request-sha256>` 核對輸入 bytes 並輸出封套。
+取得交給原生 shell 的完整內層命令；CLI 的選用參數 `--receipt <request-sha256>` 核對輸入 bytes 並輸出封套。
 原失敗 event 保留原生 `id/type/status/command/aggregatedOutput/exitCode`，不能用模型回覆代替。
 封套模式的命令會帶所需 VM Modules 旗標；Control 本身不解析專案原始碼。
+目前只接受 Windows 磁碟絕對路徑 `pwsh.exe`／`powershell.exe`、單一 `-Command` 引數的
+原生 v2 shlex 完整顯示字串，並要求唯一 `unknown` command action 與完整內層命令一致。
+額外 shell 引數、前後附加命令、管線、裸命令及其他 shell／引號編碼均拒收；路徑含引號、
+智慧引號、`$`、反引號、`!` 或 `^` 也不支援。shell 路徑元件限字母、數字、空白、`._()-`。
+這是受限格式核對，不會執行收到的命令；失敗事件摘要仍涵蓋未拆解的原生 shell 包裝。
 
 入口前後核對目前正式 project snapshot／claim／派工 marker、同一連線世代與 session，
 以及同一活動回合中先失敗、後診斷的指定 command item。錯身分、撤銷／完成／封存、

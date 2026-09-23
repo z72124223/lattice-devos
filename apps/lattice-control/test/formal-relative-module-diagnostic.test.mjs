@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
@@ -16,6 +17,15 @@ const projectId = 'diagnostic-memory-project', taskRef = 'a'.repeat(64);
 // Deliberately nonexistent: these doubles verify binding, never local file bytes.
 const workspace = path.resolve('formal-relative-diagnostic-memory-only');
 const importer = path.join(workspace, 'src', 'entry.mjs');
+// Codex 851d9e9 pins shlex 1.3.0 (4a0724b0): these restricted tokens use
+// DoubleQuoted display, escaping backslashes and double quotes like JSON.
+const nativePrefix = '"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe" -Command ';
+const nativeCommand = inner => ({ command: nativePrefix + JSON.stringify(inner),
+  commandActions: [{ type: 'unknown', command: inner }] });
+const rawFailureDigest = event => createHash('sha256').update(JSON.stringify({
+  id: event.id, type: event.type, status: event.status, command: event.command,
+  aggregatedOutput: event.aggregatedOutput, exitCode: event.exitCode,
+})).digest('hex');
 
 function fixture(context) {
   const effects = [];
@@ -34,7 +44,7 @@ function fixture(context) {
       project_snapshot_id: 'fixed-project-snapshot', blocker: null, failure_code: null } },
     claims: [claim], product: { observations: [] } };
   const failure = {
-    id: 'failed-import', type: 'commandExecution', status: 'failed', command: 'node src/entry.mjs',
+    id: 'failed-import', type: 'commandExecution', status: 'failed', ...nativeCommand(`node '${importer}'`),
     aggregatedOutput: `Error [ERR_MODULE_NOT_FOUND]: Cannot find module '${path.join(workspace, 'src', 'missing.mjs')}' imported from ${importer}`,
     exitCode: 1 };
   const binding = { projectId, taskRef, claimId: claim.claim_id, threadId: claim.thread_id,
@@ -54,7 +64,7 @@ function fixture(context) {
         sourceBytesVerified: true, importerBytesVerified: true,
         nativeProvenanceVerified: false, authorizationVerified: false } } };
   const diagnostic = { id: 'diagnostic-output', type: 'commandExecution', status: 'completed', exitCode: 0,
-    command: diagnosticReceiptCommand(receipt.requestPath, receipt.requestSha256), aggregatedOutput: JSON.stringify(receipt) };
+    ...nativeCommand(diagnosticReceiptCommand(receipt.requestPath, receipt.requestSha256)), aggregatedOutput: JSON.stringify(receipt) };
   const marker = { type: 'userMessage', content: [{ type: 'text',
     text: `[LATTICE_TASK:${taskRef}:${claim.claim_id}:${claim.input_id}]\nretained user input` }] };
   const turn = { id: claim.turn_id, status: 'inProgress', items: [marker, failure, diagnostic] };
@@ -117,10 +127,15 @@ function assertLimitedTrust(output, sample) {
   assert.deepEqual(output.receipt, sample.receipt);
   assert.equal(output.nativeClaimBindingVerified, true);
   for (const name of ['producerVerified', 'inputFileBytesVerified', 'diagnosticSemanticsVerified']) assert.equal(output[name], false);
+  assert.equal(output.receipt.result.advisoryOnly, true);
+  assert.equal(output.receipt.result.adopted, false);
+  for (const name of ['nativeProvenanceVerified', 'authorizationVerified']) assert.equal(output.receipt.result.trust[name], false);
 }
 
 test('memory doubles bind two fresh Runtime/native snapshots without opening paths, dispatching, or writing', async context => {
   const sample = fixture(context);
+  assert.equal(nativePrefix, `${JSON.stringify('C:\\Program Files\\PowerShell\\7\\pwsh.exe')} -Command `);
+  assert.equal(sample.receipt.failureEventSha256, rawFailureDigest(sample.failure));
   assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
   assert.equal(sample.calls.details, 2); assert.equal(sample.calls.reads.length, 2);
   for (const read of sample.calls.reads) assert.deepEqual(read.options.effectIdentity, {
@@ -145,7 +160,6 @@ const rejectedFixtures = [
   ['diagnostic is agent text', s => { s.diagnostic.type = 'agentMessage'; }],
   ['diagnostic unsuccessful', s => { s.diagnostic.exitCode = 1; }],
   ['diagnostic JSON has extra log text', s => { s.diagnostic.aggregatedOutput += '\nlog output'; }],
-  ['diagnostic command differs', s => { s.diagnostic.command += ' --unexpected'; }],
   ['failure declined', s => { s.failure.status = 'declined'; s.failure.exitCode = null; }],
   ['failure actually completed', s => { s.failure.status = 'completed'; s.failure.exitCode = 0; }],
   ['failure policy denied', s => { s.failure.aggregatedOutput = 'CreateProcess rejected: blocked by policy'; }],
@@ -164,6 +178,70 @@ test('stale, mismatched, denied, and overclaimed memory fixtures are rejected wi
     mutate(sample);
     await withoutFileAccess(sample, () => assert.rejects(sample.call(), diagnosticRejection));
   });
+});
+
+test('native display must exactly match one unknown action and the complete producer command', async context => {
+  const mutations = [
+    ['wrapper prefix command', (item) => { item.command = `Write-Output injected; ${item.command}`; }],
+    ['wrapper suffix command', (item) => { item.command += '; Write-Output injected'; }],
+    ['wrapper pipe', (item) => { item.command += ' | Write-Output'; }],
+    ['extra wrapper flag', (item) => { item.command = item.command.replace(' -Command ', ' -NoProfile -Command '); }],
+    ['extra wrapper argv', (item) => { item.command += ' "extra"'; }],
+    ['inner prefix command', (item, inner) => Object.assign(item, nativeCommand(`Write-Output injected; ${inner}`))],
+    ['inner suffix command', (item, inner) => Object.assign(item, nativeCommand(`${inner}; Write-Output injected`))],
+    ['inner pipe', (item, inner) => Object.assign(item, nativeCommand(`${inner} | Write-Output`))],
+    ['extra inner argv', (item, inner) => Object.assign(item, nativeCommand(`${inner} --unexpected`))],
+    ['missing action', item => { delete item.commandActions; }],
+    ['empty actions', item => { item.commandActions = []; }],
+    ['extra action', item => { item.commandActions.push(clone(item.commandActions[0])); }],
+    ['action mismatch', item => { item.commandActions[0].command += ' --unexpected'; }],
+    ['action type mismatch', item => { item.commandActions[0].type = 'read'; }],
+    ['extra action field', item => { item.commandActions[0].extra = true; }],
+    ['bare command', (item, inner) => { item.command = inner; }],
+    ['wrong shell', (item, inner) => { item.command = `${JSON.stringify('C:\\Windows\\System32\\cmd.exe')} -Command ${JSON.stringify(inner)}`; }],
+    ['relative shell', (item, inner) => { item.command = `"pwsh.exe" -Command ${JSON.stringify(inner)}`; }],
+    ['single quoted display', (item, inner) => { item.command = `${nativePrefix}'${inner}'`; }],
+    ['unescaped Windows backslashes', item => { item.command = item.command.replaceAll('\\\\', '\\'); }],
+    ['malformed ASCII apostrophe', (item, inner) => Object.assign(item, nativeCommand(inner.replace("'", "''")))],
+  ];
+  for (const [name, mutate] of mutations) await context.test(name, async subtest => {
+    const sample = fixture(subtest);
+    mutate(sample.diagnostic, sample.diagnostic.commandActions[0].command);
+    await withoutFileAccess(sample, () => assert.rejects(sample.call(), {
+      status: 409, code: 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED',
+    }));
+  });
+});
+
+test('the canonical Windows PowerShell display also preserves the limited receipt', async context => {
+  const sample = fixture(context);
+  const shell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+  sample.diagnostic.command = `${JSON.stringify(shell)} -Command ${JSON.stringify(sample.diagnostic.commandActions[0].command)}`;
+  assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
+});
+
+test('unsupported request path quoting fails closed', async context => {
+  for (const character of ["'", '"', '\u2018', '\u2019', '\u201c', '\u201d', '$', '`', '!', '^']) {
+    await context.test(`path character U+${character.codePointAt(0).toString(16)}`, async subtest => {
+      const sample = fixture(subtest);
+      sample.receipt.requestPath = path.join(workspace, `request${character}.json`);
+      sample.syncReceipt();
+      await withoutFileAccess(sample, () => assert.rejects(sample.call(), {
+        status: 409, code: 'CONTROL_DIAGNOSTIC_REQUEST_REJECTED',
+      }));
+    });
+  }
+});
+
+test('failure digest binds the original full wrapper, never its stripped inner command', async context => {
+  const sample = fixture(context);
+  const strippedDigest = rawFailureDigest({ ...sample.failure, command: sample.failure.commandActions[0].command });
+  assert.notEqual(strippedDigest, rawFailureDigest(sample.failure));
+  sample.receipt.failureEventSha256 = strippedDigest;
+  sample.syncReceipt();
+  await withoutFileAccess(sample, () => assert.rejects(sample.call(), {
+    status: 409, code: 'CONTROL_DIAGNOSTIC_BINDING_REJECTED',
+  }));
 });
 
 test('connection generation and app-server session drift after every awaited read are rejected', async context => {
@@ -226,6 +304,11 @@ test('real loopback HTTP route preserves the limited receipt and rejects changed
     const malformed = await withoutFileAccess(sample, () => getJson(`${base}?${query}${suffix}`));
     assert.equal(malformed.status, 400);
   }
+  const originalCommand = sample.diagnostic.command;
+  sample.diagnostic.command += '; Write-Output injected';
+  const malicious = await withoutFileAccess(sample, () => getJson(`${base}?${query}`));
+  assert.equal(malicious.status, 409);
+  sample.diagnostic.command = originalCommand;
   sample.claim.archived = true;
   const archived = await withoutFileAccess(sample, () => getJson(`${base}?${query}`));
   assert.equal(archived.status, 409);
