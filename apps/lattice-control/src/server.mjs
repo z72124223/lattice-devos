@@ -276,6 +276,16 @@ export function createLatticeServer({
       }
       if (formalTasks && formalRoute) {
         const taskRef = formalRoute[1];
+        if (request.method === "GET" && formalRoute[2] === "diagnostic") {
+          const selectors = Object.fromEntries(['claimId', 'threadId', 'turnId', 'failureItemId', 'diagnosticItemId']
+            .map(key => [key, url.searchParams.get(key)]));
+          if ([...url.searchParams.keys()].some(key => !['projectId', ...Object.keys(selectors)].includes(key))
+              || [...url.searchParams.keys()].some(key => url.searchParams.getAll(key).length !== 1)) {
+            throw new HttpRequestError(400, 'CONTROL_DIAGNOSTIC_SELECTOR_REJECTED', '診斷識別欄位重複或不支援。');
+          }
+          sendJson(response, 200, await formalTasks.relativeModuleDiagnostic(url.searchParams.get('projectId'), taskRef, selectors));
+          return;
+        }
         if (request.method === "GET" && formalRoute[2] === "conversation") {
           sendJson(response, 200, await formalTasks.conversation(url.searchParams.get("projectId"), taskRef,
             url.searchParams.get("phase") ?? "EXECUTION"));

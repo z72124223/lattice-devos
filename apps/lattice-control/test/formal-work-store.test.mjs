@@ -4,6 +4,18 @@ import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs
 import { openCircuitSummary } from "../src/execution-recovery.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
+test('formal detail retains the freshly read Runtime source and revision', async () => {
+  const snapshot = page(); let reads = 0;
+  const store = new FormalWorkStore({ runtime: { call: async (name, args) => {
+    assert.equal(name, 'lattice_control_snapshot');
+    assert.deepEqual(args, { project_id: 'project-a', task_ref: taskA });
+    reads += 1; return structuredClone(snapshot);
+  } } });
+  assert.deepEqual((await store.detail('project-a', taskA)).source, snapshot.source);
+  snapshot.revision = '3'.repeat(64);
+  assert.equal((await store.detail('project-a', taskA)).snapshot_revision, snapshot.revision);
+  assert.equal(reads, 2);
+});
 test("a response for another project cannot populate the selected project's graph or details", async () => {
   const store = new FormalWorkStore({ runtime: { call: async () => page() } });
   await assert.rejects(store.readProject('project-b'), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });

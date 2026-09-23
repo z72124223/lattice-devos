@@ -5,6 +5,7 @@ import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
 import { canonicalizeProjectPath, normalizeRequestedProjectPath } from './project-inspector.mjs';
 import { isExecutionDenied } from './execution-recovery.mjs';
+import { createDiagnosticReceipt } from './relative-module-receipt.mjs';
 
 const maximumBytes = 1024 * 1024;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -89,7 +90,7 @@ function contextExclusion(context, now) {
  * turn those assertions into verified authority; every output says so explicitly.
  * This module never links/evaluates project code or executes a recovery action.
  */
-export async function diagnoseRelativeModule(request, { now = Date.now() } = {}) {
+async function diagnose(request, { now = Date.now() } = {}, capture = null) {
   const output = { schema: 'lattice.relative-module-diagnostic.v1', decision: 'abstain', reason: null,
     advisoryOnly: true, adopted: false, location: null, hints: [],
     trust: { source: 'caller_supplied_snapshot', context: 'caller_asserted_current',
@@ -114,6 +115,7 @@ export async function diagnoseRelativeModule(request, { now = Date.now() } = {})
     const { subject, event } = evidence;
     if (evidence.schema !== 'lattice.relative-module-evidence.v1' || !subject || !event) fail('INVALID_SOURCE');
     output.trust.sourceBytesVerified = true;
+    if (capture) capture.evidence = evidence;
     if (subject.projectId !== context.projectId || subject.taskId !== context.taskId
         || !text(subject.projectRoot) || !text(subject.importer)
         || !samePath(subject.projectRoot, projectRoot) || !samePath(subject.importer, importer)) {
@@ -173,4 +175,15 @@ export async function diagnoseRelativeModule(request, { now = Date.now() } = {})
   } catch (error) {
     return finish('abstain', error.diagnosticCode ?? error.code ?? 'INVALID_SOURCE');
   }
+}
+
+export async function diagnoseRelativeModule(request, options) {
+  return diagnose(request, options);
+}
+
+// Only the explicitly invoked CLI uses this mode; Control never calls it.
+export async function diagnoseRelativeModuleReceipt(request, requestPath, requestSha256) {
+  const capture = {};
+  const result = await diagnose(request, undefined, capture);
+  return createDiagnosticReceipt(request, capture.evidence, result, requestPath, requestSha256);
 }

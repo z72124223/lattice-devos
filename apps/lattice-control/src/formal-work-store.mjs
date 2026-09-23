@@ -165,7 +165,8 @@ export class FormalWorkStore {
     }
     const task = page.tasks.find((row) => row.task_ref === taskRef);
     if (!task) throw formalWorkError("CONTROL_WORK_ITEM_NOT_FOUND", "找不到這項正式工作。", 404);
-    return { ...taskProjection(task, page.product), task, product: page.product, project: page.project };
+    return { ...taskProjection(task, page.product), task, product: page.product, project: page.project,
+      source: page.source, snapshot_revision: page.revision };
   }
   async getWorkSnapshot({ projectId, maxNodes = 256, maxEdges = 1024 }) {
     const { snapshot } = await this.readProject(projectId);

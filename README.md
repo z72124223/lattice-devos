@@ -219,14 +219,28 @@ node --experimental-vm-modules apps/lattice-control/src/relative-module-diagnost
 `.lattice/life-harness/delivery-02/run-20260924-01/`，可只讀核對，無須重做修復。
 此為一次預先安排的工程可行性流程，不證明泛化、生產收益或診斷的因果改善；未接入正式恢復流程。
 
-Control 接入核對（LH-DELIVERY-03）：**正式接入尚未完成**。既有
-[`FormalWorkStore.detail`](apps/lattice-control/src/formal-work-store.mjs) 從 `lattice_control_snapshot`
-取得 PostgreSQL 專案／任務／claim；[`FormalTaskService`](apps/lattice-control/src/formal-task-service.mjs)
-透過既有 Codex App Server 讀取回合並處理拒絕與驗收，應沿用這些入口。
-這條流程目前沒有提供診斷器可消費、綁定當下 session／claim／指定檔案的讀取授權；
-過去啟動對話的 sandbox 設定及保存的 claim 不能自行轉成 `authorizationVerified=true`。
-下一步須先確定此受限授權的真實來源與撤銷／過期核對，再接入原生事件及明示 importer。
-獨立 CLI 仍可在呼叫端授權範圍使用；Control 尚未呼叫它，預設啟動命令也未啟用所需 VM Modules 旗標。
+Control 結果接入（LH-DELIVERY-03）：已有唯讀入口
+`GET /api/formal-work/<taskRef>/diagnostic`，查詢欄位為 `projectId`、`claimId`、`threadId`、
+`turnId`、`failureItemId`、`diagnosticItemId`。它只從 PostgreSQL 新快照及已擁有的 Codex
+原生回合讀回結果；不開啟專案／證據檔、不執行診斷或修復、不寫正式狀態。
+
+由 Codex 在當次原生工具授權內產生診斷：在前述 request 加入 `receiptBinding`，內容是
+`{ projectId, taskRef, claimId, threadId, turnId, inputId, failureItemId }`，`context.taskId`
+須等於正式 `taskRef`，`validUntil` 設在五分鐘內。完整 request bytes 計算 SHA-256 後，
+使用 [`diagnosticReceiptCommand(requestPath, requestSha256)`](apps/lattice-control/src/relative-module-receipt.mjs)
+取得確切原生命令；CLI 的選用參數 `--receipt <request-sha256>` 核對輸入 bytes 並輸出封套。
+原失敗 event 保留原生 `id/type/status/command/aggregatedOutput/exitCode`，不能用模型回覆代替。
+封套模式的命令會帶所需 VM Modules 旗標；Control 本身不解析專案原始碼。
+
+入口前後核對目前正式 project snapshot／claim／派工 marker、同一連線世代與 session，
+以及同一活動回合中先失敗、後診斷的指定 command item。錯身分、撤銷／完成／封存、
+待核准、拒絕／熔斷、過期、來源漂移或格式／大小不符均拒收，不會重新派工。
+成功只表示 `nativeClaimBindingVerified=true`；生產者、輸入檔 bytes 與診斷內容並未由
+Control 獨立驗證，對應旗標保持 false，內層 `advisoryOnly=true`、`adopted=false` 與兩個
+未驗證權限／來源旗標也保持原值。檔案狀態仍只是 CLI 當次觀察，不是 API 讀取時的最新檔案狀態。
+前後核對是當次觀察，不是 PostgreSQL 與 App Server 之間的原子快照。
+本機適配器／HTTP 契約測試使用隔離 doubles，**同版本 live Runtime／正式任務接入仍未驗收**；
+目前沒有讀回可用的正式 claim，不能將離線識別或既有不同版本安裝當作 live 證據。
 
 </details>
 

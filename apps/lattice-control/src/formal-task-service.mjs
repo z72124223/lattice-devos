@@ -8,6 +8,7 @@ import { formalWorkError } from "./formal-work-store.mjs";
 import { closedChildEnvironment, loadLatticeRuntimeConfiguration } from "./lattice-runtime-health.mjs";
 import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./result-preview.mjs";
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
+import { rejectDiagnostic, verifyDiagnosticReceipt } from './relative-module-receipt.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -535,6 +536,81 @@ export class FormalTaskService {
       }));
     return { task_ref: taskRef, thread_id: claim.thread_id, messages,
       latest_turn_id: thread.turns.at(-1)?.id ?? null, latest_turn_status: thread.turns.at(-1)?.status ?? null };
+  }
+  relativeModuleDiagnostic(projectId, taskRef, selectors) {
+    // This route reads only Runtime facts and the already owned native thread.
+    // It never calls the filesystem diagnostic, starts a turn or saves progress.
+    return this.serial(taskRef, async () => {
+      const names = ['claimId', 'threadId', 'turnId', 'failureItemId', 'diagnosticItemId'];
+      if (typeof projectId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(projectId)
+          || !/^[a-f0-9]{64}$/u.test(taskRef ?? '') || !selectors
+          || Object.keys(selectors).sort().join(',') !== names.sort().join(',')
+          || !names.every(key => typeof selectors[key] === 'string' && /^[A-Za-z0-9._:-]{1,256}$/u.test(selectors[key]))
+          || selectors.failureItemId === selectors.diagnosticItemId) rejectDiagnostic('SELECTOR_REJECTED');
+      const { claimId, threadId, turnId, failureItemId, diagnosticItemId } = selectors;
+      const started = Date.now(), generation = this.codex.connectionGeneration, session = this.codex.appServerSessionId;
+      const current = () => {
+        const owner = this.owners.get(threadId);
+        if (this.closed || !this.codex.connected || !Number.isSafeInteger(generation) || generation < 1
+            || !/^app-server-session:sha256:[a-f0-9]{64}$/u.test(session ?? '')
+            || this.codex.connectionGeneration !== generation || this.codex.appServerSessionId !== session
+            || !this.codex.isTurnActive(threadId, turnId) || Date.now() - started > 5000
+            || owner?.projectId !== projectId || owner.taskRef !== taskRef || owner.claimId !== claimId) rejectDiagnostic('CURRENTNESS_REJECTED');
+      };
+      const claimFrom = detail => {
+        const claims = detail.claims?.filter(row => row.claim_id === claimId);
+        const claim = claims?.length === 1 ? claims[0] : null;
+        if (detail.source?.kind !== 'POSTGRESQL_CONTROL_PRODUCT' || detail.source?.authority !== 'POSTGRESQL_TASK_LEDGER'
+            || detail.id !== taskRef || detail.project_id !== projectId || detail.project?.id !== projectId
+            || detail.project.active !== true || typeof detail.project.project_snapshot_id !== 'string'
+            || !detail.project.project_snapshot_id || detail.completion_verified !== false || detail.status !== 'running'
+            || !['SUBMITTED', 'RUNNING'].includes(detail.task?.ledger?.status)
+            || detail.task.ledger.task_ref !== taskRef || detail.task.ledger.project_id !== projectId
+            || detail.task.ledger.project_snapshot_id !== detail.project.project_snapshot_id
+            || detail.task.ledger.blocker != null || detail.task.ledger.failure_code != null
+            || !claim || claim.task_ref !== taskRef || claim.project_id !== projectId || claim.phase !== 'EXECUTION'
+            || claim.thread_id !== threadId || claim.turn_id !== turnId || !claim.input_id
+            || claim.archived !== false || claim.dispatch_started !== true || claim.turn_status !== 'TURN_BOUND'
+            || !Number.isSafeInteger(claim.last_sequence) || !Number.isSafeInteger(claim.dispatch_sequence)
+            || !Array.isArray(claim.pending_inputs) || claim.pending_inputs.length
+            || !Array.isArray(claim.pending_questions) || claim.pending_questions.length
+            || detail.product?.observations?.some(row => row.claim_id === claimId && row.turn_id === turnId
+              && row.summary === openCircuitSummary)) rejectDiagnostic('CLAIM_REJECTED');
+        return claim;
+      };
+      const native = (thread, claim) => {
+        const turns = thread.turns?.filter(turn => turn.id === turnId);
+        const turn = turns?.length === 1 ? turns[0] : null;
+        if (thread.id !== threadId || thread.archived === true || !turn || thread.turns.at(-1) !== turn
+            || turn.status !== 'inProgress' || !Array.isArray(turn.items)
+            || thread.turns.filter(row => hasMarker(row, marker(claim, claim.input_id))).length !== 1
+            || !hasMarker(turn, marker(claim, claim.input_id))
+            || turn.items.filter(item => hasMarker({ items: [item] }, marker(claim, claim.input_id))).length !== 1
+            || turn.items.some(isExecutionDenied) || (this.deniedTurns.get(`${threadId}:${turnId}`)?.size ?? 0) > 0) rejectDiagnostic('TURN_REJECTED');
+        const failures = turn.items.filter(item => item.id === failureItemId);
+        const results = turn.items.filter(item => item.id === diagnosticItemId);
+        if (failures.length !== 1 || results.length !== 1 || turn.items.indexOf(failures[0]) >= turn.items.indexOf(results[0])) rejectDiagnostic('ITEM_REJECTED');
+        const binding = { projectId, taskRef, claimId, threadId, turnId, inputId: claim.input_id, failureItemId };
+        const receipt = verifyDiagnosticReceipt(results[0], failures[0], binding, claim.worktree_path);
+        return { receipt, binding, bytes: JSON.stringify([failures[0], results[0]]) };
+      };
+      const identity = (detail, claim) => JSON.stringify([detail.project, detail.ledger_head_digest, claim]);
+      current();
+      const first = await this.store.detail(projectId, taskRef); current();
+      const claim = claimFrom(first);
+      const options = { effectIdentity: { expectedGeneration: generation, expectedSessionId: session } };
+      const thread = await this.codex.readThread(threadId, options); current();
+      const before = native(thread, claim);
+      const last = await this.store.detail(projectId, taskRef); current();
+      const latestClaim = claimFrom(last);
+      if (identity(first, claim) !== identity(last, latestClaim)) rejectDiagnostic('SOURCE_CHANGED');
+      const latestThread = await this.codex.readThread(threadId, options); current();
+      const after = native(latestThread, latestClaim);
+      if (before.bytes !== after.bytes) rejectDiagnostic('SOURCE_CHANGED');
+      return { schema: 'lattice.control.relative-module-diagnostic.v1', binding: after.binding, receipt: after.receipt,
+        nativeClaimBindingVerified: true, producerVerified: false, inputFileBytesVerified: false,
+        diagnosticSemanticsVerified: false };
+    });
   }
   async openResult(projectId, taskRef) {
     const detail = await this.store.detail(projectId, taskRef);
