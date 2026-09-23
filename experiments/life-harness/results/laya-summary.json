@@ -1,0 +1,430 @@
+{
+  "schema_version": 1,
+  "experiment": "local-laya-multilingual-choice-v1",
+  "baseline_commit": "792e0104f84d0132d84f23a506ad1ae176c1812b",
+  "model_output_sha256": "54cde24500fae6fb8ec76ab590f2512b2e00cbb889e09d21f0dd57f0b0493ded",
+  "sdk_revision": "010bacef009c855ccba814b51f7c8e1d38ab5e3f",
+  "model_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+  "comparison": {
+    "status": "offline_observation_only",
+    "A_equals_B": true,
+    "C_equals_D": true,
+    "model_passes": 1,
+    "independent_C_D_runs": false,
+    "product_benefit": null,
+    "calibrated": false,
+    "adopted": false,
+    "explanation": "C=A retrieval plus local choice; D=B retrieval plus local choice. A=B, so one identical-input output set represents C=D. Development sets, no causal or generalization claim."
+  },
+  "datasets": [
+    {
+      "file": "cases.jsonl",
+      "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+      "cases": 20,
+      "model_calls": 6,
+      "excluded_before_model": 13,
+      "empty_candidates_before_model": 1,
+      "refused_truncation": 0,
+      "A_equals_B": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 1,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 1,
+          "boundary_violations": 0,
+          "correct_labels": 1,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": 1
+        },
+        "synthetic": {
+          "cases": 19,
+          "valid_cases": 4,
+          "retrieval_hits": 4,
+          "retrieval_misses": 0,
+          "selection_hits": 4,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 12,
+          "boundary_violations": 0,
+          "correct_labels": 19,
+          "none_applicable": 2,
+          "insufficient_information": 1,
+          "retrieval_recall": 1,
+          "selection_accuracy_given_recall": 1,
+          "label_accuracy": 1
+        }
+      },
+      "C_equals_D": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 1,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 1,
+          "boundary_violations": 0,
+          "correct_labels": 1,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": 1
+        },
+        "synthetic": {
+          "cases": 19,
+          "valid_cases": 4,
+          "retrieval_hits": 4,
+          "retrieval_misses": 0,
+          "selection_hits": 1,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 3,
+          "excluded": 12,
+          "boundary_violations": 0,
+          "correct_labels": 15,
+          "none_applicable": 2,
+          "insufficient_information": 1,
+          "retrieval_recall": 1,
+          "selection_accuracy_given_recall": 0.25,
+          "label_accuracy": 0.7894736842105263
+        }
+      },
+      "disagreements": [
+        {
+          "case_id": "offline-synthetic-codex-missing",
+          "gold_label": "valid",
+          "valid_procedures": [
+            "codex-resolution"
+          ],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        },
+        {
+          "case_id": "offline-synthetic-multiple-valid",
+          "gold_label": "valid",
+          "valid_procedures": [
+            "git-resolution",
+            "codex-resolution"
+          ],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        },
+        {
+          "case_id": "offline-synthetic-insufficient",
+          "gold_label": "insufficient_information",
+          "valid_procedures": [],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        },
+        {
+          "case_id": "offline-synthetic-log-instruction",
+          "gold_label": "valid",
+          "valid_procedures": [
+            "git-resolution"
+          ],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        }
+      ]
+    },
+    {
+      "file": "controlled-cases.jsonl",
+      "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+      "cases": 3,
+      "model_calls": 0,
+      "excluded_before_model": 1,
+      "empty_candidates_before_model": 2,
+      "refused_truncation": 0,
+      "A_equals_B": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 3,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 1,
+          "boundary_violations": 0,
+          "correct_labels": 3,
+          "none_applicable": 2,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": 1
+        },
+        "synthetic": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        }
+      },
+      "C_equals_D": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 3,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 1,
+          "boundary_violations": 0,
+          "correct_labels": 3,
+          "none_applicable": 2,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": 1
+        },
+        "synthetic": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        }
+      },
+      "disagreements": []
+    },
+    {
+      "file": "resolver-cases.jsonl",
+      "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+      "cases": 4,
+      "model_calls": 2,
+      "excluded_before_model": 2,
+      "empty_candidates_before_model": 0,
+      "refused_truncation": 0,
+      "A_equals_B": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 4,
+          "valid_cases": 2,
+          "retrieval_hits": 2,
+          "retrieval_misses": 0,
+          "selection_hits": 2,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 2,
+          "boundary_violations": 0,
+          "correct_labels": 4,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": 1,
+          "selection_accuracy_given_recall": 1,
+          "label_accuracy": 1
+        },
+        "synthetic": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        }
+      },
+      "C_equals_D": {
+        "real": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        },
+        "controlled_replay": {
+          "cases": 4,
+          "valid_cases": 2,
+          "retrieval_hits": 2,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 2,
+          "excluded": 2,
+          "boundary_violations": 0,
+          "correct_labels": 2,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": 1,
+          "selection_accuracy_given_recall": 0,
+          "label_accuracy": 0.5
+        },
+        "synthetic": {
+          "cases": 0,
+          "valid_cases": 0,
+          "retrieval_hits": 0,
+          "retrieval_misses": 0,
+          "selection_hits": 0,
+          "ranking_errors": 0,
+          "abstentions_with_recall": 0,
+          "excluded": 0,
+          "boundary_violations": 0,
+          "correct_labels": 0,
+          "none_applicable": 0,
+          "insufficient_information": 0,
+          "retrieval_recall": null,
+          "selection_accuracy_given_recall": null,
+          "label_accuracy": null
+        }
+      },
+      "disagreements": [
+        {
+          "case_id": "offline-resolver-git-missing",
+          "gold_label": "valid",
+          "valid_procedures": [
+            "git-resolution"
+          ],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        },
+        {
+          "case_id": "offline-resolver-codex-missing",
+          "gold_label": "valid",
+          "valid_procedures": [
+            "codex-resolution"
+          ],
+          "model_called": true,
+          "decision": "abstain",
+          "choice": "none_applicable"
+        }
+      ]
+    }
+  ]
+}

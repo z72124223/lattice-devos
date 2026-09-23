@@ -1,0 +1,1443 @@
+{
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": 0,
+  "stopped": null,
+  "spawn_error": null,
+  "wall_seconds": 21.1160144,
+  "resources_before": {
+    "project_bytes": 2996073085,
+    "disk_free_bytes": 17485316096
+  },
+  "resources_after": {
+    "project_bytes": 2996152942,
+    "disk_free_bytes": 17485250560
+  },
+  "parse_error": null,
+  "result": {
+    "status": "completed",
+    "mode": "advisories",
+    "sdk_revision": "010bacef009c855ccba814b51f7c8e1d38ab5e3f",
+    "sdk_version": "0.3.7",
+    "sdk_load_mode": "verified_source_tree",
+    "sdk_distribution_installed": false,
+    "model_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "encoder_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "tokenizer_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "transformers": "5.0.0",
+      "huggingface_hub": "1.3.5",
+      "tokenizers": "0.22.2",
+      "numpy": "2.3.5",
+      "safetensors": "0.7.0",
+      "setuptools": "80.9.0",
+      "hf-xet": "1.6.0",
+      "httpx": "0.28.1",
+      "httpcore": "1.0.9",
+      "fsspec": "2026.9.0",
+      "h11": "0.16.0",
+      "packaging": "26.3",
+      "PyYAML": "6.0.3",
+      "regex": "2026.9.10",
+      "sympy": "1.14.0",
+      "mpmath": "1.3.0",
+      "tqdm": "4.70.1",
+      "typing_extensions": "4.16.0",
+      "anyio": "4.15.1",
+      "idna": "3.20",
+      "certifi": "2026.7.22",
+      "colorama": "0.4.6",
+      "filelock": "4.0.1",
+      "Jinja2": "3.1.6",
+      "MarkupSafe": "3.0.3",
+      "networkx": "3.7",
+      "shellingham": "1.5.4",
+      "typer-slim": "0.24.0",
+      "typer": "0.27.2",
+      "annotated-doc": "0.0.5",
+      "rich": "15.0.0",
+      "Pygments": "2.21.0",
+      "markdown-it-py": "4.2.0",
+      "mdurl": "0.1.2"
+    },
+    "python": "3.12.14",
+    "device": "cpu",
+    "parameter_dtype": "float32",
+    "cuda_version": null,
+    "cpu_threads": 4,
+    "load_seconds": 4.12757040001452,
+    "worker_seconds": 19.973036400042474,
+    "peak_rss_bytes": 2343641088,
+    "memory_limits": {
+      "process_commit_limit_bytes": 8589934592,
+      "job_commit_limit_bytes": 8589934592,
+      "kill_on_job_close": true
+    },
+    "network_control": "Python socket audit + offline Hub + local-only loaders + no subprocesses; not an OS firewall",
+    "working_tokenizer_config_sha256": "2c0c4d82d4b4bc6b4ac40b2375e067a1645f78b381a9774248d47915f33d751f",
+    "score_interpretation": "SDK softmax outputs and entropy/action scores, uncalibrated for this task; no adoption threshold",
+    "records": [
+      {
+        "case_id": "offline-controlled-native-success",
+        "group_id": "lifecycle-canary-20260826",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "320f36ebbd01b48f02f35c5ce383df21ce1c14a2bab88e951e19ee70a307f297",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "docs/reviews/CODEX_APP_SERVER_LIFECYCLE_ACCEPTANCE_2026-08-26.json",
+          "selector": "/notifications/184/message/params/item",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "e7bfa28b4d849a965cc6ce908ab33a942115f5f72686808a6ee82b8bdf9a8dff",
+          "evidence_sha256": "320f36ebbd01b48f02f35c5ce383df21ce1c14a2bab88e951e19ee70a307f297",
+          "native_observed": true,
+          "redactions": [
+            "omit cwd, thread/turn IDs, commandActions, processId and timing",
+            "replace native item ID and absolute shell path; retain type/status/output/exitCode",
+            "source has no formal project/task binding; both references remain null"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-git-missing",
+        "group_id": "synthetic-1",
+        "source_kind": "synthetic",
+        "evidence_sha256": "cddabd269a417781113a801068d88a4bdc0d6f49af0958b2e3660ec29b39273e",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/0",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "cddabd269a417781113a801068d88a4bdc0d6f49af0958b2e3660ec29b39273e",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "git-resolution",
+              "probabilities": {
+                "git-resolution": 0.5998,
+                "none_applicable": 0.3349,
+                "insufficient_information": 0.0654
+              },
+              "confidence": 0.2252,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 162,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 50,
+          "total": 162,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.2741904999129474,
+        "decision": "selected",
+        "selected_procedure": "git-resolution",
+        "reason": null
+      },
+      {
+        "case_id": "offline-synthetic-codex-missing",
+        "group_id": "synthetic-2",
+        "source_kind": "synthetic",
+        "evidence_sha256": "5087811b828504270fb830b23499f8c65833b2d40c10631eaf3fff75f8da65ef",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/1",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "5087811b828504270fb830b23499f8c65833b2d40c10631eaf3fff75f8da65ef",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "codex-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "codex-resolution": 0.2627,
+                "none_applicable": 0.4745,
+                "insufficient_information": 0.2628
+              },
+              "confidence": 0.0387,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 174,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            27,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 57,
+          "total": 174,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.27756619988940656,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-synthetic-multiple-valid",
+        "group_id": "synthetic-3",
+        "source_kind": "synthetic",
+        "evidence_sha256": "ad805658fbb73f79ff578f833397f2e580375bc84572097955edcc9e787960af",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/2",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "ad805658fbb73f79ff578f833397f2e580375bc84572097955edcc9e787960af",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution",
+          "codex-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.1023,
+                "codex-resolution": 0.0893,
+                "none_applicable": 0.7087,
+                "insufficient_information": 0.0997
+              },
+              "confidence": 0.3343,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 197,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            27,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 57,
+          "total": 197,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.28941670013591647,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-synthetic-none-applicable",
+        "group_id": "synthetic-4",
+        "source_kind": "synthetic",
+        "evidence_sha256": "170f31936ddb78a64c788aee5d48a1b58ff0a9bcebe0a4723a79479b47d6cb80",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/3",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "170f31936ddb78a64c788aee5d48a1b58ff0a9bcebe0a4723a79479b47d6cb80",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "abstain",
+          "reason": "none_applicable"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "abstain",
+        "reason": "none_applicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-insufficient",
+        "group_id": "synthetic-5",
+        "source_kind": "synthetic",
+        "evidence_sha256": "43c18adf11f20c987338f425bd404574583d3d0d60055fb681d26c2ea5c1d210",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/4",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "43c18adf11f20c987338f425bd404574583d3d0d60055fb681d26c2ea5c1d210",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.1373,
+                "none_applicable": 0.6835,
+                "insufficient_information": 0.1792
+              },
+              "confidence": 0.2346,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 168,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 56,
+          "total": 168,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.23774470016360283,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-synthetic-success-quotation",
+        "group_id": "synthetic-6",
+        "source_kind": "synthetic",
+        "evidence_sha256": "292b4e5dbc24137019c778066a96de85d3d463209543012ec3653ec87ede2a7d",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/5",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "292b4e5dbc24137019c778066a96de85d3d463209543012ec3653ec87ede2a7d",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-declined",
+        "group_id": "synthetic-7",
+        "source_kind": "synthetic",
+        "evidence_sha256": "1f8c14df57daa05324df164acd88096ab59f49c3c66538d6fd5a1e6b7b8f474c",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/6",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "1f8c14df57daa05324df164acd88096ab59f49c3c66538d6fd5a1e6b7b8f474c",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "denied"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "denied",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-policy-denied",
+        "group_id": "synthetic-8",
+        "source_kind": "synthetic",
+        "evidence_sha256": "b1bcaa28793436eea5b26234c39c33cafaa48b69328f99cff30686919d77d7ef",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/7",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "b1bcaa28793436eea5b26234c39c33cafaa48b69328f99cff30686919d77d7ef",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "denied"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "denied",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-cancelled",
+        "group_id": "synthetic-9",
+        "source_kind": "synthetic",
+        "evidence_sha256": "8956b3b603e3f22595ce7152e789798cce85ff7df7953f86d42b3a6d2cd4368f",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/8",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "8956b3b603e3f22595ce7152e789798cce85ff7df7953f86d42b3a6d2cd4368f",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "lifecycle_inapplicable"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "lifecycle_inapplicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-completed-task",
+        "group_id": "synthetic-10",
+        "source_kind": "synthetic",
+        "evidence_sha256": "fedc9a7a85676941065feff4edfb4b9b64dfef6f2434df8c7f68fccced0b3584",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/9",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "fedc9a7a85676941065feff4edfb4b9b64dfef6f2434df8c7f68fccced0b3584",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "lifecycle_inapplicable"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "lifecycle_inapplicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-expired",
+        "group_id": "synthetic-11",
+        "source_kind": "synthetic",
+        "evidence_sha256": "3d712d57eb7b7dd2ebc559414645300b8fac8bfeb45d2a7d4802c965a06d0ee7",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/10",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "3d712d57eb7b7dd2ebc559414645300b8fac8bfeb45d2a7d4802c965a06d0ee7",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "stale_or_unknown"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "stale_or_unknown",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-unknown-identity",
+        "group_id": "synthetic-12",
+        "source_kind": "synthetic",
+        "evidence_sha256": "80199177d79b6e9ea4533c0d75199198e416087552fb7104f1b5f208f6e74a9b",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/11",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "80199177d79b6e9ea4533c0d75199198e416087552fb7104f1b5f208f6e74a9b",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "identity_or_authority_unknown"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "identity_or_authority_unknown",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-wrong-project",
+        "group_id": "synthetic-13",
+        "source_kind": "synthetic",
+        "evidence_sha256": "ddd9489fc14004f211a2ebaca8acdc0ebfb3c6b36db9870e5fc22105efdf33a0",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/12",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "ddd9489fc14004f211a2ebaca8acdc0ebfb3c6b36db9870e5fc22105efdf33a0",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "identity_or_authority_unknown"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "identity_or_authority_unknown",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-open-circuit",
+        "group_id": "synthetic-14",
+        "source_kind": "synthetic",
+        "evidence_sha256": "c5e8dca915e29d2216601c9b072f0d38bf1f13840b3cf20f9b7303c0641d1626",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/13",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "c5e8dca915e29d2216601c9b072f0d38bf1f13840b3cf20f9b7303c0641d1626",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "circuit_open"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "circuit_open",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-reopened",
+        "group_id": "synthetic-15",
+        "source_kind": "synthetic",
+        "evidence_sha256": "5a85af2f2a71cf939720a5e661128fa025b2d230ab672e25c8ba67c0ae3658d9",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/14",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "5a85af2f2a71cf939720a5e661128fa025b2d230ab672e25c8ba67c0ae3658d9",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "lifecycle_inapplicable"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "lifecycle_inapplicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-log-instruction",
+        "group_id": "synthetic-16",
+        "source_kind": "synthetic",
+        "evidence_sha256": "9645fc818845597f9131534f371bb48c5df0dc93cf0ad41c762ed268f9492920",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/15",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "9645fc818845597f9131534f371bb48c5df0dc93cf0ad41c762ed268f9492920",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.2447,
+                "none_applicable": 0.6514,
+                "insufficient_information": 0.1039
+              },
+              "confidence": 0.2182,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 179,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 67,
+          "total": 179,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.2567503999453038,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-synthetic-misleading-keyword",
+        "group_id": "synthetic-17",
+        "source_kind": "synthetic",
+        "evidence_sha256": "938dd672ad1d9b784385638f8054cb7295d03c62798730f5b3cd4eff7295c830",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/16",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "938dd672ad1d9b784385638f8054cb7295d03c62798730f5b3cd4eff7295c830",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.3687,
+                "none_applicable": 0.4282,
+                "insufficient_information": 0.2031
+              },
+              "confidence": 0.0399,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 180,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 68,
+          "total": 180,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.2706684998702258,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-synthetic-not-native-item",
+        "group_id": "synthetic-18",
+        "source_kind": "synthetic",
+        "evidence_sha256": "c30f9d1342f68aab3847f885dce0862a8c032c9d00d5f9bef4012c832dfbb45f",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/17",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "c30f9d1342f68aab3847f885dce0862a8c032c9d00d5f9bef4012c832dfbb45f",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-synthetic-out-of-scope",
+        "group_id": "synthetic-19",
+        "source_kind": "synthetic",
+        "evidence_sha256": "00b6d5f0eea8455d5bd9a34a2eef090539bd0bf8b99f5b8ced32a0b74cc321cc",
+        "source": {
+          "kind": "synthetic",
+          "reference": "experiments/life-harness/prepare.mjs",
+          "selector": "definitions/18",
+          "revision": "b2422e82ada81307159233e23fffa88189bcc015",
+          "sha256": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+          "evidence_sha256": "00b6d5f0eea8455d5bd9a34a2eef090539bd0bf8b99f5b8ced32a0b74cc321cc",
+          "native_observed": false,
+          "redactions": [
+            "hand-authored fixture; no real identity or outcome"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "category_inapplicable"
+        },
+        "dataset_file": "cases.jsonl",
+        "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "category_inapplicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-controlled-entry-missing",
+        "group_id": "controlled-node-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "f03b56e9ffcf2ffb4012189443f0a9205773c37f245c93271f3e4084ce91c020",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/native-fixtures/captured-events.jsonl",
+          "selector": "line/1",
+          "revision": "3d4aa7d5d1908f6c9c98477d1687c9049ee5414e",
+          "sha256": "6fa9f76741d45983f7df534eedfcf150cac7f194ba427a098c4ad373d41c1a3a",
+          "evidence_sha256": "f03b56e9ffcf2ffb4012189443f0a9205773c37f245c93271f3e4084ce91c020",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "abstain",
+          "reason": "none_applicable"
+        },
+        "dataset_file": "controlled-cases.jsonl",
+        "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "abstain",
+        "reason": "none_applicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-controlled-dependency-missing",
+        "group_id": "controlled-node-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "facd4b4df20dcfd8dd624fd0bd294fbd9639e11110c908e10bf8b924460e3fb6",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/native-fixtures/captured-events.jsonl",
+          "selector": "line/2",
+          "revision": "3d4aa7d5d1908f6c9c98477d1687c9049ee5414e",
+          "sha256": "6fa9f76741d45983f7df534eedfcf150cac7f194ba427a098c4ad373d41c1a3a",
+          "evidence_sha256": "facd4b4df20dcfd8dd624fd0bd294fbd9639e11110c908e10bf8b924460e3fb6",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "abstain",
+          "reason": "none_applicable"
+        },
+        "dataset_file": "controlled-cases.jsonl",
+        "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "abstain",
+        "reason": "none_applicable",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-controlled-success",
+        "group_id": "controlled-node-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "f2903815d30ecae22c04a97e50def0b96c749f4aa9d493bb7f058f6b5e00c1fd",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/native-fixtures/captured-events.jsonl",
+          "selector": "line/3",
+          "revision": "3d4aa7d5d1908f6c9c98477d1687c9049ee5414e",
+          "sha256": "6fa9f76741d45983f7df534eedfcf150cac7f194ba427a098c4ad373d41c1a3a",
+          "evidence_sha256": "f2903815d30ecae22c04a97e50def0b96c749f4aa9d493bb7f058f6b5e00c1fd",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "controlled-cases.jsonl",
+        "dataset_sha256": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-resolver-git-missing",
+        "group_id": "controlled-resolvers-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "6763eb17068247d061706e749ea93af9d041b436129a1395331a53dd1db5eead",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/resolver-fixtures/captured-events.jsonl",
+          "selector": "line/1",
+          "revision": "13c5478cc044e0e81efe4e68645c40f5b08f1e50",
+          "sha256": "b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f",
+          "evidence_sha256": "6763eb17068247d061706e749ea93af9d041b436129a1395331a53dd1db5eead",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "resolver-cases.jsonl",
+        "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.3494,
+                "none_applicable": 0.4649,
+                "insufficient_information": 0.1858
+              },
+              "confidence": 0.0568,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 360,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 248,
+          "total": 360,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.5018428000621498,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-resolver-codex-missing",
+        "group_id": "controlled-resolvers-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "869b4739624da0e5b5e4fc6607752c0057e4bbfe2e7188c91800dd8fe3575478",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/resolver-fixtures/captured-events.jsonl",
+          "selector": "line/2",
+          "revision": "13c5478cc044e0e81efe4e68645c40f5b08f1e50",
+          "sha256": "b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f",
+          "evidence_sha256": "869b4739624da0e5b5e4fc6607752c0057e4bbfe2e7188c91800dd8fe3575478",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "codex-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "dataset_file": "resolver-cases.jsonl",
+        "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "codex-resolution": 0.2603,
+                "none_applicable": 0.3813,
+                "insufficient_information": 0.3584
+              },
+              "confidence": 0.0117,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 493,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            27,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 376,
+          "total": 493,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.7821068000048399,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      },
+      {
+        "case_id": "offline-resolver-git-success",
+        "group_id": "controlled-resolvers-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "129d71c73f4c490edb18c700b6913a98d6fd85e5395a752aeffa8c8c53903580",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/resolver-fixtures/captured-events.jsonl",
+          "selector": "line/3",
+          "revision": "13c5478cc044e0e81efe4e68645c40f5b08f1e50",
+          "sha256": "b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f",
+          "evidence_sha256": "129d71c73f4c490edb18c700b6913a98d6fd85e5395a752aeffa8c8c53903580",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "resolver-cases.jsonl",
+        "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      },
+      {
+        "case_id": "offline-resolver-codex-success",
+        "group_id": "controlled-resolvers-capture-20260923",
+        "source_kind": "controlled_replay",
+        "evidence_sha256": "cf7f40032ca4eaca9f5fd700aa799f25e7241f7eb48d35454369c7216bb2e42f",
+        "source": {
+          "kind": "controlled_replay",
+          "reference": "experiments/life-harness/resolver-fixtures/captured-events.jsonl",
+          "selector": "line/4",
+          "revision": "13c5478cc044e0e81efe4e68645c40f5b08f1e50",
+          "sha256": "b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f",
+          "evidence_sha256": "cf7f40032ca4eaca9f5fd700aa799f25e7241f7eb48d35454369c7216bb2e42f",
+          "native_observed": true,
+          "redactions": [
+            "exact native event retained locally in ignored .lattice capture; paths and Codex identities replaced in tracked projection",
+            "CommandExecution to commandExecution is casing only; status/exit_code retained without success inference",
+            "context describes the authorized controlled slice at native item completion, never a current task authorization"
+          ]
+        },
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [],
+        "gate": {
+          "decision": "excluded",
+          "reason": "not_native_failed"
+        },
+        "dataset_file": "resolver-cases.jsonl",
+        "dataset_sha256": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+        "model_called": false,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": null,
+        "decision": "excluded",
+        "reason": "not_native_failed",
+        "inference_seconds": 0
+      }
+    ]
+  }
+}

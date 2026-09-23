@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "attempt": 1,
+  "exit_code": 0,
+  "stopped": null,
+  "spawn_error": null,
+  "wall_seconds": 49.245151899999996,
+  "resources_before": {
+    "project_bytes": 2996068066,
+    "disk_free_bytes": 17485799424
+  },
+  "resources_after": {
+    "project_bytes": 2996073085,
+    "disk_free_bytes": 17485393920
+  },
+  "parse_error": null,
+  "result": {
+    "status": "completed",
+    "mode": "smoke",
+    "sdk_revision": "010bacef009c855ccba814b51f7c8e1d38ab5e3f",
+    "sdk_version": "0.3.7",
+    "sdk_load_mode": "verified_source_tree",
+    "sdk_distribution_installed": false,
+    "model_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "encoder_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "tokenizer_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+    "versions": {
+      "torch": "2.7.1+cpu",
+      "transformers": "5.0.0",
+      "huggingface_hub": "1.3.5",
+      "tokenizers": "0.22.2",
+      "numpy": "2.3.5",
+      "safetensors": "0.7.0",
+      "setuptools": "80.9.0",
+      "hf-xet": "1.6.0",
+      "httpx": "0.28.1",
+      "httpcore": "1.0.9",
+      "fsspec": "2026.9.0",
+      "h11": "0.16.0",
+      "packaging": "26.3",
+      "PyYAML": "6.0.3",
+      "regex": "2026.9.10",
+      "sympy": "1.14.0",
+      "mpmath": "1.3.0",
+      "tqdm": "4.70.1",
+      "typing_extensions": "4.16.0",
+      "anyio": "4.15.1",
+      "idna": "3.20",
+      "certifi": "2026.7.22",
+      "colorama": "0.4.6",
+      "filelock": "4.0.1",
+      "Jinja2": "3.1.6",
+      "MarkupSafe": "3.0.3",
+      "networkx": "3.7",
+      "shellingham": "1.5.4",
+      "typer-slim": "0.24.0",
+      "typer": "0.27.2",
+      "annotated-doc": "0.0.5",
+      "rich": "15.0.0",
+      "Pygments": "2.21.0",
+      "markdown-it-py": "4.2.0",
+      "mdurl": "0.1.2"
+    },
+    "python": "3.12.14",
+    "device": "cpu",
+    "parameter_dtype": "float32",
+    "cuda_version": null,
+    "cpu_threads": 4,
+    "load_seconds": 4.970075399847701,
+    "worker_seconds": 48.13463500002399,
+    "peak_rss_bytes": 2344157184,
+    "memory_limits": {
+      "process_commit_limit_bytes": 8589934592,
+      "job_commit_limit_bytes": 8589934592,
+      "kill_on_job_close": true
+    },
+    "network_control": "Python socket audit + offline Hub + local-only loaders + no subprocesses; not an OS firewall",
+    "working_tokenizer_config_sha256": "2c0c4d82d4b4bc6b4ac40b2375e067a1645f78b381a9774248d47915f33d751f",
+    "score_interpretation": "SDK softmax outputs and entropy/action scores, uncalibrated for this task; no adoption threshold",
+    "records": [
+      {
+        "case_id": "offline-laya-synthetic-smoke",
+        "group_id": "synthetic-laya-smoke",
+        "source_kind": "synthetic",
+        "source": {
+          "kind": "synthetic",
+          "native_observed": false,
+          "reference": "inline:synthetic-laya-smoke-v1"
+        },
+        "evidence_sha256": "ecb0f870887cad014ed68c312ef0463b5b65dc4f0a72e67573a827827dac79dd",
+        "formal_refs": {
+          "project": null,
+          "task": null
+        },
+        "dataset_file": null,
+        "dataset_sha256": null,
+        "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+        "question_version": "laya-choice-v1",
+        "advisory_only": true,
+        "candidates": [
+          "git-resolution",
+          "codex-resolution"
+        ],
+        "gate": {
+          "decision": "request",
+          "reason": null
+        },
+        "model_called": true,
+        "adopted": false,
+        "calibrated_score": null,
+        "raw_model_output": {
+          "model": "laya-rl-agent",
+          "answers": {
+            "diagnosis": {
+              "type": "choice",
+              "choice": "none_applicable",
+              "probabilities": {
+                "git-resolution": 0.2302,
+                "codex-resolution": 0.1131,
+                "none_applicable": 0.5394,
+                "insufficient_information": 0.1173
+              },
+              "confidence": 0.1568,
+              "action": {
+                "act_probability": 1
+              }
+            }
+          },
+          "usage": {
+            "input_tokens": 195,
+            "output_tokens": 0
+          }
+        },
+        "token_counts": {
+          "options": [
+            22,
+            27,
+            17,
+            15
+          ],
+          "instruction": 51,
+          "state": 55,
+          "total": 195,
+          "maximum": 1024,
+          "head_maximum": 256
+        },
+        "inference_seconds": 0.27925579994916916,
+        "decision": "abstain",
+        "selected_procedure": null,
+        "reason": "none_applicable"
+      }
+    ]
+  }
+}

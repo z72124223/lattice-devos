@@ -195,7 +195,9 @@ A 已正確，所以 B 不修改檢索或診斷，仍為 no_change；`results/re
 新集合只驗證既有兩程序的受控適用路徑；沒有真實生產案例、診斷改善量、泛化或模型品質證據。
 Codex Desktop 解析成功路徑、App Server 啟動及正式恢復仍未在這個增量驗證。
 
-## 第四增量：Laya 本機 CPU 可行性，停於安裝失敗
+## 第四增量：安裝失敗封存（7f91878 當時狀態）
+
+本節保留失敗檢查點的狀態；後續改用固定原始碼並實際執行的結果見第五增量。
 
 從已驗收的 `792e0104f84d0132d84f23a506ad1ae176c1812b` 開始，僅準備隔離的
 local choice 路徑。**35 個固定相依套件已安裝成功；Laya SDK 尚未安裝成功；
@@ -242,10 +244,72 @@ token／proxy 環境。這是已審查 SDK 的 Python 層離線控制，**不是
 `laya-inputs.mjs` 先重用來源校驗、排除條件與固定檢索，不讀 gold。27 案中 16 案排除、
 3 案空候選直接棄答、8 案產生請求；後者仍須由真實 tokenizer 證明無截斷，超長即棄答。
 保留兩種明示棄答與原始 SDK 分數，分數不當作校準信心或採用門檻。未執行模型，
-所以目前沒有 C/D 成績；若後續有授權且完成執行，A=B 時只保存一次相同輸入的 C=D
+所以這個封存檢查點沒有 C/D 成績；若後續有授權且完成執行，A=B 時只保存一次相同輸入的 C=D
 觀察，不宣稱獨立實驗、因果改善或產品效益。`laya-summarize.mjs` 為該後續評估的未執行程式。
 
 新增前置輸入 7 項測試與原有 26 項合計 **33 項 Node 測試通過**；
 **4 項 Python 限制測試通過**，涵蓋 OS 限制讀回、失敗拒跑及 socket 阻擋。
 這些結果只證明輸入與限制，不證明模型可用。精確命令及獨立來源／舊資料核對
 保存在 `results/laya-verification.json`；原三組案例、標註、程序、原文與 A/B 結果均保持不變。
+
+## 第五增量：固定 SDK 原始碼載入與一次離線觀察
+
+**本機 CPU 載入與推論已成功；這組固定輸入沒有呈現診斷增量，因此不採用。**
+保留 A=B 既有規則，不接正式決策層。這不是對 Laya 其他用途或真實生產泛化的結論。
+兩次 wheel 安裝失敗維持原紀錄；依協調續派直接載入已驗證的 SDK source tree，
+沒有第三次 pip、修改 TEMP/PATH/registry、重建 venv、重新下載或改寫官方原始碼。
+
+`laya_source.py` 在 SDK import 前核對固定 revision 與全部 12 份來源 bytes，
+明確加入該目錄；拒絕預載套件、未列 Python 檔案與既有 bytecode/native extension。
+匯入後檢查各 `laya.*` 模組的實際來源，版本與固定 pyproject 一致，推論後再次核對。
+結果如實記錄 **sdk_load_mode=verified_source_tree、sdk_distribution_installed=false**，
+沒有建立或虛構 dist-info。SDK 0.3.7、模型、encoder、tokenizer 與 35 個依賴版本均沿用第四增量的固定清單。
+CPU FP32、4 threads、CUDA version=null 已由真實 worker 檢查通過。
+
+先執行一次明示 synthetic smoke，再執行三組凍結資料的一次 advisory：
+
+```powershell
+node experiments/life-harness/laya-run.mjs smoke
+node experiments/life-harness/laya-run.mjs advisories
+node experiments/life-harness/laya-summarize.mjs
+```
+
+以上是本次已執行命令，**不是要求再次跑模型**；本機 attempt 紀錄保留原結果。
+只重算現有結果可執行最後一條 summarize，不會載入模型或更動 A/B。
+
+| 真實執行 | 退出碼 | 整體時間 | 模型載入 | 選擇推論合計 | 峰值 RSS |
+|---|---:|---:|---:|---:|---:|
+| synthetic smoke，1 call | 0 | 49.245 秒 | 4.970 秒 | 0.279 秒 | 2,344,157,184 bytes |
+| 三組 27 案，8 calls | 0 | 21.116 秒 | 4.128 秒 | 2.890 秒 | 2,343,641,088 bytes |
+
+這兩次不是受控效能基準；整體時間包含匯入、檔案核對與載入。smoke 選擇
+`none_applicable`，其四選項機率依序為 Git 0.2302、Codex 0.1131、none 0.5394、
+insufficient 0.1173；SDK confidence 0.1568。保留原值，不把可執行當作答案正確或校準成功。
+
+27 案中 **16 案前置排除、3 案空候選直接棄答、8 案實際呼叫模型**；前置排除全部維持，
+沒有越界。實際輸入最大 493 tokens、單選項最大 27 tokens，8 案預檢 token 數皆與 SDK usage
+一致，無截斷或因超長棄答。模型本身回傳 1 次程序選擇與 7 次 `none_applicable`；
+所有建議 adopted=false，原始分數與棄答原因都保留。
+
+| 凍結來源 | 有效程序召回 | 原 A=B 選對／已召回 | C=D 選對／已召回 | 已召回但模型棄答 |
+|---|---:|---:|---:|---:|
+| 合成案例（19 案中的 4 個 valid） | 4/4 | 4/4 | 1/4 | 3 |
+| 受控解析器（4 案中的 2 個 valid） | 2/2 | 2/2 | 0/2 | 2 |
+
+兩個 Node 故障是空候選棄答，三個集合中的成功案例均在模型前排除，不能算模型診斷能力。
+合成集另有一案 gold 為資訊不足，但模型選了無適用程序。`results/laya-summary.json`
+逐筆列出 6 個分歧；沒有改標註、候選、問題、模型參數或重跑以改變結果。
+其中整體 label_accuracy 包含前置檢查，**不能稱為模型準確率**。
+零個 real 生產案例的分母仍為 null。A=B，因此同一次相同輸入結果代表 C=D，
+不是兩個獨立實驗；只觀察開發資料，無因果、校準、任務完成率或生產效益證據。
+
+`results/laya-smoke.json`／`laya-advisories.json` 保存 SDK 原始輸出、來源綁定、實測 token、
+時間與資源；`results/laya-source-verification.json` 記錄執行程式與 raw 檔案 digest。
+兩次原始 stderr 皆為空，raw input/stdout/stderr 留在忽略目錄。執行後該目錄為
+**2,996,152,942 bytes**，C 槽剩餘 **17,485,250,560 bytes**；兩次 Job Object
+讀回的程序／整體提交記憶體上限均為 8 GiB，峰值 RSS 與 wall time 都未超限。
+原 snapshot 六檔再次驗證不變；只有工作副本的 tokenizer config 經官方 SDK 正常轉換。
+
+本增量新增 **4 項 fake-SDK 來源綁定測試通過**；沿用已獨立驗收的 33 項 Node 與
+4 項記憶體／網路限制測試，不重跑相同模型試驗。原三組資料、標註、程序、封存與
+A/B 逐一核對保持不變。未採納、未執行恢復、未改正式 DB、未推送或發布。

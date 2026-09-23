@@ -89,14 +89,15 @@ def main():
     torch.set_num_interop_threads(1)
     torch.manual_seed(0)
     offline_loaders(model_dir)
-    distribution = importlib.metadata.distribution('laya')
-    sdk_dir = Path(distribution.locate_file('')).resolve()
-    for item in manifest['sdk_files']:
-        if item['file'].endswith('.py'):
-            verify(item, sdk_dir / item['file'])
-    assert importlib.metadata.version('laya') == '0.3.7'
-    versions['laya'] = distribution.version
-    import laya
+    try:
+        importlib.metadata.distribution('laya')
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    else:
+        raise RuntimeError('This acceptance path requires the recorded uninstalled SDK source tree')
+    from laya_source import load_verified_source, verify_loaded_modules
+    sdk_dir = (local / 'sdk').resolve()
+    laya, sdk_version = load_verified_source(sdk_dir, manifest)
     load_started = time.perf_counter()
     agent = laya.load(str(model_dir), device='cpu')
     load_seconds = time.perf_counter() - load_started
@@ -129,7 +130,9 @@ def main():
                               selected_procedure=choice if choice in record['candidates'] else None,
                               reason=None if choice in record['candidates'] else choice)
         records.append(output)
+    verify_loaded_modules(sdk_dir, manifest)
     result = {'status': 'completed', 'mode': payload['mode'], 'sdk_revision': manifest['sdk_revision'],
+              'sdk_version': sdk_version, 'sdk_load_mode': 'verified_source_tree', 'sdk_distribution_installed': False,
               'model_revision': manifest['model_revision'], 'encoder_revision': manifest['encoder']['artifact_revision'],
               'tokenizer_revision': manifest['tokenizer_revision'], 'versions': versions, 'python': sys.version.split()[0],
               'device': 'cpu', 'parameter_dtype': 'float32', 'cuda_version': torch.version.cuda, 'cpu_threads': torch.get_num_threads(),
