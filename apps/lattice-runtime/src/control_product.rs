@@ -770,4 +770,30 @@ mod decision_tests {
             answer
         );
     }
+
+    #[test]
+    fn durable_mcp_permission_projection_survives_payload_removal_and_clipping() {
+        let mut value = json!({"claims":[{"mcp_permission":{"version":1,"denied":true}}],
+            "observations":(0..120).map(|sequence| json!({"claim_id":"claim","sequence":sequence,
+                "payload":{"private":"not in preview"}})).collect::<Vec<_>>(), "decisions":[]});
+        bound_snapshot(&mut value, true);
+        assert_eq!(
+            value["claims"][0]["mcp_permission"],
+            json!({"version":1,"denied":true})
+        );
+        assert_eq!(value["observations"].as_array().unwrap().len(), 10);
+        assert!(
+            value["observations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("payload").is_none())
+        );
+        bound_snapshot(&mut value, false);
+        assert_eq!(
+            value["claims"][0]["mcp_permission"],
+            json!({"version":1,"denied":true})
+        );
+        assert_eq!(value["observations"].as_array().unwrap().len(), 1);
+    }
 }

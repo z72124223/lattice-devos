@@ -33,7 +33,8 @@ function fixture(context) {
   const claim = { project_id: projectId, task_ref: taskRef, claim_id: 'execution-claim', phase: 'EXECUTION',
     thread_id: 'execution-thread', turn_id: 'current-turn', input_id: 'retained-input',
     dispatch_started: true, dispatch_sequence: 2, turn_status: 'TURN_BOUND', archived: false,
-    worktree_path: workspace, last_sequence: 3, pending_questions: [], pending_inputs: [] };
+    worktree_path: workspace, last_sequence: 3, pending_questions: [], pending_inputs: [],
+    mcp_permission: { version: 1, denied: false } };
   const detail = {
     source: { kind: 'POSTGRESQL_CONTROL_PRODUCT', authority: 'POSTGRESQL_TASK_LEDGER' },
     id: taskRef, project_id: projectId, status: 'running', completion_verified: false,
@@ -120,6 +121,18 @@ async function withoutFileAccess(sample, action) {
 }
 
 const diagnosticRejection = error => error?.status === 409 && /^CONTROL_DIAGNOSTIC_/u.test(error.code ?? '');
+
+for (const action of ['decline', 'cancel']) test(`a retained MCP ${action} in the same turn rejects diagnostic binding`, async context => {
+  const sample = fixture(context);
+  sample.claim.mcp_permission.denied = true;
+  await withoutFileAccess(sample, () => assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_CLAIM_REJECTED' }));
+  assert.equal(sample.calls.reads.length, 0);
+});
+
+for (const projection of [undefined, { version: 2, denied: false }]) test('diagnostic requires the known durable permission projection', async context => {
+  const sample = fixture(context); sample.claim.mcp_permission = projection;
+  await withoutFileAccess(sample, () => assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_CLAIM_REJECTED' }));
+});
 
 function assertLimitedTrust(output, sample) {
   assert.equal(output.schema, 'lattice.control.relative-module-diagnostic.v1');

@@ -2460,13 +2460,8 @@ pub fn bootstrap_postgres_extensions_from_environment() -> Result<(), LatticedEr
                 ForemanExtensionDatabaseRole::Migrator,
             )
             .is_ok()
-            && migrator
-                .query_one(
-                    "SELECT pg_catalog.to_regprocedure('control_product.code_relations_v1(text,text,text,text,text,text,integer)') IS NOT NULL AND pg_catalog.to_regprocedure('control_product.graph_usage_begin_v1(jsonb)') IS NOT NULL",
-                    &[],
-                )
+            && lattice_postgres_store::verify_mcp_permission_extension(&mut migrator)
                 .map_err(|_| LatticedError::new(LatticedErrorKind::RuntimePostgresVerification))?
-                .get::<_, bool>(0)
     } else {
         false
     };

@@ -28,7 +28,8 @@ pub use migrations::{
 pub use postgres_setup::{
     BootstrapAdmission, CONTROL_PRODUCT_SQL, GRAPH_USAGE_SQL, MigrationApplyOutcome,
     MigrationBootstrapProfile, PostgresSchemaEvidence, apply_control_product_extension,
-    apply_migrations, inspect_migration_profile, verify_postgres_schema,
+    apply_migrations, inspect_migration_profile, verify_mcp_permission_extension,
+    verify_postgres_schema,
 };
 pub use project_registry::{
     PostgresProjectRegistry, PostgresProjectRegistryError, PostgresProjectRegistryErrorKind,

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
 import { mkdir, realpath, readFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { CodexAppServer } from "./codex-app-server.mjs";
@@ -9,6 +9,7 @@ import { closedChildEnvironment, loadLatticeRuntimeConfiguration } from "./latti
 import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./result-preview.mjs";
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
 import { rejectDiagnostic, verifyDiagnosticReceipt } from './relative-module-receipt.mjs';
+import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -89,10 +90,16 @@ export class FormalTaskService {
     };
     this.onRequest = (message) => {
       const owner = this.owners.get(message.params?.threadId);
-      if (!owner || this.closed) return this.codex.rejectServerRequest(message.id);
+      const identity = this.codex.serverRequestIdentity?.(message.id);
+      if (!owner || this.closed) return this.codex.rejectServerRequest(message.id, { requestIdentity: identity });
       this.codex.deferServerRequest(message.id, { timeoutMs: 3600000 });
-      void this.serial(owner.taskRef, () => this.recordQuestion(owner, message)).catch(() => {
-        try { this.codex.rejectServerRequest(message.id); } catch { /* connection already ended */ }
+      void this.serial(owner.taskRef, () => this.recordQuestion(owner, message, identity)).catch((error) => {
+        const elicitation = message.method === elicitationMethod;
+        const code = elicitation && /^CONTROL_(?:ELICITATION|QUESTION)_[A-Z_]+$/u.test(error.code ?? '')
+          ? error.code : 'CONTROL_REQUEST_UNSUPPORTED';
+        if (elicitation) void this.recordFailure(owner, elicitationError(code));
+        try { this.codex.rejectServerRequest(message.id, { requestIdentity: identity,
+          ...(elicitation ? { code: -32602, message: code } : {}) }); } catch { /* original connection already ended */ }
       });
     };
     codex.on("notification", this.onNotification);
@@ -475,7 +482,8 @@ export class FormalTaskService {
       });
     });
   }
-  async recordQuestion(owner, message) {
+  async recordQuestion(owner, message, identity = this.codex.serverRequestIdentity?.(message.id)) {
+    if (message.method === elicitationMethod) return this.recordElicitation(owner, message, identity);
     const detail = await this.store.detail(owner.projectId, owner.taskRef);
     const claim = detail.claims.find((row) => row.claim_id === owner.claimId);
     if (!claim || message.params?.threadId !== claim.thread_id || message.params?.turnId !== claim.turn_id) {
@@ -500,11 +508,13 @@ export class FormalTaskService {
       payload: { method: message.method, params: message.params },
     });
   }
-  async answer(projectId, taskRef, { questionId, decision, answers }) {
+  async answer(projectId, taskRef, input) {
+    const { questionId, decision, answers } = input;
     const retained = this.questions.get(questionId);
     if (!retained || retained.owner.projectId !== projectId || retained.owner.taskRef !== taskRef) {
       throw formalWorkError("CONTROL_QUESTION_RECONNECT_REQUIRED", "原生提問連線已結束，請先核對原工作回合。");
     }
+    if (retained.method === elicitationMethod) return this.answerElicitation(retained, questionId, input);
     const detail = await this.store.detail(projectId, taskRef);
     const claim = detail.claims.find((row) => row.claim_id === retained.owner.claimId);
     const approval = retained.method !== "item/tool/requestUserInput";
@@ -516,6 +526,73 @@ export class FormalTaskService {
     this.codex.respond(retained.nativeId, response);
     this.questions.delete(questionId);
     return this.store.detail(projectId, taskRef);
+  }
+  elicitationClaim(retained, detail) {
+    const { owner, binding, identity } = retained;
+    const claim = detail.claims.find(row => row.claim_id === owner.claimId);
+    const currentOwner = this.owners.get(binding.threadId);
+    if (this.closed || !this.codex.connected || !identity
+      || this.codex.serverRequestIdentity?.(identity.id) !== identity
+      || this.codex.connectionGeneration !== identity.generation || this.codex.appServerSessionId !== identity.sessionId
+      || !this.codex.isTurnActive(binding.threadId, binding.turnId)
+      || detail.id !== owner.taskRef || detail.project_id !== owner.projectId || detail.completion_verified
+      || currentOwner?.projectId !== owner.projectId || currentOwner.taskRef !== owner.taskRef || currentOwner.claimId !== owner.claimId
+      || !claim || claim.archived || claim.turn_status !== 'TURN_BOUND'
+      || claim.task_ref !== owner.taskRef || claim.thread_id !== binding.threadId || claim.turn_id !== binding.turnId
+      || !claim.input_id || claim.input_id !== binding.inputId) throw elicitationError('CONTROL_ELICITATION_STALE');
+    return claim;
+  }
+  async recordElicitation(owner, message, identity) {
+    const request = taskStatusElicitation(message, owner.taskRef);
+    if (!identity || identity.id !== message.id || !Number.isSafeInteger(identity.id) || identity.id < 0
+      || !Number.isSafeInteger(identity.generation) || identity.generation < 1
+      || !Number.isSafeInteger(identity.sequence) || identity.sequence < 1
+      || !/^app-server-session:sha256:[a-f0-9]{64}$/u.test(identity.sessionId ?? '')) throw elicitationError('CONTROL_ELICITATION_STALE');
+    const detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const claim = detail.claims.find(row => row.claim_id === owner.claimId);
+    const binding = { projectId: owner.projectId, taskRef: owner.taskRef, claimId: owner.claimId,
+      threadId: message.params.threadId, turnId: message.params.turnId, inputId: claim?.input_id, native: identity };
+    const retained = { owner: { ...owner }, binding, identity, method: elicitationMethod };
+    this.elicitationClaim(retained, detail);
+    if (elicitationDenied(detail, claim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    const id = `q:${sha(JSON.stringify([elicitationMethod, binding, request]))}`;
+    const payload = { method: elicitationMethod, binding, request };
+    // Resolved questions are evidence, never a reusable native authorization.
+    if (await this.store.questionResolution?.(owner.projectId, owner.taskRef, id)) throw elicitationError('CONTROL_ELICITATION_ALREADY_RESOLVED');
+    this.elicitationClaim(retained, detail);
+    const pending = claim.pending_questions?.find(row => row.approval_id === id);
+    if (pending && !isDeepStrictEqual(pending.payload, payload)) throw elicitationError('CONTROL_ELICITATION_STALE');
+    if (!pending) await this.observe(claim, 'QUESTION_REQUESTED', { approval_id: id, payload,
+      summary: 'Codex 請求一次性執行 lattice_task_status；等待使用者明示接受、拒絕或取消。' });
+    this.elicitationClaim(retained, await this.store.detail(owner.projectId, owner.taskRef));
+    this.questions.set(id, { ...retained, payload });
+  }
+  async answerElicitation(retained, questionId, input) {
+    const response = elicitationResponse(input), { owner } = retained;
+    if (input.projectId !== undefined && input.projectId !== owner.projectId) throw elicitationError('CONTROL_ELICITATION_STALE');
+    let detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const claim = this.elicitationClaim(retained, detail);
+    if (response.action === 'accept' && elicitationDenied(detail, claim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    const resolved = await this.store.questionResolution?.(owner.projectId, owner.taskRef, questionId);
+    this.elicitationClaim(retained, detail);
+    // An uncertain durable write can be read back, but it cannot change a
+    // saved answer. Once native sending is attempted, remove the callback first.
+    const payload = { method: elicitationMethod, binding: retained.binding, response };
+    if (resolved) {
+      if (resolved.claim_id !== claim.claim_id || resolved.turn_id !== claim.turn_id || resolved.input_id !== claim.input_id
+        || !isDeepStrictEqual(resolved.payload, payload)) throw elicitationError('CONTROL_ELICITATION_ALREADY_RESOLVED');
+    } else {
+      const pending = claim.pending_questions?.find(row => row.approval_id === questionId);
+      if (!pending || !isDeepStrictEqual(pending.payload, retained.payload)) throw elicitationError('CONTROL_ELICITATION_STALE');
+      await this.observe(claim, 'QUESTION_RESOLVED', { request_id: `resolve:${questionId}`, approval_id: questionId,
+        payload, summary: '已保存使用者的 MCP 一次性許可決定；原生接收結果尚未確認。' });
+    }
+    detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const freshClaim = this.elicitationClaim(retained, detail);
+    if (response.action === 'accept' && elicitationDenied(detail, freshClaim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    this.questions.delete(questionId);
+    this.codex.respond(retained.identity.id, response, { requestIdentity: retained.identity });
+    return detail;
   }
   async recordFailure(owner, error) {
     // Keep the native identity and failure visible. A read/reconcile can recover
@@ -574,6 +651,7 @@ export class FormalTaskService {
             || !Number.isSafeInteger(claim.last_sequence) || !Number.isSafeInteger(claim.dispatch_sequence)
             || !Array.isArray(claim.pending_inputs) || claim.pending_inputs.length
             || !Array.isArray(claim.pending_questions) || claim.pending_questions.length
+            || elicitationDenied(detail, claim)
             || detail.product?.observations?.some(row => row.claim_id === claimId && row.turn_id === turnId
               && row.summary === openCircuitSummary)) rejectDiagnostic('CLAIM_REJECTED');
         return claim;

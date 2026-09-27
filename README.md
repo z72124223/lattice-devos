@@ -295,3 +295,18 @@ native provenance／authorization 未驗證、adopted=false；路徑與 bytes �
 正式工作仍須走既有 executor → independent verifier → Runtime 固定測試／結果匯入，
 重新讀回 COMPLETED、非空 result_digest 與 completion_verified=true 才算結案。
 本機能力、模型採用與對外發布分開：Jev 未實測採用，亦未 push／merge／部署／release。
+
+正式 Control 的 MCP 許可適配僅支援已觀察的 `lattice_task_status` 空表單，且 task_ref
+必須是目前工作。依本機 Codex `0.155.0-alpha.16.4` 匯出的 App Server schema，使用
+`action: accept|decline|cancel` 回覆。待決定問題沿用工作詳情的 `pending_questions`；
+明示回答沿用 `POST /api/formal-work/<task_ref>/answer`，body 為
+`{projectId, questionId, action}`。只處理一次許可，不轉送 `_meta` 或 session/always 選項。
+必須先保存回答，才對同一 native request／連線／claim／turn／input 回覆；原生傳送結果
+不明時不重送批准，新的請求需要新的明示決定。未知形狀與過期回答安全拒絕。
+拒絕狀態由 PostgreSQL 完整觀察列依目前 claim／最新 dispatch／turn／input 推導為
+`mcp_permission:{version:1,denied:boolean}`，不採信 payload.binding，也不受預覽裁剪影響。
+每次送出接受前重新查核，包括已保存但未收到確認的回答；版本缺失或未知一律拒絕。
+明示 bootstrap 會驗證完整已知目錄後交易式升級讀取函式，保留原始 v1 SQL 與資料；
+未知目錄拒絕升級。隔離 PostgreSQL 已驗升級、回滾、資料／權限保留與第二次執行不變。
+這些證據限於本機測試與隔離資料庫，尚未升級正式 Runtime、續接 LH-V1-E2E-01 或發布；
+舊控制器仍需改成有界等待明示回答。未回答不代表接受，外部 message／metadata 也不能授權。

@@ -8620,12 +8620,17 @@ const GRAPH_USAGE_FUNCTION_CATALOG_SHA256: &str =
     "7ff5ba64246f77d49594fae480f13d20acb287bd975d721eccd2caca5392ab2f";
 const GRAPH_USAGE_TABLE_CATALOG_SHA256: &str =
     "515bdcc8a70a59549184d566b7c3c9390169ef5599024661e56549e408b37a8b";
+const MCP_PERMISSION_SQL: &str =
+    include_str!("../../../db/extensions/control-product/mcp-permission-v1.sql");
+const MCP_PERMISSION_FUNCTION_CATALOG_SHA256: &str =
+    "0888683bacf531cf2d64ff1ce6c83bdcbd3e4ebbe823a1ee9f596af474263c9e";
 
 struct ControlProductPrincipalProfile {
     relation_oids: Vec<i64>,
     function_oids: Vec<i64>,
     code_relations: bool,
     graph_usage: bool,
+    mcp_permission: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8651,7 +8656,8 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
         b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
     )?;
-    let graph_usage = functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
+    let mcp_permission = functions == MCP_PERMISSION_FUNCTION_CATALOG_SHA256;
+    let graph_usage = mcp_permission || functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
     let code_relations = graph_usage || functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
     if (!code_relations && functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256)
         || tables
@@ -8722,6 +8728,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         function_oids,
         code_relations,
         graph_usage,
+        mcp_permission,
     }))
 }
 
@@ -8730,6 +8737,17 @@ pub(crate) fn verify_graph_usage_extension<C: GenericClient>(
 ) -> Result<bool, PostgresStoreSetupError> {
     Ok(verify_optional_control_product_extension(client)?
         .is_some_and(|profile| profile.graph_usage))
+}
+
+/// Whether the exact Control Product catalog includes durable MCP permissions.
+///
+/// # Errors
+/// Rejects unknown function/table/ACL catalogs or mismatched database identity.
+pub fn verify_mcp_permission_extension(
+    client: &mut Client,
+) -> Result<bool, PostgresStoreSetupError> {
+    Ok(verify_optional_control_product_extension(client)?
+        .is_some_and(|profile| profile.mcp_permission))
 }
 
 /// Installs Control facts only through an explicitly invoked, verified migrator.
@@ -8790,6 +8808,24 @@ pub fn apply_control_product_extension(
                 map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
             })?;
         if !verify_graph_usage_extension(&mut transaction)? {
+            return Err(catalog_error());
+        }
+    }
+    // v1.sql remains byte-identical. Like the other append-only extensions,
+    // compatibility is pinned by the full function/table/ACL catalog and the
+    // original database identity. Never overwrite an unknown partial catalog.
+    let product =
+        verify_optional_control_product_extension(&mut transaction)?.ok_or_else(catalog_error)?;
+    if !product.mcp_permission {
+        transaction
+            .batch_execute(MCP_PERMISSION_SQL)
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        if !verify_optional_control_product_extension(&mut transaction)?
+            .ok_or_else(catalog_error)?
+            .mcp_permission
+        {
             return Err(catalog_error());
         }
     }
@@ -9837,6 +9873,10 @@ fn catalog_error() -> PostgresStoreSetupError {
 fn permission_error() -> PostgresStoreSetupError {
     PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::PermissionDenied)
 }
+
+#[cfg(test)]
+#[path = "mcp_permission_tests.rs"]
+mod mcp_permission_tests;
 
 #[cfg(test)]
 mod tests {
