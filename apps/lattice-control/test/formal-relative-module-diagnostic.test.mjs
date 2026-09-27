@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { FormalTaskService } from '../src/formal-task-service.mjs';
 import { createLatticeServer } from '../src/server.mjs';
@@ -27,7 +29,7 @@ const rawFailureDigest = event => createHash('sha256').update(JSON.stringify({
   aggregatedOutput: event.aggregatedOutput, exitCode: event.exitCode,
 })).digest('hex');
 
-function fixture(context) {
+function fixture(context, { verifyDiagnosticReceipt } = {}) {
   const effects = [];
   const forbidden = name => (...args) => { effects.push({ name, args }); assert.fail(`forbidden effect: ${name}`); };
   const claim = { project_id: projectId, task_ref: taskRef, claim_id: 'execution-claim', phase: 'EXECUTION',
@@ -91,7 +93,7 @@ function fixture(context) {
   });
   for (const name of ['startThread', 'startTurn', 'resumeThread', 'resumeEmptyThread', 'interruptTurn',
     'archiveThread', 'unarchiveThread', 'request', 'respond', 'listThreads']) codex[name] = forbidden(`codex.${name}`);
-  const service = new FormalTaskService({ store, codex, configurationLoader: forbidden('configurationLoader') });
+  const service = new FormalTaskService({ store, codex, configurationLoader: forbidden('configurationLoader'), verifyDiagnosticReceipt });
   service.dispatch = forbidden('service.dispatch');
   service.owners.set(claim.thread_id, { projectId, taskRef, claimId: claim.claim_id });
   context.after(() => service.close());
@@ -327,3 +329,122 @@ test('real loopback HTTP route preserves the limited receipt and rejects changed
   assert.equal(archived.status, 409);
   assert.deepEqual(sample.detail.product.observations, []);
 });
+
+// This acceptance reads an existing, explicitly supplied worktree. It never
+// copies helpers or resolves a validator from a request. A supplied root must
+// pass every pin check before import; an absent root is not acceptance evidence.
+const fixedHelperRoot = process.env.LATTICE_DIAGNOSTIC_HELPER_ROOT;
+test('trusted startup retains the pinned legacy validator through the real HTTP route',
+  { skip: fixedHelperRoot ? false : 'requires LATTICE_DIAGNOSTIC_HELPER_ROOT for pinned-source acceptance' }, async context => {
+    assert.ok(path.isAbsolute(fixedHelperRoot));
+    const fixedHead = 'dc1b16051321788f13eb22e194d54e6d4245d652';
+    const git = (...args) => execFileSync('git', ['--no-optional-locks', '-C', fixedHelperRoot, ...args],
+      { windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
+    const text = (...args) => git(...args).toString('utf8').trim();
+    const pins = [
+      ['relative-module-receipt.mjs', '8d290db1d3deb6ff2f42bc4b022e485afd622cb33c9e276f7ca0e8ca2f0d1974'],
+      ['execution-recovery.mjs', '8d17b4ff9d7328be7470024ef3156eeb232603d969fcd9014d951f6a09fd655a'],
+      ['relative-module-diagnostic-cli.mjs', 'cda849e46c8c8a1f03191b2dfbc1be279607332bf42c16a274408723f4b102dc'],
+    ];
+    const verifySource = () => {
+      assert.equal(fs.realpathSync(text('rev-parse', '--show-toplevel')), fs.realpathSync(fixedHelperRoot));
+      assert.equal(text('rev-parse', 'HEAD'), fixedHead);
+      assert.equal(text('status', '--porcelain=v1', '--untracked-files=all'), '');
+      for (const [name, sha256] of pins) {
+        const relative = `apps/lattice-control/src/${name}`;
+        const bytes = fs.readFileSync(path.join(fixedHelperRoot, relative));
+        assert.deepEqual(bytes, git('show', `${fixedHead}:${relative}`));
+        assert.equal(createHash('sha256').update(bytes).digest('hex'), sha256);
+      }
+    };
+    verifySource();
+    context.after(verifySource);
+    const legacy = await import(pathToFileURL(path.join(fixedHelperRoot, 'apps/lattice-control/src/relative-module-receipt.mjs')).href);
+    const useLegacyCommand = sample => Object.assign(sample.diagnostic,
+      nativeCommand(legacy.diagnosticReceiptCommand(sample.receipt.requestPath, sample.receipt.requestSha256)));
+
+    await context.test('startup accepts a function dependency, never a module path or receipt object', async subtest => {
+      const sample = fixture(subtest);
+      const listeners = sample.codex.listenerCount('notification');
+      for (const value of [null, {}, pathToFileURL(path.join(fixedHelperRoot, 'apps/lattice-control/src/relative-module-receipt.mjs')).href]) {
+        assert.throws(() => new FormalTaskService({ store: sample.store, codex: sample.codex, verifyDiagnosticReceipt: value }), TypeError);
+        assert.equal(sample.codex.listenerCount('notification'), listeners);
+      }
+      assert.deepEqual(sample.effects, []);
+    });
+
+    await context.test('the default real validator remains source-specific', async subtest => {
+      const sample = fixture(subtest);
+      assertLimitedTrust(await sample.call(), sample);
+      useLegacyCommand(sample);
+      await assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED' });
+      assert.deepEqual(sample.effects, []);
+    });
+
+    for (const [name, mutate, code] of [
+      ['exact old helper command', () => {}, null],
+      ['current helper command', s => Object.assign(s.diagnostic, nativeCommand(diagnosticReceiptCommand(s.receipt.requestPath, s.receipt.requestSha256))), 'COMMAND_REJECTED'],
+      ['another helper directory', s => Object.assign(s.diagnostic, nativeCommand(s.diagnostic.commandActions[0].command.replace(path.resolve(fixedHelperRoot), path.resolve('untrusted-helper')))), 'COMMAND_REJECTED'],
+      ['appended command', s => Object.assign(s.diagnostic, nativeCommand(`${s.diagnostic.commandActions[0].command}; Write-Output injected`)), 'COMMAND_REJECTED'],
+      ['wrong binding', s => { s.receipt.binding.claimId = 'other-claim'; s.syncReceipt(); }, 'BINDING_REJECTED'],
+      ['expired receipt', s => { s.receipt.validUntil = new Date(Date.now() - 1000).toISOString(); s.syncReceipt(); }, 'EXPIRED'],
+      ['expiry beyond five minutes', s => { s.receipt.validUntil = new Date(Date.now() + 360000).toISOString(); s.syncReceipt(); }, 'EXPIRED'],
+    ]) await context.test(name, async subtest => {
+      const sample = fixture(subtest, { verifyDiagnosticReceipt: legacy.verifyDiagnosticReceipt });
+      useLegacyCommand(sample);
+      assert.notEqual(sample.diagnostic.commandActions[0].command, diagnosticReceiptCommand(sample.receipt.requestPath, sample.receipt.requestSha256));
+      mutate(sample);
+      if (code) await assert.rejects(sample.call(), { code: `CONTROL_DIAGNOSTIC_${code}` });
+      else assertLimitedTrust(await sample.call(), sample);
+      assert.deepEqual(sample.effects, []);
+    });
+
+    for (const permission of [{ version: 1, denied: true }, undefined, { version: 2, denied: false }]) {
+      await context.test(`durable permission guard precedes native receipt validation: ${JSON.stringify(permission)}`, async subtest => {
+        const sample = fixture(subtest, { verifyDiagnosticReceipt: legacy.verifyDiagnosticReceipt });
+        sample.claim.mcp_permission = permission;
+        sample.diagnostic.aggregatedOutput = 'invalid receipt';
+        await assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_CLAIM_REJECTED' });
+        assert.equal(sample.calls.reads.length, 0);
+        assert.deepEqual(sample.effects, []);
+      });
+    }
+
+    await context.test('HTTP and receipt fields cannot select or replace the startup dependency', async subtest => {
+      const sample = fixture(subtest, { verifyDiagnosticReceipt: legacy.verifyDiagnosticReceipt });
+      useLegacyCommand(sample);
+      const application = createLatticeServer({ databasePath: ':memory:', codex: sample.codex,
+        formalWorkStore: sample.store, formalTaskService: sample.service,
+        runtimeHealth: { current: async () => ({}), close: async () => {} },
+        mcpHealth: { current: async () => ({}) } });
+      await new Promise((resolve, reject) => {
+        application.server.once('error', reject);
+        application.server.listen(0, '127.0.0.1', resolve);
+      });
+      subtest.after(() => new Promise((resolve, reject) => application.server.close(error => error ? reject(error) : resolve())));
+      const query = new URLSearchParams({ projectId, ...sample.selectors });
+      const base = `http://127.0.0.1:${application.server.address().port}/api/formal-work/${taskRef}/diagnostic`;
+      const success = await getJson(`${base}?${query}`);
+      assert.equal(success.status, 200);
+      assertLimitedTrust(success.body, sample);
+      for (const key of ['verifyDiagnosticReceipt', 'helperSourceRoot', 'validatorPath']) {
+        const injected = new URLSearchParams(query);
+        injected.set(key, pathToFileURL(path.resolve('untrusted-helper.mjs')).href);
+        const rejected = await getJson(`${base}?${injected}`);
+        assert.equal(rejected.status, 400);
+        assert.equal(rejected.body.code, 'CONTROL_DIAGNOSTIC_SELECTOR_REJECTED');
+        sample.receipt[key] = injected.get(key);
+        sample.syncReceipt();
+        const receiptRejected = await getJson(`${base}?${query}`);
+        assert.equal(receiptRejected.status, 409);
+        assert.equal(receiptRejected.body.code, 'CONTROL_DIAGNOSTIC_BINDING_REJECTED');
+        delete sample.receipt[key]; sample.syncReceipt();
+      }
+      Object.assign(sample.diagnostic, nativeCommand(diagnosticReceiptCommand(sample.receipt.requestPath, sample.receipt.requestSha256)));
+      const wrongSource = await getJson(`${base}?${query}`);
+      assert.equal(wrongSource.status, 409);
+      assert.equal(wrongSource.body.code, 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED');
+      assert.deepEqual(sample.effects, []);
+    });
+    context.diagnostic(`Pinned helper verified before and after: ${fixedHead}; ${pins.map(([name, hash]) => `${name}=${hash}`).join('; ')}`);
+  });

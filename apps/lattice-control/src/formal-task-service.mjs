@@ -8,7 +8,7 @@ import { formalWorkError } from "./formal-work-store.mjs";
 import { closedChildEnvironment, loadLatticeRuntimeConfiguration } from "./lattice-runtime-health.mjs";
 import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./result-preview.mjs";
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
-import { rejectDiagnostic, verifyDiagnosticReceipt } from './relative-module-receipt.mjs';
+import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticReceipt } from './relative-module-receipt.mjs';
 import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
 
 const execute = promisify(execFile);
@@ -56,7 +56,13 @@ async function existingFile(workspace, relative) {
 // Native Codex remains the execution harness. This service only records its exact
 // identities/events and invokes the fixed, evidence-producing result importer.
 export class FormalTaskService {
-  constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration }) {
+  #verifyDiagnosticReceipt;
+  constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration,
+    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt }) {
+    // Trusted startup composition may retain a verified helper's source identity.
+    // Request selectors and receipt data never choose or replace this dependency.
+    if (typeof verifyDiagnosticReceipt !== 'function') throw new TypeError('verifyDiagnosticReceipt must be a trusted startup function');
+    this.#verifyDiagnosticReceipt = verifyDiagnosticReceipt;
     Object.assign(this, { store, codex, configurationLoader });
     this.operations = new Map();
     this.owners = new Map();
@@ -669,7 +675,7 @@ export class FormalTaskService {
         const results = turn.items.filter(item => item.id === diagnosticItemId);
         if (failures.length !== 1 || results.length !== 1 || turn.items.indexOf(failures[0]) >= turn.items.indexOf(results[0])) rejectDiagnostic('ITEM_REJECTED');
         const binding = { projectId, taskRef, claimId, threadId, turnId, inputId: claim.input_id, failureItemId };
-        const receipt = verifyDiagnosticReceipt(results[0], failures[0], binding, claim.worktree_path);
+        const receipt = this.#verifyDiagnosticReceipt(results[0], failures[0], binding, claim.worktree_path);
         return { receipt, binding, bytes: JSON.stringify([failures[0], results[0]]) };
       };
       const identity = (detail, claim) => JSON.stringify([detail.project, detail.ledger_head_digest, claim]);
