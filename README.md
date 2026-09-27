@@ -244,8 +244,11 @@ Control 結果接入（LH-DELIVERY-03）：已有唯讀入口
 Control 獨立驗證，對應旗標保持 false，內層 `advisoryOnly=true`、`adopted=false` 與兩個
 未驗證權限／來源旗標也保持原值。檔案狀態仍只是 CLI 當次觀察，不是 API 讀取時的最新檔案狀態。
 前後核對是當次觀察，不是 PostgreSQL 與 App Server 之間的原子快照。
-本機適配器／HTTP 契約測試使用隔離 doubles，**同版本 live Runtime／正式任務接入仍未驗收**；
-目前沒有讀回可用的正式 claim，不能將離線識別或既有不同版本安裝當作 live 證據。
+本機適配器／HTTP 契約測試使用隔離 doubles；另於 2026-09-27，以固定 `e2bb735`
+完成 LH-DELIVERY-03-LIVE 的真實正式 claim／同回合診斷綁定：HTTP 200、4369 ms，
+錯誤 selector 回 409。該 fixture 已中斷，保留 DRAFT／result_digest=null，不能視為正式結案。
+2026-09-28 的 LH-V1-E2E-01 仍未取得同一任務修復成功、獨立驗收與正式 COMPLETED 證據；
+本輪在額外 MCP 許可請求與不允修改已啟動驗收條件的拒絕後停止，保留中斷任務及失敗紀錄。
 
 </details>
 
@@ -285,3 +288,10 @@ stdout 只回摘要、檔案雜湊與精確命令；準備成功 exit 0，其餘
 函式入口為 `prepareRelativeModule(input)`；不啟動子程序、網路、DB、模型、修復或重試，
 回傳命令須由 Codex 另行執行。來源仍是 caller-supplied／context caller-asserted，
 native provenance／authorization 未驗證、adopted=false；路徑與 bytes 重核不是原子檔案系統沙箱。
+
+目前手動本機首版只涵蓋已驗 Windows／Node 靜態相對模組缺失，由 Codex 明示選定事件、
+專案及 context，執行上述 prepare 命令，再於獨立工具呼叫原樣執行回傳的 `command`。
+沒有自動觸發；修復需另外明示允許的檔案與成功條件，診斷元件不執行修復。
+正式工作仍須走既有 executor → independent verifier → Runtime 固定測試／結果匯入，
+重新讀回 COMPLETED、非空 result_digest 與 completion_verified=true 才算結案。
+本機能力、模型採用與對外發布分開：Jev 未實測採用，亦未 push／merge／部署／release。
