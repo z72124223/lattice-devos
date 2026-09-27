@@ -32,12 +32,20 @@ export function failureEventDigest(event) {
   return hash(JSON.stringify({ id: event.id, type: event.type, status: event.status,
     command: event.command, aggregatedOutput: event.aggregatedOutput, exitCode: event.exitCode }));
 }
-export function diagnosticReceiptCommand(requestPath, requestSha256) {
-  if (!text(requestPath) || !path.isAbsolute(requestPath) || unsupportedQuote.test(requestPath)
-      || !digest(requestSha256)) rejectDiagnostic('REQUEST_REJECTED');
+export function diagnosticCommand(requestPath) {
+  if (!text(requestPath) || !path.isAbsolute(requestPath) || unsupportedQuote.test(requestPath)) rejectDiagnostic('REQUEST_REJECTED');
   const cli = fileURLToPath(new URL('./relative-module-diagnostic-cli.mjs', import.meta.url));
   if (!text(cli) || unsupportedQuote.test(cli)) rejectDiagnostic('REQUEST_REJECTED');
-  return `node --experimental-vm-modules --disable-warning=ExperimentalWarning '${cli}' '${requestPath}' --receipt ${requestSha256}`;
+  return `node --experimental-vm-modules --disable-warning=ExperimentalWarning '${cli}' '${requestPath}'`;
+}
+export function diagnosticReceiptCommand(requestPath, requestSha256) {
+  if (!digest(requestSha256)) rejectDiagnostic('REQUEST_REJECTED');
+  return `${diagnosticCommand(requestPath)} --receipt ${requestSha256}`;
+}
+export function validateDiagnosticBinding(binding, context) {
+  if (!keys(binding, bindingKeys) || !bindingKeys.every(key => text(binding[key], 256))
+      || !digest(binding.taskRef) || binding.projectId !== context?.projectId
+      || binding.taskRef !== context?.taskId) rejectDiagnostic('BINDING_REJECTED');
 }
 function matchesNativeCommand(item, inner) {
   if (!text(item.command, 16384) || !Array.isArray(item.commandActions) || item.commandActions.length !== 1
@@ -58,9 +66,8 @@ function matchesNativeCommand(item, inner) {
 }
 export function createDiagnosticReceipt(request, evidence, result, requestPath, requestSha256) {
   const binding = request.receiptBinding;
-  if (!keys(binding, bindingKeys) || !bindingKeys.every(key => text(binding[key], 256))
-      || !digest(binding.taskRef) || binding.projectId !== request.context?.projectId
-      || binding.taskRef !== request.context?.taskId || binding.failureItemId !== evidence?.event?.id
+  validateDiagnosticBinding(binding, request.context);
+  if (binding.failureItemId !== evidence?.event?.id
       || evidence.subject?.projectId !== binding.projectId || evidence.subject?.taskId !== binding.taskRef
       || !samePath(evidence.subject?.projectRoot, request.projectRoot) || !samePath(evidence.subject?.importer, request.importer)
       || !digest(request.evidenceSha256) || !digest(evidence?.subject?.importerSha256)) rejectDiagnostic('BINDING_REJECTED');

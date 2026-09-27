@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
-import { lstat, open, realpath } from 'node:fs/promises';
+import { lstat, mkdir, open, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import vm from 'node:vm';
 import { pathToFileURL } from 'node:url';
 import { canonicalizeProjectPath, normalizeRequestedProjectPath } from './project-inspector.mjs';
 import { isExecutionDenied } from './execution-recovery.mjs';
-import { createDiagnosticReceipt } from './relative-module-receipt.mjs';
+import { createDiagnosticReceipt, diagnosticCommand, diagnosticReceiptCommand,
+  failureEventDigest, validateDiagnosticBinding } from './relative-module-receipt.mjs';
 
 const maximumBytes = 1024 * 1024;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -83,6 +84,24 @@ function contextExclusion(context, now) {
   return null;
 }
 
+function inspectFailure(event, importer) {
+  if (!text(event?.id)) fail('INCOMPLETE_EVENT');
+  if (isExecutionDenied(event)) return { excluded: 'DENIED' };
+  if (event.type !== 'commandExecution' || event.status !== 'failed') return { excluded: 'NOT_FAILED_COMMAND' };
+  if (!text(event.command) || typeof event.aggregatedOutput !== 'string'
+      || event.aggregatedOutput.length > 64 * 1024) fail('INCOMPLETE_EVENT');
+  if (!Number.isSafeInteger(event.exitCode) || event.exitCode === 0) fail('INCOMPLETE_FAILURE');
+  if (/Cannot find package\b/u.test(event.aggregatedOutput)) fail('THIRD_PARTY_PACKAGE');
+  if (!event.aggregatedOutput.includes('ERR_MODULE_NOT_FOUND')) fail('UNSUPPORTED_FAILURE');
+  const matches = [...event.aggregatedOutput.matchAll(/^Error \[ERR_MODULE_NOT_FOUND\]: Cannot find module '([^'\r\n]+)' imported from ([^\r\n]+)$/gmu)];
+  if (matches.length !== 1) fail('INSUFFICIENT_FAILURE_DETAILS');
+  // Reported paths are compared only; they never authorize filesystem access.
+  const [, reportedTarget, reportedImporter] = matches[0];
+  if (!path.isAbsolute(reportedTarget) || !path.isAbsolute(reportedImporter)
+      || !samePath(reportedImporter, importer)) fail('FAILURE_IMPORTER_MISMATCH');
+  return { reportedTarget };
+}
+
 /**
  * Caller/adapter boundary: source JSON and hashes establish byte consistency,
  * not native provenance or current permission. The caller must independently
@@ -90,7 +109,7 @@ function contextExclusion(context, now) {
  * turn those assertions into verified authority; every output says so explicitly.
  * This module never links/evaluates project code or executes a recovery action.
  */
-async function diagnose(request, { now = Date.now() } = {}, capture = null) {
+async function diagnose(request, { now = Date.now() } = {}, capture = null, preparedEvidenceBytes = null) {
   const output = { schema: 'lattice.relative-module-diagnostic.v1', decision: 'abstain', reason: null,
     advisoryOnly: true, adopted: false, location: null, hints: [],
     trust: { source: 'caller_supplied_snapshot', context: 'caller_asserted_current',
@@ -108,8 +127,8 @@ async function diagnose(request, { now = Date.now() } = {}, capture = null) {
     if (!digest(request.evidenceSha256)) fail('SOURCE_DIGEST_REQUIRED');
     // An archive may be outside the project only because the caller explicitly
     // named it; no path parsed from a log ever reaches a filesystem API.
-    const evidenceDirectory = await canonicalizeProjectPath(path.dirname(evidenceFile));
-    const evidenceBytes = await readCheckedFile(evidenceDirectory, evidenceFile);
+    const evidenceBytes = preparedEvidenceBytes ?? await readCheckedFile(
+      await canonicalizeProjectPath(path.dirname(evidenceFile)), evidenceFile);
     if (sha256(evidenceBytes) !== request.evidenceSha256) fail('SOURCE_INTEGRITY_MISMATCH');
     const evidence = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(evidenceBytes));
     const { subject, event } = evidence;
@@ -121,20 +140,8 @@ async function diagnose(request, { now = Date.now() } = {}, capture = null) {
         || !samePath(subject.projectRoot, projectRoot) || !samePath(subject.importer, importer)) {
       return finish('excluded', 'SUBJECT_MISMATCH');
     }
-    if (!text(event.id)) fail('INCOMPLETE_EVENT');
-    if (isExecutionDenied(event)) return finish('excluded', 'DENIED');
-    if (event.type !== 'commandExecution' || event.status !== 'failed') return finish('excluded', 'NOT_FAILED_COMMAND');
-    if (!text(event.command) || typeof event.aggregatedOutput !== 'string'
-        || event.aggregatedOutput.length > 64 * 1024) fail('INCOMPLETE_EVENT');
-    if (!Number.isSafeInteger(event.exitCode) || event.exitCode === 0) fail('INCOMPLETE_FAILURE');
-    if (/Cannot find package\b/u.test(event.aggregatedOutput)) fail('THIRD_PARTY_PACKAGE');
-    if (!event.aggregatedOutput.includes('ERR_MODULE_NOT_FOUND')) fail('UNSUPPORTED_FAILURE');
-    const matches = [...event.aggregatedOutput.matchAll(/^Error \[ERR_MODULE_NOT_FOUND\]: Cannot find module '([^'\r\n]+)' imported from ([^\r\n]+)$/gmu)];
-    if (matches.length !== 1) fail('INSUFFICIENT_FAILURE_DETAILS');
-    // Paths from this line are compared as data only, never opened.
-    const [, reportedTarget, reportedImporter] = matches[0];
-    if (!path.isAbsolute(reportedTarget) || !path.isAbsolute(reportedImporter)
-        || !samePath(reportedImporter, importer)) fail('FAILURE_IMPORTER_MISMATCH');
+    const { excluded: failureExcluded, reportedTarget } = inspectFailure(event, importer);
+    if (failureExcluded) return finish('excluded', failureExcluded);
     const root = await canonicalizeProjectPath(projectRoot);
     if (!inside(root, importer)) fail('PATH_OUTSIDE_PROJECT');
     if (!['.mjs', '.js'].includes(path.extname(importer))) fail('UNSUPPORTED_SOURCE_TYPE');
@@ -186,4 +193,112 @@ export async function diagnoseRelativeModuleReceipt(request, requestPath, reques
   const capture = {};
   const result = await diagnose(request, undefined, capture);
   return createDiagnosticReceipt(request, capture.evidence, result, requestPath, requestSha256);
+}
+
+// The CLI's explicitly named configuration is the only unavoidable read before
+// the context gate. Event/importer reads and all writes happen in prepare below.
+export async function readRelativeModulePreparationInput(filename) {
+  const absolute = normalizeRequestedProjectPath(filename);
+  const bytes = await readCheckedFile(await canonicalizeProjectPath(path.dirname(absolute)), absolute);
+  return JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(bytes));
+}
+
+/** Prepare local artifacts only; never execute the returned command or event.
+ * Explicit paths/context remain caller assertions. As with readCheckedFile, the
+ * repeated filesystem observations do not form an atomic hostile-FS sandbox.
+ * On any failure keep partial output for inspection; never overwrite or clean it.
+ */
+export async function prepareRelativeModule(input, { now = Date.now } = {}) {
+  const output = { schema: 'lattice.relative-module-preparation.v1', decision: 'abstain', reason: null,
+    advisoryOnly: true, adopted: false, retainedOutputDirectory: null, artifacts: null, command: null,
+    trust: { source: 'caller_supplied_snapshot', context: 'caller_asserted_current',
+      sourceBytesVerified: false, importerBytesVerified: false,
+      nativeProvenanceVerified: false, authorizationVerified: false } };
+  const finish = (decision, reason) => ({ ...output, decision, reason });
+  try {
+    // Capture caller data before the first await; never mutate it or extend expiry.
+    input = structuredClone(input);
+    if (!input || typeof input !== 'object' || Array.isArray(input) || !Number.isFinite(now())) fail('INVALID_REQUEST');
+    const gate = () => contextExclusion(input.context, now());
+    const excluded = gate();
+    if (excluded) return finish('excluded', excluded);
+    const mode = input.mode ?? 'diagnostic';
+    if (!['diagnostic', 'receipt'].includes(mode)) fail('INVALID_MODE');
+    if (mode === 'receipt') {
+      validateDiagnosticBinding(input.receiptBinding, input.context);
+      if (Date.parse(input.context.validUntil) > now() + 300000) fail('RECEIPT_EXPIRY_OUT_OF_RANGE');
+    } else if (input.receiptBinding !== undefined) fail('RECEIPT_MODE_REQUIRED');
+    const projectRoot = normalizeRequestedProjectPath(input.projectRoot);
+    const importer = normalizeRequestedProjectPath(input.importer);
+    const failureFile = normalizeRequestedProjectPath(input.failureFile);
+    const outputDirectory = normalizeRequestedProjectPath(input.outputDirectory);
+    if (!inside(projectRoot, importer)) fail('PATH_OUTSIDE_PROJECT');
+    if (!digest(input.failureSha256)) fail('SOURCE_DIGEST_REQUIRED');
+    const evidenceFile = path.join(outputDirectory, 'evidence.json'), requestPath = path.join(outputDirectory, 'request.json');
+    diagnosticCommand(requestPath); // Reject unsafe shell literals before any I/O.
+    const archiveRoot = await canonicalizeProjectPath(path.dirname(failureFile));
+    const sourceBytes = await readCheckedFile(archiveRoot, failureFile);
+    if (sha256(sourceBytes) !== input.failureSha256) fail('SOURCE_INTEGRITY_MISMATCH');
+    const original = JSON.parse(new TextDecoder('utf8', { fatal: true }).decode(sourceBytes));
+    const { excluded: failureExcluded } = inspectFailure(original, importer);
+    if (failureExcluded) return finish('excluded', failureExcluded);
+    // Preserve the original full shell wrapper, but do not copy unrelated fields.
+    failureEventDigest(original);
+    const event = Object.fromEntries(['id', 'type', 'status', 'command', 'aggregatedOutput', 'exitCode'].map(key => [key, original[key]]));
+    if (mode === 'receipt' && input.receiptBinding.failureItemId !== event.id) fail('BINDING_REJECTED');
+    const root = await canonicalizeProjectPath(projectRoot);
+    const importerBytes = await readCheckedFile(root, importer);
+    const evidenceBytes = Buffer.from(JSON.stringify({ schema: 'lattice.relative-module-evidence.v1',
+      subject: { projectId: input.context.projectId, taskId: input.context.taskId,
+        projectRoot, importer, importerSha256: sha256(importerBytes) }, event }));
+    const request = { projectRoot, importer, evidenceFile, evidenceSha256: sha256(evidenceBytes), context: input.context,
+      ...(mode === 'receipt' ? { receiptBinding: input.receiptBinding } : {}) };
+    const requestBytes = Buffer.from(JSON.stringify(request));
+    if (evidenceBytes.length > maximumBytes || requestBytes.length > maximumBytes) fail('SOURCE_TOO_LARGE');
+    // Reuse the actual diagnostic (parse only, no evaluation) before creating output.
+    // This private bytes path cannot be selected by the existing diagnostic API/CLI.
+    const diagnostic = await diagnose(request, { now: now() }, null, evidenceBytes);
+    if (diagnostic.decision !== 'selected') return finish(diagnostic.decision, diagnostic.reason);
+    if (inside(outputDirectory, diagnostic.location.target) || inside(diagnostic.location.target, outputDirectory)) fail('OUTPUT_TARGET_COLLISION');
+    const command = mode === 'receipt' ? diagnosticReceiptCommand(requestPath, sha256(requestBytes)) : diagnosticCommand(requestPath);
+    const parent = await canonicalizeProjectPath(path.dirname(outputDirectory));
+    const parentIdentity = await lstat(parent, { bigint: true });
+    if ((await inspectPath(parent, outputDirectory, true)).exists) fail('OUTPUT_EXISTS');
+    const checkSources = async () => {
+      if (gate()) fail('CONTEXT_EXPIRED_OR_CHANGED');
+      if (!samePath(await canonicalizeProjectPath(projectRoot), root)
+          || !samePath(await canonicalizeProjectPath(path.dirname(failureFile)), archiveRoot)
+          || sha256(await readCheckedFile(archiveRoot, failureFile)) !== input.failureSha256
+          || sha256(await readCheckedFile(root, importer)) !== sha256(importerBytes)) fail('SOURCE_CHANGED');
+      if ((await inspectPath(root, diagnostic.location.target, true)).exists) fail('TARGET_CHANGED');
+      if (gate()) fail('CONTEXT_EXPIRED_OR_CHANGED');
+    };
+    await checkSources();
+    await mkdir(outputDirectory); // No recursive parents, no reuse of an existing directory.
+    output.retainedOutputDirectory = outputDirectory;
+    const directoryIdentity = (await inspectPath(parent, outputDirectory)).details;
+    const checkOutput = async () => {
+      await canonicalizeProjectPath(parent);
+      if (!identity(parentIdentity, await lstat(parent, { bigint: true }))
+          || !identity(directoryIdentity, (await inspectPath(parent, outputDirectory)).details)) fail('OUTPUT_CHANGED');
+    };
+    for (const [filename, bytes] of [[evidenceFile, evidenceBytes], [requestPath, requestBytes]]) {
+      if (gate()) fail('CONTEXT_EXPIRED_OR_CHANGED');
+      await checkOutput();
+      await writeFile(filename, bytes, { flag: 'wx', mode: 0o600 });
+      await checkOutput();
+      if (sha256(await readCheckedFile(outputDirectory, filename)) !== sha256(bytes)) fail('OUTPUT_CHANGED');
+    }
+    await checkSources();
+    await checkOutput();
+    if (gate()) fail('CONTEXT_EXPIRED_OR_CHANGED');
+    output.trust.sourceBytesVerified = true;
+    output.trust.importerBytesVerified = true;
+    output.artifacts = { evidenceFile, evidenceSha256: sha256(evidenceBytes), requestPath, requestSha256: sha256(requestBytes) };
+    output.command = command;
+    return finish('prepared', null);
+  } catch (error) {
+    const code = error.diagnosticCode ?? error.code;
+    return finish('abstain', /^[A-Z][A-Z0-9_]{0,127}$/u.test(code ?? '') ? code : 'INVALID_PREPARATION_INPUT');
+  }
 }

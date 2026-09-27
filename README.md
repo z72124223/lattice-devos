@@ -260,3 +260,28 @@ Control 獨立驗證，對應旗標保持 false，內層 `advisoryOnly=true`、`
 - 聯絡信箱：[z72124223@gmail.com](mailto:z72124223@gmail.com)
 
 歡迎來信交流 LATTICE、詢問安裝與使用問題，或洽談合作及授權。
+
+## 本機診斷輸入準備（LH-LOCAL-PREP-01）
+
+```powershell
+node --experimental-vm-modules --disable-warning=ExperimentalWarning apps/lattice-control/src/relative-module-prepare-cli.mjs C:\work\prepare-input.json
+```
+
+輸入 JSON 明示 `projectRoot`、`importer`、`failureFile`、`failureSha256`、
+`outputDirectory` 與前述診斷使用的完整 `context`。路徑皆須絕對路徑；`failureFile`
+是單一原生 `commandExecution` item 的 JSON 匯出（不是通知封套或整段對話），SHA-256
+核對匯出檔原始 bytes，保留完整 shell wrapper。context 的 projectId/taskId、authority、
+projectScope、lifecycle、freshness、circuitOpen、validUntil 必須由呼叫者明示，不從日誌推定。
+
+預設 `mode:"diagnostic"`；需要收據才明示 `mode:"receipt"` 及完整 `receiptBinding`
+七欄（projectId、taskRef、claimId、threadId、turnId、inputId、failureItemId），其中
+projectId/taskRef 必須符合 context，failureItemId 必須符合事件。收據期限最多五分鐘，
+入口不補造身分或延長期限；其餘 claim/thread/turn/input 關係仍須由正式原生入口核對。
+
+只在 preflight 選中相對缺失提示後，於**明示、尚不存在、父目錄已存在**的 outputDirectory
+建立 evidence.json/request.json；可以是專案外的明示封存目錄，但不得穿越 symlink/junction，
+不得與缺失目標碰撞。拒絕既存目錄／覆寫，失敗保留部分產物，另選新目錄才能再準備。
+stdout 只回摘要、檔案雜湊與精確命令；準備成功 exit 0，其餘 exit 1，不傾印原始日誌。
+函式入口為 `prepareRelativeModule(input)`；不啟動子程序、網路、DB、模型、修復或重試，
+回傳命令須由 Codex 另行執行。來源仍是 caller-supplied／context caller-asserted，
+native provenance／authorization 未驗證、adopted=false；路徑與 bytes 重核不是原子檔案系統沙箱。
