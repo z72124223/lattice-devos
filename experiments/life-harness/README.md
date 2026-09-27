@@ -331,3 +331,32 @@ fixture，結果另存 `results/relative-module.json`。新候選獨立存於
 這是對固定 fixture 的候選覆蓋擴充；舊 A 對原 Git／Codex 程序庫的
 `none_applicable` 仍正確。這些是開發案例，不是保留集、泛化或生產效益證據。
 舊案例、程序、標註、封存、A/B 與 Laya 結果保持不變；沒有正式接入或採納。
+
+## Jev Choice 旁路：離線契約（LH-JEV-01）
+
+```powershell
+node experiments/life-harness/jev-run.mjs
+node experiments/life-harness/jev-run.mjs --simulate
+node --test experiments/life-harness/jev-choice.test.mjs
+```
+
+預設不呼叫任何 transport；`--simulate` 只注入固定回應，usage 標成
+`simulated:true`，不代表帳單、模型準確率或品質。三個新合成案例包含合格失敗、
+缺少輸出及拒絕，沒有個資、原始碼或私人日誌；全零 revision 是合成標記，非原生來源。
+重用既有 case schema、排除規則、Git／Codex 候選與適用證據判斷，不重跑或調整舊資料。
+所有輸出皆 `advisory_only:true`、`adopted:false`，不產生執行或授權。
+
+協定固定 [Jev `jev-1.13.0`](https://docs.typesafe.ai/models) 與
+[官方 Choice API](https://docs.typesafe.ai/api)：有限 criteria、完整機率分布、最高機率選項、
+獨立 confidence 及 usage。機率總和的本地容差是 `1e-6`；預設信心門檻 `0.8`，可用
+`--min-confidence 0.9` 調整，**未校準，也不是正確性保證**。缺欄、模型不符、候選外輸出、
+缺證據、低信心或任何傳輸／HTTP／格式錯誤均棄答，不返回原始 state、回應或錯誤內容。
+
+預留 `node experiments/life-harness/jev-run.mjs --live`，只會對內建第一個非敏感合成案例
+發出最多一次請求；需另具備允許使用的金鑰與額度。金鑰僅取環境變數 `TYPESAFE_API_KEY`，
+固定官方 HTTPS endpoint、拒絕 redirect、無重試。請求 8 KiB／回應 16 KiB 是**本地 byte
+限制**，預設完整請求／讀取 deadline 為 5 秒；不是 tokenizer 計數。官方全 context 64k、
+state＋最長問題 32k token 上限仍適用，這裡沒有精確 token 預檢。
+
+本交付只驗離線契約；live auth、live inference、Jev 品質均為 `NOT_RUN`。
+沒有建立金鑰、呼叫外部模型、修改正式接線或改寫 Laya 歷史結果。
