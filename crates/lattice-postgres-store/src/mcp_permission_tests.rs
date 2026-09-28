@@ -207,6 +207,134 @@ fn assert_denied(client: &mut Client, task: &str, denied: bool) {
 }
 
 #[test]
+#[ignore = "requires a marker-owned isolated PostgreSQL 17 fixture with the current control catalog"]
+fn typed_runtime_reads_preserve_results_and_fresh_rejection() {
+    let mut f = Fixture::connect();
+    let baseline = verify_runtime_store_schema(&mut f.runtime, &f.target).unwrap();
+    let before = data_digest(&mut f.migrator);
+    // Compare the old and new wire paths, including ordered multi-row catalogs and NULL.
+    for sql in [
+        RELATION_SIGNATURE_SQL,
+        COLUMN_SIGNATURE_SQL,
+        CONSTRAINT_SIGNATURE_SQL,
+        INDEX_SIGNATURE_SQL,
+        FUNCTION_SIGNATURE_SQL,
+        TYPE_CATALOG_SIGNATURE_SQL,
+        TABLE_ACL_SIGNATURE_SQL,
+        FUNCTION_ACL_SIGNATURE_SQL,
+        SCHEMA_ACL_SIGNATURE_SQL,
+        MANAGED_FOREMAN_FUNCTION_CATALOG_SQL,
+        MANAGED_FOREMAN_TABLE_CATALOG_SQL,
+        "SELECT v FROM (VALUES (1,NULL::text),(2,'catalog'::text)) t(i,v) ORDER BY i",
+    ] {
+        let old: Vec<Option<String>> = f
+            .runtime
+            .query(sql, &[])
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        let typed: Vec<Option<String>> = f
+            .runtime
+            .query_typed(sql, &[])
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert_eq!(old, typed);
+    }
+    for sql in ["SELECT 1 WHERE false", "SELECT generate_series(1,2)"] {
+        assert_eq!(
+            f.runtime.query_one(sql, &[]).unwrap_err().to_string(),
+            f.runtime.query_typed_one(sql, &[]).unwrap_err().to_string()
+        );
+    }
+    assert_eq!(
+        f.runtime
+            .query_one("SELECT 7::int4", &[])
+            .unwrap()
+            .get::<_, i32>(0),
+        f.runtime
+            .query_typed_one("SELECT 7::int4", &[])
+            .unwrap()
+            .get::<_, i32>(0)
+    );
+    assert_eq!(
+        f.runtime.query("SELECT 1/0", &[]).unwrap_err().code(),
+        f.runtime.query_typed("SELECT 1/0", &[]).unwrap_err().code()
+    );
+    println!("TYPED_READ_ORDER_NULL_CARDINALITY_SQLSTATE_EQUIVALENCE_PASS");
+
+    // Reuse the same runtime connection: every call must see newly committed drift.
+    let identity = baseline.database_uuid();
+    for (tamper, restore) in [
+        ("ALTER FUNCTION control_product.snapshot_v1(text,text[]) VOLATILE".to_owned(),
+         "ALTER FUNCTION control_product.snapshot_v1(text,text[]) STABLE".to_owned()),
+        ("GRANT SELECT ON control_product.conversation_observations TO lattice_runtime".to_owned(),
+         "REVOKE SELECT ON control_product.conversation_observations FROM lattice_runtime".to_owned()),
+        ("UPDATE control.database_identity SET database_uuid='11111111-1111-8111-8111-111111111111'::uuid".to_owned(),
+         format!("UPDATE control.database_identity SET database_uuid='{identity}'::uuid")),
+        ("UPDATE control.schema_compatibility SET current_schema_version=9,min_reader=9,max_reader=9,min_writer=9,max_writer=9".to_owned(),
+         "UPDATE control.schema_compatibility SET current_schema_version=8,min_reader=8,max_reader=8,min_writer=8,max_writer=8".to_owned()),
+    ] {
+        f.migrator.batch_execute(&tamper).unwrap();
+        let rejected = verify_runtime_store_schema(&mut f.runtime, &f.target);
+        f.migrator.batch_execute(&restore).unwrap();
+        assert!(rejected.is_err(), "fresh validation accepted committed drift");
+        assert_eq!(verify_runtime_store_schema(&mut f.runtime, &f.target).unwrap(), baseline);
+    }
+    assert_eq!(data_digest(&mut f.migrator), before);
+    println!("TYPED_READ_FRESH_FUNCTION_ACL_IDENTITY_FUTURE_REJECTION_RESTORED_PASS");
+
+    let id = format!("typed-read-{}", std::process::id());
+    let task = hex_digest(&Sha256::digest(id.as_bytes()));
+    claim(&mut f.migrator, &id, &task);
+    dispatch(&mut f.migrator, &id, "typed-turn", "typed-input");
+    assert_denied(&mut f.runtime, &task, false);
+    question(
+        &mut f.migrator,
+        &id,
+        "QUESTION_REQUESTED",
+        "typed-turn",
+        "typed-input",
+        "typed-question",
+        "",
+    );
+    assert_eq!(
+        verify_runtime_store_schema(&mut f.runtime, &f.target).unwrap(),
+        baseline
+    );
+    assert_eq!(
+        snapshot(&mut f.runtime, &task)["claims"][0]["pending_questions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    question(
+        &mut f.migrator,
+        &id,
+        "QUESTION_RESOLVED",
+        "typed-turn",
+        "typed-input",
+        "typed-question",
+        "decline",
+    );
+    assert_eq!(
+        verify_runtime_store_schema(&mut f.runtime, &f.target).unwrap(),
+        baseline
+    );
+    assert_denied(&mut f.runtime, &task, true);
+    assert!(
+        snapshot(&mut f.runtime, &task)["claims"][0]["pending_questions"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    println!("TYPED_READ_FRESH_PENDING_AND_DURABLE_DENIAL_PASS");
+}
+
+#[test]
 #[ignore = "requires a fresh marker-owned isolated PostgreSQL 17 fixture with the known old graph catalog"]
 fn durable_mcp_permission_upgrade_and_relational_projection() {
     let mut f = Fixture::connect();
