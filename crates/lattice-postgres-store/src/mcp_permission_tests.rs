@@ -227,6 +227,8 @@ fn typed_runtime_reads_preserve_results_and_fresh_rejection() {
         MANAGED_FOREMAN_TABLE_CATALOG_SQL,
         "SELECT v FROM (VALUES (1,NULL::text),(2,'catalog'::text)) t(i,v) ORDER BY i",
     ] {
+        let sql = sql.replace("foreman_execution", "control_product");
+        let sql = sql.as_str();
         let old: Vec<Option<String>> = f
             .runtime
             .query(sql, &[])
@@ -241,6 +243,10 @@ fn typed_runtime_reads_preserve_results_and_fresh_rejection() {
             .iter()
             .map(|row| row.get(0))
             .collect();
+        assert!(
+            !old.is_empty(),
+            "catalog equivalence requires populated rows"
+        );
         assert_eq!(old, typed);
     }
     for sql in ["SELECT 1 WHERE false", "SELECT generate_series(1,2)"] {
@@ -261,7 +267,11 @@ fn typed_runtime_reads_preserve_results_and_fresh_rejection() {
     );
     assert_eq!(
         f.runtime.query("SELECT 1/0", &[]).unwrap_err().code(),
-        f.runtime.query_typed("SELECT 1/0", &[]).unwrap_err().code()
+        Some(&SqlState::DIVISION_BY_ZERO)
+    );
+    assert_eq!(
+        f.runtime.query_typed("SELECT 1/0", &[]).unwrap_err().code(),
+        Some(&SqlState::DIVISION_BY_ZERO)
     );
     println!("TYPED_READ_ORDER_NULL_CARDINALITY_SQLSTATE_EQUIVALENCE_PASS");
 
