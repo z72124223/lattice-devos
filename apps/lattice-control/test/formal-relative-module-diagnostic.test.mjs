@@ -159,6 +159,48 @@ test('memory doubles bind two fresh Runtime/native snapshots without opening pat
   assert.deepEqual(sample.detail.product.observations, []);
 });
 
+test('omitted diagnostic ID selects only one exact verified receipt in the current bound turn', async context => {
+  const sample = fixture(context); delete sample.selectors.diagnosticItemId;
+  sample.turn.items.push({ id: 'ordinary-output', type: 'commandExecution', status: 'completed', exitCode: 0,
+    command: 'echo ordinary', aggregatedOutput: 'unrelated successful output' });
+  assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
+  assert.equal(sample.calls.details, 2); assert.equal(sample.calls.reads.length, 2);
+});
+
+test('omitted diagnostic ID rejects ambiguity, invalid receipts, prior turns and read drift without guessing', async context => {
+  const cases = [
+    ['two verified receipts', s => s.turn.items.push({ ...clone(s.diagnostic), id: 'other-receipt' }), 'AMBIGUOUS_RECEIPT'],
+    ['duplicate verified identity', s => s.turn.items.push(clone(s.diagnostic)), 'AMBIGUOUS_RECEIPT'],
+    ['same identity on unrelated item', s => s.turn.items.push({ id: s.diagnostic.id, type: 'agentMessage' }), 'ITEM_REJECTED'],
+    ['no successful receipt', s => { s.diagnostic.status = 'failed'; }, 'ITEM_REJECTED'],
+    ['modified producer command', s => { s.diagnostic.commandActions[0].command += '; echo injected'; }, 'ITEM_REJECTED'],
+    ['other binding', s => { s.receipt.binding.failureItemId = 'other-failure'; s.syncReceipt(); }, 'ITEM_REJECTED'],
+    ['expired', s => { s.receipt.validUntil = new Date(Date.now() - 1).toISOString(); s.syncReceipt(); }, 'ITEM_REJECTED'],
+    ['before selected failure', s => { s.turn.items = [s.marker, s.diagnostic, s.failure]; }, 'ITEM_REJECTED'],
+    ['historical receipt', s => { s.turn.items.pop(); s.thread.turns.unshift({ id: 'old-turn', status: 'completed', items: [s.diagnostic] }); }, 'ITEM_REJECTED'],
+    ['receipt changed between reads', s => { s.hooks.read = n => { if (n === 2) s.diagnostic.id = 'changed-id'; }; }, 'SOURCE_CHANGED'],
+    ['second matching receipt appears', s => { s.hooks.read = n => { if (n === 2) s.turn.items.push({ ...clone(s.diagnostic), id: 'new-id' }); }; }, 'AMBIGUOUS_RECEIPT'],
+    ['connection changed', s => { s.hooks.read = n => { if (n === 2) s.codex.connectionGeneration++; }; }, 'CURRENTNESS_REJECTED'],
+  ];
+  for (const [name, mutate, code] of cases) await context.test(name, async t => {
+    const sample = fixture(t); delete sample.selectors.diagnosticItemId; mutate(sample);
+    await withoutFileAccess(sample, () => assert.rejects(sample.call(), { code: `CONTROL_DIAGNOSTIC_${code}` }));
+  });
+});
+
+test('explicit diagnostic ID is never replaced by another valid receipt', async context => {
+  const sample = fixture(context);
+  sample.turn.items.push({ ...clone(sample.diagnostic), id: 'valid-other-receipt' });
+  sample.diagnostic.commandActions[0].command += '; echo injected';
+  await assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED' });
+  sample.selectors.diagnosticItemId = 'missing-id';
+  await assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_ITEM_REJECTED' });
+  for (const value of ['', null, undefined]) {
+    sample.selectors.diagnosticItemId = value;
+    await assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_SELECTOR_REJECTED' });
+  }
+});
+
 const rejectedFixtures = [
   ['non-PostgreSQL authority', s => { s.detail.source.authority = 'CALLER_ASSERTED'; }],
   ['stable but stale submission snapshot', s => { s.detail.task.ledger.project_snapshot_id = 'older-project-snapshot'; }],

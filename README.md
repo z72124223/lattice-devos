@@ -221,7 +221,7 @@ node --experimental-vm-modules apps/lattice-control/src/relative-module-diagnost
 
 Control 結果接入（LH-DELIVERY-03）：已有唯讀入口
 `GET /api/formal-work/<taskRef>/diagnostic`，查詢欄位為 `projectId`、`claimId`、`threadId`、
-`turnId`、`failureItemId`、`diagnosticItemId`。它只從 PostgreSQL 新快照及已擁有的 Codex
+`turnId`、`failureItemId`，以及可選的 `diagnosticItemId`。它只從 PostgreSQL 新快照及已擁有的 Codex
 原生回合讀回結果；不開啟專案／證據檔、不執行診斷或修復、不寫正式狀態。
 
 由 Codex 在當次原生工具授權內產生診斷：在前述 request 加入 `receiptBinding`，內容是
@@ -247,8 +247,10 @@ Control 獨立驗證，對應旗標保持 false，內層 `advisoryOnly=true`、`
 本機適配器／HTTP 契約測試使用隔離 doubles；另於 2026-09-27，以固定 `e2bb735`
 完成 LH-DELIVERY-03-LIVE 的真實正式 claim／同回合診斷綁定：HTTP 200、4369 ms，
 錯誤 selector 回 409。該 fixture 已中斷，保留 DRAFT／result_digest=null，不能視為正式結案。
-2026-09-28 的 LH-V1-E2E-01 仍未取得同一任務修復成功、獨立驗收與正式 COMPLETED 證據；
-本輪在額外 MCP 許可請求與不允修改已啟動驗收條件的拒絕後停止，保留中斷任務及失敗紀錄。
+LH-V1-E2E-01 已於 2026-10-03 完成同一受控任務的真實失敗、收據與 HTTP 綁定、
+單檔修復、相同命令成功及獨立驗收；Runtime 固定測試 6/6 通過，正式保存後由新程序
+讀回 `COMPLETED` 與非空 result digest。先前中止與失敗證據保留；此受控案例不等於
+一般交付已驗證。歷史執行曾釘選另一 helper root，日常交付須使用下述同根入口。
 
 </details>
 
@@ -294,7 +296,90 @@ native provenance／authorization 未驗證、adopted=false；路徑與 bytes �
 沒有自動觸發；修復需另外明示允許的檔案與成功條件，診斷元件不執行修復。
 正式工作仍須走既有 executor → independent verifier → Runtime 固定測試／結果匯入，
 重新讀回 COMPLETED、非空 result_digest 與 completion_verified=true 才算結案。
-本機能力、模型採用與對外發布分開：Jev 未實測採用，亦未 push／merge／部署／release。
+Jev 產品入口預設關閉；2026-10-03 曾完成一次受控真實接線，HTTP 200、4785.224 ms，
+沒有採納或修復。單次成功不證明穩定性、品質或校準，詳見 [Jev 入口與限制](apps/lattice-control/jev-advisory.md)。
+一般交付仍待當輪驗證，本機驗證與 push／merge／部署／release 分開。
+
+### 從目前正式回合取得診斷來源
+
+`GET /api/formal-work/<taskRef>/diagnosticsource` 接受 `projectId`、`claimId`、`threadId`、
+`turnId`，以及可選的 `failureItemId`。省略 failure ID 時只選目前回合的唯一失敗命令；
+多筆回 409 `CONTROL_DIAGNOSTIC_SOURCE_AMBIGUOUS_FAILURE`，附至多 16 個同回合 ID，
+須明示選定後重查，不搜尋歷史回合。其餘欄位／重複欄位拒絕。
+
+服務只對自己目前持有的活動回合讀取兩次 Runtime／原生 thread，核對同連線保存的
+`item/completed` 完整事件；待決許可、拒絕、熔斷、封存、完成、不明身分或讀取期間漂移
+均拒絕。回應只含該失敗 item 的 `failureJson`、其 UTF-8 SHA-256、工作目錄、binding 與
+context，不含整段對話。JSON 是原生 item 完整欄位的序列化，並非原始傳輸封包 bytes。
+失敗 JSON 必須小於 1 MiB，仍沿用 prepare 的命令／輸出大小限制。
+有效期固定為通知觀察時間加五分鐘，重查不延長；查詢五秒包含排隊與來源讀取。
+逾時會結束這次查詢並忽略晚到結果，但不取消底層 Runtime 請求或清空其共享佇列。
+
+`context.authority="authorized"` 只投影既有正式執行範圍，以相容 prepare 格式；
+`contextBasis="existing_owned_formal_execution"`、`grantsNewAuthority=false`、
+`repairAuthorized=false`、`advisoryOnly=true`、`adopted=false` 明確保留邊界。
+`nativeSourceVerified=true` 僅證明當次本機來源核對；既有 CLI 收據的 provenance／authorization
+旗標仍維持 false，來源入口不授權修復、不讀寫檔案、不執行命令、不啟新回合或呼叫模型。
+
+在已明示授權的正式工作中，Codex 可按下列順序操作；`$projectId`／`$taskRef` 必須取自
+既有正式工作，`$importer` 是已明示選定的實際 importer 絕對路徑，不能編造身分或 context。
+`$deliveryRoot` 必須是持有此回合的 Control server 所使用的同一份交付根；prepare CLI、
+diagnostic CLI 與 server verifier 不可混用不同 checkout，也不注入歷史 helper 特例。
+
+```powershell
+$base = 'http://127.0.0.1:4317'
+$detail = Invoke-RestMethod "$base/api/formal-work/$taskRef`?projectId=$projectId"
+$claims = @($detail.claims | Where-Object { $_.phase -eq 'EXECUTION' -and $_.turn_status -eq 'TURN_BOUND' })
+if ($claims.Count -ne 1) { throw '目前沒有唯一的活動執行回合' }
+$claim = $claims[0]
+$query = "projectId=$projectId&claimId=$($claim.claim_id)&threadId=$($claim.thread_id)&turnId=$($claim.turn_id)"
+$source = Invoke-RestMethod "$base/api/formal-work/$taskRef/diagnosticsource?$query"
+# 在此工作已允許寫入的範圍明示建立新封存目錄；已存在即停止，不覆寫。
+$archive = Join-Path $source.projectRoot 'diagnostic-source-01'
+New-Item -ItemType Directory -Path $archive -ErrorAction Stop | Out-Null
+[IO.File]::WriteAllText((Join-Path $archive 'source.json'), ($source | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
+$failureFile = Join-Path $archive 'failure.json'
+[IO.File]::WriteAllText($failureFile, $source.failureJson, [Text.UTF8Encoding]::new($false))
+$inputFile = Join-Path $archive 'prepare-input.json'
+$prepareInput = @{ projectRoot=$source.projectRoot; importer=$importer; failureFile=$failureFile;
+  failureSha256=$source.failureSha256; outputDirectory=(Join-Path $archive 'receipt');
+  mode='receipt'; receiptBinding=$source.binding; context=$source.context }
+[IO.File]::WriteAllText($inputFile, ($prepareInput | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($false))
+node --experimental-vm-modules --disable-warning=ExperimentalWarning "$deliveryRoot/apps/lattice-control/src/relative-module-prepare-cli.mjs" $inputFile
+```
+
+prepare 回覆 `prepared` 後，把回傳的完整 `command` 原文交給同一正式活動回合的獨立
+原生 shell 工具呼叫；不使用 `Invoke-Expression`、額外命令或重新拼接。再使用 source 的
+binding 查原 `/diagnostic` 入口。獨立 shell 呼叫不保留前次變數，以下 `$archive` 必須設為
+前一步實際建立的絕對路徑，再讀回已封存的來源：
+
+```powershell
+$base = 'http://127.0.0.1:4317'
+$source = Get-Content -Raw -LiteralPath (Join-Path $archive 'source.json') | ConvertFrom-Json
+$binding = $source.binding
+$taskRef = $binding.taskRef
+$receiptQuery = "projectId=$($binding.projectId)&claimId=$($binding.claimId)&threadId=$($binding.threadId)&turnId=$($binding.turnId)&failureItemId=$($binding.failureItemId)"
+Invoke-RestMethod "$base/api/formal-work/$taskRef/diagnostic?$receiptQuery"
+```
+
+可省略 `diagnosticItemId`：只在同一目前回合、該失敗之後的 completed command 中，
+用原有精確命令／binding／效期／結果格式驗證選取唯一收據，並核對兩次原生讀取一致。
+無合格項目拒絕；多筆合格收據回 409 `CONTROL_DIAGNOSTIC_AMBIGUOUS_RECEIPT`，
+不猜最新、不搜尋歷史回合。若已知此次命令的原生 ID，仍可明示 `diagnosticItemId`；
+明示 ID 不符時不會改選其他項目。
+精確命令比較與原有信任旗標不變；過期、歧義或來源變動停止，不自動重試或修復。
+
+### 明示不恢復既有工作
+
+```powershell
+node apps/lattice-control/src/server.mjs --no-auto-restore
+```
+
+此啟動方式不呼叫全專案 `restore`，只處理之後明示的正式工作操作；不更改排程或全域設定。
+`GET /api/state` 的 `formal_startup` 回報 `{mode:"explicit-only",restoreRequested:false}`，
+正式工作入口仍可用。省略旗標維持既有自動 restore 預設，回報 `restore-existing`／true；
+這是啟動政策，不表示任何工作已成功恢復。直接組裝 server 則回報 `manual-composition`。
+此選項已做本機聚焦測試，尚未因本次原始碼提交而部署到已安裝服務。
 
 正式 Control 的 MCP 許可適配僅支援已觀察的 `lattice_task_status` 空表單，且 task_ref
 必須是目前工作。依本機 Codex `0.155.0-alpha.16.4` 匯出的 App Server schema，使用
@@ -308,5 +393,5 @@ native provenance／authorization 未驗證、adopted=false；路徑與 bytes �
 每次送出接受前重新查核，包括已保存但未收到確認的回答；版本缺失或未知一律拒絕。
 明示 bootstrap 會驗證完整已知目錄後交易式升級讀取函式，保留原始 v1 SQL 與資料；
 未知目錄拒絕升級。隔離 PostgreSQL 已驗升級、回滾、資料／權限保留與第二次執行不變。
-這些證據限於本機測試與隔離資料庫，尚未升級正式 Runtime、續接 LH-V1-E2E-01 或發布；
-舊控制器仍需改成有界等待明示回答。未回答不代表接受，外部 message／metadata 也不能授權。
+上述單元與隔離資料庫證據，與已完成的受控 E2E 分開解讀；一般交付仍需當輪同根接線與
+實際 Runtime 讀回驗證。未回答不代表接受，外部 message／metadata 也不能授權。

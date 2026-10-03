@@ -167,7 +167,9 @@ export function createLatticeServer({
   conversationStartTimeoutMs,
   formalWorkStore = null,
   formalTaskService = null,
+  formalStartupMode = 'manual-composition',
 }) {
+  if (!['manual-composition', 'restore-existing', 'explicit-only'].includes(formalStartupMode)) throw new TypeError('Invalid formal startup mode');
   const store = new LatticeStore(databasePath);
   const formalTasks = formalTaskService ?? (formalWorkStore ? new FormalTaskService({ store: formalWorkStore }) : null);
   const service = new LatticeControlService({
@@ -262,7 +264,8 @@ export function createLatticeServer({
         return;
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
-        sendJson(response, 200, { ...service.state(), formal_work_enabled: Boolean(formalTasks) });
+        sendJson(response, 200, { ...service.state(), formal_work_enabled: Boolean(formalTasks),
+          formal_startup: { mode: formalStartupMode, restoreRequested: formalStartupMode === 'restore-existing' } });
         return;
       }
       if (formalTasks && request.method === "POST" && url.pathname === "/api/formal-work") {
@@ -276,9 +279,21 @@ export function createLatticeServer({
       }
       if (formalTasks && formalRoute) {
         const taskRef = formalRoute[1];
-        if (request.method === "GET" && formalRoute[2] === "diagnostic") {
-          const selectors = Object.fromEntries(['claimId', 'threadId', 'turnId', 'failureItemId', 'diagnosticItemId']
+        if (request.method === 'GET' && formalRoute[2] === 'diagnosticsource') {
+          const selectors = Object.fromEntries(['claimId', 'threadId', 'turnId']
             .map(key => [key, url.searchParams.get(key)]));
+          if (url.searchParams.has('failureItemId')) selectors.failureItemId = url.searchParams.get('failureItemId');
+          if ([...url.searchParams.keys()].some(key => !['projectId', ...Object.keys(selectors)].includes(key))
+              || [...url.searchParams.keys()].some(key => url.searchParams.getAll(key).length !== 1)) {
+            throw new HttpRequestError(400, 'CONTROL_DIAGNOSTIC_SOURCE_SELECTOR_REJECTED', '診斷來源識別欄位重複或不支援。');
+          }
+          sendJson(response, 200, await formalTasks.diagnosticSource(url.searchParams.get('projectId'), taskRef, selectors));
+          return;
+        }
+        if (request.method === "GET" && formalRoute[2] === "diagnostic") {
+          const selectors = Object.fromEntries(['claimId', 'threadId', 'turnId', 'failureItemId']
+            .map(key => [key, url.searchParams.get(key)]));
+          if (url.searchParams.has('diagnosticItemId')) selectors.diagnosticItemId = url.searchParams.get('diagnosticItemId');
           if ([...url.searchParams.keys()].some(key => !['projectId', ...Object.keys(selectors)].includes(key))
               || [...url.searchParams.keys()].some(key => url.searchParams.getAll(key).length !== 1)) {
             throw new HttpRequestError(400, 'CONTROL_DIAGNOSTIC_SELECTOR_REJECTED', '診斷識別欄位重複或不支援。');
@@ -514,6 +529,8 @@ export function createLatticeServer({
       sendJson(response, Number.isInteger(error?.status) ? error.status : 400, {
         error: publicErrorMessage(error?.message),
         code: publicErrorCode(error),
+        ...(error?.code === 'CONTROL_DIAGNOSTIC_SOURCE_AMBIGUOUS_FAILURE'
+          ? { failureItemIds: error.failureItemIds } : {}),
       });
     } finally {
       if (trackedRequest) inFlightRequests.delete(trackedRequest);
@@ -674,15 +691,25 @@ export function attachDesktopShutdownChannel(application, {
   return { close: failClosed };
 }
 
-export async function startDefaultServer() {
+export function parseServerOptions(args) {
+  if (args.length === 0) return { autoRestore: true };
+  if (args.length === 1 && args[0] === '--no-auto-restore') return { autoRestore: false };
+  throw new TypeError('Supported server option: --no-auto-restore');
+}
+
+export async function startDefaultServer({ autoRestore = true } = {}) {
+  if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
   const databasePath = defaultControlDatabasePath();
-  const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore() });
+  const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore(),
+    formalStartupMode: autoRestore ? 'restore-existing' : 'explicit-only' });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);
   });
-  application.formalRestore = application.formalTasks.restore(application.service.state().projects.map((project) => project.id));
+  application.formalRestore = autoRestore
+    ? application.formalTasks.restore(application.service.state().projects.map((project) => project.id))
+    : Promise.resolve();
   process.stdout.write(`LATTICE background API: http://127.0.0.1:${port} (use Codex App)\n`);
   if (process.env.LATTICE_CONTROL_DESKTOP_OWNED === "1") {
     attachDesktopShutdownChannel(application, { databasePath });
@@ -691,5 +718,5 @@ export async function startDefaultServer() {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
-  await startDefaultServer();
+  await startDefaultServer(parseServerOptions(process.argv.slice(2)));
 }

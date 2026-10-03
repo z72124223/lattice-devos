@@ -11,6 +11,7 @@ import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied,
 import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticReceipt } from './relative-module-receipt.mjs';
 import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
 import { adviseOwnedTaskWithJev } from './jev-task-advisory.mjs';
+import { readOwnedDiagnosticSource } from './relative-module-source.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -627,11 +628,15 @@ export class FormalTaskService {
     // Explicit in-process entry only. No event, HTTP/MCP route or lifecycle calls it.
     return this.serial(taskRef, () => adviseOwnedTaskWithJev(this, projectId, taskRef, request, this.#jevAdvisory));
   }
+  diagnosticSource(projectId, taskRef, selectors) {
+    return readOwnedDiagnosticSource(this, projectId, taskRef, selectors);
+  }
   relativeModuleDiagnostic(projectId, taskRef, selectors) {
     // This route reads only Runtime facts and the already owned native thread.
     // It never calls the filesystem diagnostic, starts a turn or saves progress.
     return this.serial(taskRef, async () => {
-      const names = ['claimId', 'threadId', 'turnId', 'failureItemId', 'diagnosticItemId'];
+      const names = ['claimId', 'threadId', 'turnId', 'failureItemId'];
+      if (selectors && Object.hasOwn(selectors, 'diagnosticItemId')) names.push('diagnosticItemId');
       if (typeof projectId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(projectId)
           || !/^[a-f0-9]{64}$/u.test(taskRef ?? '') || !selectors
           || Object.keys(selectors).sort().join(',') !== names.sort().join(',')
@@ -679,9 +684,23 @@ export class FormalTaskService {
             || turn.items.filter(item => hasMarker({ items: [item] }, marker(claim, claim.input_id))).length !== 1
             || turn.items.some(isExecutionDenied) || (this.deniedTurns.get(`${threadId}:${turnId}`)?.size ?? 0) > 0) rejectDiagnostic('TURN_REJECTED');
         const failures = turn.items.filter(item => item.id === failureItemId);
-        const results = turn.items.filter(item => item.id === diagnosticItemId);
-        if (failures.length !== 1 || results.length !== 1 || turn.items.indexOf(failures[0]) >= turn.items.indexOf(results[0])) rejectDiagnostic('ITEM_REJECTED');
+        if (failures.length !== 1) rejectDiagnostic('ITEM_REJECTED');
         const binding = { projectId, taskRef, claimId, threadId, turnId, inputId: claim.input_id, failureItemId };
+        let results;
+        if (diagnosticItemId) results = turn.items.filter(item => item.id === diagnosticItemId);
+        else {
+          // Selection does not relax receipt verification or search other turns.
+          // Invalid/unrelated completed commands do not count as receipts.
+          results = turn.items.slice(turn.items.indexOf(failures[0]) + 1).filter(item => {
+            if (item.type !== 'commandExecution' || item.status !== 'completed' || item.exitCode !== 0
+                || typeof item.id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(item.id)) return false;
+            try { this.#verifyDiagnosticReceipt(item, failures[0], binding, claim.worktree_path); return true; }
+            catch (error) { if (error?.status === 409 && /^CONTROL_DIAGNOSTIC_/u.test(error.code ?? '')) return false; throw error; }
+          });
+          if (results.length > 1) rejectDiagnostic('AMBIGUOUS_RECEIPT');
+        }
+        if (results.length !== 1 || turn.items.indexOf(failures[0]) >= turn.items.indexOf(results[0])
+            || turn.items.filter(item => item.id === results[0].id).length !== 1) rejectDiagnostic('ITEM_REJECTED');
         const receipt = this.#verifyDiagnosticReceipt(results[0], failures[0], binding, claim.worktree_path);
         return { receipt, binding, bytes: JSON.stringify([failures[0], results[0]]) };
       };
@@ -698,6 +717,7 @@ export class FormalTaskService {
       const latestThread = await this.codex.readThread(threadId, options); current();
       const after = native(latestThread, latestClaim);
       if (before.bytes !== after.bytes) rejectDiagnostic('SOURCE_CHANGED');
+      current();
       return { schema: 'lattice.control.relative-module-diagnostic.v1', binding: after.binding, receipt: after.receipt,
         nativeClaimBindingVerified: true, producerVerified: false, inputFileBytesVerified: false,
         diagnosticSemanticsVerified: false };
