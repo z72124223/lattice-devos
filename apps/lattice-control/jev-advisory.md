@@ -21,7 +21,8 @@ project snapshot，以及同一 Codex App Server 的 thread 與 item/completed �
 慢速來源讀取逾時會釋放工作佇列並忽略晚到結果；
 最後傳送前與回應後也核對原生連線、回合、拒絕與許可序號。
 底層 Runtime 唯讀請求不會被取消，共享客戶端佇列仍受既有請求逾時限制。
-五秒總窗包含來源核對與模型等待，其真實環境可用性尚未實測。
+五秒總窗包含來源核對與模型等待；一例受控真實呼叫耗時 4785.224 毫秒，
+餘裕約 215 毫秒，尚未證明穩定性。
 
 第一版只接受可辨識的原生 Windows PowerShell 命令封裝，以及既有 Git／Codex
 執行檔解析失敗特徵；其他平台拒絕，Node 相對模組缺失為 `none_applicable`。
@@ -40,8 +41,15 @@ HTTP body 的 `state` 僅有固定版本 `schema`、`platform`、`category`、`f
 函式沒有 steer、interrupt、repair、adopt 或耐久寫入效果。
 
 測試可在可信建構參數提供 `transport`；回傳會標明 `mode=simulated` 和模擬 usage。
-本輪驗證只用了記憶體 Runtime／native 替身與模擬 HTTP，證明本機接線與拒絕行為；
-尚未以活動正式工作執行此產品入口的真實 Jev 請求，不能稱為產品 live 或品質提升。
+聚焦單元測試使用記憶體 Runtime／native 替身與模擬 HTTP，驗證本機接線與拒絕行為。
+2026-10-03 另以產品版本 `46daf294` 完成一例受控真實接線：既有 Git resolver
+以空 `pathValue` 選項產生原始解析失敗，再由持有同一正式活動回合的服務明示呼叫入口。
+唯一一次 Jev HTTP 回覆為 200，總耗時 4785.224 毫秒，選出 `git-resolution`；
+`native_source_verified=true`，usage 由伺服器回報且非模擬，建議與信任旗標維持上述限制。
+保存證據後依設計中止專用回合；新程序讀回的回合狀態為 `INTERRUPTED`，正式工作仍為
+`SUBMITTED`／`DRAFT`、result digest 為空，未建立驗收回合或執行修復。
+這一例只證明真實來源、有限分類投影與 Jev 產品入口的單次接線，
+不代表自然故障品質、信心校準、一般成功率、穩定性、建議採納或正式工作完成。
 既有實驗入口與精確合成資料 allowlist 維持原有行為。
 
 聚焦測試：
