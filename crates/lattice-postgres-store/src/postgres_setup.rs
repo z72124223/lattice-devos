@@ -2527,38 +2527,102 @@ fn verify_owned_catalog_signature_profile<C: GenericClient>(
     client: &mut C,
     expected: &[&str; 9],
 ) -> Result<(), PostgresStoreSetupError> {
-    for (query, expected_signature) in [
-        RELATION_SIGNATURE_SQL,
-        COLUMN_SIGNATURE_SQL,
-        CONSTRAINT_SIGNATURE_SQL,
-        INDEX_SIGNATURE_SQL,
-        FUNCTION_SIGNATURE_SQL,
-        TYPE_CATALOG_SIGNATURE_SQL,
-    ]
-    .into_iter()
-    .zip(&expected[..6])
-    {
-        if catalog_signature(client, query, PostgresStoreSetupErrorKind::CorruptCatalog)?
-            != *expected_signature
-        {
-            return Err(catalog_error());
+    verify_catalog_signature_batch(
+        client,
+        &[
+            RELATION_SIGNATURE_SQL,
+            COLUMN_SIGNATURE_SQL,
+            CONSTRAINT_SIGNATURE_SQL,
+            INDEX_SIGNATURE_SQL,
+            FUNCTION_SIGNATURE_SQL,
+            TYPE_CATALOG_SIGNATURE_SQL,
+        ],
+        &expected[..6],
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    )?;
+    verify_catalog_signature_batch(
+        client,
+        &[
+            TABLE_ACL_SIGNATURE_SQL,
+            FUNCTION_ACL_SIGNATURE_SQL,
+            SCHEMA_ACL_SIGNATURE_SQL,
+        ],
+        &expected[6..],
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    )
+}
+
+// Each ARRAY subquery retains the exact SELECT and its ORDER BY, including empty
+// results and NULL elements. Only fixed private catalog queries enter this path.
+fn catalog_signature_batch_sql(queries: &[&str]) -> String {
+    format!(
+        "SELECT {}",
+        queries
+            .iter()
+            .map(|sql| format!("ARRAY({sql})"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn catalog_batch_may_replay(error: &postgres::Error) -> bool {
+    error.as_db_error().is_some_and(|database_error| {
+        let code = database_error.code().code();
+        database_error.parsed_severity() == Some(postgres::error::Severity::Error)
+            && !code.starts_with("08")
+            && !code.starts_with("25")
+            && !code.starts_with("40")
+            && !code.starts_with("57")
+            && !matches!(code, "55P03" | "72000")
+    })
+}
+
+fn verify_catalog_signature_batch<C: GenericClient>(
+    client: &mut C,
+    queries: &[&str],
+    expected: &[&str],
+    error_kind: PostgresStoreSetupErrorKind,
+) -> Result<(), PostgresStoreSetupError> {
+    if queries.is_empty() || queries.len() != expected.len() {
+        return Err(PostgresStoreSetupError::new(error_kind));
+    }
+    // Require the caller's existing transaction; never create a new BEGIN or
+    // refresh a snapshot/deadline. The private savepoint is released before reuse.
+    client
+        .batch_execute("SAVEPOINT lattice_catalog_signature_batch")
+        .map_err(|error| map_postgres_error(&error, error_kind))?;
+    match client.query_typed_one(&catalog_signature_batch_sql(queries), &[]) {
+        Ok(row) => {
+            // Decode and compare in the original guard order, not SQL evaluation order.
+            for (index, expected_signature) in expected.iter().enumerate() {
+                let values = row_value::<Vec<String>>(&row, index, error_kind)?;
+                if catalog_signature_values(values.into_iter().map(Ok), error_kind)?
+                    != *expected_signature
+                {
+                    return Err(PostgresStoreSetupError::new(error_kind));
+                }
+            }
+            client
+                .batch_execute("RELEASE SAVEPOINT lattice_catalog_signature_batch")
+                .map_err(|error| map_postgres_error(&error, error_kind))
+        }
+        Err(error) => {
+            if !catalog_batch_may_replay(&error) {
+                return Err(map_postgres_error(&error, error_kind));
+            }
+            // A later SQL error must not hide an earlier mismatch. Recover only
+            // this savepoint, then evaluate the original sequence exactly once.
+            client
+                .batch_execute("ROLLBACK TO SAVEPOINT lattice_catalog_signature_batch; RELEASE SAVEPOINT lattice_catalog_signature_batch")
+                .map_err(|error| map_postgres_error(&error, error_kind))?;
+            for (query, expected_signature) in queries.iter().zip(expected) {
+                if catalog_signature(client, query, error_kind)? != *expected_signature {
+                    return Err(PostgresStoreSetupError::new(error_kind));
+                }
+            }
+            Ok(())
         }
     }
-    for (query, expected_signature) in [
-        TABLE_ACL_SIGNATURE_SQL,
-        FUNCTION_ACL_SIGNATURE_SQL,
-        SCHEMA_ACL_SIGNATURE_SQL,
-    ]
-    .into_iter()
-    .zip(&expected[6..])
-    {
-        if catalog_signature(client, query, PostgresStoreSetupErrorKind::PermissionDenied)?
-            != *expected_signature
-        {
-            return Err(permission_error());
-        }
-    }
-    Ok(())
 }
 
 fn verify_schema_v6_v7_forbidden_object_profile<C: GenericClient>(
@@ -9797,15 +9861,26 @@ fn catalog_signature<C: GenericClient>(
     let rows = client
         .query_typed(query, &[])
         .map_err(|error| map_postgres_error(&error, error_kind))?;
+    catalog_signature_values(
+        rows.iter()
+            .map(|row| row_value::<String>(row, 0, error_kind)),
+        error_kind,
+    )
+}
+
+fn catalog_signature_values(
+    values: impl ExactSizeIterator<Item = Result<String, PostgresStoreSetupError>>,
+    error_kind: PostgresStoreSetupErrorKind,
+) -> Result<String, PostgresStoreSetupError> {
     let mut hasher = Sha256::new();
     hasher.update(CATALOG_SIGNATURE_DOMAIN);
     hasher.update(
-        u64::try_from(rows.len())
+        u64::try_from(values.len())
             .map_err(|_| PostgresStoreSetupError::new(error_kind))?
             .to_be_bytes(),
     );
-    for row in &rows {
-        let value = row_value::<String>(row, 0, error_kind)?;
+    for value in values {
+        let value = value?;
         hasher.update(
             u64::try_from(value.len())
                 .map_err(|_| PostgresStoreSetupError::new(error_kind))?

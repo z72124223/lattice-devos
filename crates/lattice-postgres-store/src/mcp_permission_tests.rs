@@ -562,3 +562,250 @@ fn durable_mcp_permission_upgrade_and_relational_projection() {
         data_digest(&mut f.migrator)
     );
 }
+
+#[test]
+#[ignore = "requires the marker-owned isolated PostgreSQL 17 fixture with populated control catalogs"]
+fn catalog_batch_preserves_digest_order_and_first_error() {
+    let mut f = Fixture::connect();
+    let kind = PostgresStoreSetupErrorKind::CorruptCatalog;
+    let function_sql =
+        MANAGED_FOREMAN_FUNCTION_CATALOG_SQL.replace("foreman_execution", "control_product");
+    let table_sql =
+        MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product");
+    let queries = [
+        RELATION_SIGNATURE_SQL,
+        COLUMN_SIGNATURE_SQL,
+        CONSTRAINT_SIGNATURE_SQL,
+        INDEX_SIGNATURE_SQL,
+        FUNCTION_SIGNATURE_SQL,
+        TYPE_CATALOG_SIGNATURE_SQL,
+        TABLE_ACL_SIGNATURE_SQL,
+        FUNCTION_ACL_SIGNATURE_SQL,
+        SCHEMA_ACL_SIGNATURE_SQL,
+        function_sql.as_str(),
+        table_sql.as_str(),
+    ];
+    // Independent copy of the pre-batch byte contract, including row count.
+    let legacy = |values: &[String]| {
+        let mut hash = Sha256::new();
+        hash.update(CATALOG_SIGNATURE_DOMAIN);
+        hash.update((values.len() as u64).to_be_bytes());
+        for value in values {
+            hash.update((value.len() as u64).to_be_bytes());
+            hash.update(value.as_bytes());
+        }
+        hex_digest(&hash.finalize())
+    };
+    let mut tx = f
+        .runtime
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .unwrap();
+    harden_transaction(&mut tx).unwrap();
+    let batched = tx
+        .query_typed_one(&catalog_signature_batch_sql(&queries), &[])
+        .unwrap();
+    let mut expected = Vec::new();
+    for (index, query) in queries.iter().enumerate() {
+        let old: Vec<String> = tx
+            .query(*query, &[])
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0))
+            .collect();
+        assert!(!old.is_empty());
+        assert_eq!(old, batched.get::<_, Vec<String>>(index));
+        let digest = legacy(&old);
+        assert_eq!(catalog_signature(&mut tx, query, kind).unwrap(), digest);
+        expected.push(digest);
+    }
+    verify_catalog_signature_batch(
+        &mut tx,
+        &queries,
+        &expected.iter().map(String::as_str).collect::<Vec<_>>(),
+        kind,
+    )
+    .unwrap();
+    tx.rollback().unwrap();
+    println!("CATALOG_BATCH_POPULATED_ORDER_AND_LEGACY_DIGEST_EQUIVALENCE_PASS");
+
+    for sql in [
+        "SELECT ''::text WHERE false",
+        "SELECT ''::text",
+        "SELECT v FROM (VALUES(2,'繁體中文'::text),(1,''::text)) t(i,v) ORDER BY i",
+        "SELECT NULL::text",
+    ] {
+        let mut tx = f
+            .runtime
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .unwrap();
+        let old = catalog_signature(&mut tx, sql, kind);
+        let expected = old.as_ref().map_or("irrelevant-null", String::as_str);
+        let batch = verify_catalog_signature_batch(&mut tx, &[sql], &[expected], kind);
+        assert_eq!(old.is_ok(), batch.is_ok());
+        if let Err(error) = old {
+            assert_eq!(error.kind(), batch.unwrap_err().kind());
+        }
+        tx.rollback().unwrap();
+    }
+    println!("CATALOG_BATCH_NULL_EMPTY_ZERO_ONE_MULTI_EQUIVALENCE_PASS");
+
+    // The later denied table read errors in the batch; the old first guard must win.
+    let denied = "SELECT claim_id::text FROM control_product.conversation_observations";
+    let actual = legacy(&["actual".to_owned()]);
+    for (first, expected, expected_kind) in [
+        (
+            "SELECT 'actual'::text",
+            "wrong",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "SELECT (1/0)::text",
+            "unused",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "SELECT NULL::text",
+            "unused",
+            PostgresStoreSetupErrorKind::CorruptCatalog,
+        ),
+        (
+            "SELECT 'actual'::text",
+            actual.as_str(),
+            PostgresStoreSetupErrorKind::PermissionDenied,
+        ),
+    ] {
+        let mut tx = f
+            .runtime
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .unwrap();
+        let batch_error = tx
+            .query_typed_one(&catalog_signature_batch_sql(&[first, denied]), &[])
+            .unwrap_err();
+        assert_eq!(
+            batch_error.code(),
+            Some(if first == "SELECT (1/0)::text" {
+                &SqlState::DIVISION_BY_ZERO
+            } else {
+                &SqlState::INSUFFICIENT_PRIVILEGE
+            })
+        );
+        assert!(catalog_batch_may_replay(&batch_error));
+        tx.rollback().unwrap();
+        let mut tx = f
+            .runtime
+            .build_transaction()
+            .isolation_level(IsolationLevel::RepeatableRead)
+            .read_only(true)
+            .start()
+            .unwrap();
+        let observed =
+            verify_catalog_signature_batch(&mut tx, &[first, denied], &[expected, "unused"], kind)
+                .unwrap_err();
+        assert_eq!(observed.kind(), expected_kind);
+        if first != "SELECT (1/0)::text" && expected_kind == kind {
+            let state = tx.query_one("SELECT current_user::text,current_setting('transaction_isolation'),current_setting('transaction_read_only')", &[]).unwrap();
+            assert_eq!(state.get::<_, String>(0), "lattice_runtime");
+            assert_eq!(state.get::<_, String>(1), "repeatable read");
+            assert_eq!(state.get::<_, String>(2), "on");
+        }
+        tx.rollback().unwrap();
+    }
+    println!("CATALOG_BATCH_FIRST_MISMATCH_AND_SQL_ERROR_PRIORITY_PASS");
+
+    let mut tx = f
+        .runtime
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .unwrap();
+    tx.batch_execute("SET LOCAL statement_timeout='30ms'")
+        .unwrap();
+    let slow = "SELECT 'slow'::text FROM pg_sleep(0.2)";
+    assert!(
+        verify_catalog_signature_batch(
+            &mut tx,
+            &["SELECT 'first'::text", slow],
+            &["wrong", "unused"],
+            kind
+        )
+        .is_err()
+    );
+    // A terminal timeout must leave the transaction failed, never recover/replay.
+    assert_eq!(
+        tx.query_one("SELECT 1", &[]).unwrap_err().code(),
+        Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    tx.rollback().unwrap();
+    let mut tx = f
+        .runtime
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .unwrap();
+    tx.batch_execute("SET LOCAL statement_timeout='30ms'")
+        .unwrap();
+    let timeout = tx.query_typed_one(slow, &[]).unwrap_err();
+    assert_eq!(timeout.code(), Some(&SqlState::QUERY_CANCELED));
+    assert!(!catalog_batch_may_replay(&timeout));
+    tx.rollback().unwrap();
+    println!("CATALOG_BATCH_TIMEOUT_TERMINATES_WITHOUT_REPLAY_PASS");
+
+    let mut lock = f.migrator.transaction().unwrap();
+    lock.batch_execute("LOCK TABLE control.database_identity IN ACCESS EXCLUSIVE MODE")
+        .unwrap();
+    let mut tx = f
+        .runtime
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .unwrap();
+    tx.batch_execute("SET LOCAL lock_timeout='30ms'").unwrap();
+    assert!(
+        verify_catalog_signature_batch(
+            &mut tx,
+            &[
+                "SELECT 'first'::text",
+                "SELECT database_uuid::text FROM control.database_identity"
+            ],
+            &["wrong", "unused"],
+            kind
+        )
+        .is_err()
+    );
+    assert_eq!(
+        tx.query_one("SELECT 1", &[]).unwrap_err().code(),
+        Some(&SqlState::IN_FAILED_SQL_TRANSACTION)
+    );
+    tx.rollback().unwrap();
+    let mut tx = f
+        .runtime
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .unwrap();
+    tx.batch_execute("SET LOCAL lock_timeout='30ms'").unwrap();
+    let timeout = tx
+        .query_typed_one(
+            "SELECT database_uuid::text FROM control.database_identity",
+            &[],
+        )
+        .unwrap_err();
+    assert_eq!(timeout.code(), Some(&SqlState::LOCK_NOT_AVAILABLE));
+    assert!(!catalog_batch_may_replay(&timeout));
+    tx.rollback().unwrap();
+    lock.rollback().unwrap();
+    println!("CATALOG_BATCH_LOCK_TIMEOUT_TERMINATES_WITHOUT_REPLAY_PASS");
+}
