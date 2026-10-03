@@ -2991,17 +2991,18 @@ test("a late completed predecessor cannot overwrite a queued successor released 
   }
 });
 
-test("Control startup dispatches a durable queued follow-up after its predecessor terminal was already committed", async () => {
+for (const autoRestore of [true, false]) test(`Control startup ${autoRestore ? 'restores by default' : 'retains without restoring'} a durable queued follow-up after its predecessor terminal was committed`, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-terminal-restart-"));
   const databasePath = path.join(directory, "control.db");
   let firstStore;
   let firstService;
   let restartedStore;
   let restartedService;
+  let restartedApplication;
   try {
     firstStore = new LatticeStore(databasePath);
     const firstCodex = new FakeCodex();
-    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex });
+    firstService = new LatticeControlService({ store: firstStore, codex: firstCodex, autoRestore: false });
     const project = firstService.createProject({ name: "Queued terminal restart", rootPath: directory });
     const first = await firstService.sendPrimaryConversationMessage({
       projectId: project.id,
@@ -3040,7 +3041,6 @@ test("Control startup dispatches a durable queued follow-up after its predecesso
     firstStore.close();
     firstStore = null;
 
-    restartedStore = new LatticeStore(databasePath);
     const restartedCodex = new FakeCodex();
     restartedCodex.turns = 1;
     restartedCodex.resumeResult = {
@@ -3057,7 +3057,30 @@ test("Control startup dispatches a durable queued follow-up after its predecesso
       }],
     };
     const secondStarted = new Promise((resolve) => restartedCodex.once("turnStartAccepted", resolve));
-    restartedService = new LatticeControlService({ store: restartedStore, codex: restartedCodex });
+    restartedApplication = createLatticeServer({ databasePath, codex: restartedCodex,
+      ...(autoRestore ? {} : { autoRestore: false }),
+      runtimeHealth: { current: async () => ({}), close: async () => {} },
+      mcpHealth: { current: async () => ({}) } });
+    restartedStore = restartedApplication.store;
+    restartedService = restartedApplication.service;
+    if (!autoRestore) {
+      const retained = restartedStore.primaryConversationUnresolvedMessage();
+      const events = restartedStore.listEvents('primary');
+      const item = restartedStore.getWorkItem('primary');
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(restartedStore.primaryConversationUnresolvedMessage(), retained);
+      assert.deepEqual(restartedStore.listEvents('primary'), events);
+      assert.deepEqual(restartedStore.getWorkItem('primary'), item);
+      assert.equal(restartedCodex.readinessCalls, 0);
+      assert.deepEqual(restartedCodex.resumed, []);
+      assert.deepEqual(restartedCodex.threadStarts, []);
+      assert.deepEqual(restartedCodex.turnStarts, []);
+      assert.equal(restartedService.conversationLeaseFence, null);
+      assert.equal(restartedService.conversationStartupRecoveryTimer, null);
+      // The startup opt-out must not disable an explicit operation for the saved input.
+      await restartedService.sendPrimaryConversationMessage({ projectId: project.id,
+        clientMessageId: retained.payload.clientMessageId, text: retained.payload.text });
+    }
     const automaticStart = await bounded(
       secondStarted,
       "startup-owned queued follow-up dispatch",
@@ -3078,6 +3101,7 @@ test("Control startup dispatches a durable queued follow-up after its predecesso
     );
   } finally {
     restartedService?.close();
+    await restartedApplication?.service.codeGraphStore?.close();
     restartedStore?.close();
     firstService?.close();
     firstStore?.close();

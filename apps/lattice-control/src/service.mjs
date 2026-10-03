@@ -298,7 +298,9 @@ export class LatticeControlService {
     conversationLeaseTtlMs = primaryConversationLeaseTtlMs,
     conversationObservationIntervalMs = primaryConversationObservationIntervalMs,
     conversationStartTimeoutMs = conversationStartWarningMs,
+    autoRestore = true,
   }) {
+    if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
     this.store = store;
     this.codex = codex;
     this.formalWorkStore = formalWorkStore;
@@ -400,7 +402,7 @@ export class LatticeControlService {
     codex.on("serverRequest", this.onServerRequest);
     codex.on("serverRequestSettled", this.onServerRequestSettled);
     codex.on("disconnect", this.onDisconnect);
-    queueMicrotask(() => {
+    if (autoRestore) queueMicrotask(() => {
       void Promise.resolve()
         .then(() => this.closed
           ? false

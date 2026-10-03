@@ -375,9 +375,11 @@ Invoke-RestMethod "$base/api/formal-work/$taskRef/diagnostic?$receiptQuery"
 node apps/lattice-control/src/server.mjs --no-auto-restore
 ```
 
-此啟動方式不呼叫全專案 `restore`，只處理之後明示的正式工作操作；不更改排程或全域設定。
+此啟動方式同時跳過全專案正式工作 `restore` 與主要對話佇列的 constructor 啟動恢復；
+已保存的排隊訊息保留，不因啟動被領取或派送。之後明示的正式工作／主要對話操作仍可用，
+既有執行期間的佇列與終態事件處理不變；此旗標不會全面停用佇列或更改排程／全域設定。
 `GET /api/state` 的 `formal_startup` 回報 `{mode:"explicit-only",restoreRequested:false}`，
-正式工作入口仍可用。省略旗標維持既有自動 restore 預設，回報 `restore-existing`／true；
+正式工作入口仍可用。省略旗標維持既有兩條自動恢復路徑，回報 `restore-existing`／true；
 這是啟動政策，不表示任何工作已成功恢復。直接組裝 server 則回報 `manual-composition`。
 此選項已做本機聚焦測試，尚未因本次原始碼提交而部署到已安裝服務。
 

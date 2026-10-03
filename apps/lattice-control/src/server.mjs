@@ -168,7 +168,9 @@ export function createLatticeServer({
   formalWorkStore = null,
   formalTaskService = null,
   formalStartupMode = 'manual-composition',
+  autoRestore = true,
 }) {
+  if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
   if (!['manual-composition', 'restore-existing', 'explicit-only'].includes(formalStartupMode)) throw new TypeError('Invalid formal startup mode');
   const store = new LatticeStore(databasePath);
   const formalTasks = formalTaskService ?? (formalWorkStore ? new FormalTaskService({ store: formalWorkStore }) : null);
@@ -176,6 +178,7 @@ export function createLatticeServer({
     store,
     codex,
     formalWorkStore,
+    autoRestore,
     codeGraphStore: new CodeGraphStore(),
     ...(projectInspector ? { projectInspector } : {}),
     ...(conversationModel ? { conversationModel } : {}),
@@ -701,7 +704,7 @@ export async function startDefaultServer({ autoRestore = true } = {}) {
   if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
   const databasePath = defaultControlDatabasePath();
-  const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore(),
+  const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore(), autoRestore,
     formalStartupMode: autoRestore ? 'restore-existing' : 'explicit-only' });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
