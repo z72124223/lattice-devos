@@ -10,6 +10,7 @@ import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
 import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticReceipt } from './relative-module-receipt.mjs';
 import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
+import { adviseOwnedTaskWithJev } from './jev-task-advisory.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -57,12 +58,14 @@ async function existingFile(workspace, relative) {
 // identities/events and invokes the fixed, evidence-producing result importer.
 export class FormalTaskService {
   #verifyDiagnosticReceipt;
+  #jevAdvisory;
   constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration,
-    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt }) {
+    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, jevAdvisory = {} }) {
     // Trusted startup composition may retain a verified helper's source identity.
     // Request selectors and receipt data never choose or replace this dependency.
     if (typeof verifyDiagnosticReceipt !== 'function') throw new TypeError('verifyDiagnosticReceipt must be a trusted startup function');
     this.#verifyDiagnosticReceipt = verifyDiagnosticReceipt;
+    this.#jevAdvisory = Object.freeze({ ...jevAdvisory });
     Object.assign(this, { store, codex, configurationLoader });
     this.operations = new Map();
     this.owners = new Map();
@@ -619,6 +622,10 @@ export class FormalTaskService {
       }));
     return { task_ref: taskRef, thread_id: claim.thread_id, messages,
       latest_turn_id: thread.turns.at(-1)?.id ?? null, latest_turn_status: thread.turns.at(-1)?.status ?? null };
+  }
+  jevAdvisory(projectId, taskRef, request) {
+    // Explicit in-process entry only. No event, HTTP/MCP route or lifecycle calls it.
+    return this.serial(taskRef, () => adviseOwnedTaskWithJev(this, projectId, taskRef, request, this.#jevAdvisory));
   }
   relativeModuleDiagnostic(projectId, taskRef, selectors) {
     // This route reads only Runtime facts and the already owned native thread.
