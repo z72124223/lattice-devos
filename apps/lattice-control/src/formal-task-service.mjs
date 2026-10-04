@@ -12,6 +12,7 @@ import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticRec
 import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
 import { adviseOwnedTaskWithJev } from './jev-task-advisory.mjs';
 import { readOwnedDiagnosticSource } from './relative-module-source.mjs';
+import { LifeHarnessCandidates, failedCommand } from './life-harness-candidates.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -61,7 +62,7 @@ export class FormalTaskService {
   #verifyDiagnosticReceipt;
   #jevAdvisory;
   constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration,
-    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, jevAdvisory = {} }) {
+    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, jevAdvisory = {}, lifeHarness = {} }) {
     // Trusted startup composition may retain a verified helper's source identity.
     // Request selectors and receipt data never choose or replace this dependency.
     if (typeof verifyDiagnosticReceipt !== 'function') throw new TypeError('verifyDiagnosticReceipt must be a trusted startup function');
@@ -75,6 +76,7 @@ export class FormalTaskService {
     this.previews = new Map();
     this.deniedTurns = new Map();
     this.closed = false;
+    this.lifeHarnessCandidates = new LifeHarnessCandidates(this, lifeHarness);
     this.onNotification = (message) => {
       const threadId = message.params?.threadId;
       const owner = this.owners.get(threadId);
@@ -82,6 +84,8 @@ export class FormalTaskService {
       if (message.method === "item/completed" && isExecutionDenied(message.params?.item)) {
         void this.serial(owner.taskRef, () => this.redirectDeniedTurn(owner, message.params))
           .catch((error) => this.recordFailure(owner, error));
+      } else if (message.method === 'item/completed' && failedCommand(message.params?.item)) {
+        this.lifeHarnessCandidates.handle(owner, message.params);
       } else if (message.method === "turn/completed") {
         void this.serial(owner.taskRef, () => this.reconcile(owner.projectId, owner.taskRef, { advance: true }))
           .catch((error) => this.recordFailure(owner, error));

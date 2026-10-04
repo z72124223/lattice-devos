@@ -35,6 +35,7 @@ for (const autoRestore of [true, false]) test(`startup restore policy ${autoRest
     if (autoRestore) assert.deepEqual([...restores[0]].sort(), [...ids].sort());
     const state = await (await fetch(`http://127.0.0.1:${app.server.address().port}/api/state`)).json();
     assert.equal(state.formal_work_enabled, true);
+    assert.deepEqual(state.life_harness, { enabled: true, scope: 'owned-execution', mode: 'failure-candidates' });
     assert.deepEqual(state.formal_startup, { mode: autoRestore ? 'restore-existing' : 'explicit-only', restoreRequested: autoRestore });
     assert.deepEqual(effects, []);
   } finally {

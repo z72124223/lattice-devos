@@ -169,11 +169,12 @@ export function createLatticeServer({
   formalTaskService = null,
   formalStartupMode = 'manual-composition',
   autoRestore = true,
+  lifeHarness = {},
 }) {
   if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
   if (!['manual-composition', 'restore-existing', 'explicit-only'].includes(formalStartupMode)) throw new TypeError('Invalid formal startup mode');
   const store = new LatticeStore(databasePath);
-  const formalTasks = formalTaskService ?? (formalWorkStore ? new FormalTaskService({ store: formalWorkStore }) : null);
+  const formalTasks = formalTaskService ?? (formalWorkStore ? new FormalTaskService({ store: formalWorkStore, lifeHarness }) : null);
   const service = new LatticeControlService({
     store,
     codex,
@@ -268,6 +269,7 @@ export function createLatticeServer({
       }
       if (request.method === "GET" && url.pathname === "/api/state") {
         sendJson(response, 200, { ...service.state(), formal_work_enabled: Boolean(formalTasks),
+          life_harness: { enabled: formalTasks?.lifeHarnessCandidates?.enabled === true, scope: 'owned-execution', mode: 'failure-candidates' },
           formal_startup: { mode: formalStartupMode, restoreRequested: formalStartupMode === 'restore-existing' } });
         return;
       }
@@ -705,7 +707,8 @@ export async function startDefaultServer({ autoRestore = true } = {}) {
   const port = Number(process.env.LATTICE_CONTROL_PORT || 4317);
   const databasePath = defaultControlDatabasePath();
   const application = createLatticeServer({ databasePath, formalWorkStore: new FormalWorkStore(), autoRestore,
-    formalStartupMode: autoRestore ? 'restore-existing' : 'explicit-only' });
+    formalStartupMode: autoRestore ? 'restore-existing' : 'explicit-only',
+    lifeHarness: { enabled: true, origin: () => `http://127.0.0.1:${application.server.address().port}` } });
   await new Promise((resolve, reject) => {
     application.server.once("error", reject);
     application.server.listen(port, "127.0.0.1", resolve);

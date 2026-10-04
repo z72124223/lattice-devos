@@ -291,14 +291,39 @@ stdout 只回摘要、檔案雜湊與精確命令；準備成功 exit 0，其餘
 回傳命令須由 Codex 另行執行。來源仍是 caller-supplied／context caller-asserted，
 native provenance／authorization 未驗證、adopted=false；路徑與 bytes 重核不是原子檔案系統沙箱。
 
-目前手動本機首版只涵蓋已驗 Windows／Node 靜態相對模組缺失，由 Codex 明示選定事件、
-專案及 context，執行上述 prepare 命令，再於獨立工具呼叫原樣執行回傳的 `command`。
-沒有自動觸發；修復需另外明示允許的檔案與成功條件，診斷元件不執行修復。
+目前只涵蓋 Windows／Node 靜態相對模組缺失。手動來源及診斷入口仍可使用；
+日常 Control 啟動另為其擁有的 EXECUTION 活動回合啟用失敗候選通知，
+經來源守衛核對後透過原生 `turn/steer` 提醒同一回合的 Codex 執行診斷。
+Control 不執行診斷命令或修復；修復仍須符合原工作允許的檔案與成功條件。
 正式工作仍須走既有 executor → independent verifier → Runtime 固定測試／結果匯入，
 重新讀回 COMPLETED、非空 result_digest 與 completion_verified=true 才算結案。
 Jev 產品入口預設關閉；2026-10-03 曾完成一次受控真實接線，HTTP 200、4785.224 ms，
 沒有採納或修復。單次成功不證明穩定性、品質或校準，詳見 [Jev 入口與限制](apps/lattice-control/jev-advisory.md)。
 一般交付仍待當輪驗證，本機驗證與 push／merge／部署／release 分開。
+
+### 從 Codex App 指派受管程式工作
+
+`node apps/lattice-control/src/formal-work-client.mjs projects` 讀取已登記的專案；
+`list --project <projectId>` 先找可續接的工作。新工程工作以 `create --input <JSONfile>`
+傳入 `projectId`、固定 `clientRequestId`、`objective`，可附 `title` 與 `successCriteria`。
+沿用回傳的正式 `taskRef`，再執行 `start --project <projectId> --task <taskRef>`。
+`status` 使用相同參數讀回結果；重複 create 必須沿用原請求身份，不暗中重新派送。
+這個客戶端只連 loopback 上正在執行的同一 Control，不建立第二個服務或所有權表。
+
+現有 FormalTaskService 會建立其持有的原生 Codex 執行回合及隔離工作目錄；
+目前 App 對話負責指派與呈現進度，並不因登記 task_ref 而變成受管執行回合。
+此入口適用於能提供程式成果及 Node 測試的工程工作。一般問答、非受管回合、
+其他主機或未登記專案，不能聲稱已有自動診斷。已受管的執行者不得再次派送自己。
+
+候選通知附上同一安裝版本的 `life-harness-client.mjs prepare` 精確命令。
+Codex 執行後取得 `command` 與 `readbackCommand`：先在獨立原生工具呼叫原樣執行
+`command` 產生收據，再於另一呼叫執行 `readbackCommand` 核對既有 `/diagnostic`。
+prepare 只在本機系統暫存區的新 `lattice-diagnostic-*` 目錄保存來源及準備產物，不放進 Git 工作目錄、不執行
+回傳命令、不延長期限、不覆寫舊證據。多失敗選擇依據保留在候選紀錄中，原始事件不刪除。
+
+候選發現、送出提示、診斷讀回與工作完成是不同狀態；送出提示意圖不代表 Codex
+已採用或診斷成功。失敗、過期、身分漂移與許可拒絕保留原有守衛，不自動重送。
+新接線的實際涵蓋範圍以該版本測試與真實受管任務的讀回結果為準。
 
 ### 從目前正式回合取得診斷來源
 
