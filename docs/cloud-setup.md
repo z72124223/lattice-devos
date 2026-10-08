@@ -10,6 +10,8 @@ Run as a non-root user with Node 24.15 or newer, Rust 1.97.x, Git, PostgreSQL
 server tools, and a native Linux `codex` binary already installed. Use a signed
 package source or independently verified dependency artifact when provisioning
 these tools. This script does not install OS packages or change authentication.
+Keep the checkout on the intended Git branch and verify its commit before setup;
+the runtime's project inspection expects a branch rather than a detached HEAD.
 The selected PostgreSQL version must support the repository's actual migrations;
 `--postgres-initialize` and `--postgres-bootstrap` must both pass.
 
@@ -50,6 +52,8 @@ evidence. It does not modify the user's default MCP configuration. Re-running a
 completed setup preserves the database identity and credentials. Failed partial
 installation data is retained for diagnosis; an unknown cluster is never erased
 or adopted. Use a separate new state root after inspecting a partial failure.
+When the runtime environment contract changes, use a new state root so the private
+MCP configuration is generated with the same authority identity as bootstrap.
 
 Start checks the cluster identity, effective bind address and configuration hashes
 before using it, applies the actual runtime bootstrap, and starts Control in the

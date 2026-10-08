@@ -59,11 +59,15 @@ async function command(executable, args, options = {}) {
   }
 }
 
-async function executable(name, explicit) {
+export async function executable(name, explicit, { preserveInvocationPath = false,
+  checkAccess = access, inspect = stat, canonicalize = realpath } = {}) {
   const candidates = explicit ? [explicit] : (process.env.PATH ?? '').split(path.delimiter).map((entry) => path.join(entry, name));
   for (const file of candidates) {
     if (!path.isAbsolute(file)) continue;
-    try { await access(file, constants.X_OK); if ((await stat(file)).isFile()) return await realpath(file); } catch { /* try next */ }
+    try {
+      await checkAccess(file, constants.X_OK);
+      if ((await inspect(file)).isFile()) return preserveInvocationPath ? path.resolve(file) : await canonicalize(file);
+    } catch { /* try next */ }
   }
   fail(`CLOUD_${name.toUpperCase().replaceAll('-', '_')}_MISSING`);
 }
@@ -135,11 +139,23 @@ async function load(root) {
 }
 
 export function runtimeEnvironment(data) {
+  if (!/^[a-f0-9]{32}$/u.test(data.runId) || !/^[1-9][0-9]*$/u.test(data.systemId ?? '')) fail('CLOUD_STORE_IDENTITY_REQUIRED');
+  // These stable commitments identify the prepared cluster. The native bootstrap
+  // still checks and persists authority; environment presence never proves readiness.
+  const jsonDigest = (value) => createHash('sha256').update(JSON.stringify(value, Object.keys(value).sort())).digest('hex');
+  const identity = { schema, run_id: data.runId, system_id: data.systemId };
+  const observation = jsonDigest(identity);
+  const authority = jsonDigest({ ...identity, epoch: 1, revision: 1, observation });
   const env = {
     LATTICE_TASK019_HOST: '127.0.0.1', LATTICE_TASK019_PORT: String(data.pgPort),
     LATTICE_TASK019_RUN_ID: data.runId, LATTICE_TASK019_PASSWORD: data.password,
     LATTICE_DELIVERY_CODEX_MODE: 'OFFICIAL_CODEX_APP_SERVER',
     LATTICE_FULL_CHAIN_RUN_MODE: 'RESUME_EXISTING', LATTICE_RUNTIME_INTEGRATION: 'GRAPHIFY',
+    LATTICE_MANAGED_FOREMAN_MODE: 'DISABLED',
+    LATTICE_STORE_DAEMON_INSTANCE_ID: `cloud-${data.runId}`, LATTICE_STORE_DAEMON_EPOCH: '1',
+    LATTICE_STORE_AUTHORITY_REVISION: '1', LATTICE_STORE_OBSERVATION_DIGEST: observation,
+    LATTICE_STORE_AUTHORITY_HEAD_DIGEST: authority, LATTICE_TASK_INGRESS_KIND: 'CODEX_LOCAL_MCP',
+    LATTICE_TASK_INGRESS_PROFILE_SHA256: jsonDigest({ kind: 'CODEX_LOCAL_MCP', ...identity }),
     LATTICE_DELIVERY_ROOT: path.join(data.root, 'delivery'),
     LATTICE_DELIVERY_SCHEMA_DIR: path.join(data.root, 'delivery', 'schema'),
     LATTICE_DELIVERY_CODEX_HOME: data.codexHome, LATTICE_DELIVERY_LAUNCHER: data.codex,
@@ -171,8 +187,10 @@ async function setup(build) {
     await load(root);
     return { status: 'CONFIGURED', root, reused: true, serviceStarted: false, overallReady: false };
   }
-  const rustc = await executable('rustc');
-  const rustVersion = (await command(rustc, ['--version'])).stdout.trim();
+  // rustup dispatches its rustc/cargo shims by argv[0]; resolving the symlink to
+  // rustup would run a different command. Binary identity pins below stay canonical.
+  const rustc = await executable('rustc', undefined, { preserveInvocationPath: true });
+  const rustVersion = (await command(rustc, ['--version'], { cwd: repository })).stdout.trim();
   if (!/^rustc 1\.97\.\d+(?:\s|$)/u.test(rustVersion)) fail('CLOUD_RUST_1_97_REQUIRED');
   const pgBin = process.env.LATTICE_PG_BIN;
   if (!pgBin || !path.isAbsolute(pgBin)) fail('CLOUD_PG_BIN_ABSOLUTE_REQUIRED');
@@ -185,7 +203,7 @@ async function setup(build) {
   const codexVersion = (await command(codex, ['--version'])).stdout.trim();
   const codexHome = await realpath(process.env.CODEX_HOME ?? path.join(homedir(), '.codex'));
   if (build) {
-    const cargo = await executable('cargo');
+    const cargo = await executable('cargo', undefined, { preserveInvocationPath: true });
     await command(cargo, ['build', '--locked', '--release', '-p', 'lattice-runtime', '--bin', 'latticed'], {
       cwd: repository, env: { ...cleanEnvironment(), CARGO_TARGET_DIR: path.join(root, 'target') }, timeout: 20 * 60_000,
     });

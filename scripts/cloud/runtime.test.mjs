@@ -7,7 +7,7 @@ import { mkdtemp, realpath, rmdir, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { controlDataScopeDescriptor } from '../../apps/lattice-control/src/database-path.mjs';
-import { checkedPort, childEnvironment, classifyReadiness, cleanEnvironment, controlReadback, isOutsideRepository,
+import { checkedPort, childEnvironment, classifyReadiness, cleanEnvironment, controlReadback, executable, isOutsideRepository,
   runtimeChildEnvironment, runtimeEnvironment, validateCodexPath, validateManagedPaths, validGraphifyReceipt, versionAtLeast } from './runtime.mjs';
 
 test('Node lower bound includes current patch releases and rejects older runtime', () => {
@@ -31,7 +31,8 @@ test('cloud child does not inherit JEV, old LATTICE bindings or external PG opti
     LATTICE_JEV_ENABLED: '1', LATTICE_TASK019_PASSWORD: 'old', PGHOST: 'remote' }),
   { PATH: '/bin', CODEX_HOME: '/workspace/auth' });
   const environment = runtimeEnvironment({ root: '/state', repository: '/repo', codexHome: '/auth', codex: '/bin/codex',
-    codexVersion: 'codex 1', files: { '/bin/codex': 'hash' }, git: '/bin/git', pgPort: 55432, controlPort: 4317, runId: 'run', password: 'secret' });
+    codexVersion: 'codex 1', files: { '/bin/codex': 'hash' }, git: '/bin/git', pgPort: 55432, controlPort: 4317,
+    runId: 'a'.repeat(32), systemId: '7430100000000000000', password: 'secret' });
   assert.equal(environment.LATTICE_TASK019_HOST, '127.0.0.1');
   assert.equal(environment.LATTICE_RUNTIME_INTEGRATION, 'GRAPHIFY');
   assert.equal(Object.keys(environment).some((key) => /JEV|WSL|HERMES/u.test(key)), false);
@@ -68,8 +69,44 @@ test('every actual prerequisite is required; HTTP health and login text are insu
 function fixtureInstallation() {
   return { root: path.resolve('test-state'), repository: path.resolve('test-repo'), codexHome: path.resolve('test-auth'), codex: process.execPath,
     codexVersion: 'test-only', files: { [process.execPath]: 'fixture' }, git: path.resolve('git'), pgPort: 55432,
-    controlPort: 4317, runId: 'test-only', password: 'fixture-private-password' };
+    controlPort: 4317, runId: 'a'.repeat(32), systemId: '7430100000000000000', password: 'fixture-private-password' };
 }
+
+test('store authority and task ingress remain bound to the same prepared PostgreSQL identity', () => {
+  const data = fixtureInstallation();
+  const env = runtimeEnvironment(data);
+  assert.equal(env.LATTICE_STORE_DAEMON_INSTANCE_ID, `cloud-${data.runId}`);
+  assert.equal(env.LATTICE_STORE_DAEMON_EPOCH, '1');
+  assert.equal(env.LATTICE_STORE_AUTHORITY_REVISION, '1');
+  assert.equal(env.LATTICE_TASK_INGRESS_KIND, 'CODEX_LOCAL_MCP');
+  assert.equal(env.LATTICE_MANAGED_FOREMAN_MODE, 'DISABLED');
+  for (const key of ['LATTICE_STORE_OBSERVATION_DIGEST', 'LATTICE_STORE_AUTHORITY_HEAD_DIGEST', 'LATTICE_TASK_INGRESS_PROFILE_SHA256']) {
+    assert.match(env[key], /^[a-f0-9]{64}$/u);
+    assert.equal(runtimeEnvironment({ ...data, password: 'changed-secret' })[key], env[key]);
+    assert.notEqual(runtimeEnvironment({ ...data, systemId: '7430100000000000001' })[key], env[key]);
+    assert.notEqual(runtimeEnvironment({ ...data, runId: 'b'.repeat(32) })[key], env[key]);
+  }
+  assert.deepEqual(runtimeEnvironment(JSON.parse(JSON.stringify(data))), env);
+  for (const patch of [{ systemId: undefined }, { systemId: 'invalid' }, { runId: 'invalid' }]) {
+    assert.throws(() => runtimeEnvironment({ ...data, ...patch }), { code: 'CLOUD_STORE_IDENTITY_REQUIRED' });
+  }
+  assert.equal(Object.keys(childEnvironment(data)).some((key) => key.startsWith('LATTICE_STORE_') || key.startsWith('LATTICE_TASK_INGRESS_')), false);
+});
+
+test('rustup proxy invocations preserve rustc/cargo names while pinned executables resolve targets', async () => {
+  const canonicalCalls = [];
+  const options = { checkAccess: async () => {}, inspect: async () => ({ isFile: () => true }),
+    canonicalize: async (file) => { canonicalCalls.push(file); return path.resolve('tools', 'rustup'); } };
+  for (const name of ['rustc', 'cargo']) {
+    const invocation = path.resolve('tools', name);
+    assert.equal(await executable(name, invocation, { ...options, preserveInvocationPath: true }), invocation);
+  }
+  assert.equal(canonicalCalls.length, 0);
+  for (const name of ['codex', 'latticed']) {
+    assert.equal(await executable(name, path.resolve('tools', name), options), path.resolve('tools', 'rustup'));
+  }
+  assert.equal(canonicalCalls.length, 2);
+});
 
 test('Control and its ordinary descendants receive no PostgreSQL password or runtime bindings', async () => {
   const data = fixtureInstallation();
