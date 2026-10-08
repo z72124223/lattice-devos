@@ -291,14 +291,16 @@ stdout 只回摘要、檔案雜湊與精確命令；準備成功 exit 0，其餘
 回傳命令須由 Codex 另行執行。來源仍是 caller-supplied／context caller-asserted，
 native provenance／authorization 未驗證、adopted=false；路徑與 bytes 重核不是原子檔案系統沙箱。
 
-目前只涵蓋 Windows／Node 靜態相對模組缺失。手動來源及診斷入口仍可使用；
+目前涵蓋 Node 靜態相對模組缺失，收據入口接受已核對的 Windows 與 Linux 原生命令格式；
+Linux 的正式任務與診斷閉環仍須在交付主機完成驗收。手動來源及診斷入口仍可使用；
 日常 Control 啟動另為其擁有的 EXECUTION 活動回合啟用失敗候選通知，
 經來源守衛核對後透過原生 `turn/steer` 提醒同一回合的 Codex 執行診斷。
 Control 不執行診斷命令或修復；修復仍須符合原工作允許的檔案與成功條件。
 正式工作仍須走既有 executor → independent verifier → Runtime 固定測試／結果匯入，
 重新讀回 COMPLETED、非空 result_digest 與 completion_verified=true 才算結案。
-Jev 產品入口預設關閉；2026-10-03 曾完成一次受控真實接線，HTTP 200、4785.224 ms，
-沒有採納或修復。單次成功不證明穩定性、品質或校準，詳見 [Jev 入口與限制](apps/lattice-control/jev-advisory.md)。
+JEV 已排除於正式交付，Control 不再提供 JEV 建議入口；歷史實驗保留於
+[experiments/life-harness](experiments/life-harness/README.md)。
+Linux 雲端的安裝、啟動、認證與 Graphify 限制見 [雲端設定](docs/cloud-setup.md)。
 一般交付仍待當輪驗證，本機驗證與 push／merge／部署／release 分開。
 
 ### 從 Codex App 指派受管程式工作
