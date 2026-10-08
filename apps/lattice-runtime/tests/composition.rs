@@ -872,10 +872,34 @@ fn latticed_graphify_runtime_preflight_reports_missing_independent_runtime_confi
     assert!(output.stdout.is_empty());
     assert_eq!(
         String::from_utf8(output.stderr).expect("stderr utf8"),
-        concat!(
-            "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
-            "LATTICE_GRAPHIFY_RUNTIME_ROOT,LATTICE_GRAPHIFY_WSL_EXE\n"
+        if cfg!(target_os = "linux") {
+            "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:LATTICE_GRAPHIFY_RUNTIME_ROOT\n"
+        } else {
+            concat!(
+                "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_MISSING_CONFIGURATION:",
+                "LATTICE_GRAPHIFY_RUNTIME_ROOT,LATTICE_GRAPHIFY_WSL_EXE\n"
+            )
+        }
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn latticed_native_graphify_preflight_requires_no_windows_configuration_and_rejects_unpinned_root() {
+    let output = Command::new(env!("CARGO_BIN_EXE_latticed"))
+        .arg("--graphify-runtime-preflight")
+        .env_clear()
+        .env(
+            "LATTICE_GRAPHIFY_RUNTIME_ROOT",
+            "/nonexistent-lattice-native-graphify-runtime",
         )
+        .output()
+        .expect("native preflight without WSL or SystemRoot");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("stderr utf8"),
+        "LATTICE_GRAPHIFY_RUNTIME_PREFLIGHT_CONFIGURATION_REJECTED\n"
     );
 }
 

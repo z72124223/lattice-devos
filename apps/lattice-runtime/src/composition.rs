@@ -4206,6 +4206,9 @@ impl GraphifyRuntimePreflight {
 /// The runtime root is deliberately supplied outside any historical delivery fixture.
 #[must_use]
 pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight {
+    #[cfg(target_os = "linux")]
+    const REQUIRED: [&str; 1] = ["LATTICE_GRAPHIFY_RUNTIME_ROOT"];
+    #[cfg(not(target_os = "linux"))]
     const REQUIRED: [&str; 2] = ["LATTICE_GRAPHIFY_RUNTIME_ROOT", "LATTICE_GRAPHIFY_WSL_EXE"];
     let missing = REQUIRED
         .into_iter()
@@ -4220,20 +4223,12 @@ pub fn graphify_runtime_preflight_from_environment() -> GraphifyRuntimePreflight
             std::env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT")
                 .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
         );
-        let wsl_executable = PathBuf::from(
-            std::env::var_os("LATTICE_GRAPHIFY_WSL_EXE")
-                .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?,
-        );
         let staging_root = runtime_root.join(".lattice-preflight-staging");
-        GraphifyRuntimeConfig::new_for_profile(
-            wsl_executable,
+        graphify_runtime_config_for_host(
             runtime_root,
             staging_root,
             Duration::from_secs(30),
-            GraphOutputLimits::default(),
-            graphify_platform_from_environment()?,
-        )
-        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+        )?;
         Ok::<(), LatticedError>(())
     })();
 
@@ -5430,7 +5425,11 @@ impl<H: FullChainHermesPort> FullChainCore<H> {
         );
         let graphify_status = if self.integration_mode.uses_graphify() {
             let root = env::var_os("LATTICE_GRAPHIFY_RUNTIME_ROOT").map(PathBuf::from);
-            let launcher = env::var_os("LATTICE_GRAPHIFY_WSL_EXE").map(PathBuf::from);
+            let launcher = if cfg!(target_os = "linux") {
+                Some(PathBuf::from(lattice_graphify_adapter::GRAPHIFY_WSL_BWRAP_PATH))
+            } else {
+                env::var_os("LATTICE_GRAPHIFY_WSL_EXE").map(PathBuf::from)
+            };
             graphify_configuration_status(root.as_deref(), launcher.as_deref())
         } else {
             "DEFERRED"
@@ -12178,20 +12177,11 @@ fn run_graph_memory_request(
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
 
-    let system_root = env::var_os("SystemRoot")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
-        graphify_wsl_executable_from_environment(
-            PathBuf::from(system_root).join("System32/wsl.exe"),
-        ),
+    let graphify_config = graphify_runtime_config_for_host(
         graphify_runtime_root_from_environment(&fixture.repository_root),
         graph_root.join("staging"),
         remaining,
-        GraphOutputLimits::default(),
-        graphify_platform_from_environment()?,
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    )?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
     let client = connect_fixed_runtime_client(database, password, deadline)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
@@ -12649,20 +12639,11 @@ fn run_runtime_graph_memory_request(
     )
     .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
     let mut snapshot = ExactGitSnapshotMaterializer::with_bridge(snapshot_config, bridge.clone());
-    let system_root = env::var_os("SystemRoot")
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
-    let graphify_config = GraphifyRuntimeConfig::new_for_profile(
-        graphify_wsl_executable_from_environment(
-            PathBuf::from(system_root).join("System32/wsl.exe"),
-        ),
+    let graphify_config = graphify_runtime_config_for_host(
         graphify_runtime_root_from_environment(&source.repository_root),
         graph_root.join("staging"),
         remaining,
-        GraphOutputLimits::default(),
-        graphify_platform_from_environment()?,
-    )
-    .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    )?;
     let mut graphify = PinnedGraphifyAdapter::new(graphify_config, bridge);
     let client = connect_fixed_runtime_client(database, password, deadline)
         .map_err(|_| LatticedError::new(LatticedErrorKind::DatabaseConnect))?;
@@ -12706,6 +12687,37 @@ fn graphify_runtime_root_from_value(
     configured.unwrap_or_else(|| repository_root.join(GRAPHIFY_RUNTIME_RELATIVE_PATH))
 }
 
+fn graphify_runtime_config_for_host(
+    runtime_root: PathBuf,
+    staging_root: PathBuf,
+    timeout: Duration,
+) -> Result<GraphifyRuntimeConfig, LatticedError> {
+    #[cfg(target_os = "linux")]
+    let config = GraphifyRuntimeConfig::new_native_linux(
+        runtime_root,
+        staging_root,
+        timeout,
+        GraphOutputLimits::default(),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let config = {
+        let default_launcher = env::var_os("SystemRoot")
+            .filter(|value| !value.is_empty())
+            .map(|root| PathBuf::from(root).join("System32/wsl.exe"))
+            .unwrap_or_default();
+        GraphifyRuntimeConfig::new_for_profile(
+            graphify_wsl_executable_from_environment(default_launcher),
+            runtime_root,
+            staging_root,
+            timeout,
+            GraphOutputLimits::default(),
+            graphify_platform_from_environment()?,
+        )
+    };
+    config.map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))
+}
+
+#[cfg(not(target_os = "linux"))]
 fn graphify_platform_from_environment()
 -> Result<lattice_graphify_adapter::WslProfile, LatticedError> {
     match (
@@ -12723,6 +12735,7 @@ fn graphify_platform_from_environment()
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 fn graphify_wsl_executable_from_environment(default: PathBuf) -> PathBuf {
     graphify_wsl_executable_from_value(
         std::env::var_os("LATTICE_GRAPHIFY_WSL_EXE")
@@ -12732,6 +12745,7 @@ fn graphify_wsl_executable_from_environment(default: PathBuf) -> PathBuf {
     )
 }
 
+#[cfg(any(not(target_os = "linux"), test))]
 fn graphify_wsl_executable_from_value(configured: Option<PathBuf>, default: PathBuf) -> PathBuf {
     configured.unwrap_or(default)
 }

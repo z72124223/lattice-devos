@@ -204,19 +204,27 @@ fn exact_git_snapshot_disables_replace_objects_for_tree_and_blob_reads() {
 }
 
 #[test]
-#[ignore = "requires the reviewed WSL launcher and parent Graphify WSL runtime"]
+#[ignore = "requires the exact reviewed Graphify payload and native Linux or Windows WSL system"]
 // Keeping the live fixture, composition, and assertions together makes this
 // ignored executable acceptance gate reproducible as one exact command.
 #[allow(clippy::too_many_lines)]
 fn pinned_graphify_live_typed_ports_are_provenance_bound_and_deterministic() {
+    #[cfg(not(target_os = "linux"))]
     let wsl = std::env::var_os("LATTICE_TEST_WSL_EXE")
         .map(PathBuf::from)
         .expect("set LATTICE_TEST_WSL_EXE to the reviewed Windows WSL launcher");
+    #[cfg(not(target_os = "linux"))]
     let wsl = fs::canonicalize(wsl).expect("resolve reviewed WSL launcher");
-    let runtime = std::env::var_os("LATTICE_TEST_GRAPHIFY_WSL_RUNTIME")
+    let runtime_variable = if cfg!(target_os = "linux") {
+        "LATTICE_TEST_GRAPHIFY_LINUX_RUNTIME"
+    } else {
+        "LATTICE_TEST_GRAPHIFY_WSL_RUNTIME"
+    };
+    let runtime = std::env::var_os(runtime_variable)
         .map(PathBuf::from)
-        .expect("set LATTICE_TEST_GRAPHIFY_WSL_RUNTIME to the parent wsl-runtime directory");
+        .expect("set the host-specific reviewed Graphify runtime directory");
     let runtime = fs::canonicalize(runtime).expect("resolve reviewed Graphify WSL runtime");
+    #[cfg(not(target_os = "linux"))]
     assert_eq!(
         sha256_file(&wsl),
         GRAPHIFY_WSL_LAUNCHER_SHA256,
@@ -314,6 +322,7 @@ fn pinned_graphify_live_typed_ports_are_provenance_bound_and_deterministic() {
         .expect("valid live snapshot config"),
         bridge.clone(),
     );
+    #[cfg(not(target_os = "linux"))]
     let graphify_config = GraphifyRuntimeConfig::new(
         &wsl,
         &runtime,
@@ -322,7 +331,19 @@ fn pinned_graphify_live_typed_ports_are_provenance_bound_and_deterministic() {
         GraphOutputLimits::default(),
     )
     .expect("valid pinned Graphify runtime config");
+    #[cfg(target_os = "linux")]
+    let graphify_config = GraphifyRuntimeConfig::new_native_linux(
+        &runtime,
+        &staging,
+        Duration::from_mins(1),
+        GraphOutputLimits::default(),
+    )
+    .expect("exact native Linux system and payload identity");
     let expected_capability = graphify_config.capability_sha256();
+    let expected_identity = graphify_config
+        .expected_execution_identity_sha256()
+        .to_owned();
+    assert_eq!(graphify_config.is_native_linux(), cfg!(target_os = "linux"));
     let mut graphify_port = PinnedGraphifyAdapter::new(graphify_config, bridge);
 
     let snapshot = snapshot_port
@@ -355,7 +376,7 @@ fn pinned_graphify_live_typed_ports_are_provenance_bound_and_deterministic() {
     assert_eq!(first.identity().license(), "Apache-2.0");
     assert_eq!(
         first.identity().executable_digest().as_str(),
-        GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256
+        expected_identity
     );
     assert_eq!(
         first.identity().cli_help_digest().as_str(),
