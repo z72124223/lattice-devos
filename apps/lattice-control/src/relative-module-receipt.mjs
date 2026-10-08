@@ -54,8 +54,13 @@ function matchesNativeCommand(item, inner) {
   // Native v2 uses shlex::try_join(argv), not PowerShell command-line quoting.
   // Pinned upstream: comex/rust-shlex 4a0724b0/src/bytes.rs (1.3.0),
   // used by openai/codex 851d9e95/codex-rs/shell-command/src/parse_command.rs.
-  // On this restricted alphabet both executable and inner script use one double
-  // quoted token, escaping only backslash and double quote, exactly as JSON does.
+  // The restricted inner script uses one double-quoted token, escaping only
+  // backslash and double quote, exactly as JSON does. Linux executable/flag
+  // tokens are unquoted; accept only the native three-argument shell forms from
+  // the same pinned Codex shell-command/src/bash.rs, never arbitrary shell paths.
+  const posix = /^(\/(?:usr\/)?bin\/(?:bash|sh|zsh)) (-lc|-c) /u.exec(item.command);
+  if (posix) return item.command === `${posix[1]} ${posix[2]} ${JSON.stringify(inner)}`;
+  // Windows executable paths use a double-quoted token too.
   // Decode only the executable token; never parse/evaluate the supplied script.
   const prefix = /^("[^"]+") -Command /u.exec(item.command);
   if (!prefix) return false;

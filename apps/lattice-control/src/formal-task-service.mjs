@@ -10,7 +10,6 @@ import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
 import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticReceipt } from './relative-module-receipt.mjs';
 import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
-import { adviseOwnedTaskWithJev } from './jev-task-advisory.mjs';
 import { readOwnedDiagnosticSource } from './relative-module-source.mjs';
 import { LifeHarnessCandidates, failedCommand } from './life-harness-candidates.mjs';
 
@@ -60,14 +59,12 @@ async function existingFile(workspace, relative) {
 // identities/events and invokes the fixed, evidence-producing result importer.
 export class FormalTaskService {
   #verifyDiagnosticReceipt;
-  #jevAdvisory;
   constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration,
-    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, jevAdvisory = {}, lifeHarness = {} }) {
+    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, lifeHarness = {} }) {
     // Trusted startup composition may retain a verified helper's source identity.
     // Request selectors and receipt data never choose or replace this dependency.
     if (typeof verifyDiagnosticReceipt !== 'function') throw new TypeError('verifyDiagnosticReceipt must be a trusted startup function');
     this.#verifyDiagnosticReceipt = verifyDiagnosticReceipt;
-    this.#jevAdvisory = Object.freeze({ ...jevAdvisory });
     Object.assign(this, { store, codex, configurationLoader });
     this.operations = new Map();
     this.owners = new Map();
@@ -627,10 +624,6 @@ export class FormalTaskService {
       }));
     return { task_ref: taskRef, thread_id: claim.thread_id, messages,
       latest_turn_id: thread.turns.at(-1)?.id ?? null, latest_turn_status: thread.turns.at(-1)?.status ?? null };
-  }
-  jevAdvisory(projectId, taskRef, request) {
-    // Explicit in-process entry only. No event, HTTP/MCP route or lifecycle calls it.
-    return this.serial(taskRef, () => adviseOwnedTaskWithJev(this, projectId, taskRef, request, this.#jevAdvisory));
   }
   diagnosticSource(projectId, taskRef, selectors) {
     return readOwnedDiagnosticSource(this, projectId, taskRef, selectors);

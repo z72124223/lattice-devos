@@ -167,7 +167,7 @@ async function verifyExecutableFile(executablePath) {
 }
 
 export async function loadLatticeRuntimeConfiguration({
-  configPath = path.join(homedir(), ".codex", "config.toml"),
+  configPath = process.env.LATTICE_RUNTIME_CONFIG_PATH ?? path.join(homedir(), ".codex", "config.toml"),
   readText = (target) => readFile(target, "utf8"),
   verifyExecutable = verifyExecutableFile,
 } = {}) {

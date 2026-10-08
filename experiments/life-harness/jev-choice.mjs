@@ -1,7 +1,7 @@
 import { validateCase, validateSources, exclusion, retrieve, diagnose, procedures } from './harness.mjs';
 import { syntheticCases } from './jev-synthetic.mjs';
 
-import { MODEL, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, exchangeJevChoice } from '../../apps/lattice-control/src/jev-choice-protocol.mjs';
+import { MODEL, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, exchangeJevChoice } from './jev-choice-protocol.mjs';
 export { MODEL, ENDPOINT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES };
 const probability = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1;
 const abstentions = {
