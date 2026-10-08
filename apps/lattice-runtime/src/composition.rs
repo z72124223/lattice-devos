@@ -9432,9 +9432,8 @@ impl<H: FullChainHermesPort> DeliveryToolService for FullChainService<H> {
             // Historical reads may replay the retained legacy receipt. Refresh never
             // uses this fallback: it must analyze under the selected platform identity.
             if receipt.is_none()
-                && graphify_platform_from_environment()
+                && graphify_legacy_receipt_fallback_allowed()
                     .map_err(|e| ToolExecutionError::new(e.code()))?
-                    .is_portable()
             {
                 request = runtime_graph_request(
                     core.delivery.database.run_id(),
@@ -12548,10 +12547,9 @@ fn runtime_graph_configuration_digest(
     git_sha256: &str,
 ) -> Result<ContentDigest, LatticedError> {
     let legacy = legacy_runtime_graph_configuration_digest(repository_root, git_sha256)?;
-    let profile = graphify_platform_from_environment()?;
-    if !profile.is_portable() {
+    let Some(platform_selection) = graphify_platform_selection_from_environment()? else {
         return Ok(legacy);
-    }
+    };
     digest(
         "lattice.runtime.graphify-source-configuration.v2",
         &CanonicalValue::Object(vec![
@@ -12561,10 +12559,40 @@ fn runtime_graph_configuration_digest(
             ),
             (
                 "platform_selection".into(),
-                CanonicalValue::String(profile.selection_digest()),
+                CanonicalValue::String(platform_selection),
             ),
         ]),
     )
+}
+
+// Windows selection is fallible; keep one caller contract on both hosts.
+#[cfg_attr(target_os = "linux", allow(clippy::unnecessary_wraps))]
+fn graphify_platform_selection_from_environment() -> Result<Option<String>, LatticedError> {
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Some(
+            lattice_graphify_adapter::native_linux_selection_digest(),
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let profile = graphify_platform_from_environment()?;
+        Ok(profile.is_portable().then(|| profile.selection_digest()))
+    }
+}
+
+#[cfg_attr(target_os = "linux", allow(clippy::unnecessary_wraps))]
+fn graphify_legacy_receipt_fallback_allowed() -> Result<bool, LatticedError> {
+    #[cfg(target_os = "linux")]
+    {
+        // Native Linux never silently adopts a Windows WSL receipt. Explicit
+        // project-owned retained configurations keep their existing read path.
+        Ok(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(graphify_platform_from_environment()?.is_portable())
+    }
 }
 
 fn legacy_runtime_graph_configuration_digest(
@@ -17433,6 +17461,23 @@ mod tests {
                 && winner_reload < project_resolutions[1]
                 && project_resolutions[1] < admissions[1]
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_graphify_configuration_is_bound_without_implicit_wsl_receipt_fallback() {
+        let repository = env::temp_dir().join("lattice-native-selection");
+        let git_sha256 = "a".repeat(64);
+        let native = runtime_graph_configuration_digest(&repository, &git_sha256)
+            .expect("native configuration digest");
+        let legacy = legacy_runtime_graph_configuration_digest(&repository, &git_sha256)
+            .expect("legacy configuration digest");
+        assert_ne!(native, legacy);
+        assert_eq!(
+            graphify_platform_selection_from_environment().expect("native selection"),
+            Some(lattice_graphify_adapter::native_linux_selection_digest())
+        );
+        assert!(!graphify_legacy_receipt_fallback_allowed().expect("native fallback policy"));
     }
 
     #[test]

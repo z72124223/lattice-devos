@@ -365,6 +365,16 @@ fn native_linux_execution_identity_digest() -> String {
     ])
 }
 
+/// Binds the fixed native Linux profile into a caller's configuration digest.
+/// This is a selection identity, not evidence that its files or sandbox ran.
+#[must_use]
+pub fn native_linux_selection_digest() -> String {
+    framed_digest(&[
+        b"lattice-graphify-native-linux-platform-selection-1.0",
+        native_linux_execution_identity_digest().as_bytes(),
+    ])
+}
+
 fn verify_pinned_payload(runtime_root: &Path) -> GraphifyAdapterResult<PayloadManifest> {
     let payload = collect_wsl_payload(runtime_root)?;
     if payload.entries.len() != GRAPHIFY_WSL_RUNTIME_FILE_COUNT
