@@ -1365,7 +1365,7 @@ function referenceControlSchemaManifest() {
   }
 }
 
-function validateControlSchemaProfile(database) {
+export function validateControlSchemaProfile(database) {
   if (JSON.stringify(controlSchemaManifest(database)) !== JSON.stringify(referenceControlSchemaManifest())) {
     schemaProfileFailure("exact SQL manifest");
   }

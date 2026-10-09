@@ -5494,7 +5494,7 @@ fn read_database_identity<C: GenericClient>(
     Ok(database_uuid)
 }
 
-fn verify_stopped_admission<C: GenericClient>(
+pub(crate) fn verify_stopped_admission<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let admission = client
@@ -9164,6 +9164,10 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
     if let Some(product) = product {
         foreman_relation_oids.extend_from_slice(&product.relation_oids);
     }
+    foreman_relation_oids.extend(
+        crate::project_purge::optional_maintenance_relations(client)
+            .map_err(|_| permission_error())?,
+    );
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \

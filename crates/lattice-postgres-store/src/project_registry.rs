@@ -129,7 +129,7 @@ const READ_PROJECTS_SQL: &str = "\
            drift_canonical_root, drift_repository, drift_file, drift_primary_ref_name, \
            drift_primary_ref_storage, authority_contract_version, authority_producer_id, \
            authority_producer_version, authority_runtime, authority_snapshot_id, \
-           authority_registry_revision, authority_lifecycle, authority_primary_ref, \
+           authority_registry_revision::text, authority_lifecycle, authority_primary_ref, \
            authority_primary_ref_storage_digest, authority_observation_digest, \
            authority_receipt_digest \
        FROM control.project_registry_read_projects_v2($1::smallint,$2::text)";
@@ -901,32 +901,108 @@ fn load_verified_registry<C: GenericClient>(
     persistence: &PostgresProjectRegistryPersistenceEvidence,
     started: Option<&Instant>,
 ) -> PostgresProjectRegistryResult<LoadedRegistry> {
+    load_registry_queries(client, persistence, started, false)
+}
+
+/// Maintenance uses the identical semantic and persistence receipt verifier.
+/// Only the authenticated migrator's physical read path differs.
+pub(crate) fn load_registry_for_maintenance<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+) -> PostgresProjectRegistryResult<VerifiedRegistryState> {
+    let row = client.query_one("SELECT current_schema_version, manifest_sha256::text FROM ONLY control.schema_compatibility WHERE singleton", &[])
+        .map_err(|db| map_database_error(&db))?;
+    let version: i16 = row.get(0);
+    let manifest: String = row.get(1);
+    let persistence = PostgresProjectRegistryPersistenceEvidence {
+        database_identity_digest: digest(target.expected_database_identity_sha256().as_str())?,
+        schema_version: u16::try_from(version)
+            .map_err(|_| error(PostgresProjectRegistryErrorKind::Malformed))?,
+        manifest_digest: digest(manifest.trim())?,
+    };
+    Ok(load_registry_queries(client, &persistence, None, true)?.state)
+}
+
+fn registry_query<C: GenericClient>(
+    client: &mut C,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+    direct: bool,
+    table: &str,
+) -> Result<Vec<Row>, PostgresError> {
+    if direct {
+        let prefix = sql
+            .split("FROM control.project_registry_read_")
+            .next()
+            .expect("fixed SQL");
+        client.query(&format!("{prefix} FROM ONLY control.{table}"), &[])
+    } else {
+        client.query(sql, params)
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Both transports share one unchanged full replay verifier.
+fn load_registry_queries<C: GenericClient>(
+    client: &mut C,
+    persistence: &PostgresProjectRegistryPersistenceEvidence,
+    started: Option<&Instant>,
+    direct: bool,
+) -> PostgresProjectRegistryResult<LoadedRegistry> {
     let version = profile_version(persistence)?;
     let manifest = persistence.manifest_digest().as_str().to_owned();
     let params: [&(dyn ToSql + Sync); 2] = [&version, &manifest];
-    let state_row = client
-        .query_one(READ_STATE_SQL, &params)
-        .map_err(|db| map_database_error(&db))?;
-    let retained_checkpoint = parse_state_row(&state_row)?;
+    let state_rows = registry_query(
+        client,
+        READ_STATE_SQL,
+        &params,
+        direct,
+        "project_registry_state",
+    )
+    .map_err(|db| map_database_error(&db))?;
+    if state_rows.len() != 1 {
+        return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+    }
+    let state_row = &state_rows[0];
+    let retained_checkpoint = parse_state_row(state_row)?;
     check_optional_deadline(started)?;
-    let observation_rows = client
-        .query(READ_OBSERVATIONS_SQL, &params)
-        .map_err(|db| map_database_error(&db))?;
+    let observation_rows = registry_query(
+        client,
+        READ_OBSERVATIONS_SQL,
+        &params,
+        direct,
+        "project_registry_observations ORDER BY observation_digest",
+    )
+    .map_err(|db| map_database_error(&db))?;
     let observations = parse_observations(&observation_rows)?;
     check_optional_deadline(started)?;
-    let project_rows = client
-        .query(READ_PROJECTS_SQL, &params)
-        .map_err(|db| map_database_error(&db))?;
+    let project_rows = registry_query(
+        client,
+        READ_PROJECTS_SQL,
+        &params,
+        direct,
+        "project_registry_projects ORDER BY project_id",
+    )
+    .map_err(|db| map_database_error(&db))?;
     let projects = parse_projects(&project_rows, &observations)?;
     check_optional_deadline(started)?;
-    let command_rows = client
-        .query(READ_COMMANDS_SQL, &params)
-        .map_err(|db| map_database_error(&db))?;
+    let command_rows = registry_query(
+        client,
+        READ_COMMANDS_SQL,
+        &params,
+        direct,
+        "project_registry_commands ORDER BY ordinal",
+    )
+    .map_err(|db| map_database_error(&db))?;
     let stored_commands = parse_commands(&command_rows, &observations, persistence)?;
     check_optional_deadline(started)?;
-    let reservation_rows = client
-        .query(READ_RESERVATIONS_SQL, &params)
-        .map_err(|db| map_database_error(&db))?;
+    let reservation_rows = registry_query(
+        client,
+        READ_RESERVATIONS_SQL,
+        &params,
+        direct,
+        "project_registry_identity_reservations ORDER BY dimension, identity_digest, reservation_status, project_id",
+    )
+    .map_err(|db| map_database_error(&db))?;
     let reservations = parse_reservations(&reservation_rows)?;
     check_optional_deadline(started)?;
 

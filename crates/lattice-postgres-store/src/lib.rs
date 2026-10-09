@@ -12,6 +12,8 @@ mod live;
 mod migrations;
 mod postgres_setup;
 mod project_registry;
+mod project_purge;
+pub use project_purge::{PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge};
 mod schema_v6_profile;
 mod task_ledger;
 

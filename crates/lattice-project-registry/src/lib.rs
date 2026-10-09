@@ -900,6 +900,44 @@ pub struct VerifiedRegistryState {
     reservations: Vec<RegistryIdentityReservation>,
 }
 
+/// The only erasure supported by the v1 Registry format: remove a project's
+/// entire command suffix and restore the *already verified* preceding state.
+/// No survivor command, receipt or digest is rewritten. Interleaved histories
+/// require a separately reviewed format migration and are rejected here.
+///
+/// # Errors
+///
+/// Rejects an absent project, interleaved history, or a prefix that cannot be
+/// replayed into the exact previously verified state.
+pub fn project_purge_prefix(
+    state: &VerifiedRegistryState,
+    project_id: &ProjectId,
+) -> Result<VerifiedRegistryState, RegistryError> {
+    if state.project(project_id).is_none() {
+        return Err(RegistryError::CorruptSnapshot);
+    }
+    let mut prefix = VerifiedRegistryState::vacant(state.checkpoint.runtime())?;
+    let mut found = false;
+    for record in state.commands.values() {
+        if command_project_id(record.command()) == project_id {
+            found = true;
+        } else {
+            if found {
+                return Err(RegistryError::CorruptSnapshot);
+            }
+            let plan = plan_command(&prefix, record.command().clone())?;
+            if plan.record != *record {
+                return Err(RegistryError::CorruptSnapshot);
+            }
+            prefix = apply_command_plan(&prefix, &plan)?.state;
+        }
+    }
+    if !found || prefix.project(project_id).is_some() {
+        return Err(RegistryError::CorruptSnapshot);
+    }
+    Ok(prefix)
+}
+
 impl VerifiedRegistryState {
     /// Constructs a structural zero-command Registry for one explicit runtime.
     ///
