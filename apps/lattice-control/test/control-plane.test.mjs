@@ -6301,6 +6301,7 @@ test("the four-core product API resolves one proven context and shares work proj
       limit: 32,
     });
     const firstDecision = application.store.recordDecision({
+      owner: { kind: "PROJECT", projectId: project.id },
       scope: project.id,
       subject: "product.navigation",
       content: "使用左側四核心導覽。",
@@ -6312,6 +6313,7 @@ test("the four-core product API resolves one proven context and shares work proj
     });
     decisionState = application.store.getCurrentDecisionsPacket({ scope: project.id, limit: 32 });
     application.store.recordDecision({
+      owner: { kind: "PROJECT", projectId: project.id },
       scope: project.id,
       subject: "product.navigation",
       content: "桌面使用四分頁，手機使用底部四分頁。",

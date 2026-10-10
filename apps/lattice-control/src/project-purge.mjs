@@ -102,6 +102,7 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     || (bot.status === 'READY' && !/^[a-f0-9]{64}$/u.test(bot.scopeDigest)))) fail('PURGE_BOT_RESPONSE_INVALID');
   const canonicalPath = absolute(pg.project.canonicalPath);
   const sqlite = previewProjectPurgeSqlite({ databasePath, projectId: base.projectId, canonicalPath,
+    operationDigest: hash(base.operationId),
     authoritativeProject: { source: 'POSTGRES_PREVIEW', projectId: base.projectId, canonicalPath, scopeDigest: pg.scopeDigest } });
   const codeGraph = await previewControlCodeGraphPurge({ projectId: base.projectId,
     cacheDirectory: absolute(options.codeGraphCacheDirectory ?? path.join(process.env.LOCALAPPDATA || process.cwd(), 'LATTICE/control/code-graphs')) });

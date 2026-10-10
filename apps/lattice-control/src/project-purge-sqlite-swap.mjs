@@ -122,7 +122,35 @@ function readMarker(file, binding) {
   return value;
 }
 
+function survivorRowids(metadata, retained) {
+  const result = {};
+  for (const [table, originals] of Object.entries(metadata.rowids)) {
+    const byContent = new Map(originals.map(({ __purge_rowid__, ...row }) => [JSON.stringify(row), __purge_rowid__]));
+    let nextId = Math.max(0, ...originals.map(row => row.__purge_rowid__));
+    result[table] = retained[table].map(row => {
+      let rowid = byContent.get(JSON.stringify(row));
+      if (rowid === undefined) {
+        if (table === 'decision_state' && originals.length === 1 && retained[table].length === 1
+          && row.slot === 'current' && originals[0].slot === row.slot) {
+          // Only this global aggregate changes. Surviving decision rows, rowids,
+          // request digests and original immutable triggers remain byte-exact.
+          rowid = originals[0].__purge_rowid__;
+        } else if (['decision_request_tombstones', 'decision_purge_receipts'].includes(table)) {
+          rowid = ++nextId;
+        } else fail('PURGE_SQLITE_UNEXPECTED_REPLACEMENT_ROW');
+      }
+      return { __purge_rowid__: rowid, ...row };
+    }).sort((a, b) => a.__purge_rowid__ - b.__purge_rowid__);
+    if (['decision_request_tombstones', 'decision_purge_receipts'].includes(table)
+      && originals.some(({ __purge_rowid__, ...row }) => !retained[table].some(kept => JSON.stringify(kept) === JSON.stringify(row)))) {
+      fail('PURGE_SQLITE_ATTESTATION_REMOVED');
+    }
+  }
+  return result;
+}
+
 function createSurvivorDatabase(file, metadata, retained, validateSnapshot, expectedDigest) {
+  const expectedRowids = survivorRowids(metadata, retained);
   const next = new DatabaseSync(file);
   try {
     next.exec('PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON;');
@@ -134,11 +162,9 @@ function createSurvivorDatabase(file, metadata, retained, validateSnapshot, expe
     if (!['UTF-8', 'UTF-16le', 'UTF-16be'].includes(metadata.header.encoding)) fail('PURGE_SQLITE_HEADER_INVALID');
     next.exec(`PRAGMA encoding='${metadata.header.encoding}'; BEGIN; PRAGMA defer_foreign_keys=ON;`);
     for (const item of metadata.manifest.filter(item => item.type === 'table')) next.exec(item.sql);
-    for (const [table, rows] of Object.entries(metadata.rowids)) {
-      const allowed = new Set(retained[table].map(row => JSON.stringify(row)));
+    for (const [table, rows] of Object.entries(expectedRowids)) {
       for (const original of rows) {
         const { __purge_rowid__, ...row } = original;
-        if (!allowed.has(JSON.stringify(row))) continue;
         const columns = Object.keys(row);
         next.prepare(`INSERT INTO ${quote(table)} (rowid,${columns.map(quote).join(',')}) VALUES (${Array(columns.length + 1).fill('?').join(',')})`)
           .run(__purge_rowid__, ...Object.values(row));
@@ -153,9 +179,7 @@ function createSurvivorDatabase(file, metadata, retained, validateSnapshot, expe
     if (hash(rebuilt.manifest) !== hash(metadata.manifest) || hash(rebuilt.header) !== hash(metadata.header)
       || hash(rebuilt.sequence) !== hash(metadata.sequence)) fail('PURGE_SQLITE_REBUILD_PROFILE');
     for (const [table, rows] of Object.entries(rebuilt.rowids)) {
-      const allowed = new Set(retained[table].map(row => JSON.stringify(row)));
-      const expected = metadata.rowids[table].filter(({ __purge_rowid__, ...row }) => allowed.has(JSON.stringify(row)));
-      if (hash(rows) !== hash(expected)) fail('PURGE_SQLITE_ROW_ID_CHANGED');
+      if (hash(rows) !== hash(expectedRowids[table])) fail('PURGE_SQLITE_ROW_ID_CHANGED');
     }
     const integrity = next.prepare('PRAGMA integrity_check').all();
     if (integrity.length !== 1 || integrity[0].integrity_check !== 'ok') fail('PURGE_SQLITE_REBUILD_INTEGRITY');

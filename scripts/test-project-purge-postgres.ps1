@@ -29,7 +29,7 @@ $botFixture = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
 if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
-if ($Scenario -eq 'bot-purge' -and [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $LifecycleBinary = Join-Path (Split-Path -Parent $RuntimeBinary) 'lattice-runtime.exe' }
+if ($Scenario -in @('bot-purge','all') -and [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $LifecycleBinary = Join-Path (Split-Path -Parent $RuntimeBinary) 'lattice-runtime.exe' }
 if ($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
@@ -65,10 +65,10 @@ $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
     try {
-        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','graph-ownership')
+        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','graph-ownership','bot-purge')
         if ($copies.ContainsKey('legacy')) { $stages += 'upgrade' }
         foreach ($stage in $stages) {
-            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -EpochFixtureBinary $EpochFixtureBinary -LegacyPurgeBinary $LegacyPurgeBinary -NodeBinary $NodeBinary -Scenario $stage)
+            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -EpochFixtureBinary $EpochFixtureBinary -LegacyPurgeBinary $LegacyPurgeBinary -LifecycleBinary $LifecycleBinary -NodeBinary $NodeBinary -Scenario $stage)
             $child = $childOutput[-1] | ConvertFrom-Json
             if ($child.status -cne 'PASS' -or -not $child.fixtureStopped) { throw "FIXTURE_STAGE_FAILED: $stage" }
             foreach ($key in $copies.Keys) {

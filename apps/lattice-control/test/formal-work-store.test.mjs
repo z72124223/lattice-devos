@@ -110,3 +110,21 @@ test("project pages must have one authority and no duplicate task identities", (
   const foreign = page(); foreign.project.id = "project-b";
   assert.throws(() => projectFormalWork([first, foreign]), { code: "CONTROL_WORK_AUTHORITY_REJECTED" });
 });
+
+test("formal decision owners must match the structural PostgreSQL project scope", async () => {
+  const calls = [], store = new FormalWorkStore({ runtime: { call: async (name, command) => {
+    calls.push({ name, command });
+    return { schema_version: "lattice.control.decision-mutation.v1", source: { authority: "POSTGRESQL_TASK_LEDGER" } };
+  } } });
+  const request = { scope:"project-a",subject:"synthetic",content:"Synthetic",rationale:"Verification",
+    source:{kind:"user_confirmation",reference:"thread:fixture/turn:1"},clientRequestId:"fixture-request",
+    expectedRevision:0,expectedDigest:"0".repeat(64) };
+  for (const owner of [{kind:"GLOBAL"},{kind:"PROJECT",projectId:"project-b"},{kind:"PROJECT",projectId:"project-a",extra:true}]) {
+    await assert.rejects(store.recordDecision({...request,owner}), {code:"CONTROL_DECISION_SCOPE_REJECTED"});
+  }
+  assert.equal(calls.length,0);
+  await store.recordDecision({...request,owner:{kind:"PROJECT",projectId:"project-a"}});
+  await store.recordDecision(request);
+  assert.equal(calls.length,2);
+  assert.deepEqual(calls[0],calls[1]);
+});

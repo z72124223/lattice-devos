@@ -19,9 +19,12 @@
 - 新基準由資料庫外的主機憑證固定其摘要與 epoch，資料庫不能自我宣告受信任。預設 Windows 路徑是 `%LOCALAPPDATA%/LATTICE/registry-epochs/<database-identity>/registry-epoch.anchor.json`；主機設定 `LATTICE_REGISTRY_ANCHOR_ROOT` 可改共同根目錄，所有 reader 與維護工具必須一致，不能由 DB、計畫或刪除要求自行指定。憑證不得位於刪除根目錄，路徑別名與硬連結均拒絕。Unix 主機預設使用 XDG_STATE_HOME 或 HOME/.local/state，未宣稱已做 Unix 整合驗收。
 - 摘要不是匿名化，低熵 ID 可能被猜測。新 attested 維護收據只存操作 ID 的承諾摘要；回覆中的原 ID 只供同一呼叫者續作。旧維護收據不自動改寫，報告列出待檢閱筆數。主機憑證僅防資料庫單邊跨 epoch 回滾，不防同一 OS 使用者同時改檔案和 DB，也不防同 epoch 新命令尾端的回滾。
 - task streams／ingress／Control product 等已實作的固定資料閉包一起刪除。未知表、尚未支援的資料種類及跨範圍引用會列入 blockers；不可把 blocker 當成已清除。預覽的 counts 是實際範圍，並非所有未來擴充功能的涵蓋承諾。
-- SQLite：只接受既有精確 schema profile；工作、事件、內部關係、登記、觀察及其附表在交易中清除。名單已先被移除時，必須由當次 PostgreSQL 預覽提供相同 ID、路徑與 scope digest，才能接手殘留資料；名單不存在本身不能充當清除成功。其他專案及所有保留資料的完整內容摘要必須不變；同一路徑的其他專案登記仍會阻擋刪除。
-- 目標有 installation receipt 時，Windows 自動採 `REBUILD_SURVIVORS_V1`：不修改或停用原資料庫的 append-only trigger，以精確原 schema 重建保留資料。逐項核對原 row、rowid、事件序號高水位、完整性、FK、索引、trigger 與檔頭設定，再同目錄替換舊檔。重建前以系統 Windows PowerShell 唯讀檢查 owner/group/DACL，必須與新暫存檔完全相同；自訂 ACL、無法讀取或中途變動都拒絕，不能為通過清除而放寬權限。SACL 稽核設定未驗證；此版未提供權限複製或非 Windows 的重建轉接器。一般開啟會恢復 WAL 模式；SQLite schema 仍為相容的 v7。
-- decisions 的 scope 是自由字串，沒有專案 FK。偵測到目標引用時維持阻擋，所有 decision 與 decision_state 原文保留；沒有找到 ID／路徑也不能證明沒有相關決策。報告另列 `LEGACY_SCOPE_OWNERSHIP_NOT_PROVEN`，需要由正常決策模組提供結構性歸屬後才能處理。不能用字串猜測刪掉整條決策歷史，也不以新增 SQLite epoch 掩蓋歸屬未知。
+- SQLite：只接受既有精確 schema profile；工作、事件、內部關係、登記、觀察及其附表在交易中清除。名單已先被移除時，必須由當次 PostgreSQL 預覽提供相同 ID、路徑與 scope digest，才能接手殘留資料；名單不存在本身不能充當清除成功。其他專案的原始 rows 與收據內容必須不變（共享 decision_state 的明示轉換見下）；同一路徑的其他專案登記仍會阻擋刪除。
+- 目標有 installation receipt 或可證歸屬的 decision 時，Windows 自動採 `REBUILD_SURVIVORS_V1`：不修改或停用原資料庫的 append-only trigger，以精確原 schema 重建保留資料。逐項核對原 row、rowid、事件序號高水位、完整性、FK、索引、trigger 與檔頭設定，再同目錄替換舊檔。重建前以系統 Windows PowerShell 唯讀檢查 owner/group/DACL，必須與新暫存檔完全相同；自訂 ACL、無法讀取或中途變動都拒絕，不能為通過清除而放寬權限。SACL 稽核設定未驗證；此版未提供權限複製或非 Windows 的重建轉接器。一般開啟會恢復 WAL 模式；SQLite 核心 schema 為 v7，新增決策歸屬 extension 需要相容的新讀寫端。
+- Control SQLite 新決策必須明確帶 `owner: {kind: "PROJECT", projectId: "精確 Control 專案 ID"}` 或 `{kind: "GLOBAL"}`。首次寫入在同一交易內安裝固定 sidecar extension，綁定 decision ID 與專案 FK；同 scope 的所有 subject／lineage 必須是同一 owner。不要將專案資料標成 GLOBAL 來規避歸屬。原 decisions 欄位、列摘要與 immutable triggers 不變；新請求摘要包含 owner。舊版已開啟的 writer 會被新增 INSERT guard 拒絕，舊版 constructor 會拒絕擴充後的 exact profile。使用前應更新全部相關讀寫端；首次寫入失敗會將 extension 和 sidecar 一起回滾。
+- 舊列不會自動認領；既有無 owner 的 exact request 仍可重播，但不能在其 scope 新增列。任何缺 owner／混合 owner 的 scope 都阻擋清除，預覽列出未知 scope 的摘要與筆數，不以 scope 字串猜測。只移除完整且專屬於目標的 scope；其他專案／GLOBAL 引用目標 decision ID、專案 ID 或路徑仍阻擋。正常 PostgreSQL 決策原本就有結構性 project scope；若提供 owner，必須與其專案一致。
+- SQLite 重建保留其他決策及 sidecar 的原始 row、rowid、request digest；共享 `decision_state` 依原演算法重算，revision 是**存活列數**，清除後可下降。保留不含專案內容的 before/after revision、digest、operation digest 與驗證時間。舊全域 read/search packet 因身分不符而拒絕，必須重新讀取；B 的 exact mutation replay 回原決策和新的全域 revision/digest，沒有重新證明刪除前的全域封包。
+- 移除決策的 client_request_id 僅保留 domain SHA-256 tombstone，且檢查先於 exact replay。相同請求 ID 即使換 owner 或內容也拒絕；新 ID 配有效 owner 與新 state 可寫入新決策，這不是對相同內容的永久禁令。此行為列在 preview 的 `decisionRetirement`。未驗證的 legacy 資料仍標未知，不增加 SQLite epoch 來掩蓋歸屬問題。
 - 檔案：只接受權威清單中的絕對路徑；拒絕使用者家目錄、磁碟根、工具自身、其他專案、重疊根、祖先 junction、未支援的巢狀 repository 等。junction／symlink 僅移除連結，不追蹤目標。檔案預覽有數量、深度、manifest 大小上限。
 - 硬連結：目前在盤點及執行前驗證時拒絕 `nlink > 1` 的檔案或連結，即使所有名稱看似位於同一專案。移除其中一個名稱會改變共用檔案的連結數與時間戳；本版沒有完整的硬連結歸屬與續作轉接器，因此須在任何 PostgreSQL／檔案刪除前阻擋，不能先刪一半再卡住，也不能略過時間戳驗證或改動外部連結以強行通過。
 - Control 圖譜磁碟快取：從共用快取目錄盤點全部直接子目錄，以 graph.json 格式、project_id、source_root、目錄鍵及內容摘要建立歸屬，涵蓋同專案不同 checkout。只有確定屬於目標的快取才加入相同檔案清單；內容變更、新增目標快取、未知目錄、缺失標頭、連結及超出盤點上限均阻擋。共用快取目錄與專案刪除根重疊也阻擋，以保護其他專案快取。此項不涵蓋 Runtime 的共用 Graphify 記憶體／索引或仍運作的 Control 記憶體快取，執行仍需停止相關寫入者。
@@ -125,7 +128,7 @@ Graph PostgreSQL 歸屬使用 Runtime 原本的來源設定摘要：同一個路
 ```powershell
 node --test apps/lattice-control/test/project-purge*.test.mjs
 cargo build -p lattice-postgres-store --example project_purge_fixture
-cargo build -p lattice-runtime --bin latticed --bin lattice-project-purge
+cargo build -p lattice-runtime --bin latticed --bin lattice-project-purge --bin lattice-runtime
 cargo build -p lattice-runtime --example project_purge_epoch_fixture
 pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <lattice-project-purge.exe 絕對路徑> -SeedBinary <project_purge_fixture.exe 絕對路徑> -RuntimeBinary <latticed.exe 絕對路徑>
 ```
@@ -141,3 +144,5 @@ PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.latt
 `-Scenario survivor-reference` 以正式 Registry API 建立跨專案的 duplicate-denied 憑證，驗證盤點回傳引用筆數、清除被拒絕、資料及 receipt 不變、另一程序仍能重播原歷史。`-Scenario coordinator-absent` 另涵蓋真 PostgreSQL／SQLite／檔案及不同 checkout 的 Control 圖譜快取清除，並核對保留專案快取原文不变。
 
 `-Scenario upgrade -LegacyPurgeBinary <舊版維護 binary 絕對路徑>` 使用真正舊版 binary 產生 v1 摘要與清除 receipt，再以新版 binary 讀回及重試原操作，驗證相容性。舊、新 binary 都會複製並核對 SHA-256；未提供舊版 binary 的一般測試不包含此驗證。
+
+`-Scenario bot-purge` 在兩個全新 cluster 驗證正常 Bot 登錄歸屬、原生閒置證據、Bot 先於 Registry 清除、Control SQLite 決策完整 lineage 清除與保留列號、角色防復活、CLI 續跑及 maintenance finalize；`all` 包含此案例。所有情境保存 Node source hashes 並在完成時核對未變。

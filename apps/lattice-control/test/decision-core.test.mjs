@@ -108,6 +108,7 @@ test("schema v0 initialization rejects decision rows without trusted mutation pr
     const service = new ControlDecisionService({ store });
     const initial = service.current({ scope: "product:lattice", limit: 10 });
     service.record({
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "untrusted.bootstrap",
       content: "This row must not be adopted through schema initialization.",
@@ -162,6 +163,7 @@ test("an explicit decision is bounded, current, revision-bound, and request-idem
   try {
     const initial = service.current({ scope: "product:lattice", limit: 10 });
     const input = {
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "execution.adapter",
       content: "Ordinary work uses disposable codex exec workers.",
@@ -204,6 +206,7 @@ test("an explicit decision is bounded, current, revision-bound, and request-idem
     );
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...input,
         expectedRevision: Number.MAX_SAFE_INTEGER,
         expectedDigest: "f".repeat(64),
@@ -212,6 +215,7 @@ test("an explicit decision is bounded, current, revision-bound, and request-idem
     );
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...input,
         clientRequestId: "decision-record-2",
         expectedRevision: recorded.revision,
@@ -221,6 +225,7 @@ test("an explicit decision is bounded, current, revision-bound, and request-idem
     );
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...input,
         subject: "another.subject",
         clientRequestId: "decision-record-3",
@@ -239,6 +244,7 @@ test("supersession retains history and moves the only current decision atomicall
   try {
     const initial = service.current({ scope: "product:lattice", limit: 10 });
     const first = service.record({
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "worker.model",
       content: "Engineering workers use gpt-5.6-terra by default.",
@@ -249,6 +255,7 @@ test("supersession retains history and moves the only current decision atomicall
       expectedDigest: initial.digest,
     });
     const replacementInput = {
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "worker.model",
       content: "Engineering workers use the currently configured balanced model.",
@@ -288,6 +295,7 @@ test("supersession retains history and moves the only current decision atomicall
 
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...replacementInput,
         clientRequestId: "decision-lineage-3",
         expectedRevision: replacement.revision,
@@ -297,6 +305,7 @@ test("supersession retains history and moves the only current decision atomicall
     );
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...replacementInput,
         scope: "product:other",
         clientRequestId: "decision-lineage-4",
@@ -307,6 +316,7 @@ test("supersession retains history and moves the only current decision atomicall
     );
     assert.throws(
       () => service.record({
+      owner: { kind: "GLOBAL" },
         ...replacementInput,
         supersedesDecisionId: "00000000-0000-4000-8000-000000000000",
         clientRequestId: "decision-lineage-5",
@@ -326,6 +336,7 @@ test("read and search are bounded and bound to the same verifiable decision stat
   try {
     const initial = service.current({ scope: "product:lattice", limit: 10 });
     const first = service.record({
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "worker.lifecycle",
       content: "Ordinary workers are disposable after they return bounded evidence.",
@@ -336,6 +347,7 @@ test("read and search are bounded and bound to the same verifiable decision stat
       expectedDigest: initial.digest,
     });
     const second = service.record({
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "worker.lifecycle",
       content: "Ordinary workers are disposable and the foreman owns continuation.",
@@ -347,6 +359,7 @@ test("read and search are bounded and bound to the same verifiable decision stat
       expectedDigest: first.digest,
     });
     const third = service.record({
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "privacy.boundary",
       content: "Decision memory stores explicit decisions, not complete chat transcripts.",
@@ -444,6 +457,7 @@ test("decision inputs reject oversized, secret-like, transcript, reasoning, and 
     const initial = service.current({ scope: "product:lattice", limit: 10 });
     const syntheticSecret = "z".repeat(24);
     const base = {
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "privacy.boundary",
       content: "Only explicit confirmed decisions are durable.",
@@ -529,6 +543,7 @@ test("database constraints and transactions fail closed on double-current, dangl
     const secondService = new ControlDecisionService({ store: secondStore });
     const initial = firstService.current({ scope: "product:lattice", limit: 10 });
     const base = {
+      owner: { kind: "GLOBAL" },
       scope: "product:lattice",
       subject: "single.current",
       content: "Only one current decision may exist for a subject.",
@@ -543,6 +558,10 @@ test("database constraints and transactions fail closed on double-current, dangl
       (error) => error.code === "DECISION_REVISION_MISMATCH",
     );
     assert.equal(firstService.current({ scope: "product:lattice", limit: 10 }).decisions.length, 1);
+    firstStore.database.exec("BEGIN;");
+    for (const id of ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002"]) {
+      firstStore.database.prepare("INSERT INTO decision_project_ownership(decision_id,owner_kind) VALUES (?,'GLOBAL')").run(id);
+    }
 
     assert.throws(
       () => firstStore.database.prepare(`
@@ -585,6 +604,7 @@ test("database constraints and transactions fail closed on double-current, dangl
       ),
       /FOREIGN KEY constraint failed/iu,
     );
+    firstStore.database.exec("ROLLBACK;");
 
     const current = firstService.current({ scope: "product:lattice", limit: 10 });
     const replacement = firstService.record({

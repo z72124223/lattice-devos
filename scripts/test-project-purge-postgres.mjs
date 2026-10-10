@@ -25,6 +25,12 @@ evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary
 const redact = value => String(value ?? '').replaceAll(password, '[FIXTURE_PASSWORD]');
 let sequence = 0;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-finalize.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'project-purge-sqlite-swap.mjs', 'project-purge-code-graph.mjs', 'code-graph.mjs', 'code-graph-model.mjs', 'lattice-runtime-health.mjs', 'store.mjs', 'database-path.mjs', 'decision-project-ownership.mjs'];
+const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
+  const file = fileURLToPath(new URL(`../apps/lattice-control/src/${name}`, import.meta.url));
+  return [name, createHash('sha256').update(readFileSync(file)).digest('hex')];
+}));
+evidence.sourceHashes = sourceHashes();
 function command(executable, argv, env, input, label, expectedSuccess = true) {
   const result = spawnSync(executable, argv, { env, input, encoding: 'utf8', windowsHide: true, timeout: 180000, maxBuffer: 8 * 1024 * 1024 });
   const record = { label, exitCode: result.status, error: result.error?.code ?? null, stdout: redact(result.stdout), stderr: redact(result.stderr) };
@@ -195,7 +201,23 @@ try {
     assert.deepEqual(botRows(),before);
     check('disabled-retirement-trigger-rejected-and-existing-installer-preserves-protection');
     const {LatticeStore}=await import('../apps/lattice-control/src/store.mjs');
-    const sqlitePath=path.join(root,'control.sqlite'), store=new LatticeStore(sqlitePath);store.close();
+    const sqlitePath=path.join(root,'control.sqlite'), store=new LatticeStore(sqlitePath);
+    for (const kind of ['target','survivor']) {
+      store.database.prepare('INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES(?,?,?,?,?)')
+        .run(seeded[`${kind}ProjectId`],`Synthetic ${kind}`,seeded[`${kind}CanonicalPath`],'2026-10-09T00:00:00Z','2026-10-09T00:00:00Z');
+    }
+    const decide=(decisionOwner,scope,clientRequestId,supersedesDecisionId)=> {
+      const state=store.decisionStateIdentity();
+      return store.recordDecision({owner:decisionOwner,scope,subject:'synthetic',content:'Synthetic decision',rationale:'Synthetic verification',
+        source:{kind:'user_confirmation',reference:'thread:synthetic-bot-fixture/turn:1'},clientRequestId,
+        expectedRevision:state.revision,expectedDigest:state.digest,...(supersedesDecisionId?{supersedesDecisionId}:{})});
+    };
+    const aDecision=decide({kind:'PROJECT',projectId:seeded.targetProjectId},'scope-a','fixture-decision-a1');
+    decide({kind:'PROJECT',projectId:seeded.targetProjectId},'scope-a','fixture-decision-a2',aDecision.decision.id);
+    decide({kind:'PROJECT',projectId:seeded.survivorProjectId},'scope-b','fixture-decision-b');
+    decide({kind:'GLOBAL'},'global','fixture-decision-global');
+    const sqliteSurvivors=store.database.prepare("SELECT rowid,* FROM decisions WHERE scope<>'scope-a' ORDER BY rowid").all();
+    store.close();
     const configPath=path.join(root,'purge-config.json'),planPath=path.join(root,'purge-plan.json'),boundaryPath=path.join(root,'native-boundaries.json');
     writeFileSync(configPath,JSON.stringify({projectId:seeded.targetProjectId,operationId:req.operationId,nativeBinary:path.resolve(args.binary),databasePath:sqlitePath,statePath:path.join(root,'progress.json'),codeGraphCacheDirectory:path.join(root,'control-graph'),runtimeGraphWorkDirectory:path.join(root,'runtime-graph'),botService,botBoundaryPath:boundaryPath}));
     const cliPath=fileURLToPath(new URL('../apps/lattice-control/src/project-purge-client.mjs',import.meta.url));
@@ -205,6 +227,16 @@ try {
     const applied=cli('apply',['--plan',planPath,'--confirm',plan.digest,'--maintenance-offline','--bot-boundaries',boundaryPath]);
     assert.equal(applied.status,'SCOPED_PURGED');assert.equal(applied.bot.status,'PURGED');
     assert.equal(applied.report.remaining.some(item=>item.kind==='botLifecycle'),false);
+    assert.equal(applied.report.remaining.some(item=>item.kind==='controlDecisions'),false);
+    assert.equal(plan.sqlite.counts.decisions,2);assert.equal(plan.sqlite.strategy,'REBUILD_SURVIVORS_V1');
+    const rebuilt=new LatticeStore(sqlitePath);
+    try {
+      assert.deepEqual(rebuilt.database.prepare('SELECT rowid,* FROM decisions ORDER BY rowid').all(),sqliteSurvivors);
+      assert.equal(rebuilt.decisionStateIdentity().revision,2);
+      assert.equal(rebuilt.database.prepare('SELECT count(*) AS count FROM decision_request_tombstones').get().count,2);
+      assert.equal(rebuilt.database.prepare('SELECT count(*) AS count FROM decision_purge_receipts').get().count,1);
+    } finally { rebuilt.close(); }
+    check('real-cli-erases-complete-owned-decision-lineage-and-preserves-survivor-and-global-rowids');
     const after=botRows();
     for(let i=0;i<3;i++)assert.deepEqual(after[i],before[i].filter(row=>row.project_id===seeded.survivorProjectId));
     assert.equal(after[3].length,1);assert.deepEqual(Object.keys(after[3][0]),['pair_digest']);
@@ -684,12 +716,6 @@ try {
   }
 
   if (args.scenario === 'coordinator-absent') {
-  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'project-purge-sqlite-swap.mjs', 'project-purge-code-graph.mjs', 'code-graph.mjs', 'code-graph-model.mjs', 'lattice-runtime-health.mjs', 'store.mjs'];
-  const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
-    const file = fileURLToPath(new URL(`../apps/lattice-control/src/${name}`, import.meta.url));
-    return [name, createHash('sha256').update(readFileSync(file)).digest('hex')];
-  }));
-  evidence.sourceHashes = sourceHashes();
   const coordinated = establish('coordinator-absent');
   const codeGraphCacheDirectory = path.join(coordinated.root, 'code-graphs');
   const graphCache = (projectId, sourceRoot) => {
@@ -834,6 +860,8 @@ try {
   evidence.capturedNodeSourcesUnchanged = true;
   check('same-node-source-hashes-through-entire-cli-acceptance');
   }
+  assert.deepEqual(sourceHashes(), evidence.sourceHashes);
+  evidence.capturedNodeSourcesUnchanged = true;
   evidence.status = 'PASS';
 } catch (error) {
   evidence.status = 'FAIL'; evidence.error = redact(error.stack); process.exitCode = 1;

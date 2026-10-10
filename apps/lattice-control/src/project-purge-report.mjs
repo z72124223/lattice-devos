@@ -128,7 +128,9 @@ export function projectPurgeReport(plan, result = null) {
     stages: [
       { kind: 'postgres', counts: plan.postgres.counts, status: result?.postgres?.status === 'PURGED' ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
       { kind: 'sqlite', counts: plan.sqlite.counts, strategy: plan.sqlite.strategy ?? 'IN_PLACE_V1',
-        decisionOwnership: plan.sqlite.retainedDecisionRows === 0 ? 'NO_DECISIONS_PRESENT' : 'LEGACY_SCOPE_OWNERSHIP_NOT_PROVEN',
+        decisionOwnership: plan.sqlite.decisionOwnership ?? (plan.sqlite.retainedDecisionRows === 0 ? 'NO_DECISIONS_PRESENT' : 'LEGACY_SCOPE_OWNERSHIP_NOT_PROVEN'),
+        decisionTransition: plan.sqlite.decisionTransition ?? null,
+        unattributedDecisionScopes: plan.sqlite.unattributedDecisionScopes ?? [],
         ...(plan.sqlite.strategy === 'REBUILD_SURVIVORS_V1' ? {
           requiredAccessCheck: 'WINDOWS_OWNER_GROUP_DACL_EXACT_MATCH', saclAudit: 'NOT_VERIFIED',
           handleExclusion: 'REQUIRES_OFFLINE_MAINTENANCE', powerLossRecoveryGuaranteed: false,
@@ -145,7 +147,7 @@ export function projectPurgeReport(plan, result = null) {
     blockers, external,
     history: plan.postgres.history ?? null,
     remaining: [
-      ...(plan.sqlite.retainedDecisionRows > 0 ? [{ kind: 'controlDecisions', reason: 'FREEFORM_SCOPE_HAS_NO_STRUCTURAL_PROJECT_OWNERSHIP' }] : []),
+      ...((plan.sqlite.unattributedDecisionRows ?? plan.sqlite.retainedDecisionRows) > 0 ? [{ kind: 'controlDecisions', reason: 'FREEFORM_SCOPE_HAS_NO_STRUCTURAL_PROJECT_OWNERSHIP' }] : []),
       ...external.filter(item => !['NO_DATA_IN_CONFIGURED_STORE','NO_TARGET_DATA_IN_VERIFIED_SCOPE'].includes(item.disposition)).map(item => ({ kind: item.kind, ownership: item.ownership,
         reason: item.ownership === 'LATTICE' ? 'LATTICE_OWNED_SCOPE_NOT_VERIFIED' : 'DISCOVERY_AND_ERASURE_NOT_VERIFIED',
         nextStep: item.nextStep })),

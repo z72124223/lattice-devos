@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
-import { validateControlSchemaProfile } from './store.mjs';
+import { validateControlSchemaProfile, validateControlDecisionState, decisionStateAfterPurge } from './store.mjs';
+import { classifyDecisionOwnership, decisionRequestKey } from './decision-project-ownership.mjs';
 import { controlStoreSchemaVersion } from './database-path.mjs';
 import { beginSqliteSurvivorRebuild, sqliteRebuildMetadata, sqliteFileAccessDigests, assertNoSqlitePurgeSwap } from './project-purge-sqlite-swap.mjs';
 
@@ -43,6 +44,7 @@ function planIdentity(plan) {
 
 function snapshot(db) {
   validateControlSchemaProfile(db);
+  validateControlDecisionState(db);
   if (db.prepare('PRAGMA user_version').get().user_version !== controlStoreSchemaVersion) fail('PURGE_SQLITE_SCHEMA_VERSION');
   const rows = {};
   for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()) {
@@ -51,6 +53,8 @@ function snapshot(db) {
     rows[name] = values.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b), 'en'));
   }
   if (Buffer.byteLength(JSON.stringify(rows)) > 32 * 1024 * 1024) fail('PURGE_SQLITE_SCOPE_TOO_LARGE');
+  const retiredRequests = new Set((rows.decision_request_tombstones ?? []).map(row => row.request_digest));
+  if (rows.decisions.some(row => retiredRequests.has(decisionRequestKey(row.client_request_id)))) fail('PURGE_SQLITE_RETIRED_DECISION_PRESENT');
   return rows;
 }
 
@@ -66,6 +70,7 @@ function inspect(db, options, { includeRetained = false } = {}) {
   if (registration && !samePath(registration.canonical_path, canonicalPath)) fail('PURGE_SQLITE_PROJECT_IDENTITY');
   const workIds = new Set(rows.work_items.filter(row => row.project_id === projectId).map(row => row.id));
   const observationIds = new Set(rows.project_observations.filter(row => row.project_id === projectId).map(row => row.id));
+  const decisions = classifyDecisionOwnership(rows, projectId);
   const owned = (table, row) => {
     if (table === 'projects') return row.id === projectId;
     if (['work_items', 'project_registration_details', 'project_observations', 'installation_receipts'].includes(table)) return row.project_id === projectId;
@@ -73,15 +78,18 @@ function inspect(db, options, { includeRetained = false } = {}) {
     if (table === 'conversation_writer_leases') return workIds.has(row.conversation_id);
     if (['project_git_remotes', 'project_rule_documents'].includes(table)) return observationIds.has(row.observation_id);
     if (table === 'project_registration_claims') return samePath(row.canonical_path, canonicalPath);
+    if (table === 'decisions') return decisions.selected.has(row.id);
+    if (table === 'decision_project_ownership') return decisions.selected.has(row.decision_id);
     return false;
   };
-  const retained = {}, counts = {}, blockers = [];
+  const retained = {}, counts = {}, blockers = [...decisions.blockers];
   const otherRoots = [
     ...rows.projects.filter(row => row.id !== projectId).map(row => row.root_path),
     ...rows.project_registration_details.filter(row => row.project_id !== projectId).map(row => row.canonical_path),
   ];
   if (otherRoots.some(root => samePath(root, canonicalPath))) blockers.push('SQLITE_SHARED_PROJECT_ROOT');
-  const needles = [projectId, canonicalPath, absolute(canonicalPath), ...(project ? [project.root_path] : []), ...workIds, ...observationIds].map(fold);
+  const needles = [projectId, canonicalPath, absolute(canonicalPath), ...(project ? [project.root_path] : []),
+    ...workIds, ...observationIds, ...decisions.selected].map(fold);
   const references = value => {
     const walk = (item, depth = 0) => {
       if (depth > 64) fail('PURGE_SQLITE_REFERENCE_DEPTH');
@@ -103,8 +111,31 @@ function inspect(db, options, { includeRetained = false } = {}) {
   }
   if (rows.work_items.some(row => workIds.has(row.id) && ['starting', 'running', 'waiting_approval'].includes(row.status))) blockers.push('SQLITE_ACTIVE_WORK');
   if (rows.conversation_writer_leases.some(row => workIds.has(row.conversation_id))) blockers.push('SQLITE_WRITER_LEASE_PRESENT');
+  let decisionTransition = null;
+  if (decisions.selected.size) {
+    const operationDigest = options.operationDigest;
+    if (!/^[a-f0-9]{64}$/u.test(operationDigest ?? '')) fail('PURGE_SQLITE_DECISION_OPERATION_REQUIRED');
+    const before = rows.decision_state[0];
+    const recordedAt = options.decisionTransition?.recordedAt
+      ?? new Date(Math.max(Date.now(), new Date(before.updated_at).getTime() + 1)).toISOString();
+    if (typeof recordedAt !== 'string' || !Number.isFinite(Date.parse(recordedAt))
+      || new Date(recordedAt).toISOString() !== recordedAt || Date.parse(recordedAt) < Date.parse(before.updated_at)
+      || Date.parse(recordedAt) > Date.now() + 300000) fail('PURGE_SQLITE_DECISION_TIMESTAMP_INVALID');
+    const after = decisionStateAfterPurge(retained.decisions, before, recordedAt);
+    if (rows.decision_purge_receipts.some(row => row.operation_digest === operationDigest)) fail('PURGE_SQLITE_DECISION_OPERATION_REUSED');
+    retained.decision_state = [after];
+    retained.decision_request_tombstones.push(...rows.decisions.filter(row => decisions.selected.has(row.id))
+      .map(row => ({ request_digest: decisionRequestKey(row.client_request_id) })));
+    retained.decision_purge_receipts.push({ operation_digest: operationDigest, before_revision: before.revision,
+      before_digest: before.digest, after_revision: after.revision, after_digest: after.digest, recorded_at: recordedAt });
+    if (Object.values(retained).some(values => values.length > 10000)
+      || Buffer.byteLength(JSON.stringify(retained)) > 32 * 1024 * 1024) fail('PURGE_SQLITE_SCOPE_TOO_LARGE');
+    decisionTransition = { operationDigest, recordedAt, beforeRevision: before.revision, beforeDigest: before.digest,
+      afterRevision: after.revision, afterDigest: after.digest };
+    for (const values of Object.values(retained)) values.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b), 'en'));
+  }
   if (includeRetained) return retained;
-  const strategy = counts.installation_receipts > 0 ? 'REBUILD_SURVIVORS_V1' : 'IN_PLACE_V1';
+  const strategy = counts.installation_receipts > 0 || decisions.selected.size > 0 ? 'REBUILD_SURVIVORS_V1' : 'IN_PLACE_V1';
   let rebuildAccessDigest = null;
   if (strategy === 'REBUILD_SURVIVORS_V1') {
     try { [rebuildAccessDigest] = sqliteFileAccessDigests([path.resolve(databasePath)]); }
@@ -118,7 +149,12 @@ function inspect(db, options, { includeRetained = false } = {}) {
     projectId, canonicalPath: path.resolve(canonicalPath),
     catalogState, authoritativeProject,
     beforeDigest: hash(rows), afterDigest: hash(retained), counts, strategy,
-    retainedDecisionRows: rows.decisions.length,
+    retainedDecisionRows: retained.decisions.length,
+    unattributedDecisionRows: decisions.unassignedRows, unattributedDecisionScopes: decisions.unknown,
+    decisionOwnership: decisions.blockers.length ? 'UNATTRIBUTABLE' : rows.decisions.length ? 'EXPLICIT_OWNERSHIP' : 'NO_DECISIONS_PRESENT',
+    decisionRetirement: { key: 'CLIENT_REQUEST_ID_DOMAIN_SHA256', changedPayloadOrOwnerWithSameKey: 'REJECTED',
+      freshRequestWithFreshKey: 'ALLOWED_WITH_VALID_OWNER_AND_FRESH_STATE' },
+    operationDigest: options.operationDigest ?? null, decisionTransition,
     ...(strategy === 'REBUILD_SURVIVORS_V1' ? {
       rebuildMetadataDigest: sqliteRebuildMetadata(db).digest,
       rebuildAccessDigest,

@@ -159,6 +159,7 @@ test('offline rebuild removes only owned receipts and preserves original trigger
   f.store.appendEvent(f.workA.id, 'highest-id-removed', { synthetic: true });
   const current = f.store.decisionStateIdentity();
   f.store.recordDecision({
+    owner: { kind: "GLOBAL" },
     scope: 'shared', subject: 'unrelated-retained-decision', content: 'Preserve original bytes', rationale: 'Synthetic',
     source: { kind: 'user_confirmation', reference: 'thread:synthetic-survivor/turn:1' },
     clientRequestId: 'synthetic-survivor-decision', expectedRevision: current.revision, expectedDigest: current.digest,
@@ -295,6 +296,7 @@ Set-Acl -LiteralPath $file -AclObject $acl`;
 test('project references in immutable decisions block without modifying the decision ledger', async t => {
   const f = await fixture(t), current = f.store.decisionStateIdentity();
   f.store.recordDecision({
+    owner: { kind: "GLOBAL" },
     scope: `project:${f.own.id}`, subject: 'synthetic-retention', content: 'Synthetic project decision', rationale: 'Synthetic test',
     source: { kind: 'user_confirmation', reference: 'thread:synthetic-purge-test/turn:1' },
     clientRequestId: 'synthetic-purge-decision', expectedRevision: current.revision, expectedDigest: current.digest,
@@ -420,6 +422,7 @@ test('a surviving project sharing an absent target root or registered canonical 
 test('an absent catalog still blocks retained project references and immutable decisions', async t => {
   const f = await fixture(t), current = f.store.decisionStateIdentity();
   f.store.recordDecision({
+    owner: { kind: "GLOBAL" },
     scope: `project:${f.own.id}`, subject: 'synthetic-retained-after-catalog-removal', content: 'Synthetic retained decision', rationale: 'Synthetic test',
     source: { kind: 'user_confirmation', reference: 'thread:synthetic-purge-test/turn:2' },
     clientRequestId: 'synthetic-absent-purge-decision', expectedRevision: current.revision, expectedDigest: current.digest,

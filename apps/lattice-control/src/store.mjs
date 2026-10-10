@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { controlStoreSchemaVersion } from "./database-path.mjs";
 import { assertNoSqlitePurgeSwap } from "./project-purge-sqlite-swap.mjs";
+import { decisionOwnershipNames, decisionOwnershipManifest, normalizedDecisionOwner, prepareDecisionOwnership, assertDecisionRequestNotRetired } from "./decision-project-ownership.mjs";
 
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const statuses = new Set([
@@ -834,7 +835,7 @@ function normalizedDecisionRecordInput(input) {
       "expectedRevision",
       "expectedDigest",
     ],
-    ["supersedesDecisionId"],
+    ["supersedesDecisionId", "owner"],
   )) {
     throw decisionError(
       "DECISION_INPUT_REJECTED",
@@ -844,6 +845,7 @@ function normalizedDecisionRecordInput(input) {
   }
   return {
     scope: normalizedDecisionIdentifier(input.scope, "decision scope", 128),
+    owner: normalizedDecisionOwner(input.owner),
     subject: normalizedDecisionIdentifier(input.subject, "decision subject", 256),
     content: normalizedDecisionText(input.content, "decision content", 4_096),
     rationale: normalizedDecisionText(input.rationale, "decision rationale", 4_096),
@@ -969,6 +971,7 @@ function decisionRequestDigest(input) {
     supersedes_decision_id: input.supersedesDecisionId,
     expected_revision: input.expectedRevision,
     expected_digest: input.expectedDigest,
+    ...(input.owner ? { owner: input.owner } : {}),
   }), "utf8").digest("hex");
 }
 
@@ -1015,6 +1018,19 @@ function decisionRowsDigest(rows) {
     row.created_at,
   ])), "utf8").digest("hex");
 }
+
+export function decisionStateAfterPurge(rows, prior, recordedAt) {
+  const ordered = [...rows].sort((a, b) => {
+    for (const key of ["scope", "subject", "created_at", "id"]) {
+      const result = Buffer.compare(Buffer.from(a[key]), Buffer.from(b[key]));
+      if (result) return result;
+    }
+    return 0;
+  });
+  return { ...prior, revision: ordered.length, digest: decisionRowsDigest(ordered), updated_at: recordedAt };
+}
+
+export function validateControlDecisionState(database) { return assertDecisionStateIntegrity(database); }
 
 function decodeDecision(row) {
   if (!row) return null;
@@ -1367,7 +1383,11 @@ function referenceControlSchemaManifest() {
 }
 
 export function validateControlSchemaProfile(database) {
-  if (JSON.stringify(controlSchemaManifest(database)) !== JSON.stringify(referenceControlSchemaManifest())) {
+  const actualManifest = controlSchemaManifest(database);
+  const hasOwnership = actualManifest.some(row => decisionOwnershipNames.has(row.name));
+  const expectedManifest = [...referenceControlSchemaManifest(), ...(hasOwnership ? decisionOwnershipManifest(normalizeSchemaSql) : [])]
+    .sort((a, b) => a.type === b.type ? (a.name < b.name ? -1 : a.name > b.name ? 1 : 0) : (a.type < b.type ? -1 : 1));
+  if (JSON.stringify(actualManifest) !== JSON.stringify(expectedManifest)) {
     schemaProfileFailure("exact SQL manifest");
   }
   for (const [table, expectedColumns] of schemaColumns) {
@@ -4154,6 +4174,8 @@ export class LatticeStore {
     const requestDigest = decisionRequestDigest(normalized);
     this.database.exec("BEGIN IMMEDIATE;");
     try {
+      validateControlSchemaProfile(this.database);
+      assertDecisionRequestNotRetired(this.database, normalized.clientRequestId);
       const before = assertDecisionStateIntegrity(this.database);
       const replay = before.rows.find(
         ({ client_request_id: requestId }) => requestId === normalized.clientRequestId,
@@ -4229,6 +4251,7 @@ export class LatticeStore {
       );
       const createdAt = new Date(Math.max(Date.now(), previousTimestamp + 1)).toISOString();
       const id = randomUUID();
+      prepareDecisionOwnership(this.database, normalized, id);
       if (predecessor) {
         const superseded = this.database.prepare(`
           UPDATE decisions SET status = 'superseded'
