@@ -13,7 +13,8 @@
 
 ## 支援範圍與拒絕條件
 
-- 容量限制：目前 PostgreSQL 保留資料驗證會載入完整資料快照；每表最多 100,000 列，總 JSON 最多 64 MiB。超過任一界線會在產生計畫前回報 `PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED`，不會截斷範圍或執行刪除。2026-10-10 的既有正式資料庫唯讀預覽已重現此限制，因此**通用入口已實作，但此正式資料庫的完整清除需求仍未完成**。後續需以分批串流摘要取代整體載入，先證明與舊摘要位元一致、通過超限合成資料測試，再做正式資料庫唯讀預覽；不得直接提高限制或把拒絕視為成功。
+- PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 512 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。
+- 2026-10-10 在含 584,134 筆 Graphify records 的既有資料庫上完成唯讀原生預覽，總耗時約 64 秒，未執行刪除。預覽仍列出既有舊 analysis 歸屬未明、跨專案 decision 引用及維護元件／離線條件等阻擋；這證明能完成盤點，不代表該專案已可刪除或已清空。
 - PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。舊版 `VERIFIED_SUFFIX_V1` 只接受目標命令構成全域歷史最後一段，清除後回到原始保留前綴，完整重播仍從起點開始。沒有選擇資料保留政策的舊計畫維持此限制。
 - 選擇 `registryPolicy: "MINIMAL_ATTESTATION"` 後，`ATTESTED_EPOCH_V1` 可處理交錯歷史。清除前完整驗證舊歷史／前次受信任基準與新命令；清除後一般保留專案的原始命令、語意收據及 PostgreSQL 持久化收據保持原值，存於新的歷史基準。必須移除的跨專案歷史命令，在預覽列出命令承諾與 record-set 摘要，授權綁定同一範圍；舊指令 ID 以摘要保留並拒絕任何內容的重送。新的指令 ID 可登記已釋放的身分。
 - 這項政策的歷史保證為 `ATTESTED_FROM_SEAL`，新的命令從已驗證基準完整重播；不是刪除前全域歷史仍能從零重播。只有一份當前基準；下次清除會再次過濾，不能保留可能含新刪除目標的舊基準原文。其他專案的**目前狀態**仍引用目標時維持 `REGISTRY_CURRENT_SURVIVOR_REFERENCE`，必須先走該專案正常調和程序，不可用歷史刪除授權改掉它的現況。
@@ -147,3 +148,5 @@ PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.latt
 `-Scenario upgrade -LegacyPurgeBinary <舊版維護 binary 絕對路徑>` 使用真正舊版 binary 產生 v1 摘要與清除 receipt，再以新版 binary 讀回及重試原操作，驗證相容性。舊、新 binary 都會複製並核對 SHA-256；未提供舊版 binary 的一般測試不包含此驗證。
 
 `-Scenario bot-purge` 在兩個全新 cluster 驗證正常 Bot 登錄歸屬、原生閒置證據、Bot 先於 Registry 清除、Control SQLite 決策完整 lineage 清除與保留列號、角色防復活、CLI 續跑及 maintenance finalize；`all` 包含此案例。所有情境保存 Node source hashes 並在完成時核對未變。
+
+`-Scenario streaming -LegacyPurgeBinary <串流化前相容 binary 絕對路徑>` 比對 Unicode／大小寫／數字字串的小型原生圖譜，驗證新舊預覽完全相同、兩方向收據讀回及舊計畫接受。`-Scenario streaming-large` 使用正常 Graph API 在兩個專案寫入合計 110,000 列、超過 64 MiB；舊版應容量拒絕，新版仍完整檢查跨專案引用，刪除目標 55,000 列後核對保留 55,000 列原文摘要及原生 receipt，並重試同操作。兩種情境各使用新隔離 cluster，不連線正式庫；輸出記錄執行耗時及新舊 binary 雜湊。它們須明確選擇，不由未指定相容舊 binary 的 `all` 推定已驗證。

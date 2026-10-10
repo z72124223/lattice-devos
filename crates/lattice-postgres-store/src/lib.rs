@@ -14,6 +14,7 @@ mod live;
 mod migrations;
 mod postgres_setup;
 mod project_purge;
+mod project_purge_snapshot;
 mod project_registry;
 mod registry_epoch;
 pub mod registry_epoch_anchor;

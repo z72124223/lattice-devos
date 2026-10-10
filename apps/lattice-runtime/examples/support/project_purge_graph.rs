@@ -93,16 +93,38 @@ pub fn run(
             &request,
             &snapshot,
             GraphifyIdentity::task033(digest('1'), digest('2'), digest('3')).unwrap(),
-            vec![
-                GraphifyRawNode::new(
-                    "synthetic-node",
-                    "synthetic graph",
-                    "trait",
-                    GraphSourceProvenance::new(&source, Some(1), Some(2)).unwrap(),
-                    GraphConfidence::Extracted,
-                )
-                .unwrap(),
-            ],
+            (0..match mode {
+                "graph-seed-large" => 55_000,
+                "graph-seed-compat" => 8,
+                _ => 1,
+            })
+                .map(|index| {
+                    GraphifyRawNode::new(
+                        format!("synthetic-node-{index}"),
+                        if mode == "graph-seed-compat" {
+                            format!(
+                                "synthetic graph {}",
+                                [
+                                    "a",
+                                    "A",
+                                    "a0",
+                                    "a00",
+                                    "繁體",
+                                    "é",
+                                    "0.1",
+                                    "18446744073709551615"
+                                ][index]
+                            )
+                        } else {
+                            format!("synthetic graph {index:05}")
+                        },
+                        "trait",
+                        GraphSourceProvenance::new(&source, Some(1), Some(2)).unwrap(),
+                        GraphConfidence::Extracted,
+                    )
+                    .unwrap()
+                })
+                .collect(),
             vec![],
             digest('4'),
             digest('5'),
