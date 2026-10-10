@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'coordinator', 'coordinator-absent', 'inventory', 'upgrade'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'upgrade'].includes(args.scenario));
 if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -21,7 +21,7 @@ assert.ok(path.basename(runRoot).match(/^[0-9a-f]{32}$/));
 const password = randomBytes(24).toString('hex');
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(LATTICE_|PG|DATABASE_URL$)/i.test(key)));
 const evidence = { schema: 'lattice.project-purge-live-scenarios.v1', status: 'RUNNING', port, checks: [], databases: [] };
-evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary', ...(args['legacy-binary'] ? ['legacy-binary'] : [])].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
+evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary', ...(args['legacy-binary'] ? ['legacy-binary'] : []), ...(args['epoch-binary'] ? ['epoch-binary'] : [])].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
 const redact = value => String(value ?? '').replaceAll(password, '[FIXTURE_PASSWORD]');
 let sequence = 0;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -33,8 +33,9 @@ function command(executable, argv, env, input, label, expectedSuccess = true) {
   return record;
 }
 function check(name, detail = {}) { evidence.checks.push({ name, passed: true, ...detail }); }
-function sql(env, statement) {
-  return command(args.psql, ['-X', '-A', '-t', '-h', '127.0.0.1', '-p', String(port), '-U', 'runtime_bootstrap', '-d', `lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0, 8)}_base`, '-v', 'ON_ERROR_STOP=1', '-c', statement], env, undefined, 'sql').stdout.trim();
+function sql(env, statement, expectedSuccess = true) {
+  const result=command(args.psql, ['-X', '-A', '-t', '-h', '127.0.0.1', '-p', String(port), '-U', 'runtime_bootstrap', '-d', `lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0, 8)}_base`, '-v', 'ON_ERROR_STOP=1', '-f', '-'], { ...env, PGCLIENTENCODING: 'UTF8' }, statement, 'sql', expectedSuccess);
+  return expectedSuccess?result.stdout.trim():result;
 }
 function native(env, request, expectedSuccess = true, binary = args.binary) {
   const label = binary === args.binary ? 'native' : 'legacy-native';
@@ -65,7 +66,7 @@ function establish(order, { install = true } = {}) {
   const env = { ...baseEnv, LATTICE_TASK019_HOST: '127.0.0.1', LATTICE_TASK019_PORT: String(port), LATTICE_TASK019_RUN_ID: runId, LATTICE_TASK019_PASSWORD: password,
     LATTICE_RUNTIME_INTEGRATION: 'CORE_ONLY', LATTICE_FULL_CHAIN_RUN_MODE: 'RESUME_EXISTING', LATTICE_DELIVERY_CODEX_MODE: 'OFFICIAL_CODEX_APP_SERVER', LATTICE_MANAGED_FOREMAN_MODE: 'DISABLED',
     LATTICE_STORE_DAEMON_INSTANCE_ID: 'task050-fresh-process', LATTICE_STORE_DAEMON_EPOCH: '50', LATTICE_STORE_AUTHORITY_REVISION: '50', LATTICE_STORE_OBSERVATION_DIGEST: 'a'.repeat(64), LATTICE_STORE_AUTHORITY_HEAD_DIGEST: 'b'.repeat(64),
-    LATTICE_PURGE_FIXTURE_ROOT: root, LATTICE_PURGE_FIXTURE_ONLY: '1' };
+    LATTICE_PURGE_FIXTURE_ROOT: root, LATTICE_PURGE_FIXTURE_ONLY: '1', LATTICE_REGISTRY_ANCHOR_ROOT: path.join(root, 'anchors') };
   command(args['runtime-binary'], ['--postgres-initialize'], env, undefined, `${order}-initialize`);
   command(args['runtime-binary'], ['--postgres-bootstrap'], env, undefined, `${order}-bootstrap`);
   // Product bootstrap establishes the requested synthetic authority. This newly
@@ -74,7 +75,7 @@ function establish(order, { install = true } = {}) {
   assert.equal(sql(env, 'SELECT count(*) FROM control.project_registry_commands'), '0');
   const stopped = sql(env, "UPDATE control.runtime_admission SET admission_mode='STOPPED',daemon_instance_id=NULL,daemon_epoch=NULL,authority_revision=0,observation_digest=NULL,authority_head_digest=NULL WHERE singleton AND admission_mode='ACTIVE' AND daemon_instance_id='task050-fresh-process' AND daemon_epoch=50 AND authority_revision=50 AND observation_digest=decode(repeat('a',64),'hex') AND authority_head_digest=decode(repeat('b',64),'hex') RETURNING admission_mode");
   assert.match(stopped, /^STOPPED\r?\nUPDATE 1$/);
-  const seeded = JSON.parse(command(args['seed-binary'], order === 'target-first' ? ['target-first'] : [], env, undefined, `${order}-seed`).stdout);
+  const seeded = JSON.parse(command(args['seed-binary'], ['target-first', 'survivor-reference'].includes(order) ? [order] : [], env, undefined, `${order}-seed`).stdout);
   seeded.targetTaskRef = seeded.records.find(x => x.projectId === seeded.targetProjectId).taskRef;
   seeded.survivorTaskRef = seeded.records.find(x => x.projectId === seeded.survivorProjectId).taskRef;
   seeded.targetCanonicalPath = path.join(root, 'project-a');
@@ -215,6 +216,100 @@ try {
   check('blocked-online-or-uninstalled-digests-cannot-authorize-later-maintenance-apply');
   }
 
+  if (['epoch','epoch-reference'].includes(args.scenario)) {
+    for (const order of [args.scenario==='epoch'?'target-first':'survivor-reference']) {
+      const {env,seeded}=establish(order);
+      const request={projectId:seeded.targetProjectId,operationId:`epoch-${order}`,registryPolicy:'MINIMAL_ATTESTATION'};
+      assert.equal(native(env,{action:'install-epoch',authorization:'INSTALL_REGISTRY_EPOCH_MAINTENANCE'}).value.status,'INSTALLED');
+      const vectors=[['register-alpha','811300be1d2eebe93b7f5a4cdcc1a06aeb5033f9b48d8630a3557456ebae8fc1'],['命令-台灣','4129561f037081570f776d844308446a06f5fecdbc7cae04feaec81f479a4c43'],['quote"slash\\line\nend','028fcad801490b3ad55228ac222462d20e7b4c6cc602a92e0364d9ec2b01d458']];
+      for(const [id,commitment] of vectors) assert.equal(sql(env,`SELECT registry_epoch.command_key_v1($fixture$${id}$fixture$)`),commitment);
+      assert.equal(sql(env,"SELECT registry_epoch.command_key_v1(U&'e\\0301')=registry_epoch.command_key_v1('é')"),'t');
+      check(`${order}-sql-command-commitments-match-pure-unicode-and-escaping-vectors`);
+      const original=rows(env);
+      const originalRetry=JSON.parse(command(args['epoch-binary'],['retry-survivor'],env,undefined,`${order}-original-survivor-retry`).stdout);
+      const originalCommands=original.find(([table])=>table==='control.project_registry_commands')[1];
+      const survivorCommand=originalCommands.find(row=>row.command_id==='fixture-register-purge-survivor');
+      const survivorProjects=original.find(([table])=>table==='control.project_registry_projects')[1].filter(row=>row.project_id===seeded.survivorProjectId);
+      const preview=native(env,{action:'preview',...request}).value;
+      assert.equal(preview.status,'READY',JSON.stringify(preview.blockers));
+      assert.equal(preview.history.assurance,'ATTESTED_FROM_SEAL');
+      assert.equal(preview.history.redactedSurvivorCommands.length,order==='survivor-reference'?1:0);
+      assert.deepEqual(rows(env),original);
+      check(`${order}-epoch-preview-binds-explicit-survivor-redactions-without-writing`);
+      for(const [change,restore] of [
+        ['GRANT SELECT ON registry_epoch.current_seal TO lattice_runtime','REVOKE SELECT ON registry_epoch.current_seal FROM lattice_runtime'],
+        ['ALTER FUNCTION registry_epoch.read_v1() VOLATILE','ALTER FUNCTION registry_epoch.read_v1() STABLE'],
+      ]) {
+        sql(env,change);assert.notEqual(native(env,{action:'preview',...request},false).exitCode,0);sql(env,restore);
+      }
+      check(`${order}-expanded-table-grant-and-altered-read-function-rejected`);
+      const anchorRoot=preview.protectedRoots.find(root=>path.dirname(root)===env.LATTICE_REGISTRY_ANCHOR_ROOT);
+      assert.ok(anchorRoot); assert.match(path.basename(anchorRoot),/^[a-f0-9]{64}$/);
+      const anchorPath=path.join(anchorRoot,'registry-epoch.anchor.json');
+      const canonical=value=>Array.isArray(value)?value.map(canonical):value!==null&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value;
+      const operationDigest=createHash('sha256').update(`${request.operationId}\n${request.projectId}\n${preview.scopeDigest}`).digest('hex');
+      const pending={schema:'lattice.registry-epoch.anchor.v1',dbIdentityDigest:path.basename(anchorRoot),status:'pending',previous:null,next:{epoch:1,sealDigest:preview.history.sealDigest},operationDigest};
+      mkdirSync(anchorRoot,{recursive:true});writeFileSync(anchorPath,JSON.stringify(canonical(pending)));
+      assert.notEqual(command(args['epoch-binary'],['retry-survivor'],env,undefined,`${order}-pending-reader`,false).exitCode,0);
+      assert.notEqual(native(env,{action:'preview',...request},false).exitCode,0);
+      assert.notEqual(native(env,{action:'apply',...request,operationId:'wrong-operation',expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'},false).exitCode,0);
+      assert.deepEqual(rows(env),original);
+      assert.equal(native(env,{action:'preview',...request,expectedScopeDigest:preview.scopeDigest}).value.scopeDigest,preview.scopeDigest);
+      check(`${order}-precommit-pending-state-blocks-runtime-and-wrong-operation-but-resumes-exact-source`);
+      const applied=native(env,{action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value;
+      assert.equal(applied.status,'PURGED');
+      const after=rows(env);
+      const targetNeedles=[seeded.targetProjectId,seeded.targetCanonicalPath,seeded.targetTaskRef,seeded.targetStreamId];
+      assert.deepEqual(selectRows(after,targetNeedles),[]);
+      assert.deepEqual(after.find(([table])=>table==='control.project_registry_projects')[1],survivorProjects);
+      const seal=after.find(([table])=>table==='registry_epoch.current_seal')[1][0];
+      assert.deepEqual(seal.payload.commandRows,[survivorCommand]);
+      assert.equal(seal.epoch,1);
+      assert.equal(sql(env,'SELECT count(*) FROM control.project_registry_commands'),'0');
+      for(const [id,code] of [['fixture-register-purge-target','REGISTRY_COMMAND_REDACTED'],['fixture-register-purge-survivor','REGISTRY_ARCHIVED_COMMAND_REPLAY_REQUIRED']]) {
+        const originalRow=originalCommands.find(row=>row.command_id===id);
+        const probe=sql(env,`INSERT INTO control.project_registry_commands SELECT * FROM jsonb_populate_record(NULL::control.project_registry_commands,'${JSON.stringify(originalRow).replaceAll("'","''")}'::jsonb)`,false);
+        assert.notEqual(probe.exitCode,0);assert.ok(probe.stderr.includes(code),probe.stderr);
+      }
+      check(`${order}-sql-insert-guard-rejects-erased-and-archived-command-ids`);
+      const inspected=JSON.parse(command(args['epoch-binary'],['retry-survivor'],env,undefined,`${order}-epoch-runtime-readback`).stdout);
+      assert.deepEqual(inspected,originalRetry);
+      assert.equal(JSON.parse(command(args['epoch-binary'],['redacted'],env,undefined,`${order}-redacted-id`).stdout).status,'REDACTED_ID_REJECTED');
+      check(`${order}-fresh-runtime-verifies-anchored-baseline-and-original-survivor-row`);
+      assert.equal(sql(env,`SELECT count(*) FROM project_purge.receipts WHERE operation_id='${request.operationId}'`),'0');
+      writeFileSync(anchorPath,JSON.stringify(canonical(pending)));
+      assert.notEqual(command(args['epoch-binary'],['retry-survivor'],env,undefined,`${order}-committed-pending-reader`,false).exitCode,0);
+      assert.deepEqual(native(env,{action:'status',...request}).value,applied);
+      assert.equal(JSON.parse(readFileSync(anchorPath,'utf8')).status,'active');
+      assert.deepEqual(native(env,{action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value,applied);
+      assert.deepEqual(rows(env),after);
+      check(`${order}-committed-pending-state-activates-only-from-matching-receipt-and-retry-is-idempotent`);
+      renameSync(anchorPath,`${anchorPath}.fixture-hidden`);
+      assert.notEqual(native(env,{action:'preview',projectId:seeded.survivorProjectId,operationId:'missing-anchor',registryPolicy:'MINIMAL_ATTESTATION'},false).exitCode,0);
+      assert.equal(existsSync(anchorPath),false);
+      renameSync(`${anchorPath}.fixture-hidden`,anchorPath);
+      check(`${order}-missing-host-anchor-is-never-rebuilt-from-database`);
+      sql(env,"UPDATE registry_epoch.current_seal SET seal_digest=repeat('f',64)");
+      const tampered=native(env,{action:'preview',projectId:seeded.survivorProjectId,operationId:'tampered',registryPolicy:'MINIMAL_ATTESTATION'},false);
+      assert.notEqual(tampered.exitCode,0);
+      sql(env,`UPDATE registry_epoch.current_seal SET seal_digest='${applied.registrySealDigest}'`);
+      check(`${order}-database-only-seal-substitution-rejected`);
+      const secondRequest={projectId:seeded.survivorProjectId,operationId:`second-${order}`,registryPolicy:'MINIMAL_ATTESTATION'};
+      const second=native(env,{action:'preview',...secondRequest}).value;
+      assert.equal(second.status,'READY',JSON.stringify(second.blockers));
+      const secondApplied=native(env,{action:'apply',...secondRequest,expectedScopeDigest:second.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value;
+      assert.equal(secondApplied.history.epoch,2);
+      assert.equal(sql(env,'SELECT count(*) FROM control.project_registry_projects'),'0');
+      assert.equal(sql(env,"SELECT count(*) FROM registry_epoch.used_commands WHERE disposition='ARCHIVED'"),'0');
+      assert.equal(sql(env,"SELECT count(*) FROM registry_epoch.used_commands WHERE disposition='REDACTED'"),order==='survivor-reference'?'3':'2');
+      assert.deepEqual(selectRows(rows(env),[seeded.survivorProjectId,seeded.survivorCanonicalPath]),[]);
+      check(`${order}-second-epoch-erases-prior-baseline-content-and-carries-command-tombstones`);
+      assert.equal(JSON.parse(command(args['epoch-binary'],['redacted'],env,undefined,`${order}-second-redacted-id`).stdout).status,'REDACTED_ID_REJECTED');
+      assert.deepEqual(JSON.parse(command(args['epoch-binary'],['new-tail'],env,undefined,`${order}-new-tail`).stdout),{status:'NEW_TAIL_VERIFIED',epoch:2,ordinal:1});
+      check(`${order}-redacted-id-blocks-changed-payload-across-epochs-and-new-id-reuses-released-identity`);
+    }
+  }
+
   if (args.scenario === 'main') {
   const { env, seeded } = establish('survivor-first');
   assert.equal(typeof seeded.targetProjectId, 'string');
@@ -342,6 +437,32 @@ try {
   check('interleaved-history-fails-closed-with-no-mutation');
   }
 
+  if (args.scenario === 'survivor-reference') {
+  const { env, seeded } = establish('survivor-reference');
+  const request = { projectId: seeded.targetProjectId, operationId: 'fixture-survivor-reference' };
+  assert.equal(sql(env, "SELECT denial_existing_project_id FROM control.project_registry_commands WHERE command_id='fixture-duplicate-survivor'"), seeded.targetProjectId);
+  const before = rows(env, { includeMaintenance: true });
+  const preview = native(env, { action: 'preview', ...request }).value;
+  assert.equal(preview.status, 'BLOCKED');
+  assert.ok(preview.blockers.some(item => item.code === 'REGISTRY_INTERLEAVED_HISTORY_REQUIRES_MIGRATION'
+    && item.detail === 'REGISTRY_COMPACTION_TRUST_ROOT_REQUIRED'));
+  for (const table of ['control.project_registry_commands', 'control.project_registry_observations']) {
+    const blocker = preview.blockers.find(item => item.code === 'REGISTRY_SURVIVOR_REFERENCE' && item.table === table);
+    assert.equal(blocker?.count, 1);
+    assert.deepEqual(Object.keys(blocker).sort(), ['code', 'count', 'table']);
+  }
+  assert.deepEqual(rows(env, { includeMaintenance: true }), before);
+  check('real-registry-denied-command-retains-target-id-and-owned-observation-and-preview-reports-counts-only');
+  const applied = native(env, { action: 'apply', ...request, expectedScopeDigest: preview.scopeDigest, authorization: 'ERASE_PROJECT_DATA' }).value;
+  assert.equal(applied.status, 'BLOCKED');
+  assert.deepEqual(rows(env, { includeMaintenance: true }), before);
+  assert.equal(sql(env, 'SELECT count(*) FROM project_purge.receipts'), '0');
+  check('survivor-reference-apply-rejects-with-all-rows-and-receipts-unchanged');
+  const replay = JSON.parse(command(args['seed-binary'], ['verify-survivor'], env, undefined, 'reference-survivor-replay').stdout);
+  assert.equal(replay.status, 'VERIFIED');
+  check('fresh-process-registry-replay-preserves-the-original-cross-project-denial');
+  }
+
   if (args.scenario === 'coordinator') {
   const coordinated = establish('coordinator');
   const { LatticeStore } = await import('../apps/lattice-control/src/store.mjs');
@@ -362,7 +483,7 @@ try {
   const coordinatorBefore = rows(coordinated.env);
   const coordinatorSurvivors = [coordinated.seeded.survivorProjectId, coordinated.seeded.survivorStreamId, coordinated.seeded.survivorTaskRef];
   const survivorPgBefore = hash(selectRows(coordinatorBefore, coordinatorSurvivors));
-  const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), operationId: 'fixture-coordinator' });
+  const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator' });
   assert.equal(plan.status, 'READY', JSON.stringify(plan.blockers));
   writeFileSync(path.join(runRoot, 'coordinator-plan.json'), JSON.stringify(plan, null, 2) + '\n');
   const appliedCoordinator = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true });
@@ -378,13 +499,28 @@ try {
   }
 
   if (args.scenario === 'coordinator-absent') {
-  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'store.mjs'];
+  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'project-purge-code-graph.mjs', 'code-graph.mjs', 'code-graph-model.mjs', 'lattice-runtime-health.mjs', 'store.mjs'];
   const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
     const file = fileURLToPath(new URL(`../apps/lattice-control/src/${name}`, import.meta.url));
     return [name, createHash('sha256').update(readFileSync(file)).digest('hex')];
   }));
   evidence.sourceHashes = sourceHashes();
   const coordinated = establish('coordinator-absent');
+  const codeGraphCacheDirectory = path.join(coordinated.root, 'code-graphs');
+  const graphCache = (projectId, sourceRoot) => {
+    const graph = { schema_version: 'lattice.control.code-graph.v1', source: 'GRAPHIFY', authority: 'DERIVED',
+      commit: '1'.repeat(40), nodes: [], edges: [], project_id: projectId, source_root: sourceRoot };
+    const key = createHash('sha256').update(`${projectId}\0${sourceRoot.toLocaleLowerCase()}`).digest('hex');
+    const root = path.join(codeGraphCacheDirectory, key);
+    mkdirSync(path.join(root, 'runs'), { recursive: true });
+    writeFileSync(path.join(root, 'graph.json'), JSON.stringify({ cache_digest: hash(graph), ...graph }));
+    writeFileSync(path.join(root, 'runs', 'analysis.txt'), `Synthetic derived content for ${projectId}`);
+    return root;
+  };
+  const targetCaches = [coordinated.seeded.targetCanonicalPath, path.join(coordinated.root, 'other-checkout')]
+    .map(root => graphCache(coordinated.seeded.targetProjectId, root));
+  const survivorCache = graphCache(coordinated.seeded.survivorProjectId, coordinated.seeded.survivorCanonicalPath);
+  const survivorCacheBefore = hash(readFileSync(path.join(survivorCache, 'graph.json')));
   const { LatticeStore } = await import('../apps/lattice-control/src/store.mjs');
   const { DatabaseSync } = await import('node:sqlite');
   const sqlitePath = path.join(coordinated.root, 'control-fixture.sqlite');
@@ -420,6 +556,7 @@ try {
   writeFileSync(configPath, JSON.stringify({
     projectId: coordinated.seeded.targetProjectId, operationId: 'fixture-coordinator-absent',
     nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'),
+    codeGraphCacheDirectory,
     externalResources: [{ kind: 'codex', reference: 'thread:synthetic-unverified-reference', source: 'synthetic-fixture' }],
   }, null, 2) + '\n');
   const cli = (alias, action, flags, expectedCode = 0) => {
@@ -443,6 +580,8 @@ try {
   assert.equal(plan.sqlite.authoritativeProject.canonicalPath, coordinated.seeded.targetCanonicalPath);
   assert.equal(plan.sqlite.authoritativeProject.scopeDigest, plan.postgres.scopeDigest);
   assert.equal(plan.sqlite.counts.project_registration_claims, 1);
+  assert.equal(plan.codeGraph.discovery, 'COMPLETE');
+  assert.deepEqual([...plan.codeGraph.roots].sort(), [...targetCaches].sort());
   assert.equal(hash(rows(coordinated.env)), hash(postgresBefore));
   assert.equal(hash(sqliteRows()), hash(sqliteBefore));
   assert.ok(existsSync(coordinated.seeded.targetCanonicalPath));
@@ -455,6 +594,10 @@ try {
   assert.equal(resumed.report.stages.find(stage => stage.kind === 'sqlite').initialCatalog, 'ABSENT');
   assert.equal(existsSync(coordinated.seeded.targetCanonicalPath), false);
   assert.equal(hash(readFileSync(survivorFile)), survivorFileBefore);
+  assert.ok(targetCaches.every(root => !existsSync(root)));
+  assert.equal(hash(readFileSync(path.join(survivorCache, 'graph.json'))), survivorCacheBefore);
+  assert.equal(resumed.report.stages.find(stage => stage.kind === 'controlCodeGraph').status, 'VERIFIED_ABSENT');
+  check('standard-cli-clears-multiple-owned-control-caches-and-preserves-survivor-cache', { survivorCacheBefore });
   const postgresAfter = rows(coordinated.env), sqliteAfter = sqliteRows();
   assert.equal(selectRows(postgresAfter, targetNeedles).length, 0);
   assert.equal(hash(selectRows(postgresAfter, survivorNeedles)), survivorPgBefore);

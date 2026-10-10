@@ -282,5 +282,170 @@ class BundleTests(unittest.TestCase):
             B.verify_node(node)
 
 
+class MaintenanceBundleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="lattice-maintenance-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.base = Path(self.temp.name)
+        supply = self.base / "supply"; supply.mkdir()
+        node = supply / "node"; node.mkdir()
+        for name in ("node.exe", "LICENSE"):
+            (node / name).write_bytes(("fixture-" + name).encode())
+        node_hashes = {name: B.sha(node / name) for name in ("node.exe", "LICENSE")}
+        (node / "provenance.json").write_bytes(B.M.CONFIG.json_bytes({
+            "schema": "lattice.node-supply.v1", "version": B.NODE_VERSION, "source": B.NODE_URL,
+            "archive_sha256": B.NODE_ZIP_SHA256, "files": node_hashes}))
+        redist = supply / "redist"; redist.mkdir()
+        for name in B.M.VC_RUNTIME_FILES:
+            (redist / name).write_bytes(("fixture-" + name).encode())
+        vc_hashes = {name: B.sha(redist / name) for name in B.M.VC_RUNTIME_FILES}
+        license_path = supply / "license.docx"; license_path.write_bytes(b"fixture-license")
+        redist_list = supply / "Redist.txt"; redist_list.write_bytes(b"fixture-redist-list")
+        runtime = supply / "latticed.exe"; runtime.write_bytes(b"fixture-runtime-not-executed")
+        binary = supply / "purge.exe"; binary.write_bytes(b"fixture-purge-not-executed")
+        self.enterContext(patch.multiple(B, NODE_EXE_SHA256=node_hashes["node.exe"],
+            NODE_LICENSE_SHA256=node_hashes["LICENSE"], VC_LICENSE_SHA256=B.sha(license_path),
+            VC_REDIST_LIST_SHA256=B.sha(redist_list)))
+        self.enterContext(patch.dict(B.M.VC_RUNTIME_FILES, vc_hashes, clear=True))
+        self.enterContext(patch.object(B.M, "private_new_root", side_effect=lambda root: root.mkdir()))
+        self.arguments = dict(runtime=runtime, runtime_sha=B.sha(runtime), node=node,
+            vc_redist=redist, vc_license=license_path, vc_redist_list=redist_list,
+            project_purge_binary=binary, project_purge_sha256=B.sha(binary),
+            project_purge_source=Path(__file__).resolve().parent.parent)
+        self.number = 0
+
+    def build(self):
+        self.number += 1
+        self.root = self.base / ("output-" + str(self.number))
+        result = B.build_maintenance(self.root, **self.arguments)
+        self.manifest = B.json.loads((self.root / "bundle.json").read_bytes())
+        return result["sha256"]
+
+    def save(self, *, inventory=False):
+        if inventory:
+            self.manifest["files"], self.manifest["total_bytes"] = B.inventory(self.root)
+        (self.root / "bundle.json").write_bytes(B.M.CONFIG.json_bytes(self.manifest))
+        return B.sha(self.root / "bundle.json")
+
+    def test_minimal_bundle_has_distinct_profile_and_exact_software(self):
+        digest = self.build()
+        data = B.verify_maintenance(self.root, digest)
+        self.assertEqual(data["schema"], "lattice.windows-project-purge-maintenance.v1")
+        self.assertEqual(data["profile"], "offline-project-purge")
+        self.assertEqual(len(data["files"]), len(B.PROJECT_PURGE_FILES) + 19)
+        self.assertFalse(any((self.root / name).exists() for name in ("postgres", "python", "git", "graphify", "platform")))
+        self.assertEqual(data["project_purge"]["runtime_sha256"], B.sha(self.root / "bin/latticed.exe"))
+
+    def test_cli_build_and_verify_maintenance_use_the_distinct_profile(self):
+        output = self.base / "cli-output"
+        arguments = ["lattice-bundle.py", "build-maintenance", "--bundle", str(output)]
+        for name, value in self.arguments.items():
+            option = "runtime-sha256" if name == "runtime_sha" else name.replace("_", "-")
+            arguments.extend(["--" + option, str(value)])
+        with patch.object(B.sys, "argv", arguments), patch.object(B.sys, "stdout", io.StringIO()) as stream:
+            B.main()
+            built = B.json.loads(stream.getvalue())
+        self.assertEqual(built["status"], "LOCAL_MAINTENANCE_BUNDLE_VERIFIED")
+        with patch.object(B.sys, "argv", ["lattice-bundle.py", "verify-maintenance", "--bundle",
+                str(output), "--sha256", built["sha256"]]), patch.object(B.sys, "stdout", io.StringIO()) as stream:
+            B.main()
+            self.assertEqual(B.json.loads(stream.getvalue())["status"], "LOCAL_MAINTENANCE_BUNDLE_VERIFIED")
+        with patch.object(B.sys, "argv", arguments + ["--postgres", str(self.base)]), \
+                self.assertRaisesRegex(B.M.Rejected, "MAINTENANCE_OPTION_REJECTED"):
+            B.main()
+
+    def test_missing_or_mismatched_supply_rejected_before_creating_output(self):
+        for overrides, error in (({"node": None}, "MAINTENANCE_SUPPLY_REQUIRED"),
+                                 ({"runtime_sha": "a" * 64}, "RUNTIME_DIGEST_MISMATCH"),
+                                 ({"project_purge_sha256": "a" * 64}, "PROJECT_PURGE_BINARY_DIGEST_REJECTED")):
+            output = self.base / "invalid-supply"
+            with self.subTest(overrides=overrides), self.assertRaisesRegex(B.M.Rejected, error):
+                B.build_maintenance(output, **{**self.arguments, **overrides})
+            self.assertFalse(output.exists())
+
+    def test_packaged_maintenance_cli_loads_help_without_database(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node executable unavailable")
+        self.build()
+        result = subprocess.run([node, str(self.root / B.PROJECT_PURGE_ENTRYPOINT), "--help"],
+            cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("preview", result.stdout)
+
+    def test_manifest_and_payload_changes_reject_original_digest(self):
+        digest = self.build()
+        self.manifest["profile"] = "full-install"
+        self.save()
+        with self.assertRaisesRegex(B.M.Rejected, "MANIFEST_DIGEST_REJECTED"):
+            B.verify_maintenance(self.root, digest)
+        with self.assertRaisesRegex(B.M.Rejected, "MAINTENANCE_MANIFEST_REJECTED"):
+            B.verify_maintenance(self.root, self.save())
+        digest = self.build()
+        (self.root / B.PROJECT_PURGE_ENTRYPOINT).write_bytes(b"changed")
+        with self.assertRaisesRegex(B.M.Rejected, "BUNDLE_CONTENT_CHANGED"):
+            B.verify_maintenance(self.root, digest)
+
+    def test_recomputed_inventory_cannot_add_or_omit_files(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                self.build()
+                if missing:
+                    (self.root / B.PROJECT_PURGE_FILES[-1]).unlink()
+                else:
+                    (self.root / "unexpected.dll").write_bytes(b"extra")
+                with self.assertRaisesRegex(B.M.Rejected, "MAINTENANCE_FILE_SET_REJECTED"):
+                    B.verify_maintenance(self.root, self.save(inventory=True))
+
+    def test_runtime_binding_cannot_be_replaced_by_recomputed_inventory(self):
+        self.build()
+        (self.root / "bin/latticed.exe").write_bytes(b"different-runtime")
+        self.manifest["runtime_sha256"] = B.sha(self.root / "bin/latticed.exe")
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_BUNDLE_REJECTED"):
+            B.verify_maintenance(self.root, self.save(inventory=True))
+
+    def test_vendor_bytes_remain_pinned_after_manifest_recomputation(self):
+        for name, error in (("node/node.exe", "NODE_SUPPLY_REJECTED"),
+                            ("bin/vcruntime140.dll", "VC_RUNTIME_SOURCE_REJECTED")):
+            with self.subTest(name=name):
+                self.build()
+                (self.root / name).write_bytes(b"replacement")
+                with self.assertRaisesRegex(B.M.Rejected, error):
+                    B.verify_maintenance(self.root, self.save(inventory=True))
+
+    def test_full_verify_and_install_reject_maintenance_before_preparing_state(self):
+        digest = self.build()
+        with self.assertRaisesRegex(B.M.Rejected, "BUNDLE_MANIFEST_REJECTED"):
+            B.verify(self.root, digest)
+        with patch.object(B.M, "prepare") as prepare:
+            with self.assertRaisesRegex(B.M.Rejected, "BUNDLE_MANIFEST_REJECTED"):
+                B.install(self.root, digest, self.base / "state", self.base / "source", self.base / "wsl.exe")
+            prepare.assert_not_called()
+        self.assertFalse((self.base / "state").exists())
+
+    def test_fresh_absolute_nonoverlapping_output_required_before_copy(self):
+        for output, error in ((Path("relative"), "ABSOLUTE_PATH_REQUIRED"),
+                              (self.base, "FRESH_CUSTOMER_DIRECTORY_REQUIRED"),
+                              (self.arguments["node"] / "output", "BUNDLE_SOURCE_OUTPUT_OVERLAP")):
+            with self.subTest(output=str(output)), self.assertRaisesRegex(B.M.Rejected, error):
+                B.build_maintenance(output, **self.arguments)
+        output = self.base / "too-large"
+        with patch.object(B, "MAX_BYTES", 1), self.assertRaisesRegex(B.M.Rejected, "CAPACITY_REJECTED"):
+            B.build_maintenance(output, **self.arguments)
+        self.assertFalse(output.exists())
+
+    def test_alias_supply_or_output_parent_rejected(self):
+        link = self.base / "alias"
+        try:
+            link.symlink_to(self.arguments["node"], target_is_directory=True)
+        except OSError:
+            self.skipTest("Windows symbolic-link privilege unavailable")
+        with self.assertRaisesRegex(B.M.Rejected, "PATH_REDIRECTION_REJECTED"):
+            B.build_maintenance(self.base / "output", **{**self.arguments, "node": link})
+        with self.assertRaisesRegex(B.M.Rejected, "PATH_REDIRECTION_REJECTED"):
+            B.build_maintenance(link / "output", **self.arguments)
+        self.assertFalse((self.arguments["node"] / "output").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

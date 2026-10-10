@@ -27,6 +27,7 @@ pub mod task_control;
 use std::error::Error;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use lattice_codex_adapter::{
@@ -40,6 +41,19 @@ use crate::delivery_ledger::{
     DeliveryDatabaseBinding, DeliveryLedger, DeliveryLedgerErrorKind, connect_fixed_runtime_client,
 };
 use crate::git_delivery::GitDeliveryErrorKind;
+
+/// Install the fixed native anchor audit before any Registry reader is used.
+/// Repeated calls reuse our first result. An already registered foreign callback
+/// is rejected, never silently accepted as equivalent.
+pub fn initialize_registry_anchor_file_audit() -> Result<(), &'static str> {
+    static INITIALIZED: OnceLock<Result<(), &'static str>> = OnceLock::new();
+    *INITIALIZED.get_or_init(|| {
+        lattice_postgres_store::registry_epoch_anchor::install_anchor_file_audit(
+            managed_file_identity::registry_anchor_file_audit,
+        )
+        .map_err(|_| "REGISTRY_ANCHOR_FILE_AUDIT_REGISTRATION_REJECTED")
+    })
+}
 
 const USAGE: &str = "usage:\n  lattice-runtime codex-preflight --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path>\n  lattice-runtime delivery-run --launcher <absolute-path> --version <exact-version> --sha256 <lowercase-sha256> --schema-dir <absent-path> --codex-home <absolute-path> --delivery-root <absent-absolute-path> --git-exe <absolute-path> --timeout-seconds <1..3600> --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime delivery-status --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime runtime-health --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>\n  lattice-runtime receipt-state --postgres-host 127.0.0.1 --postgres-port <ephemeral-port> --postgres-run-id <32-lowercase-hex>";
 
@@ -112,6 +126,7 @@ pub enum RuntimeCommand {
 /// Stable command-line failures without sensitive process output.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeError {
+    RegistryAnchorAudit,
     BotLifecycle(&'static str),
     ProjectRecovery(&'static str),
     Usage,
@@ -139,6 +154,7 @@ impl RuntimeError {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::RegistryAnchorAudit => "REGISTRY_ANCHOR_FILE_AUDIT_REGISTRATION_REJECTED",
             Self::BotLifecycle(code) => code,
             Self::ProjectRecovery(code) => code,
             Self::Usage => "LATTICE_RUNTIME_USAGE",
@@ -162,6 +178,7 @@ impl RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RegistryAnchorAudit => formatter.write_str(self.code()),
             Self::BotLifecycle(code) => formatter.write_str(code),
             Self::ProjectRecovery(code) => formatter.write_str(code),
             Self::Usage => formatter.write_str(USAGE),
@@ -385,6 +402,7 @@ pub fn parse_command(arguments: &[String]) -> Result<RuntimeCommand, RuntimeErro
 /// generated schema does not match the supplied expectation.
 #[allow(clippy::too_many_lines)]
 pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
+    initialize_registry_anchor_file_audit().map_err(|_| RuntimeError::RegistryAnchorAudit)?;
     match command {
         RuntimeCommand::BotLifecycle {
             port,

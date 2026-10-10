@@ -1,6 +1,10 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    if let Err(code) = lattice_runtime::initialize_registry_anchor_file_audit() {
+        eprintln!("{code}");
+        return ExitCode::from(2);
+    }
     let mut arguments = std::env::args_os();
     let _program = arguments.next();
     if let Some(argument) = arguments.next() {

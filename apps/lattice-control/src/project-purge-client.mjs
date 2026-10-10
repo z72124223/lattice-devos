@@ -59,7 +59,7 @@ export async function runProjectPurgeCli(argv, { preview = previewProjectPurge, 
     if (['preview', 'inventory'].includes(options.action)) {
       const inputPath = path.resolve(options['--input']);
       const config = await jsonFile(inputPath);
-      if (!config || Array.isArray(config) || Object.keys(config).some(key => !['projectId', 'operationId', 'nativeBinary', 'databasePath', 'statePath', 'protectedRoots', 'externalResources'].includes(key))) throw new Error('PURGE_CONFIG_INVALID');
+      if (!config || Array.isArray(config) || Object.keys(config).some(key => !['projectId', 'operationId', 'nativeBinary', 'databasePath', 'statePath', 'protectedRoots', 'externalResources', 'codeGraphCacheDirectory', 'registryPolicy'].includes(key))) throw new Error('PURGE_CONFIG_INVALID');
       plan = await preview({ ...config, protectedRoots: [...(config.protectedRoots ?? []), planPath, inputPath] });
       await writeFile(planPath, JSON.stringify(plan, null, 2), { flag: 'wx', mode: 0o600 });
       result = { ...plan, report: projectPurgeReport(plan) };

@@ -30,8 +30,12 @@ export function externalPurgeInventory(input = []) {
 
 function blockerCode(blocker) { return typeof blocker === 'string' ? blocker : blocker?.code ?? 'UNKNOWN_BLOCKER'; }
 function nextStep(code) {
+  if (code === 'REGISTRY_EPOCH_EXTENSION_REQUIRED') return 'Install the compatible Registry epoch extension while stopped, then review a fresh preview with minimal historical attestation.';
+  if (code === 'REGISTRY_CURRENT_SURVIVOR_REFERENCE') return 'Another project still uses this identity in its current state; reconcile that project through its normal commands before generating a new purge preview.';
   if (code === 'MAINTENANCE_EXTENSION_REQUIRED') return 'Use a compatible Runtime and install the purge maintenance schema while stopped, then create a fresh preview.';
   if (code === 'MAINTENANCE_OFFLINE_REQUIRED') return 'Enter the existing offline maintenance lifecycle, then create and confirm a fresh preview before erasure.';
+  if (code === 'REGISTRY_SURVIVOR_REFERENCE') return 'A retained project history contains this project identity or path; erasure requires an explicit retention or redaction decision, not rewriting another project receipt.';
+  if (code.startsWith('PURGE_CODE_GRAPH_')) return 'Inspect the exact Control code-graph cache ownership and stop its writer; unknown or changed cache entries cannot be treated as absent.';
   if (code.includes('HARDLINK')) return 'Hard-link ownership and recovery are not supported; keep this scope blocked without changing shared link metadata to force acceptance.';
   if (code.includes('INTERLEAVED')) return 'Registry history requires a compatible maintenance migration; do not rewrite survivor receipts.';
   if (code.includes('IMMUTABLE') || code.includes('RETAINED_REFERENCE') || code.includes('UNSUPPORTED_REFERENCE')) return 'Resolve the owning module retention and reference contract before erasing; never disable its protection.';
@@ -57,8 +61,12 @@ export function projectPurgeReport(plan, result = null) {
       { kind: 'sqlite', counts: plan.sqlite.counts, initialCatalog: plan.sqlite.catalogState ?? 'PRESENT', status: result?.sqlite?.complete ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
       { kind: 'files', roots: plan.files.roots, entries: plan.files.entries?.length ?? null,
         status: result?.files?.complete || result?.files?.readback?.complete ? 'VERIFIED_ABSENT' : 'NOT_VERIFIED' },
+      ...(plan.codeGraph ? [{ kind: 'controlCodeGraph', cacheDirectory: plan.codeGraph.cacheDirectory,
+        roots: plan.codeGraph.roots, discovery: plan.codeGraph.discovery,
+        status: result?.codeGraph?.complete === true ? 'VERIFIED_ABSENT' : 'NOT_VERIFIED' }] : []),
     ],
     blockers, external,
+    history: plan.postgres.history ?? null,
     remaining: external.map(item => ({ kind: item.kind, reason: 'EXTERNAL_DISCOVERY_AND_ERASURE_NOT_VERIFIED' })),
     explanation: scopedComplete
       ? 'The verified local scope is erased. External resources remain unverified; this is not complete project erasure.'

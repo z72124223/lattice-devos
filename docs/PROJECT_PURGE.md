@@ -13,11 +13,16 @@
 
 ## 支援範圍與拒絕條件
 
-- PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。Registry 目前只支援目標專案命令構成全域歷史最後一段的情形，清除後恢復保留前綴的原 checkpoint，再用既有完整重播驗證器讀回。交錯歷史必須拒絕，不能改寫其他專案的 receipt 或停用 trigger。
+- PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。舊版 `VERIFIED_SUFFIX_V1` 只接受目標命令構成全域歷史最後一段，清除後回到原始保留前綴，完整重播仍從起點開始。沒有選擇資料保留政策的舊計畫維持此限制。
+- 選擇 `registryPolicy: "MINIMAL_ATTESTATION"` 後，`ATTESTED_EPOCH_V1` 可處理交錯歷史。清除前完整驗證舊歷史／前次受信任基準與新命令；清除後一般保留專案的原始命令、語意收據及 PostgreSQL 持久化收據保持原值，存於新的歷史基準。必須移除的跨專案歷史命令，在預覽列出命令承諾與 record-set 摘要，授權綁定同一範圍；舊指令 ID 以摘要保留並拒絕任何內容的重送。新的指令 ID 可登記已釋放的身分。
+- 這項政策的歷史保證為 `ATTESTED_FROM_SEAL`，新的命令從已驗證基準完整重播；不是刪除前全域歷史仍能從零重播。只有一份當前基準；下次清除會再次過濾，不能保留可能含新刪除目標的舊基準原文。其他專案的**目前狀態**仍引用目標時維持 `REGISTRY_CURRENT_SURVIVOR_REFERENCE`，必須先走該專案正常調和程序，不可用歷史刪除授權改掉它的現況。
+- 新基準由資料庫外的主機憑證固定其摘要與 epoch，資料庫不能自我宣告受信任。預設 Windows 路徑是 `%LOCALAPPDATA%/LATTICE/registry-epochs/<database-identity>/registry-epoch.anchor.json`；主機設定 `LATTICE_REGISTRY_ANCHOR_ROOT` 可改共同根目錄，所有 reader 與維護工具必須一致，不能由 DB、計畫或刪除要求自行指定。憑證不得位於刪除根目錄，路徑別名與硬連結均拒絕。Unix 主機預設使用 XDG_STATE_HOME 或 HOME/.local/state，未宣稱已做 Unix 整合驗收。
+- 摘要不是匿名化，低熵 ID 可能被猜測。新 attested 維護收據只存操作 ID 的承諾摘要；回覆中的原 ID 只供同一呼叫者續作。旧維護收據不自動改寫，報告列出待檢閱筆數。主機憑證僅防資料庫單邊跨 epoch 回滾，不防同一 OS 使用者同時改檔案和 DB，也不防同 epoch 新命令尾端的回滾。
 - task streams／ingress／Control product 等已實作的固定資料閉包一起刪除。未知表、尚未支援的資料種類及跨範圍引用會列入 blockers；不可把 blocker 當成已清除。預覽的 counts 是實際範圍，並非所有未來擴充功能的涵蓋承諾。
 - SQLite：只接受既有精確 schema profile；工作、事件、內部關係、登記、觀察及其附表在交易中清除。名單已先被移除時，必須由當次 PostgreSQL 預覽提供相同 ID、路徑與 scope digest，才能接手殘留資料；名單不存在本身不能充當清除成功。永久保留的 installation receipt／decision 或其他保留資料引用目標時拒絕，保留既有不可刪除保護。其他專案及所有保留資料的完整內容摘要必須不變；同一路徑的其他專案登記仍會阻擋刪除。
 - 檔案：只接受權威清單中的絕對路徑；拒絕使用者家目錄、磁碟根、工具自身、其他專案、重疊根、祖先 junction、未支援的巢狀 repository 等。junction／symlink 僅移除連結，不追蹤目標。檔案預覽有數量、深度、manifest 大小上限。
 - 硬連結：目前在盤點及執行前驗證時拒絕 `nlink > 1` 的檔案或連結，即使所有名稱看似位於同一專案。移除其中一個名稱會改變共用檔案的連結數與時間戳；本版沒有完整的硬連結歸屬與續作轉接器，因此須在任何 PostgreSQL／檔案刪除前阻擋，不能先刪一半再卡住，也不能略過時間戳驗證或改動外部連結以強行通過。
+- Control 圖譜磁碟快取：從共用快取目錄盤點全部直接子目錄，以 graph.json 格式、project_id、source_root、目錄鍵及內容摘要建立歸屬，涵蓋同專案不同 checkout。只有確定屬於目標的快取才加入相同檔案清單；內容變更、新增目標快取、未知目錄、缺失標頭、連結及超出盤點上限均阻擋。共用快取目錄與專案刪除根重疊也阻擋，以保護其他專案快取。此項不涵蓋 Runtime 的共用 Graphify 記憶體／索引或仍運作的 Control 記憶體快取，執行仍需停止相關寫入者。
 - 這不是磁碟安全抹除：SQLite／PostgreSQL 的備份、WAL、儲存媒體殘留及外部副本不由本入口保證消失。它驗證的是支援範圍的邏輯資料與路徑不再存在。
 
 ## 執行入口
@@ -37,9 +42,11 @@ Node 協調入口使用目前專案要求的 Node 版本。準備 config JSON，
 ```json
 {
   "projectId": "<Registry 專案 UUID>",
+  "registryPolicy": "MINIMAL_ATTESTATION",
   "nativeBinary": "C:/maintenance/lattice-project-purge.exe",
   "databasePath": "C:/maintenance/control.db",
   "statePath": "C:/maintenance/purge-progress.json",
+  "codeGraphCacheDirectory": "C:/Users/example/AppData/Local/LATTICE/control/code-graphs",
   "protectedRoots": ["C:/another-project"],
   "externalResources": [
     {"kind": "codex", "reference": "<對話 ID>", "source": "Codex 對話清單讀回"}
@@ -65,6 +72,10 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 
 `externalResources` 可省略，僅接受 `kind`、`reference`、`source`。七種分類為 `codex`、`automations`、`git`、`graphify`、`botLifecycle`、`backups`、`maintenance`。每一類都保留 discovery 狀態；沒有填資源不等於不存在。呼叫者不能自行填入已刪除、已驗證或完成狀態來取得通過。
 
+`codeGraphCacheDirectory` 可省略，預設與 Control 相同：`%LOCALAPPDATA%/LATTICE/control/code-graphs`。若 Control 使用自訂目錄，必須提供實際目錄。報告將這個可驗證磁碟範圍獨立列為 `controlCodeGraph`；即使通過，外部 `graphify` 分類仍未完整驗證。沒有此盤點欄位的舊計畫保持原範圍，不能據此聲稱已清掉快取。
+
+使用最小驗證憑證前，以原生入口的 `install-epoch` action 與 `INSTALL_REGISTRY_EPOCH_MAINTENANCE` 授權安裝精確的可選 catalog；仍須已停止 Store。它包含一般清除 receipt schema，不改 admission 或角色權限。舊 Runtime 不支援此新增 catalog，須先準備相容讀取者；schema 安裝不是 Runtime 部署。安裝完成後重新產生預覽，核對 `history` 的 redactedSurvivorCommands、assurance 與限制，再確認同一計畫。
+
 每次輸出均包含同一格式的清除報告。`apply`／`resume`／`status` 在本機範圍完成時 exit 0，但報告仍為 `PARTIAL`、`complete: false`；`verify` 對這種情況回傳 exit 2。阻擋或錯誤回傳 exit 1。由於外部驗證尚未實作，本版 `verify` 不會回傳完整通過，任何自動化均不得用 `apply` 的 exit 0 宣稱整個專案清空。
 
 ## 交易、部分失敗與續跑
@@ -77,6 +88,8 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 6. 若程序異常留下 `.lock`，先確認該 operation 已無執行程序並讀回所有階段，再處理鎖檔；程式不會自動猜測 stale lock。不得刪除未知鎖或啟動第二個 writer。
 7. 三階段讀回通過只回報 `SCOPED_PURGED`。`externalCleanup: NOT_VERIFIED` 明確保留外部清理待辦；只有外部逐項驗證也完成，才可向使用者說「整個專案已清空」。
 
+Attested Registry 在 PG 刪除前先寫外部 `Pending(previous, next, operationDigest)`，再用單一 PG 交易寫新基準、ID 防重表與清除收據。PG 提交後，必須比對同一新基準及已提交收據，才將主機憑證改為 Active。正常 Runtime 遇 Pending 一律拒絕。提交前中斷只能沿用同操作／摘要驗證 previous；提交後中斷只能以匹配的收據完成 next，不可用「舊狀態驗證失敗」猜測已提交。缺少主機憑證、兩邊不符或未知鎖都維持阻擋，不從 DB 自動重建。人工處理時先停住所有 reader/writer、保存原錯誤、核對原計畫與兩邊實際狀態；沒有独立可信證據時不能補造新憑證或重新開始刪除。
+
 這裡的中斷續作指程序崩潰或一般 I/O 失敗；不保證突然斷電後可自動續作。進度檔雖先做檔案同步再原子替換，但父目錄項與目標檔案刪除的斷電落盤順序尚未驗證，尤其 Windows 不能由目前 Node API 假定相同保證。重啟後若進度與檔案不符，維持阻擋並人工核對，不補造已移除紀錄。
 
 計畫／進度檔本身保留路徑及清除證據；它們也是最終資料保留決策的一部分。不要將實際專案計畫、資料庫或含機密的測試輸出提交 Git。
@@ -87,17 +100,24 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 
 此能力仍須明確加入套件；舊套件維持相容，不會因 repository 新增檔案而自動取得刪除功能。套件驗證也不會解除資料庫、共用 Git、交錯歷史或工具政策的阻擋。
 
+只需要本機離線維護工具時，可用 `build-maintenance`，參數為 `--bundle`、`--runtime`、`--runtime-sha256`、`--node`、三個 purge 參數，以及 `--vc-redist`／`--vc-license`／`--vc-redist-list`。固定清單包含相容 Runtime、清除 binary、Node/CLI 依賴閉包、VC runtime 及授權來源；不重複複製 PostgreSQL、Python、Git 或 Graphify。用 `verify-maintenance --bundle ... --sha256 ...` 核對。這是本機候選維護包，不能交給一般 `install` 假裝完整依賴部署。
+
 ## 驗證
 
 ```powershell
 node --test apps/lattice-control/test/project-purge*.test.mjs
 cargo build -p lattice-postgres-store --example project_purge_fixture
 cargo build -p lattice-runtime --bin latticed --bin lattice-project-purge
+cargo build -p lattice-runtime --example project_purge_epoch_fixture
 pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <lattice-project-purge.exe 絕對路徑> -SeedBinary <project_purge_fixture.exe 絕對路徑> -RuntimeBinary <latticed.exe 絕對路徑>
 ```
 
 PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.lattice` 下的證據，不連正式資料庫。Windows 檔案測試包含實際鎖檔及部分失敗續跑。協調層測試使用真 SQLite／檔案與受控 native adapter；真 PG fixture 的結果須另外報告，不能把 mock 當成完整部署驗收。
 
 `-Scenario inventory` 可單獨驗證運作中／未安裝維護元件的盤點不改動資料、離線要求仍生效，以及狀態改變後的舊摘要被拒絕。
+
+`-Scenario epoch` 與 `-Scenario epoch-reference` 使用各自的新 cluster，驗證交錯歷史／跨專案拒絕紀錄、外部憑證、原始持久化收據精確重送、兩次清除及新命令。Pending 案例由 fixture 寫入真實預覽綁定的提交前／提交後檔案狀態，驗證後續程序恢復；這是中斷狀態模擬，不是突然斷電驗收。`project_purge_epoch_fixture` 使用 Runtime 的實際原生檔案識別及 Store，要求合成資料目錄 marker 和 fixture opt-in，且拒絕已知正式埠；不會加入交付套件。
+
+`-Scenario survivor-reference` 以正式 Registry API 建立跨專案的 duplicate-denied 憑證，驗證盤點回傳引用筆數、清除被拒絕、資料及 receipt 不變、另一程序仍能重播原歷史。`-Scenario coordinator-absent` 另涵蓋真 PostgreSQL／SQLite／檔案及不同 checkout 的 Control 圖譜快取清除，並核對保留專案快取原文不变。
 
 `-Scenario upgrade -LegacyPurgeBinary <舊版維護 binary 絕對路徑>` 使用真正舊版 binary 產生 v1 摘要與清除 receipt，再以新版 binary 讀回及重試原操作，驗證相容性。舊、新 binary 都會複製並核對 SHA-256；未提供舊版 binary 的一般測試不包含此驗證。

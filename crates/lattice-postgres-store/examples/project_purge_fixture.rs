@@ -8,7 +8,9 @@ use lattice_postgres_store::{
     MigrationTarget, PostgresProjectRegistry, PostgresTaskLedger, apply_control_product_extension,
     apply_migrations, connect_project_purge,
 };
-use lattice_project_registry::{CommandId, RegistryCommand, RepositoryObservation};
+use lattice_project_registry::{
+    CommandId, RegistryCommand, RegistryCommandOutcome, RegistryDenial, RepositoryObservation,
+};
 use lattice_task_ledger::{
     ActorId, AppendCommand, CorrelationId, TaskSubmissionEnvelope, VerifiedStream,
 };
@@ -163,13 +165,64 @@ fn main() {
             .unwrap();
         records.push(json!({"projectId":id,"taskRef":submission.task_ref().as_str()}));
     }
+    let mut output = json!({"targetProjectId":"purge-target","survivorProjectId":"purge-survivor","records":records});
+    if std::env::args().nth(1).as_deref() == Some("survivor-reference") {
+        let mut registry =
+            PostgresProjectRegistry::new(runtime(port, &target, &password), &target).unwrap();
+        let before = registry.load().unwrap();
+        let target_id = ProjectId::new("purge-target").unwrap();
+        let survivor_id = ProjectId::new("purge-survivor").unwrap();
+        let reference_id = ProjectId::new("purge-reference").unwrap();
+        let observation = before
+            .state()
+            .project(&target_id)
+            .unwrap()
+            .observation()
+            .clone();
+        // Re-registering the existing survivor would collide with its own ID
+        // first. A new rejected project retains a genuine cross-project command
+        // without changing either accepted project or creating another ledger.
+        let denied = registry
+            .execute(
+                RegistryCommand::register(
+                    CommandId::new("fixture-duplicate-survivor").unwrap(),
+                    reference_id.clone(),
+                    ProjectClass::UserProject,
+                    observation,
+                ),
+                authority.clone(),
+            )
+            .unwrap();
+        assert!(matches!(
+            denied.semantic_receipt().outcome(),
+            RegistryCommandOutcome::Denied(RegistryDenial::DuplicateIdentity {
+                existing_project_id,
+                ..
+            }) if existing_project_id == target_id
+        ));
+        let after = registry.load().unwrap();
+        for project_id in [&target_id, &survivor_id] {
+            assert_eq!(
+                before.state().project(project_id),
+                after.state().project(project_id),
+                "denial must preserve accepted project records"
+            );
+        }
+        assert!(after.state().project(&reference_id).is_none());
+        assert_eq!(
+            after.state().checkpoint().command_count(),
+            before.state().checkpoint().command_count() + 1,
+            "duplicate denial must be retained through the Registry API"
+        );
+        output["denial"] = json!(true);
+        output["referenceProjectId"] = json!(reference_id.as_str());
+        output["referenceCommandId"] = json!("fixture-duplicate-survivor");
+        output["referencedProjectId"] = json!(target_id.as_str());
+    }
     // Only this opted-in empty-DB fixture changes admission; the product purge
     // implementation never changes daemon authority or stops any service.
     admin.batch_execute("UPDATE control.runtime_admission SET admission_mode='STOPPED',daemon_instance_id=NULL,daemon_epoch=NULL,authority_revision=0,observation_digest=NULL,authority_head_digest=NULL WHERE singleton").unwrap();
-    println!(
-        "{}",
-        json!({"targetProjectId":"purge-target","survivorProjectId":"purge-survivor","records":records})
-    );
+    println!("{output}");
 }
 fn runtime(port: u16, target: &MigrationTarget, password: &str) -> postgres::Client {
     Config::new()

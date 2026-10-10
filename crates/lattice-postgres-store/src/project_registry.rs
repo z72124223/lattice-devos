@@ -13,11 +13,13 @@ use lattice_contracts::{
 };
 use lattice_project_registry::{
     CommandId, IdentityDimension, IdentityDrift, ReconciliationDecision, RegistryCheckpoint,
-    RegistryCommand, RegistryCommandOutcome, RegistryCommandRecord, RegistryDenial, RegistryError,
-    RegistryIdentityReservation, RegistryProjectProjection, RegistryProjectRow,
-    RegistryReservationStatus, RepositoryObservation, UntrustedRegistrySnapshot,
-    VerifiedRegistryState, apply_command_plan, plan_command,
+    RegistryCommand, RegistryCommandLookup, RegistryCommandOutcome, RegistryCommandRecord,
+    RegistryDenial, RegistryError, RegistryIdentityReservation, RegistryProjectProjection,
+    RegistryProjectRow, RegistryReservationStatus, RepositoryObservation,
+    UntrustedRegistrySnapshot, VerifiedRegistryState, apply_command_plan,
+    export_untrusted_registry_snapshot, lookup_registry_command, plan_command,
     verify_untrusted_registry_snapshot_against_checkpoint,
+    verify_untrusted_registry_snapshot_from_baseline,
 };
 use postgres::types::{FromSqlOwned, ToSql};
 use postgres::{Client, Error as PostgresError, GenericClient, IsolationLevel, Row, Transaction};
@@ -198,6 +200,7 @@ pub type PostgresProjectRegistryResult<T> = Result<T, PostgresProjectRegistryErr
 pub enum PostgresProjectRegistryErrorKind {
     Malformed,
     CommandSubstitution,
+    CommandRedacted,
     AdmissionDenied,
     AuthorityMismatch,
     CheckpointChanged,
@@ -211,9 +214,10 @@ pub enum PostgresProjectRegistryErrorKind {
 }
 
 impl PostgresProjectRegistryErrorKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 13] = [
         Self::Malformed,
         Self::CommandSubstitution,
+        Self::CommandRedacted,
         Self::AdmissionDenied,
         Self::AuthorityMismatch,
         Self::CheckpointChanged,
@@ -231,6 +235,7 @@ impl PostgresProjectRegistryErrorKind {
         match self {
             Self::Malformed => "POSTGRES_PROJECT_REGISTRY_MALFORMED",
             Self::CommandSubstitution => "POSTGRES_PROJECT_REGISTRY_COMMAND_SUBSTITUTED",
+            Self::CommandRedacted => "POSTGRES_PROJECT_REGISTRY_COMMAND_REDACTED",
             Self::AdmissionDenied => "POSTGRES_PROJECT_REGISTRY_ADMISSION_DENIED",
             Self::AuthorityMismatch => "POSTGRES_PROJECT_REGISTRY_AUTHORITY_MISMATCH",
             Self::CheckpointChanged => "POSTGRES_PROJECT_REGISTRY_CHECKPOINT_CHANGED",
@@ -656,6 +661,47 @@ fn run_execute_attempt(
                 .map_err(AttemptFailure::Terminal)?,
         ),
     ];
+    // Archived IDs no longer occur in the live SQL command table. Resolve them
+    // against the externally anchored epoch before SQL can classify them NEW.
+    let loaded = match load_verified_registry(&mut transaction, persistence, Some(&started)) {
+        Ok(loaded) => loaded,
+        Err(failure) => return rollback_attempt(transaction, AttemptFailure::Terminal(failure)),
+    };
+    match lookup_registry_command(&loaded.state, command.command_id(), &request_digest) {
+        Ok(RegistryCommandLookup::ExactHistorical(historical)) => {
+            let Some(durable) = loaded.durable_receipts.get(command.command_id().as_str()) else {
+                return rollback_attempt(
+                    transaction,
+                    AttemptFailure::Terminal(error(
+                        PostgresProjectRegistryErrorKind::RetainedRowCorrupt,
+                    )),
+                );
+            };
+            let execution = PostgresProjectRegistryExecution {
+                semantic_receipt: historical.record().receipt().clone(),
+                result_checkpoint: durable.result_checkpoint().clone(),
+                persistence_receipt: durable.clone(),
+                exact_retry: true,
+            };
+            // Existing exact retries do not re-admit old work. Return the old
+            // durable receipt, keeping the adapter checkpoint at the current tail.
+            return transaction
+                .rollback()
+                .map(|()| (execution, loaded.retained_checkpoint))
+                .map_err(|_| {
+                    AttemptFailure::Terminal(error(
+                        PostgresProjectRegistryErrorKind::TransactionFailed,
+                    ))
+                });
+        }
+        Ok(RegistryCommandLookup::New | RegistryCommandLookup::ExactTail(_)) => {}
+        Err(registry) => {
+            return rollback_attempt(
+                transaction,
+                AttemptFailure::Terminal(map_registry_error(registry)),
+            );
+        }
+    }
     let prepare_row = match query_one_boxed(&mut transaction, PREPARE_SQL, &prepare_values) {
         Ok(row) => row,
         Err(database) => return rollback_attempt(transaction, classify_query_error(&database)),
@@ -670,10 +716,6 @@ fn run_execute_attempt(
             AttemptFailure::Terminal(error(PostgresProjectRegistryErrorKind::CommandSubstitution)),
         );
     }
-    let loaded = match load_verified_registry(&mut transaction, persistence, Some(&started)) {
-        Ok(loaded) => loaded,
-        Err(failure) => return rollback_attempt(transaction, AttemptFailure::Terminal(failure)),
-    };
     if prepare.current_checkpoint != loaded.retained_checkpoint {
         return rollback_attempt(
             transaction,
@@ -901,7 +943,7 @@ fn load_verified_registry<C: GenericClient>(
     persistence: &PostgresProjectRegistryPersistenceEvidence,
     started: Option<&Instant>,
 ) -> PostgresProjectRegistryResult<LoadedRegistry> {
-    load_registry_queries(client, persistence, started, false)
+    load_registry_queries(client, persistence, started, false, None)
 }
 
 /// Maintenance uses the identical semantic and persistence receipt verifier.
@@ -909,6 +951,24 @@ fn load_verified_registry<C: GenericClient>(
 pub(crate) fn load_registry_for_maintenance<C: GenericClient>(
     client: &mut C,
     target: &MigrationTarget,
+) -> PostgresProjectRegistryResult<VerifiedRegistryState> {
+    load_registry_for_maintenance_inner(client, target, None)
+}
+
+/// Only the maintenance coordinator may supply an epoch already verified against
+/// the explicit pending transition. Runtime always reads the active host anchor.
+pub(crate) fn load_registry_for_transition<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    epoch: Option<crate::registry_epoch::LoadedEpoch>,
+) -> PostgresProjectRegistryResult<VerifiedRegistryState> {
+    load_registry_for_maintenance_inner(client, target, Some(epoch))
+}
+
+fn load_registry_for_maintenance_inner<C: GenericClient>(
+    client: &mut C,
+    target: &MigrationTarget,
+    epoch_override: Option<Option<crate::registry_epoch::LoadedEpoch>>,
 ) -> PostgresProjectRegistryResult<VerifiedRegistryState> {
     let row = client.query_one("SELECT current_schema_version, manifest_sha256::text FROM ONLY control.schema_compatibility WHERE singleton", &[])
         .map_err(|db| map_database_error(&db))?;
@@ -920,7 +980,7 @@ pub(crate) fn load_registry_for_maintenance<C: GenericClient>(
             .map_err(|_| error(PostgresProjectRegistryErrorKind::Malformed))?,
         manifest_digest: digest(manifest.trim())?,
     };
-    Ok(load_registry_queries(client, &persistence, None, true)?.state)
+    Ok(load_registry_queries(client, &persistence, None, true, epoch_override)?.state)
 }
 
 fn registry_query<C: GenericClient>(
@@ -947,7 +1007,16 @@ fn load_registry_queries<C: GenericClient>(
     persistence: &PostgresProjectRegistryPersistenceEvidence,
     started: Option<&Instant>,
     direct: bool,
+    epoch_override: Option<Option<crate::registry_epoch::LoadedEpoch>>,
 ) -> PostgresProjectRegistryResult<LoadedRegistry> {
+    let epoch = match epoch_override {
+        Some(verified) => verified,
+        None => crate::registry_epoch::load_epoch(
+            client,
+            persistence.database_identity_digest().as_str(),
+        )
+        .map_err(|_| error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))?,
+    };
     let version = profile_version(persistence)?;
     let manifest = persistence.manifest_digest().as_str().to_owned();
     let params: [&(dyn ToSql + Sync); 2] = [&version, &manifest];
@@ -1006,10 +1075,16 @@ fn load_registry_queries<C: GenericClient>(
     let reservations = parse_reservations(&reservation_rows)?;
     check_optional_deadline(started)?;
 
-    let mut replayed =
-        VerifiedRegistryState::vacant(RuntimeKind::Live).map_err(map_registry_error)?;
+    let baseline = match &epoch {
+        Some(epoch) => epoch.baseline.clone(),
+        None => VerifiedRegistryState::vacant(RuntimeKind::Live).map_err(map_registry_error)?,
+    };
+    let mut replayed = baseline.clone();
     let mut commands = Vec::with_capacity(stored_commands.len());
-    let mut durable_receipts = BTreeMap::new();
+    let mut durable_receipts = match &epoch {
+        Some(epoch) => load_archived_receipts(client, epoch, persistence)?,
+        None => BTreeMap::new(),
+    };
     for stored in stored_commands {
         let plan =
             plan_command(&replayed, stored.command.clone()).map_err(map_retained_registry_error)?;
@@ -1038,7 +1113,12 @@ fn load_registry_queries<C: GenericClient>(
             plan.result_checkpoint().clone(),
             plan.record_set().record_set_digest().clone(),
         );
-        durable_receipts.insert(stored.command.command_id().as_str().to_owned(), durable);
+        if durable_receipts
+            .insert(stored.command.command_id().as_str().to_owned(), durable)
+            .is_some()
+        {
+            return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+        }
         commands.push(record);
         replayed = apply_command_plan(&replayed, &plan)
             .map_err(map_retained_registry_error)?
@@ -1052,9 +1132,13 @@ fn load_registry_queries<C: GenericClient>(
         commands,
         reservations,
     );
-    let state =
-        verify_untrusted_registry_snapshot_against_checkpoint(&snapshot, &retained_checkpoint)
-            .map_err(map_retained_registry_error)?;
+    let state = match epoch {
+        Some(_) => verify_untrusted_registry_snapshot_from_baseline(&baseline, &snapshot),
+        None => {
+            verify_untrusted_registry_snapshot_against_checkpoint(&snapshot, &retained_checkpoint)
+        }
+    }
+    .map_err(map_retained_registry_error)?;
     Ok(LoadedRegistry {
         state,
         retained_checkpoint,
@@ -1067,6 +1151,93 @@ fn parse_state_row(row: &Row) -> PostgresProjectRegistryResult<RegistryCheckpoin
         return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
     }
     checkpoint_from_row(row, 0)
+}
+
+/// The seal binds the original SQL rows as well as the pure semantic records.
+/// Convert only that authenticated payload to PostgreSQL's fixed row type. The
+/// roundtrip check rejects omitted/extra fields and coercions, with no table write.
+fn load_archived_receipts<C: GenericClient>(
+    client: &mut C,
+    epoch: &crate::registry_epoch::LoadedEpoch,
+    persistence: &PostgresProjectRegistryPersistenceEvidence,
+) -> PostgresProjectRegistryResult<BTreeMap<String, PostgresProjectRegistryPersistenceReceipt>> {
+    let prefix = READ_COMMANDS_SQL
+        .split("FROM control.project_registry_read_")
+        .next()
+        .expect("fixed SQL");
+    let sql = format!(
+        "WITH raw AS (SELECT value FROM pg_catalog.jsonb_array_elements($1::jsonb)), \
+        typed AS (SELECT r.*, pg_catalog.to_jsonb(r) = raw.value AS shape_valid \
+        FROM raw CROSS JOIN LATERAL pg_catalog.jsonb_populate_record(\
+        NULL::control.project_registry_commands, raw.value) r) \
+        {prefix} FROM typed WHERE shape_valid"
+    );
+    let payload = serde_json::Value::Array(epoch.command_rows.clone());
+    let rows = client
+        .query(&sql, &[&payload])
+        .map_err(|db| map_database_error(&db))?;
+    if rows.len() != epoch.envelope.normal_history().len() {
+        return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+    }
+    let snapshot = export_untrusted_registry_snapshot(&epoch.baseline);
+    let observations = snapshot
+        .observations()
+        .iter()
+        .map(|observation| {
+            (
+                observation.digest().as_str().to_owned(),
+                observation.clone(),
+            )
+        })
+        .collect();
+    let stored = parse_commands(&rows, &observations, persistence)?;
+    verify_archived_receipts(stored, epoch.envelope.normal_history())
+}
+
+fn verify_archived_receipts(
+    stored_commands: Vec<StoredCommand>,
+    history: &BTreeMap<CommandId, lattice_project_registry::RegistryHistoricalCommand>,
+) -> PostgresProjectRegistryResult<BTreeMap<String, PostgresProjectRegistryPersistenceReceipt>> {
+    if stored_commands.len() != history.len() {
+        return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+    }
+    let mut receipts = BTreeMap::new();
+    for stored in stored_commands {
+        let historical = history
+            .get(stored.command.command_id())
+            .ok_or_else(|| error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt))?;
+        let record = historical.record();
+        if stored.command != *record.command()
+            || !stored_matches_parts(
+                &stored,
+                record.receipt(),
+                record.ordinal(),
+                record.base_checkpoint(),
+                record.result_checkpoint(),
+                historical.record_set().record_set_digest(),
+            )
+        {
+            return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+        }
+        let durable = build_persistence_receipt(
+            record.command(),
+            record.receipt(),
+            record.record_set_digest(),
+            record.base_checkpoint(),
+            record.result_checkpoint(),
+            stored.daemon_authority.clone(),
+            &stored.persistence,
+        )?;
+        if durable.transaction_digest != stored.transaction_digest
+            || durable.receipt_digest != stored.persistence_receipt_digest
+            || receipts
+                .insert(stored.command.command_id().as_str().to_owned(), durable)
+                .is_some()
+        {
+            return Err(error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt));
+        }
+    }
+    Ok(receipts)
 }
 
 fn checkpoint_from_row(
@@ -1383,9 +1554,26 @@ fn stored_matches_plan(
     stored: &StoredCommand,
     plan: &lattice_project_registry::RegistryCommandPlan,
 ) -> bool {
-    let receipt = plan.receipt();
+    stored_matches_parts(
+        stored,
+        plan.receipt(),
+        plan.record_set().ordinal(),
+        plan.base_checkpoint(),
+        plan.result_checkpoint(),
+        plan.record_set().record_set_digest(),
+    )
+}
+
+fn stored_matches_parts(
+    stored: &StoredCommand,
+    receipt: &lattice_project_registry::RegistryCommandReceipt,
+    ordinal: u64,
+    base_checkpoint: &RegistryCheckpoint,
+    result_checkpoint: &RegistryCheckpoint,
+    record_set_digest: &ContentDigest,
+) -> bool {
     let denial = denial_projection(&receipt.outcome());
-    stored.ordinal == plan.record_set().ordinal()
+    stored.ordinal == ordinal
         && stored.request_digest == *receipt.request_digest()
         && stored.outcome == denial.outcome
         && stored.denial_reason == denial.reason
@@ -1404,9 +1592,9 @@ fn stored_matches_plan(
                 .map(ProjectAuthorityReceipt::receipt_digest)
         && stored.drift == drift_flags(receipt.drift())
         && stored.result_digest == *receipt.result_digest()
-        && stored.base_checkpoint == *plan.base_checkpoint()
-        && stored.result_checkpoint == *plan.result_checkpoint()
-        && stored.record_set_digest == *plan.record_set().record_set_digest()
+        && stored.base_checkpoint == *base_checkpoint
+        && stored.result_checkpoint == *result_checkpoint
+        && stored.record_set_digest == *record_set_digest
 }
 
 struct DenialProjection {
@@ -2359,6 +2547,7 @@ fn map_registry_error(value: RegistryError) -> PostgresProjectRegistryError {
         RegistryError::CommandIdReuse => {
             error(PostgresProjectRegistryErrorKind::CommandSubstitution)
         }
+        RegistryError::CommandRedacted => error(PostgresProjectRegistryErrorKind::CommandRedacted),
         RegistryError::CheckpointMismatch => {
             error(PostgresProjectRegistryErrorKind::CheckpointChanged)
         }
@@ -2368,7 +2557,9 @@ fn map_registry_error(value: RegistryError) -> PostgresProjectRegistryError {
         RegistryError::CommandOrdinalOverflow => {
             error(PostgresProjectRegistryErrorKind::RevisionOverflow)
         }
-        RegistryError::CorruptSnapshot => {
+        RegistryError::CorruptSnapshot
+        | RegistryError::EpochBaselineInvalid
+        | RegistryError::EpochTrustMismatch => {
             error(PostgresProjectRegistryErrorKind::RetainedRowCorrupt)
         }
         _ => error(PostgresProjectRegistryErrorKind::Malformed),

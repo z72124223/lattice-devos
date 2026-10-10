@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, writeFile, readFile, link, rm } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -19,9 +20,10 @@ async function fixture(t) {
   const databasePath = path.join(root, 'control.db');
   const store = new LatticeStore(databasePath);
   const project = store.createProject({ name: 'target', rootPath: target });
-  store.createProject({ name: 'survivor', rootPath: survivor });
+  const survivorProject = store.createProject({ name: 'survivor', rootPath: survivor });
   store.database.close();
   const statePath = path.join(root, 'progress.json');
+  const codeGraphCacheDirectory = path.join(root, 'code-graphs');
   let applied = 0, receipt, loseReply = false, readbackChanged = false, blockers = [];
   const native = async (_binary, request) => {
     if (request.action === 'status') {
@@ -36,10 +38,88 @@ async function fixture(t) {
     if (loseReply) { loseReply = false; throw new Error('PURGE_NATIVE_TIMEOUT_OUTCOME_UNKNOWN'); }
     return receipt;
   };
-  const preview = () => previewProjectPurge({ projectId: project.id, databasePath, nativeBinary: path.join(root, 'native.exe'), statePath }, { native });
-  return { root, target, survivor, databasePath, statePath, project, native, preview,
+  const preview = () => previewProjectPurge({ projectId: project.id, databasePath, nativeBinary: path.join(root, 'native.exe'), statePath, codeGraphCacheDirectory }, { native });
+  return { root, target, survivor, databasePath, statePath, project, survivorProject, codeGraphCacheDirectory, native, preview,
     get applied() { return applied; }, loseReply() { loseReply = true; }, changeReadback() { readbackChanged = true; }, block() { blockers = ['CROSS_SCOPE_RETAINED_REFERENCE']; } };
 }
+
+async function cache(f, projectId, sourceRoot) {
+  const graph = { schema_version: 'lattice.control.code-graph.v1', source: 'GRAPHIFY', authority: 'DERIVED',
+    commit: '1'.repeat(40), nodes: [], edges: [], project_id: projectId, source_root: sourceRoot,
+    generated_at: '2026-10-10T00:00:00.000Z' };
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  const root = path.join(f.codeGraphCacheDirectory, digest(`${projectId}\0${sourceRoot.toLocaleLowerCase()}`));
+  await mkdir(path.join(root, 'runs'), { recursive: true });
+  await writeFile(path.join(root, 'graph.json'), JSON.stringify({ cache_digest: digest(JSON.stringify(graph)), ...graph }));
+  await writeFile(path.join(root, 'runs', 'analysis.txt'), `Derived cache for ${projectId}`);
+  return root;
+}
+
+test('attestation policy and seal stay bound through preview, apply and readback', async t => {
+  const f=await fixture(t), calls=[];
+  const history={assurance:'ATTESTED_FROM_SEAL',epoch:1,sealDigest:'b'.repeat(64),identifiersAreAnonymous:false};
+  const native=async(binary,request)=>{
+    calls.push(request);
+    const response=await f.native(binary,request);
+    return ['READY','PURGED'].includes(response.status)?{...response,registryStrategy:'ATTESTED_EPOCH_V1',history,registrySealDigest:history.sealDigest}:response;
+  };
+  const plan=await previewProjectPurge({projectId:f.project.id,databasePath:f.databasePath,nativeBinary:path.join(f.root,'native.exe'),statePath:f.statePath,codeGraphCacheDirectory:f.codeGraphCacheDirectory,registryPolicy:'MINIMAL_ATTESTATION'},{native});
+  const result=await applyProjectPurge(plan,{confirmDigest:plan.digest,maintenanceOffline:true,native});
+  assert.equal(result.status,'SCOPED_PURGED');assert.deepEqual(result.report.history,history);
+  assert.ok(calls.every(request=>request.registryPolicy==='MINIMAL_ATTESTATION'));
+  assert.ok(calls.slice(1).every(request=>request.expectedScopeDigest===plan.postgres.scopeDigest));
+  const readback=await statusProjectPurge(plan,{native:async(binary,request)=>({...await native(binary,request),registrySealDigest:'c'.repeat(64)})});
+  assert.equal(readback.status,'INCOMPLETE');
+});
+
+test('coordinator purges all owned Control graph caches and preserves another project cache', async t => {
+  const f = await fixture(t);
+  const first = await cache(f, f.project.id, f.target);
+  const second = await cache(f, f.project.id, path.join(f.root, 'other-checkout'));
+  const retained = await cache(f, f.survivorProject.id, f.survivor);
+  const original = await readFile(path.join(retained, 'graph.json'));
+  const plan = await f.preview();
+  assert.equal(plan.status, 'READY'); assert.equal(plan.codeGraph.roots.length, 2);
+  const result = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native });
+  assert.equal(result.status, 'SCOPED_PURGED'); assert.equal(result.codeGraph.complete, true);
+  for (const root of [first, second]) await assert.rejects(readFile(path.join(root, 'graph.json')), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(path.join(retained, 'graph.json')), original);
+  assert.equal(result.report.stages.find(stage => stage.kind === 'controlCodeGraph').status, 'VERIFIED_ABSENT');
+  assert.equal(result.report.complete, false);
+  await cache(f, f.project.id, path.join(f.root, 'new-checkout'));
+  const readback = await statusProjectPurge(plan, { native: f.native });
+  assert.equal(readback.status, 'INCOMPLETE'); assert.equal(readback.codeGraph.complete, false);
+});
+
+test('new graph cache after preview is rejected before PostgreSQL or SQLite deletion', async t => {
+  const f = await fixture(t); await cache(f, f.project.id, f.target);
+  const plan = await f.preview();
+  await cache(f, f.project.id, path.join(f.root, 'new-checkout'));
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /PURGE_CODE_GRAPH_SCOPE_CHANGED/);
+  assert.equal(f.applied, 0);
+  const db = new LatticeStore(f.databasePath); assert.ok(db.getProject(f.project.id)); db.close();
+});
+
+test('unowned Control cache blocks the workflow instead of claiming discovery complete', async t => {
+  const f = await fixture(t);
+  await mkdir(path.join(f.codeGraphCacheDirectory, 'unknown'), { recursive: true });
+  const plan = await f.preview();
+  assert.equal(plan.status, 'BLOCKED'); assert.equal(plan.codeGraph.discovery, 'BLOCKED');
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /PURGE_BLOCKED/);
+  assert.equal(f.applied, 0);
+});
+
+test('a shared cache located inside a project deletion root blocks before any deletion', async t => {
+  const f = await fixture(t), codeGraphCacheDirectory = path.join(f.target, 'shared-cache');
+  const retained = await cache({ ...f, codeGraphCacheDirectory }, f.survivorProject.id, f.survivor);
+  const original = await readFile(path.join(retained, 'graph.json'));
+  const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath,
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, codeGraphCacheDirectory }, { native: f.native });
+  assert.equal(plan.status, 'BLOCKED');
+  assert.ok(plan.blockers.some(blocker => blocker.code === 'PURGE_CODE_GRAPH_SHARED_ROOT_OVERLAP'));
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /PURGE_BLOCKED/);
+  assert.equal(f.applied, 0); assert.deepEqual(await readFile(path.join(retained, 'graph.json')), original);
+});
 
 test('scoped real SQLite and files purge keeps survivor, verifies receipt, and replays idempotently', async t => {
   const f = await fixture(t), plan = await f.preview();
@@ -76,7 +156,7 @@ test('online inventory preserves maintenance blockers and counts without allowin
       blockers: [{ code: 'MAINTENANCE_EXTENSION_REQUIRED' }, { code: 'MAINTENANCE_OFFLINE_REQUIRED' }] };
   };
   const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath,
-    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath }, { native });
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory }, { native });
   assert.equal(plan.postgres.inventoryMode, 'READ_ONLY_SNAPSHOT');
   assert.equal(plan.postgres.maintenanceExtensionInstalled, false);
   assert.equal(plan.postgres.maintenanceStopped, false);
@@ -165,7 +245,7 @@ test('PostgreSQL-owned project can finish the local scope after an earlier catal
 test('unsafe filesystem scope yields an inspectable blocked plan without deleting PostgreSQL', async t => {
   const f = await fixture(t);
   const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath,
-    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, protectedRoots: [f.target] }, { native: f.native });
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory, protectedRoots: [f.target] }, { native: f.native });
   assert.equal(plan.status, 'BLOCKED');
   assert.ok(plan.blockers.includes('PURGE_FILE_PROTECTED_ROOT'));
   const readback = await statusProjectPurge(plan, { native: f.native });
@@ -202,7 +282,7 @@ test('standard CLI rejects unknown, duplicate and incomplete deletion arguments 
 test('standard CLI inventory saves one plan; resume delegates exact plan and verify rejects partial completion', async t => {
   const f = await fixture(t), input = path.join(f.root, 'input.json'), planPath = path.join(f.root, 'plan.json');
   await writeFile(input, JSON.stringify({ projectId: f.project.id, databasePath: f.databasePath,
-    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath }));
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory }));
   const services = { preview: options => previewProjectPurge(options, { native: f.native }),
     apply: (plan, options) => applyProjectPurge(plan, { ...options, native: f.native }),
     status: plan => statusProjectPurge(plan, { native: f.native }) };

@@ -4,9 +4,10 @@ param(
     [Parameter(Mandatory = $true)][string]$PurgeBinary,
     [Parameter(Mandatory = $true)][string]$SeedBinary,
     [Parameter(Mandatory = $true)][string]$RuntimeBinary,
+    [string]$EpochFixtureBinary,
     [string]$LegacyPurgeBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','coordinator','coordinator-absent','inventory','upgrade')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','upgrade')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -26,8 +27,10 @@ $serverIdentity = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
 if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
+if ($Scenario -in @('epoch','epoch-reference','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
+if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $inputBinaries += $EpochFixtureBinary }
 foreach ($file in $inputBinaries) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "FIXTURE_BINARY_MISSING: $file" }
 }
@@ -38,6 +41,7 @@ $binRoot = Join-Path $runRoot 'bin'
 $copies = @{}
 $binaryEntries = @(@{name='purge';source=$PurgeBinary},@{name='seed';source=$SeedBinary},@{name='runtime';source=$RuntimeBinary})
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $binaryEntries += @{name='legacy';source=$LegacyPurgeBinary} }
+if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $binaryEntries += @{name='epoch';source=$EpochFixtureBinary} }
 foreach ($entry in $binaryEntries) {
     $source = [IO.Path]::GetFullPath($entry.source)
     $copyName = if ($entry.name -eq 'legacy') { 'legacy-lattice-project-purge.exe' } else { [IO.Path]::GetFileName($source) }
@@ -50,14 +54,15 @@ foreach ($entry in $binaryEntries) {
 }
 $PurgeBinary=$copies.purge.path; $SeedBinary=$copies.seed.path; $RuntimeBinary=$copies.runtime.path
 if ($copies.ContainsKey('legacy')) { $LegacyPurgeBinary = $copies.legacy.path }
+if ($copies.ContainsKey('epoch')) { $EpochFixtureBinary = $copies.epoch.path }
 $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
     try {
-        $stages = @('main','interleaved','coordinator','coordinator-absent','inventory')
+        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory')
         if ($copies.ContainsKey('legacy')) { $stages += 'upgrade' }
         foreach ($stage in $stages) {
-            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -LegacyPurgeBinary $LegacyPurgeBinary -NodeBinary $NodeBinary -Scenario $stage)
+            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -EpochFixtureBinary $EpochFixtureBinary -LegacyPurgeBinary $LegacyPurgeBinary -NodeBinary $NodeBinary -Scenario $stage)
             $child = $childOutput[-1] | ConvertFrom-Json
             if ($child.status -cne 'PASS' -or -not $child.fixtureStopped) { throw "FIXTURE_STAGE_FAILED: $stage" }
             foreach ($key in $copies.Keys) {
@@ -108,6 +113,7 @@ log_statement = 'none'
     if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($dataDirectory) -cne $cluster) { throw 'FIXTURE_DATABASE_IDENTITY_REJECTED' }
     $nodeArguments = @((Join-Path $PSScriptRoot 'test-project-purge-postgres.mjs'), '--binary', $PurgeBinary, '--seed-binary', $SeedBinary, '--runtime-binary', $RuntimeBinary, '--port', $port, '--run-root', $runRoot, '--psql', $psql, '--scenario', $Scenario)
     if ($copies.ContainsKey('legacy')) { $nodeArguments += @('--legacy-binary', $LegacyPurgeBinary) }
+    if ($copies.ContainsKey('epoch')) { $nodeArguments += @('--epoch-binary', $EpochFixtureBinary) }
     & $NodeBinary @nodeArguments
     if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_SCENARIOS_FAILED' }
     foreach ($copy in $copies.Values) {

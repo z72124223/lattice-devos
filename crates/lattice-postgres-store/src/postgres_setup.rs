@@ -8017,6 +8017,12 @@ fn read_forbidden_schema_object_counts<C: GenericClient>(
     for (index, count) in counts.iter_mut().enumerate() {
         *count = row_value::<i64>(&row, index, PostgresStoreSetupErrorKind::CorruptCatalog)?;
     }
+    // A new optional maintenance guard is accepted only after its entire
+    // independently versioned catalog and privileges pass exact verification.
+    if crate::registry_epoch::optional_catalog(client)
+        .map_err(|_| catalog_error())?.is_some() {
+        counts[1] = counts[1].checked_sub(1).ok_or_else(catalog_error)?;
+    }
     Ok(counts)
 }
 
@@ -8686,7 +8692,11 @@ fn verify_exact_principal_database_core<C: GenericClient>(
         return Err(permission_error());
     }
     verify_login_principal_closure(client)?;
-    Ok(dangerous_functions)
+    // The new read-only SECURITY DEFINER entry is permitted only with the exact
+    // complete epoch catalog. All existing profile counts stay frozen.
+    let epoch_functions = i64::from(crate::registry_epoch::optional_catalog(client)
+        .map_err(|_| permission_error())?.is_some());
+    dangerous_functions.checked_sub(epoch_functions).ok_or_else(permission_error)
 }
 
 /// SQL for the independently versioned, same-database Control product facts.
@@ -9187,6 +9197,9 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
         crate::project_purge::optional_maintenance_relations(client)
             .map_err(|_| permission_error())?,
     );
+    if let Some(epoch) = crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())? {
+        foreman_relation_oids.extend(epoch.relation_oids);
+    }
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -9250,6 +9263,9 @@ fn verify_external_function_principal_closure<C: GenericClient>(
         .unwrap_or_default();
     if let Some(product) = product {
         foreman_function_oids.extend_from_slice(&product.function_oids);
+    }
+    if let Some(epoch) = crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())? {
+        foreman_function_oids.extend(epoch.function_oids);
     }
     let forbidden = client
         .query_one(

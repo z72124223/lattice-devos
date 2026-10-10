@@ -3,6 +3,7 @@ use lattice_postgres_store::{connect_project_purge, execute_project_purge};
 use std::io::{self, Read};
 use std::process::ExitCode;
 fn run() -> Result<serde_json::Value, &'static str> {
+    lattice_runtime::initialize_registry_anchor_file_audit()?;
     if std::env::args_os().len() != 1 {
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }

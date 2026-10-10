@@ -1,14 +1,17 @@
 //! Bounded operator-only physical erasure for a complete Registry command suffix.
 //! A successful result is deliberately PG-only; the caller must separately erase
 //! its local catalog/files and cannot infer success from a project being absent.
-use crate::project_registry::load_registry_for_maintenance;
+use crate::project_registry::{load_registry_for_maintenance, load_registry_for_transition};
+use crate::registry_epoch::{self, EpochMigration};
 use crate::{DatabaseRole, MigrationTarget, verify_postgres_schema};
 use lattice_contracts::ProjectId;
-use lattice_project_registry::{VerifiedRegistryState, project_purge_prefix};
+use lattice_project_registry::{
+    VerifiedRegistryState, preview_required_redactions, project_purge_prefix,
+};
 use postgres::{Client, Config, GenericClient, IsolationLevel, NoTls, Transaction};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 use std::time::Duration;
 
@@ -43,6 +46,12 @@ fn db<T>(r: std::result::Result<T, postgres::Error>) -> Result<T> {
 fn quoted(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
 }
+fn operation_key(operation: &str) -> String {
+    format!(
+        "epoch:{}",
+        digest(format!("lattice.project-purge.operation.v1\n{operation}").as_bytes())
+    )
+}
 fn references(value: &Value, project: &str, canonical: &str, keys: &[&String]) -> bool {
     match value {
         Value::String(s) => {
@@ -63,6 +72,81 @@ fn references(value: &Value, project: &str, canonical: &str, keys: &[&String]) -
         }),
         _ => false,
     }
+}
+
+// Registry observations have no project_id. Only observations referenced by a
+// retained command/project belong to this survivor scan; the global checkpoint
+// and target-only observations are not another project's retained content.
+fn registry_survivor_reference_blockers(
+    physical: &BTreeMap<String, Vec<String>>,
+    project: &str,
+    canonical: &str,
+    keys: &[&String],
+) -> Result<Vec<Value>> {
+    let mut blockers = Vec::new();
+    let mut observation_digests = BTreeSet::new();
+    for (table, observation_fields) in [
+        (
+            "control.project_registry_commands",
+            &["observation_digest", "before_observation_digest"][..],
+        ),
+        (
+            "control.project_registry_projects",
+            &[
+                "accepted_observation_digest",
+                "pending_observation_digest",
+                "authority_observation_digest",
+            ][..],
+        ),
+        ("control.project_registry_identity_reservations", &[][..]),
+    ] {
+        let mut count = 0;
+        for raw in physical
+            .get(table)
+            .ok_or("PROJECT_PURGE_REGISTRY_CORRUPT")?
+        {
+            let row: Value =
+                serde_json::from_str(raw).map_err(|_| "PROJECT_PURGE_REGISTRY_CORRUPT")?;
+            let owner = row["project_id"]
+                .as_str()
+                .ok_or("PROJECT_PURGE_REGISTRY_CORRUPT")?;
+            if owner == project {
+                continue;
+            }
+            for field in observation_fields {
+                if let Some(value) = row[*field].as_str() {
+                    observation_digests.insert(value.to_owned());
+                }
+            }
+            if references(&row, project, canonical, keys) {
+                count += 1;
+            }
+        }
+        if count > 0 {
+            blockers
+                .push(json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":table,"count":count}));
+        }
+    }
+    let table = "control.project_registry_observations";
+    let mut count = 0;
+    for raw in physical
+        .get(table)
+        .ok_or("PROJECT_PURGE_REGISTRY_CORRUPT")?
+    {
+        let row: Value = serde_json::from_str(raw).map_err(|_| "PROJECT_PURGE_REGISTRY_CORRUPT")?;
+        let observation_digest = row["observation_digest"]
+            .as_str()
+            .ok_or("PROJECT_PURGE_REGISTRY_CORRUPT")?;
+        if observation_digests.contains(observation_digest)
+            && references(&row, project, canonical, keys)
+        {
+            count += 1;
+        }
+    }
+    if count > 0 {
+        blockers.push(json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":table,"count":count}));
+    }
+    Ok(blockers)
 }
 
 /// Fixed loopback, fixed existing migrator identity; credentials never enter JSON.
@@ -190,6 +274,7 @@ fn extension<C: GenericClient>(client: &mut C) -> Result<()> {
 struct Plan {
     public: Value,
     prefix: Option<VerifiedRegistryState>,
+    epoch: Option<EpochMigration>,
     streams: Vec<String>,
     tasks: Vec<String>,
     claims: Vec<String>,
@@ -281,6 +366,7 @@ fn known_table(schema: &str, name: &str) -> bool {
             "extension_identity extension_ledger child_events preparation_observations promotion_intents task_promotions worker_attempts pending_worker_claims execution_environments worker_observations verification_records artifact_references staged_artifact_references provider_dispatch_claims attempt_closures approval_owner_snapshots approval_evidence"
         }
         "project_purge" => "identity receipts",
+        "registry_epoch" => "identity current_seal used_commands",
         _ => return false,
     };
     names.split_whitespace().any(|n| n == name)
@@ -342,8 +428,104 @@ fn snapshots<C: GenericClient>(
 
 #[cfg(test)]
 mod tests {
-    use super::references;
+    use super::{references, registry_survivor_reference_blockers};
     use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    fn registry_rows() -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([
+            ("control.project_registry_commands".into(), vec![
+                json!({"project_id":"target-id","observation_digest":"target-observation"}).to_string(),
+                json!({"project_id":"survivor-id","observation_digest":"survivor-observation"}).to_string(),
+            ]),
+            ("control.project_registry_projects".into(), vec![
+                json!({"project_id":"target-id","accepted_observation_digest":"target-observation"}).to_string(),
+                json!({"project_id":"survivor-id","accepted_observation_digest":"survivor-observation"}).to_string(),
+            ]),
+            ("control.project_registry_identity_reservations".into(), vec![
+                json!({"project_id":"target-id"}).to_string(),
+                json!({"project_id":"survivor-id"}).to_string(),
+            ]),
+            ("control.project_registry_observations".into(), vec![
+                json!({"observation_digest":"target-observation","canonical_root":"C:/fixture/target"}).to_string(),
+                json!({"observation_digest":"survivor-observation","canonical_root":"C:/fixture/survivor"}).to_string(),
+            ]),
+            ("control.project_registry_state".into(), vec![
+                json!({"aggregate":"target-id"}).to_string(),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn registry_scan_excludes_target_owned_rows_and_the_global_checkpoint() {
+        let physical = registry_rows();
+        assert!(
+            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn registry_scan_counts_survivor_denial_and_shared_observation_without_content() {
+        let mut physical = registry_rows();
+        physical
+            .get_mut("control.project_registry_commands")
+            .unwrap()
+            .push(
+                json!({"project_id":"survivor-id","denial_existing_project_id":"target-id",
+                "observation_digest":"target-observation"})
+                .to_string(),
+            );
+        let original = physical.clone();
+        assert_eq!(
+            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
+                .unwrap(),
+            vec![
+                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_commands","count":1}),
+                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
+            ]
+        );
+        assert_eq!(physical, original);
+    }
+
+    #[test]
+    fn registry_scan_follows_each_survivor_observation_reference() {
+        for (table, field) in [
+            (
+                "control.project_registry_commands",
+                "before_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "accepted_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "pending_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "authority_observation_digest",
+            ),
+        ] {
+            let mut physical = registry_rows();
+            let row = json!({"project_id":"survivor-id",field:"target-observation"});
+            physical.get_mut(table).unwrap().push(row.to_string());
+            assert_eq!(
+                registry_survivor_reference_blockers(
+                    &physical,
+                    "target-id",
+                    "C:/fixture/target",
+                    &[]
+                )
+                .unwrap(),
+                vec![
+                    json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
+                ]
+            );
+        }
+    }
 
     #[test]
     fn reference_scan_decodes_windows_paths_and_nested_json_text() {
@@ -380,19 +562,35 @@ fn prepare<C: GenericClient>(
     target: &MigrationTarget,
     project: &str,
     operation: &str,
+    epoch_policy: bool,
+    resume_scope: Option<&str>,
 ) -> Result<Plan> {
     let id = ProjectId::new(project).map_err(|_| "PROJECT_PURGE_INPUT_REJECTED")?;
-    let state = load_registry_for_maintenance(client, target)
-        .map_err(|_| "PROJECT_PURGE_REGISTRY_CORRUPT")?;
+    let database = target.expected_database_identity_sha256().as_str();
+    let state = if let Some(scope) = resume_scope {
+        let binding = digest(format!("{operation}\n{project}\n{scope}").as_bytes());
+        let epoch = registry_epoch::load_epoch_for_resume(client, database, &binding)?;
+        load_registry_for_transition(client, target, epoch)
+    } else {
+        load_registry_for_maintenance(client, target)
+    }
+    .map_err(|_| "PROJECT_PURGE_REGISTRY_CORRUPT")?;
     let projection = state
         .project(&id)
         .ok_or("PROJECT_PURGE_PROJECT_NOT_FOUND")?;
     let canonical = projection.observation().canonical_root();
     let mut protected_roots: Vec<String> = db(client.query("SELECT o.canonical_root FROM control.project_registry_projects p JOIN control.project_registry_observations o ON o.observation_digest=p.accepted_observation_digest WHERE p.project_id<>$1 ORDER BY p.project_id", &[&project]))?.into_iter().map(|r|r.get(0)).collect();
-    let prefix = project_purge_prefix(&state, &id).ok();
+    let prefix = if !epoch_policy && state.epoch() == 0 {
+        project_purge_prefix(&state, &id).ok()
+    } else {
+        None
+    };
     let mut blockers = Vec::<Value>::new();
-    if prefix.is_none() {
-        blockers.push(json!({"code":"REGISTRY_INTERLEAVED_HISTORY_REQUIRES_MIGRATION"}));
+    if prefix.is_none() && !epoch_policy {
+        blockers.push(
+            json!({"code":"REGISTRY_INTERLEAVED_HISTORY_REQUIRES_MIGRATION",
+            "detail":"REGISTRY_COMPACTION_TRUST_ROOT_REQUIRED"}),
+        );
     }
     let streams: Vec<String> = db(client.query("SELECT encode(stream_id,'hex') FROM ONLY control.task_ledger_streams WHERE project_id=$1 ORDER BY stream_id", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
     let tasks: Vec<String> = db(client.query("SELECT task_ref::text FROM ONLY control.task_submission_envelopes WHERE project_id=$1 ORDER BY task_ref", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
@@ -429,6 +627,16 @@ fn prepare<C: GenericClient>(
         }
     }
     let params: [&(dyn postgres::types::ToSql + Sync); 4] = [&project, &streams, &tasks, &claims];
+    let keys: Vec<&String> = streams
+        .iter()
+        .chain(tasks.iter())
+        .chain(claims.iter())
+        .collect();
+    if !epoch_policy {
+        blockers.extend(registry_survivor_reference_blockers(
+            &physical, project, canonical, &keys,
+        )?);
+    }
     let mut selected = BTreeMap::<String, Vec<String>>::new();
     let mut deletes = Vec::new();
     for (table, predicate) in selectors() {
@@ -445,11 +653,12 @@ fn prepare<C: GenericClient>(
         selected.insert(table.into(), rows);
         deletes.push((table.into(), predicate.into()));
     }
-    // Ignore only the Registry aggregate itself here: full replay, exact suffix
-    // and post-erasure verification separately prove its survivor bytes.
+    // Registry references were scanned through their precise ownership above.
+    // Full replay, exact suffix and post-erasure verification separately prove
+    // its survivor bytes; the aggregate checkpoint is not survivor content.
     let mut survivors = physical.clone();
     for (table, rows) in &physical {
-        if table.starts_with("control.project_registry_") {
+        if table.starts_with("control.project_registry_") || table.starts_with("registry_epoch.") {
             continue;
         }
         let selected_rows = selected.get(table).cloned().unwrap_or_default();
@@ -457,11 +666,6 @@ fn prepare<C: GenericClient>(
             .iter()
             .filter(|r| !selected_rows.contains(r))
             .cloned()
-            .collect();
-        let keys: Vec<&String> = streams
-            .iter()
-            .chain(tasks.iter())
-            .chain(claims.iter())
             .collect();
         let reference_count = retained
             .iter()
@@ -474,7 +678,9 @@ fn prepare<C: GenericClient>(
         }
         survivors.insert(table.clone(), retained);
     }
-    survivors.retain(|table, _| !table.starts_with("control.project_registry_"));
+    survivors.retain(|table, _| {
+        !table.starts_with("control.project_registry_") && !table.starts_with("registry_epoch.")
+    });
     let mut counts: BTreeMap<String, u64> = selected
         .iter()
         .map(|(k, v)| (k.clone(), v.len() as u64))
@@ -502,10 +708,82 @@ fn prepare<C: GenericClient>(
     let maintenance_installed = tables
         .iter()
         .any(|(schema, name)| schema == "project_purge" && name == "identity");
-    let scope_digest = digest(&serde_json::to_vec(&json!({"schema":"lattice.project-purge.scope.v2","database":target.expected_database_identity_sha256().as_str(),"project":project,"operation":operation,"maintenanceExtensionInstalled":maintenance_installed,"rows":physical})).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
+    let mut scope_value = json!({"schema":"lattice.project-purge.scope.v2","database":database,"project":project,"operation":operation,"maintenanceExtensionInstalled":maintenance_installed,"rows":physical});
+    // Preserve old v2 receipt/plan bindings exactly; explicit attestation is v3.
+    if epoch_policy {
+        scope_value["schema"] = json!("lattice.project-purge.scope.v3");
+        scope_value["registryPolicy"] = json!("MINIMAL_ATTESTATION");
+    }
+    let scope_digest =
+        digest(&serde_json::to_vec(&scope_value).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
+    let mut epoch = None;
+    let mut history = json!(null);
+    if epoch_policy {
+        if registry_epoch::optional_catalog(client)?.is_none() {
+            blockers.push(json!({"code":"REGISTRY_EPOCH_EXTENSION_REQUIRED"}));
+        }
+        let permissions = preview_required_redactions(&state, &id)
+            .map_err(|_| "REGISTRY_CURRENT_SURVIVOR_REFERENCE");
+        match permissions {
+            Err(code) => blockers.push(json!({"code":code})),
+            Ok(permissions) => {
+                let binding = digest(format!("{operation}\n{project}\n{scope_digest}").as_bytes());
+                match registry_epoch::plan_migration(
+                    client,
+                    database,
+                    &state,
+                    &id,
+                    &binding,
+                    &permissions,
+                ) {
+                    Err(code) => blockers.push(json!({"code":code})),
+                    Ok(migration) => {
+                        let checkpoint = migration.baseline.checkpoint();
+                        for (table, count) in [
+                            (
+                                "control.project_registry_commands",
+                                state.checkpoint().command_count(),
+                            ),
+                            ("control.project_registry_projects", 1),
+                            (
+                                "control.project_registry_observations",
+                                state.checkpoint().observation_count()
+                                    - checkpoint.observation_count(),
+                            ),
+                            (
+                                "control.project_registry_identity_reservations",
+                                state.checkpoint().reservation_count()
+                                    - checkpoint.reservation_count(),
+                            ),
+                        ] {
+                            counts.insert(table.into(), count);
+                        }
+                        if references(&migration.payload, project, canonical, &keys) {
+                            blockers
+                                .push(json!({"code":"REGISTRY_UNCLASSIFIED_SURVIVOR_REFERENCE"}));
+                        }
+                        history = json!({"assurance":"ATTESTED_FROM_SEAL","newTail":"FULL_REPLAY_FROM_BASELINE","epoch":migration.next.epoch,"sealDigest":migration.next.seal_digest.as_str(),"unchangedArchivedCommands":migration.payload["commandRows"].as_array().map(Vec::len),
+                            "redactedSurvivorCommands":permissions.iter().map(|permission|json!({"commandCommitment":permission.command_id_digest().as_str(),"recordSetDigest":permission.record_set_digest().as_str()})).collect::<Vec<_>>(),
+                            "identifiersAreAnonymous":false,"operationIdentifierRetention":"SHA256_COMMITMENT_GUESSABLE_IF_LOW_ENTROPY","rollbackProtection":"DATABASE_ONLY_CROSS_EPOCH","sameEpochTailRollbackProtected":false,"powerLossRecoveryGuaranteed":false});
+                        epoch = Some(migration);
+                    }
+                }
+            }
+        }
+    }
+    if epoch_policy && maintenance_installed {
+        let legacy:i64=db(client.query_one("SELECT count(*)::bigint FROM ONLY project_purge.receipts WHERE result->>'operationCommitment' IS NULL",&[]))?.get(0);
+        if history.is_object() {
+            history["legacyMaintenanceReceiptsRequiringReview"] = json!(legacy);
+        }
+    }
+    if let Ok(root) = registry_epoch::anchor_root(database) {
+        protected_roots.push(root.to_string_lossy().into_owned());
+    }
     Ok(Plan {
-        public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":"VERIFIED_SUFFIX_V1","filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
+        public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
         prefix,
+        epoch,
         streams,
         tasks,
         claims,
@@ -530,33 +808,53 @@ fn erase(
             &params,
         ))?;
     }
-    let prefix = plan.prefix.as_ref().ok_or("PROJECT_PURGE_SCOPE_BLOCKED")?;
+    let prefix = plan
+        .epoch
+        .as_ref()
+        .map(|epoch| &epoch.baseline)
+        .or(plan.prefix.as_ref())
+        .ok_or("PROJECT_PURGE_SCOPE_BLOCKED")?;
     let checkpoint = prefix.checkpoint();
-    db(transaction.execute(
-        "DELETE FROM ONLY control.project_registry_commands WHERE project_id=$1",
-        &[&project],
-    ))?;
-    db(transaction.execute(
-        "DELETE FROM ONLY control.project_registry_identity_reservations WHERE project_id=$1",
-        &[&project],
-    ))?;
-    db(transaction.execute(
-        "DELETE FROM ONLY control.project_registry_projects WHERE project_id=$1",
-        &[&project],
-    ))?;
-    // A suffix introduced no observations referenced by an earlier command.
-    db(transaction.execute("DELETE FROM ONLY control.project_registry_observations o WHERE NOT EXISTS(SELECT 1 FROM control.project_registry_commands c WHERE c.observation_digest=o.observation_digest) AND NOT EXISTS(SELECT 1 FROM control.project_registry_projects p WHERE p.accepted_observation_digest=o.observation_digest OR p.pending_observation_digest=o.observation_digest OR p.authority_observation_digest=o.observation_digest)",&[]))?;
+    if let Some(epoch) = &plan.epoch {
+        registry_epoch::write_migration(transaction, project, epoch)?;
+    } else {
+        db(transaction.execute(
+            "DELETE FROM ONLY control.project_registry_commands WHERE project_id=$1",
+            &[&project],
+        ))?;
+        db(transaction.execute(
+            "DELETE FROM ONLY control.project_registry_identity_reservations WHERE project_id=$1",
+            &[&project],
+        ))?;
+        db(transaction.execute(
+            "DELETE FROM ONLY control.project_registry_projects WHERE project_id=$1",
+            &[&project],
+        ))?;
+        // A suffix introduced no observations referenced by an earlier command.
+        db(transaction.execute("DELETE FROM ONLY control.project_registry_observations o WHERE NOT EXISTS(SELECT 1 FROM control.project_registry_commands c WHERE c.observation_digest=o.observation_digest) AND NOT EXISTS(SELECT 1 FROM control.project_registry_projects p WHERE p.accepted_observation_digest=o.observation_digest OR p.pending_observation_digest=o.observation_digest OR p.authority_observation_digest=o.observation_digest)",&[]))?;
+    }
     let number = |n| i64::try_from(n).map_err(|_| "PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED");
     db(transaction.execute("UPDATE ONLY control.project_registry_state SET command_ordinal=$1,observation_count=$2,project_count=$3,command_count=$4,reservation_count=$5,retained_bytes=$6,checkpoint_digest=decode($7,'hex') WHERE singleton AND stage_command_id IS NULL",&[
         &number(checkpoint.command_ordinal())?,&number(checkpoint.observation_count())?,&number(checkpoint.project_count())?,&number(checkpoint.command_count())?,&number(checkpoint.reservation_count())?,&number(checkpoint.retained_bytes())?,&checkpoint.checkpoint_digest().as_str()]))?;
-    let readback = load_registry_for_maintenance(transaction, target)
-        .map_err(|_| "PROJECT_PURGE_READBACK_FAILED")?;
+    let readback = if let Some(epoch) = &plan.epoch {
+        let loaded = registry_epoch::load_epoch_for_transition(
+            transaction,
+            target.expected_database_identity_sha256().as_str(),
+            &epoch.next,
+        )?;
+        load_registry_for_transition(transaction, target, loaded)
+    } else {
+        load_registry_for_maintenance(transaction, target)
+    }
+    .map_err(|_| "PROJECT_PURGE_READBACK_FAILED")?;
     if &readback != prefix {
         return Err("PROJECT_PURGE_READBACK_FAILED");
     }
     let tables = all_tables(transaction)?;
     let mut survivors = snapshots(transaction, &tables)?;
-    survivors.retain(|table, _| !table.starts_with("control.project_registry_"));
+    survivors.retain(|table, _| {
+        !table.starts_with("control.project_registry_") && !table.starts_with("registry_epoch.")
+    });
     if digest(&serde_json::to_vec(&survivors).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?)
         != plan.survivor_digest
     {
@@ -567,12 +865,18 @@ fn erase(
 
 fn replay_receipt<C: GenericClient>(
     client: &mut C,
+    target: &MigrationTarget,
     request: &Value,
     request_digest: &str,
-    result: Value,
+    mut result: Value,
 ) -> Result<Value> {
     let operation = text(request, "operationId")?;
     let project = text(request, "projectId")?;
+    if result.get("operationCommitment").is_some()
+        && result["operationCommitment"] != operation_key(operation)
+    {
+        return Err("PROJECT_PURGE_IDEMPOTENCY_CONFLICT");
+    }
     let scope = text(&result, "scopeDigest")?;
     if digest(format!("{operation}\n{project}\n{scope}").as_bytes()) != request_digest {
         return Err("PROJECT_PURGE_IDEMPOTENCY_CONFLICT");
@@ -585,6 +889,16 @@ fn replay_receipt<C: GenericClient>(
     if current != text(&result, "afterDigest")? {
         return Err("PROJECT_PURGE_READBACK_CHANGED");
     }
+    if result["registryStrategy"] == "ATTESTED_EPOCH_V1" {
+        registry_epoch::activate_anchor(
+            client,
+            target.expected_database_identity_sha256().as_str(),
+            request_digest,
+        )?;
+        load_registry_for_maintenance(client, target)
+            .map_err(|_| "PROJECT_PURGE_READBACK_FAILED")?;
+    }
+    result["operationId"] = json!(operation);
     Ok(result)
 }
 
@@ -612,6 +926,7 @@ pub fn execute_project_purge(
             "operationId",
             "expectedScopeDigest",
             "authorization",
+            "registryPolicy",
         ]
         .contains(&k.as_str())
     }) || text(request, "schema")? != "lattice.project-purge.request.v1"
@@ -619,7 +934,18 @@ pub fn execute_project_purge(
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }
     let action = text(request, "action")?;
-    if !["install", "preview", "apply", "status"].contains(&action) {
+    if !["install", "install-epoch", "preview", "apply", "status"].contains(&action) {
+        return Err("PROJECT_PURGE_INPUT_REJECTED");
+    }
+    let epoch_policy = match request.get("registryPolicy").and_then(Value::as_str) {
+        None => false,
+        Some("MINIMAL_ATTESTATION") => true,
+        Some(_) => return Err("PROJECT_PURGE_INPUT_REJECTED"),
+    };
+    if request
+        .get("registryPolicy")
+        .is_some_and(|value| !value.is_string())
+    {
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }
     if action == "preview" {
@@ -629,8 +955,13 @@ pub fn execute_project_purge(
         verify_postgres_schema(client, target, DatabaseRole::Migrator)
             .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
     }
-    if action == "install" {
-        if text(request, "authorization")? != "INSTALL_PURGE_MAINTENANCE" {
+    if action == "install" || action == "install-epoch" {
+        let authorization = if action == "install" {
+            "INSTALL_PURGE_MAINTENANCE"
+        } else {
+            "INSTALL_REGISTRY_EPOCH_MAINTENANCE"
+        };
+        if text(request, "authorization")? != authorization {
             return Err("PROJECT_PURGE_AUTHORIZATION_REQUIRED");
         }
         let mut tx = db(client.transaction())?;
@@ -647,9 +978,25 @@ pub fn execute_project_purge(
             ))?;
         }
         extension(&mut tx)?;
+        if action == "install-epoch" {
+            let installed: bool =
+                db(tx.query_one("SELECT to_regnamespace('registry_epoch') IS NOT NULL", &[]))?
+                    .get(0);
+            if !installed {
+                db(tx.batch_execute(registry_epoch::REGISTRY_EPOCH_SQL))?;
+                db(tx.execute(
+                    "INSERT INTO registry_epoch.identity VALUES(true,$1)",
+                    &[&registry_epoch::digest(
+                        registry_epoch::REGISTRY_EPOCH_SQL.as_bytes(),
+                    )],
+                ))?;
+            }
+            registry_epoch::optional_catalog(&mut tx)?
+                .ok_or("REGISTRY_EPOCH_EXTENSION_REQUIRED")?;
+        }
         db(tx.commit())?;
         return Ok(
-            json!({"schema":SCHEMA,"status":"INSTALLED","registryStrategy":"VERIFIED_SUFFIX_V1"}),
+            json!({"schema":SCHEMA,"status":"INSTALLED","registryStrategy":if action=="install-epoch"{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"}}),
         );
     }
     let operation = text(request, "operationId")?;
@@ -672,7 +1019,14 @@ pub fn execute_project_purge(
             extension(&mut tx)?;
         }
         let stopped: bool = db(tx.query_one("SELECT admission_mode='STOPPED' AND daemon_instance_id IS NULL AND daemon_epoch IS NULL AND authority_revision=0 AND observation_digest IS NULL AND authority_head_digest IS NULL FROM ONLY control.runtime_admission WHERE singleton", &[]))?.get(0);
-        let mut plan = prepare(&mut tx, target, text(request, "projectId")?, operation)?;
+        let mut plan = prepare(
+            &mut tx,
+            target,
+            text(request, "projectId")?,
+            operation,
+            epoch_policy,
+            request.get("expectedScopeDigest").and_then(Value::as_str),
+        )?;
         let blockers = plan.public["blockers"]
             .as_array_mut()
             .ok_or("PROJECT_PURGE_SERIALIZATION")?;
@@ -707,14 +1061,14 @@ pub fn execute_project_purge(
         crate::postgres_setup::verify_stopped_admission(&mut tx)
             .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
         let row = db(tx.query_opt(
-            "SELECT request_digest,result FROM ONLY project_purge.receipts WHERE operation_id=$1",
-            &[&operation],
+            "SELECT request_digest,result FROM ONLY project_purge.receipts WHERE operation_id=$1 OR operation_id=$2",
+            &[&operation,&operation_key(operation)],
         ))?;
         return match row {
             None => {
                 Ok(json!({"schema":SCHEMA,"status":"UNKNOWN_OPERATION","operationId":operation}))
             }
-            Some(r) => replay_receipt(&mut tx, request, &r.get::<_, String>(0), r.get(1)),
+            Some(r) => replay_receipt(&mut tx, target, request, &r.get::<_, String>(0), r.get(1)),
         };
     }
     let project = text(request, "projectId")?;
@@ -736,8 +1090,8 @@ pub fn execute_project_purge(
         crate::postgres_setup::verify_stopped_admission(&mut tx)
             .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
         if let Some(row) = db(tx.query_opt(
-            "SELECT request_digest,result FROM ONLY project_purge.receipts WHERE operation_id=$1",
-            &[&operation],
+            "SELECT request_digest,result FROM ONLY project_purge.receipts WHERE operation_id=$1 OR operation_id=$2",
+            &[&operation,&operation_key(operation)],
         ))? {
             let bound = digest(
                 format!(
@@ -749,10 +1103,17 @@ pub fn execute_project_purge(
             if row.get::<_, String>(0) != bound {
                 return Err("PROJECT_PURGE_IDEMPOTENCY_CONFLICT");
             }
-            return replay_receipt(&mut tx, request, &bound, row.get(1));
+            return replay_receipt(&mut tx, target, request, &bound, row.get(1));
         }
     }
-    let plan = prepare(&mut tx, target, project, operation)?;
+    let plan = prepare(
+        &mut tx,
+        target,
+        project,
+        operation,
+        epoch_policy,
+        Some(text(request, "expectedScopeDigest")?),
+    )?;
     if plan.public["status"] != "READY" {
         return Ok(plan.public);
     }
@@ -760,16 +1121,38 @@ pub fn execute_project_purge(
     if text(request, "expectedScopeDigest")? != scope {
         return Err("PROJECT_PURGE_STALE_SCOPE");
     }
+    if let Some(epoch) = &plan.epoch {
+        registry_epoch::prepare_anchor(target.expected_database_identity_sha256().as_str(), epoch)?;
+    }
     erase(&mut tx, target, project, &plan)?;
     let tables = all_tables(&mut tx)?;
     let after_digest = digest(
         &serde_json::to_vec(&snapshots(&mut tx, &tables)?)
             .map_err(|_| "PROJECT_PURGE_SERIALIZATION")?,
     );
-    let result = json!({"schema":SCHEMA,"status":"PURGED","phase":"POSTGRES_ONLY","operationId":operation,"scopeDigest":scope,"afterDigest":after_digest,"registryStrategy":"VERIFIED_SUFFIX_V1","counts":plan.public["counts"],"blockers":[]});
+    let mut result = json!({"schema":SCHEMA,"status":"PURGED","phase":"POSTGRES_ONLY","operationId":operation,"scopeDigest":scope,"afterDigest":after_digest,"registryStrategy":plan.public["registryStrategy"],"counts":plan.public["counts"],"blockers":[]});
+    if let Some(epoch) = &plan.epoch {
+        result["registrySealDigest"] = json!(epoch.next.seal_digest.as_str());
+        result["history"] = plan.public["history"].clone();
+        result["operationCommitment"] = json!(operation_key(operation));
+    }
     let binding = digest(format!("{operation}\n{project}\n{scope}").as_bytes());
-    db(tx.execute("INSERT INTO project_purge.receipts(operation_id,scope_digest,request_digest,result) VALUES($1,$2,$3,$4)",&[&operation,&scope,&binding,&result]))?;
+    let retained_key = if plan.epoch.is_some() {
+        operation_key(operation)
+    } else {
+        operation.to_owned()
+    };
+    let mut retained_result = result.clone();
+    retained_result["operationId"] = json!(retained_key);
+    db(tx.execute("INSERT INTO project_purge.receipts(operation_id,scope_digest,request_digest,result) VALUES($1,$2,$3,$4)",&[&retained_key,&scope,&binding,&retained_result]))?;
     tx.commit()
         .map_err(|_| "PROJECT_PURGE_COMMIT_OUTCOME_UNKNOWN")?;
+    if plan.epoch.is_some() {
+        registry_epoch::activate_anchor(
+            client,
+            target.expected_database_identity_sha256().as_str(),
+            &binding,
+        )?;
+    }
     Ok(result)
 }

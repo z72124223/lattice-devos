@@ -87,6 +87,11 @@ tests prove only the tested behavior.
   or blockers must remain visibly incomplete. A previous tool-policy denial
   cannot be retried through this entry point or a different tool.
 
+- Important purge decisions about data retention, historical verification or
+  irreversible scope changes require a cross-check with Claude before choosing
+  the approach or asking the user to decide. Collaboration is Codex + Claude;
+  do not involve DOT or ChatGPT web. Prefer browser text over screenshots.
+
 - Keep each Runtime module independently testable and repairable. Reserve a
   complete three-core run for an explicit release-level integration check, never
   as the mandatory proof for routine module work.
