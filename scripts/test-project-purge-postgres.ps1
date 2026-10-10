@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][string]$SeedBinary,
     [Parameter(Mandatory = $true)][string]$RuntimeBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','coordinator')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','coordinator','coordinator-absent')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -46,7 +46,7 @@ $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
     try {
-        foreach ($stage in @('main','interleaved','coordinator')) {
+        foreach ($stage in @('main','interleaved','coordinator','coordinator-absent')) {
             $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -NodeBinary $NodeBinary -Scenario $stage)
             $child = $childOutput[-1] | ConvertFrom-Json
             if ($child.status -cne 'PASS' -or -not $child.fixtureStopped) { throw "FIXTURE_STAGE_FAILED: $stage" }

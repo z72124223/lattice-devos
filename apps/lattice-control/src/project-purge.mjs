@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { previewProjectPurgeSqlite, beginProjectPurgeSqlite, readbackProjectPurgeSqlite } from './project-purge-sqlite.mjs';
 import { previewProjectPurgeFiles, validateProjectPurgeFiles, applyProjectPurgeFiles, readbackProjectPurgeFiles } from './project-purge-files.mjs';
+import { externalPurgeInventory, projectPurgeReport } from './project-purge-report.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new Error(code); };
@@ -45,16 +46,27 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   const pg = await native(nativeBinary, request(base, 'preview'));
   if (!['READY', 'BLOCKED'].includes(pg.status) || pg.project?.id !== options.projectId || !Array.isArray(pg.blockers)
       || !Array.isArray(pg.protectedRoots) || !Array.isArray(pg.filesystemRoots) || !/^[a-f0-9]{64}$/.test(pg.scopeDigest)) fail('PURGE_NATIVE_RESPONSE_INVALID');
-  const sqlite = previewProjectPurgeSqlite({ databasePath, projectId: base.projectId, canonicalPath: absolute(pg.project.canonicalPath) });
+  const canonicalPath = absolute(pg.project.canonicalPath);
+  const sqlite = previewProjectPurgeSqlite({ databasePath, projectId: base.projectId, canonicalPath,
+    authoritativeProject: { source: 'POSTGRES_PREVIEW', projectId: base.projectId, canonicalPath, scopeDigest: pg.scopeDigest } });
   const roots = [...new Set([sqlite.canonicalPath, ...pg.filesystemRoots.map(entry => absolute(entry.path))])];
   const protectedRoots = [...new Set([...sqlite.protectedRoots, ...pg.protectedRoots.map(absolute), databasePath,
     nativeBinary, statePath, `${statePath}.lock`, `${statePath}.tmp`, fileURLToPath(import.meta.url), ...(options.protectedRoots ?? []).map(absolute)])];
-  const files = await previewProjectPurgeFiles({ projectId: base.projectId, roots, protectedRoots });
+  let files;
+  const fileBlockers = [];
+  try { files = await previewProjectPurgeFiles({ projectId: base.projectId, roots, protectedRoots }); }
+  catch (error) {
+    if (!/^PURGE_FILE_[A-Z_]+$/.test(error.message)) throw error;
+    fileBlockers.push(error.message);
+    files = { projectId: base.projectId, roots, protectedRoots, status: 'BLOCKED', blockers: fileBlockers };
+  }
+  const blockers = [...pg.blockers, ...sqlite.blockers, ...fileBlockers];
   const plan = { schema, ...base, nativeBinary, statePath, sqlite, files,
     postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy },
-    blockers: [...pg.blockers, ...sqlite.blockers],
+    blockers,
     externalScope: ['Codex conversations and attachments', 'automations', 'remote repositories and published artifacts', 'backups and database WAL', 'separate Bot lifecycle database', 'Graphify external caches', 'this maintenance plan, progress, and receipts'],
-    status: pg.status === 'BLOCKED' || pg.blockers.length || sqlite.blockers.length ? 'BLOCKED' : 'READY',
+    externalInventory: externalPurgeInventory(options.externalResources),
+    status: pg.status === 'BLOCKED' || blockers.length ? 'BLOCKED' : 'READY',
   };
   plan.digest = planDigest(plan);
   return plan;
@@ -64,6 +76,11 @@ function validatePlan(plan) {
   if (plan.schema !== schema || plan.digest !== planDigest(plan) || plan.projectId !== plan.sqlite.projectId || plan.projectId !== plan.files.projectId
     || !plan.operationId || !/^[a-f0-9]{64}$/.test(plan.postgres.scopeDigest)) fail('PURGE_PLAN_INVALID');
   absolute(plan.statePath); absolute(plan.nativeBinary);
+  if (plan.sqlite.catalogState === 'ABSENT') {
+    const authority = plan.sqlite.authoritativeProject;
+    if (authority?.source !== 'POSTGRES_PREVIEW' || authority.projectId !== plan.projectId
+      || authority.scopeDigest !== plan.postgres.scopeDigest || authority.canonicalPath !== plan.sqlite.canonicalPath) fail('PURGE_PLAN_INVALID');
+  }
 }
 
 async function loadState(plan) {
@@ -75,7 +92,9 @@ async function loadState(plan) {
 }
 async function saveState(plan, state) {
   const temporary = `${plan.statePath}.${randomUUID()}.tmp`;
-  await writeFile(temporary, JSON.stringify(state, null, 2), { flag: 'wx', mode: 0o600 });
+  const file = await open(temporary, 'wx', 0o600);
+  try { await file.writeFile(JSON.stringify(state, null, 2)); await file.sync(); }
+  finally { await file.close(); }
   await rename(temporary, plan.statePath);
 }
 function matchingReceipt(plan, receipt) {
@@ -97,14 +116,15 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     let receipt = await native(plan.nativeBinary, request(plan, 'status'));
     if (!matchingReceipt(plan, receipt)) {
       if (!['NOT_FOUND', 'UNKNOWN_OPERATION'].includes(receipt.status)) fail('PURGE_NATIVE_RECEIPT_MISMATCH');
-      if (transaction.alreadyApplied) fail('PURGE_SQLITE_ABSENT_WITHOUT_NATIVE_RECEIPT');
+      if (transaction.alreadyApplied && plan.sqlite.catalogState !== 'ABSENT') fail('PURGE_SQLITE_ABSENT_WITHOUT_NATIVE_RECEIPT');
       const current = await native(plan.nativeBinary, request(plan, 'preview'));
       if (current.scopeDigest !== plan.postgres.scopeDigest || current.status !== 'READY' || current.blockers?.length) fail('PURGE_NATIVE_STALE_SCOPE');
       receipt = await native(plan.nativeBinary, { ...request(plan, 'apply'), expectedScopeDigest: plan.postgres.scopeDigest, authorization: 'ERASE_PROJECT_DATA' });
       if (!matchingReceipt(plan, receipt)) fail('PURGE_NATIVE_RECEIPT_MISMATCH');
     }
     state.postgres = receipt; state.status = 'PARTIAL'; await saveState(plan, state);
-    state.files = await applyProjectPurgeFiles(plan.files, { ...fileOptions(plan), previousResult: state.files });
+    state.files = await applyProjectPurgeFiles(plan.files, { ...fileOptions(plan), previousResult: state.files,
+      onProgress: async progress => { state.files = progress; await saveState(plan, state); } });
     await saveState(plan, state);
     if (state.files.status !== 'completed') fail('PURGE_FILES_INCOMPLETE');
     const committing = transaction; transaction = null; committing.commit();
@@ -114,6 +134,7 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     if (!state.sqlite.complete || !fileReadback.complete || !matchingReceipt(plan, finalReceipt)) fail('PURGE_READBACK_INCOMPLETE');
     state.postgres = finalReceipt;
     state.status = 'SCOPED_PURGED'; state.files.readback = fileReadback;
+    state.report = projectPurgeReport(plan, state);
     await saveState(plan, state); return state;
   } catch (error) {
     transaction?.rollback(); transaction = null;
@@ -128,11 +149,13 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
 
 export async function statusProjectPurge(plan, { native = nativeProjectPurge } = {}) {
   validatePlan(plan);
+  if (plan.status === 'BLOCKED') return { status: 'BLOCKED', report: projectPurgeReport(plan) };
   const state = await loadState(plan);
   const receipt = await native(plan.nativeBinary, request(plan, 'status'));
   const sqlite = readbackProjectPurgeSqlite(plan.sqlite);
   const files = await readbackProjectPurgeFiles(plan.files, fileOptions(plan));
-  return { operationId: plan.operationId, planDigest: plan.digest,
+  const result = { operationId: plan.operationId, planDigest: plan.digest,
     status: state && matchingReceipt(plan, receipt) && sqlite.complete && files.complete ? 'SCOPED_PURGED' : 'INCOMPLETE',
     postgres: receipt, sqlite, files, externalCleanup: 'NOT_VERIFIED', externalScope: plan.externalScope };
+  return { ...result, report: projectPurgeReport(plan, result) };
 }

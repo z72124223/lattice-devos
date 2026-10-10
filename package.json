@@ -13,6 +13,7 @@
     "control:codex-lifecycle-acceptance": "node scripts/run-codex-app-server-lifecycle-acceptance.mjs",
     "control:primary-conversation-acceptance": "node scripts/run-primary-conversation-acceptance.mjs",
     "control:project": "node apps/lattice-control/src/project-client.mjs",
+    "project:purge": "node apps/lattice-control/src/project-purge-client.mjs",
     "control:receipt": "node apps/lattice-control/src/installation-receipt-client.mjs",
     "control:decision-mcp": "node apps/lattice-control/src/decision-core-mcp.mjs",
     "control:decision-mcp-acceptance": "node scripts/run-lattice-control-decision-core-mcp-acceptance.mjs",

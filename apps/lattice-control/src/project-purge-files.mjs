@@ -202,6 +202,15 @@ export async function validateProjectPurgeFiles(plan, options) {
   await checkProtectedAliases(authoritative);
   const ancestors = await ancestry(authoritative.roots);
   if (digest(ancestors) !== digest(plan.ancestors)) fail('PURGE_FILE_SCOPE_CHANGED');
+  const pending = options.previousResult?.pendingRemoval;
+  if (pending != null) {
+    const entry = plan.entries.find(item => item.path === pending);
+    if (!entry || removed.has(pending)) fail('PURGE_FILE_RECEIPT_MISMATCH');
+    await checkAncestors(plan, entry);
+    // A durable intent precedes unlink. After a crash, absence is acceptable
+    // only for this exact planned entry, with the original ancestor identities.
+    if (!(await inspect(pending))) removed.add(pending);
+  }
   const current = await manifest(authoritative.roots, plan.limits);
   const absent = new Set(current.absentRoots);
   const expected = plan.entries.filter(entry => !absent.has(entry.root) && !removed.has(entry.path));
@@ -213,7 +222,7 @@ export async function validateProjectPurgeFiles(plan, options) {
       if (observed.path !== entry.path || observed.type !== entry.type || digest(observed.identity) !== digest(entry.identity)) fail('PURGE_FILE_SCOPE_CHANGED');
     } else if (digest(entry) !== digest(observed)) fail('PURGE_FILE_SCOPE_CHANGED');
   }
-  return { valid: true, absentRoots: current.absentRoots, remainingEntries: current.entries };
+  return { valid: true, absentRoots: current.absentRoots, remainingEntries: current.entries, removed: [...removed] };
 }
 
 async function checkAncestors(plan, entry) {
@@ -251,7 +260,10 @@ export async function applyProjectPurgeFiles(plan, options) {
   // Whole-scope validation precedes the first mutation. Recursive rm is deliberately
   // avoided: an unexpected child makes rmdir fail rather than deleting new data.
   const checked = await validateProjectPurgeFiles(plan, options);
-  const removed = [...previousRemoved(plan, options.previousResult)], failed = [];
+  const removed = [...checked.removed], failed = [];
+  const progress = pendingRemoval => ({ schema: SCHEMA, projectId: plan.projectId, planDigest: plan.planDigest,
+    status: 'partial', removed: [...removed], alreadyAbsent: checked.absentRoots, failed: [], pendingRemoval });
+  if (options.onProgress) await options.onProgress(progress(null));
   for (const entry of [...checked.remainingEntries].reverse()) {
     try {
       await checkAncestors(plan, entry);
@@ -259,8 +271,10 @@ export async function applyProjectPurgeFiles(plan, options) {
       if (!stat || digest(identity(stat)) !== digest(entry.identity)) fail('PURGE_FILE_SCOPE_CHANGED');
       if (entry.type !== 'directory' && digest(details(stat)) !== digest({ identity: entry.identity, size: entry.size, mtimeNs: entry.mtimeNs, ctimeNs: entry.ctimeNs, nlink: entry.nlink })) fail('PURGE_FILE_SCOPE_CHANGED');
       if (entry.type === 'link' && await readlink(entry.path) !== entry.linkTarget) fail('PURGE_FILE_SCOPE_CHANGED');
+      if (options.onProgress) await options.onProgress(progress(entry.path));
       if (entry.type === 'directory') await rmdir(entry.path); else await unlink(entry.path);
       removed.push(entry.path);
+      if (options.onProgress) await options.onProgress(progress(null));
     } catch (error) {
       failed.push({ path: entry.path, code: safeCode(error) });
       break;

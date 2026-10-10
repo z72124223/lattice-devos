@@ -22,6 +22,19 @@ SPEC = importlib.util.spec_from_file_location("customer", Path(__file__).with_na
 M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 SCHEMA = "lattice.windows-dependency-bundle.v1"
+PROJECT_PURGE_SCHEMA = "lattice.project-purge.bundle.v1"
+PROJECT_PURGE_BINARY = "bin/lattice-project-purge.exe"
+PROJECT_PURGE_ENTRYPOINT = "apps/lattice-control/src/project-purge-client.mjs"
+PROJECT_PURGE_FILES = (
+    PROJECT_PURGE_ENTRYPOINT,
+    "apps/lattice-control/src/project-purge.mjs",
+    "apps/lattice-control/src/project-purge-files.mjs",
+    "apps/lattice-control/src/project-purge-sqlite.mjs",
+    "apps/lattice-control/src/project-purge-report.mjs",
+    "apps/lattice-control/src/store.mjs",
+    "apps/lattice-control/src/database-path.mjs",
+    "apps/lattice-control/data-scope-contract.json",
+)
 MAX_FILES = 50_000
 MAX_BYTES = 3_000_000_000
 NODE_VERSION = "24.16.0"
@@ -180,6 +193,25 @@ def verify(root, expected):
     actual, size = inventory(root)
     if actual != data["files"] or size != data["total_bytes"]:
         raise M.Rejected("BUNDLE_CONTENT_CHANGED")
+    if "project_purge" in data:
+        feature = data["project_purge"]
+        required = {PROJECT_PURGE_BINARY, *PROJECT_PURGE_FILES}
+        if (not isinstance(feature, dict)
+                or set(feature) != {"schema", "entrypoint", "binary", "runtime_sha256", "files"}
+                or feature["schema"] != PROJECT_PURGE_SCHEMA
+                or feature["entrypoint"] != PROJECT_PURGE_ENTRYPOINT
+                or feature["binary"] != PROJECT_PURGE_BINARY
+                or not isinstance(feature["files"], dict)
+                or set(feature["files"]) != required
+                or not required.issubset(actual)
+                or any(feature["files"][name] != actual[name]["sha256"] for name in required)
+                or feature["runtime_sha256"] != data.get("runtime_sha256")
+                or actual.get("bin/latticed.exe", {}).get("sha256") != feature["runtime_sha256"]
+                or "node/node.exe" not in actual):
+            raise M.Rejected("PROJECT_PURGE_BUNDLE_REJECTED")
+        verify_node(root / "node")
+    elif any(name in actual for name in (PROJECT_PURGE_BINARY, PROJECT_PURGE_ENTRYPOINT)):
+        raise M.Rejected("PROJECT_PURGE_CAPABILITY_REQUIRED")
     crt_directories = (root / "bin", root / "postgres/bin")
     if "vc_runtime" not in data:
         for directory in crt_directories:
@@ -213,10 +245,54 @@ def copy_tree(source, target, excluded=(), budget=None):
             raise M.Rejected("BUNDLE_SOURCE_CHANGED")
 
 
+def project_purge_payload(binary, expected, source):
+    """Select only the reviewed maintenance executable and its software closure."""
+    if binary is None and expected is None and source is None:
+        return None
+    if binary is None or expected is None or source is None:
+        raise M.Rejected("PROJECT_PURGE_SUPPLY_REQUIRED")
+    if not binary.is_absolute() or not source.is_absolute():
+        raise M.Rejected("ABSOLUTE_PATH_REQUIRED")
+    M.regular(source, directory=True)
+    if not binary.exists():
+        raise M.Rejected("PROJECT_PURGE_BINARY_REQUIRED")
+    if sha(binary) != expected:
+        raise M.Rejected("PROJECT_PURGE_BINARY_DIGEST_REJECTED")
+    result = {PROJECT_PURGE_BINARY: (binary, expected)}
+    for name in PROJECT_PURGE_FILES:
+        original = source / name
+        if not original.exists():
+            raise M.Rejected("PROJECT_PURGE_SOURCE_REQUIRED")
+        result[name] = (original, sha(original))
+    return result
+
+
+def copy_project_purge(root, payload, runtime_sha, budget):
+    for name, (original, expected) in payload.items():
+        if sha(original) != expected:
+            raise M.Rejected("BUNDLE_SOURCE_CHANGED")
+        budget["files"] += 1
+        budget["bytes"] += original.stat().st_size
+        if budget["files"] > MAX_FILES or budget["bytes"] > MAX_BYTES:
+            raise M.Rejected("BUNDLE_CAPACITY_REJECTED")
+        copied = root / name
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        if copied.exists():
+            raise M.Rejected("PROJECT_PURGE_OUTPUT_EXISTS")
+        shutil.copyfile(original, copied)
+        if sha(copied) != expected or sha(original) != expected:
+            raise M.Rejected("BUNDLE_SOURCE_CHANGED")
+    return {"schema": PROJECT_PURGE_SCHEMA, "entrypoint": PROJECT_PURGE_ENTRYPOINT,
+            "binary": PROJECT_PURGE_BINARY, "runtime_sha256": runtime_sha,
+            "files": {name: value[1] for name, value in sorted(payload.items())}}
+
+
 def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None, archive=None,
-          vc_redist=None, vc_license=None, vc_redist_list=None):
+          vc_redist=None, vc_license=None, vc_redist_list=None,
+          project_purge_binary=None, project_purge_sha256=None, project_purge_source=None):
     if sha(runtime) != runtime_sha:
         raise M.Rejected("RUNTIME_DIGEST_MISMATCH")
+    purge_payload = project_purge_payload(project_purge_binary, project_purge_sha256, project_purge_source)
     if not root.is_absolute():
         raise M.Rejected("ABSOLUTE_PATH_REQUIRED")
     M.CONFIG.regular_path(root)
@@ -253,6 +329,7 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
     for name in M.SCRIPTS:
         shutil.copyfile(Path(__file__).with_name(name), root / "bin" / name)
     budget = {"files": len(M.SCRIPTS) + 1, "bytes": sum(path.stat().st_size for path in (root / "bin").iterdir())}
+    purge_feature = copy_project_purge(root, purge_payload, runtime_sha, budget) if purge_payload is not None else None
     # Explicit software subtrees; PostgreSQL data, Git global config, Python
     # site-packages, user homes, installer state and credentials are never inputs.
     for name in ("bin", "lib", "share"):
@@ -289,6 +366,9 @@ def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None
             "full_dependency_portability": "NOT_VERIFIED", "cores": ["control", "postgresql", "graphify"]}
     if archive is not None:
         data["bundled"].append("Pinned official Ubuntu 26.04.1 WSL image with Python 3.14 and bubblewrap")
+    if purge_feature is not None:
+        data["project_purge"] = purge_feature
+        data["bundled"].append("LATTICE offline project purge executable and verified CLI software closure")
     (root / "bundle.json").write_bytes(M.CONFIG.json_bytes(data))
     digest = sha(root / "bundle.json")
     verify(root, digest)
@@ -331,6 +411,9 @@ def main():
     parser.add_argument("--sha256")
     parser.add_argument("--runtime", type=Path)
     parser.add_argument("--runtime-sha256")
+    parser.add_argument("--project-purge-binary", type=Path, help="opt in to the offline purge capability with its reviewed executable")
+    parser.add_argument("--project-purge-sha256", help="expected SHA-256 of the purge executable; required with purge capability")
+    parser.add_argument("--project-purge-source", type=Path, help="repository root supplying the exact purge CLI dependency closure")
     parser.add_argument("--postgres", type=Path)
     parser.add_argument("--python", type=Path)
     parser.add_argument("--git", type=Path)
@@ -340,6 +423,8 @@ def main():
     parser.add_argument("--graph-source", type=Path)
     parser.add_argument("--wsl", type=Path)
     args = parser.parse_args()
+    if args.action != "build" and any((args.project_purge_binary, args.project_purge_sha256, args.project_purge_source)):
+        raise M.Rejected("PROJECT_PURGE_BUILD_OPTION_ONLY")
     if args.action == "supply-node":
         if args.node is None:
             raise M.Rejected("NODE_SUPPLY_PATH_REQUIRED")
@@ -350,7 +435,8 @@ def main():
         if not all((args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node)):
             raise M.Rejected("BUNDLE_BUILD_ARGUMENTS_REQUIRED")
         result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify,
-                       args.node, args.archive, args.vc_redist, args.vc_license, args.vc_redist_list)
+                       args.node, args.archive, args.vc_redist, args.vc_license, args.vc_redist_list,
+                       args.project_purge_binary, args.project_purge_sha256, args.project_purge_source)
     elif args.action == "install":
         if not all((args.sha256, args.state, args.graph_source, args.wsl)):
             raise M.Rejected("BUNDLE_INSTALL_ARGUMENTS_REQUIRED")

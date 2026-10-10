@@ -252,21 +252,32 @@ const usage = [
   "npm.cmd run control:project -- register --name <顯示名稱> --path <絕對路徑>",
   "npm.cmd run control:project -- refresh --project-id <id>",
   "npm.cmd run control:project -- read --project-id <id>",
+  "npm.cmd run project:purge -- <preview|apply|resume|status|verify> <清除參數>",
+  "control:project delete/purge 為同一離線清除入口的別名；apply 必須核對預覽摘要及維護狀態。",
   "",
   "read/refresh 可用 --project-name <名稱> 取代 --project-id；--json 輸出機器可讀 JSON。",
   "--origin 預設為 http://127.0.0.1:4317，且只接受 HTTP loopback。",
 ].join("\n");
 
+export async function runProjectCli(argv, {
+  purgeCli,
+  projectCommand = runProjectCommand,
+} = {}) {
+  if (["delete", "purge"].includes(argv[0])) {
+    const delegate = purgeCli ?? (await import("./project-purge-client.mjs")).runProjectPurgeCli;
+    return delegate(argv.slice(1));
+  }
+  const options = parseProjectArguments(argv);
+  if (options.help) return { output: usage, exitCode: 0 };
+  const result = await projectCommand(options);
+  return { output: options.json ? JSON.stringify(result) : formatProjectResult(result), exitCode: 0 };
+}
+
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
-    const options = parseProjectArguments(process.argv.slice(2));
-    if (options.help) process.stdout.write(`${usage}\n`);
-    else {
-      const result = await runProjectCommand(options);
-      process.stdout.write(options.json
-        ? `${JSON.stringify(result)}\n`
-        : `${formatProjectResult(result)}\n`);
-    }
+    const result = await runProjectCli(process.argv.slice(2));
+    (result.exitCode === 0 ? process.stdout : process.stderr).write(`${result.output}\n`);
+    process.exitCode = result.exitCode;
   } catch (error) {
     process.stderr.write(`錯誤：${error.message}\n`);
     process.exitCode = 1;

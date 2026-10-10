@@ -4,6 +4,8 @@ import path from 'node:path';
 import test from 'node:test';
 import { LatticeStore } from '../src/store.mjs';
 import { previewProjectPurge, applyProjectPurge, statusProjectPurge } from '../src/project-purge.mjs';
+import { runProjectPurgeCli } from '../src/project-purge-client.mjs';
+import { externalPurgeInventory, projectPurgeReport } from '../src/project-purge-report.mjs';
 
 async function fixture(t) {
   const parent = path.resolve('.lattice/project-purge-workflow-tests');
@@ -102,4 +104,72 @@ test('PostgreSQL is read again after the other stages; historical receipt alone 
   await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /READBACK_CHANGED/);
   assert.equal(JSON.parse(await readFile(f.statePath, 'utf8')).status, 'INCOMPLETE');
   assert.equal(f.applied, 1);
+});
+
+test('PostgreSQL-owned project can finish the local scope after an earlier catalog-only removal', async t => {
+  const f = await fixture(t);
+  const db = new LatticeStore(f.databasePath);
+  db.database.prepare('DELETE FROM projects WHERE id=?').run(f.project.id); db.close();
+  const plan = await f.preview();
+  assert.equal(plan.sqlite.catalogState, 'ABSENT');
+  assert.equal(plan.sqlite.authoritativeProject.scopeDigest, plan.postgres.scopeDigest);
+  const result = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native });
+  assert.equal(result.status, 'SCOPED_PURGED'); assert.equal(f.applied, 1);
+  assert.equal(result.report.overallStatus, 'PARTIAL'); assert.equal(result.report.complete, false);
+  assert.equal((await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native })).status, 'SCOPED_PURGED');
+  assert.equal(f.applied, 1);
+});
+
+test('unsafe filesystem scope yields an inspectable blocked plan without deleting PostgreSQL', async t => {
+  const f = await fixture(t);
+  const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath,
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath, protectedRoots: [f.target] }, { native: f.native });
+  assert.equal(plan.status, 'BLOCKED');
+  assert.ok(plan.blockers.includes('PURGE_FILE_PROTECTED_ROOT'));
+  const readback = await statusProjectPurge(plan, { native: f.native });
+  assert.equal(readback.report.overallStatus, 'BLOCKED');
+  assert.ok(readback.report.blockers[0].nextStep);
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /PURGE_BLOCKED/);
+  assert.equal(f.applied, 0);
+});
+
+test('external resource inventory is bounded and never accepts claimed deletion or absence', async t => {
+  const f = await fixture(t), plan = await f.preview();
+  assert.throws(() => externalPurgeInventory([{ kind: 'codex', reference: 'thread-1', source: 'native list', status: 'DELETED' }]), /INVENTORY_INVALID/);
+  const declared = { kind: 'codex', reference: 'thread-1', source: 'native list' };
+  assert.throws(() => externalPurgeInventory([declared, declared]), /INVENTORY_DUPLICATE/);
+  plan.externalInventory = externalPurgeInventory([declared]);
+  plan.externalInventory[0].discovery = 'COMPLETE';
+  plan.externalInventory[0].resources[0].status = 'DELETED';
+  const report = projectPurgeReport(plan, { status: 'SCOPED_PURGED' });
+  assert.equal(report.complete, false); assert.equal(report.overallStatus, 'PARTIAL');
+  assert.equal(report.external[0].discovery, 'NOT_VERIFIED');
+  assert.equal(report.external[0].resources[0].status, 'NOT_VERIFIED');
+  assert.equal(report.remaining.length, 7);
+});
+
+test('standard CLI rejects unknown, duplicate and incomplete deletion arguments before side effects', async () => {
+  const never = async () => assert.fail('unexpected side effect');
+  for (const args of [
+    ['apply', '--plan', 'missing'], ['resume', '--plan', 'missing', '--confirm', 'a'.repeat(64)],
+    ['apply', '--plan', 'missing', '--confirm', 'a'.repeat(64), '--maintenance-offline', '--force'],
+    ['status', '--plan', 'one', '--plan', 'two'], ['status', '--plan'], ['purge-all'],
+  ]) assert.equal((await runProjectPurgeCli(args, { preview: never, apply: never, status: never })).exitCode, 1);
+});
+
+test('standard CLI inventory saves one plan; resume delegates exact plan and verify rejects partial completion', async t => {
+  const f = await fixture(t), input = path.join(f.root, 'input.json'), planPath = path.join(f.root, 'plan.json');
+  await writeFile(input, JSON.stringify({ projectId: f.project.id, databasePath: f.databasePath,
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath }));
+  const services = { preview: options => previewProjectPurge(options, { native: f.native }),
+    apply: (plan, options) => applyProjectPurge(plan, { ...options, native: f.native }),
+    status: plan => statusProjectPurge(plan, { native: f.native }) };
+  assert.equal((await runProjectPurgeCli(['inventory', '--input', input, '--plan', planPath], services)).exitCode, 0);
+  assert.equal((await runProjectPurgeCli(['preview', '--input', input, '--plan', planPath], services)).exitCode, 1);
+  const plan = JSON.parse(await readFile(planPath, 'utf8'));
+  const applied = await runProjectPurgeCli(['resume', '--plan', planPath, '--confirm', plan.digest, '--maintenance-offline'], services);
+  assert.equal(applied.exitCode, 0);
+  const verified = await runProjectPurgeCli(['verify', '--plan', planPath], services);
+  assert.equal(verified.exitCode, 2); assert.equal(JSON.parse(verified.output).report.complete, false);
+  assert.equal(JSON.parse(verified.output).status, 'SCOPED_PURGED'); assert.equal(f.applied, 1);
 });

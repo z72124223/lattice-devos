@@ -3,13 +3,14 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, all) => {
   if (i % 2 === 0) pairs.push([token.replace(/^--/, ''), all[i + 1]]);
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'coordinator'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'coordinator', 'coordinator-absent'].includes(args.scenario));
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
 assert.equal(marker.port, port);
@@ -246,6 +247,120 @@ try {
   assert.equal(verifiedCoordinator.externalCleanup, 'NOT_VERIFIED');
   writeFileSync(path.join(runRoot, 'coordinator-result.json'), JSON.stringify(verifiedCoordinator, null, 2) + '\n');
   check('real-coordinator-pg-sqlite-files-readback-and-survivor-preserved', { survivorPgBefore, survivorFileBefore });
+  }
+
+  if (args.scenario === 'coordinator-absent') {
+  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'store.mjs'];
+  const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
+    const file = fileURLToPath(new URL(`../apps/lattice-control/src/${name}`, import.meta.url));
+    return [name, createHash('sha256').update(readFileSync(file)).digest('hex')];
+  }));
+  evidence.sourceHashes = sourceHashes();
+  const coordinated = establish('coordinator-absent');
+  const { LatticeStore } = await import('../apps/lattice-control/src/store.mjs');
+  const { DatabaseSync } = await import('node:sqlite');
+  const sqlitePath = path.join(coordinated.root, 'control-fixture.sqlite');
+  const localStore = new LatticeStore(sqlitePath);
+  const timestamp = '2026-10-10T00:00:00Z';
+  try {
+    const id = coordinated.seeded.survivorProjectId, root = coordinated.seeded.survivorCanonicalPath;
+    localStore.database.prepare('INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES(?,?,?,?,?)')
+      .run(id, 'Synthetic survivor', root, timestamp, timestamp);
+    localStore.createWorkItem({ projectId: id, title: 'Retained work', objective: 'Preserve this synthetic survivor' });
+    localStore.database.prepare('INSERT INTO project_registration_details(project_id,canonical_path,registered_at,refreshed_at) VALUES (?,?,?,?)')
+      .run(id, root, timestamp, timestamp);
+    // Registration claims have no project FK. Simulate a catalog entry already
+    // removed while both its PostgreSQL truth and this path claim remain.
+    for (const kind of ['target', 'survivor']) {
+      localStore.database.prepare('INSERT INTO project_registration_claims(canonical_path,generation,claimed_at) VALUES (?,1,?)')
+        .run(coordinated.seeded[`${kind}CanonicalPath`], timestamp);
+    }
+    assert.equal(localStore.getProject(coordinated.seeded.targetProjectId), null);
+  } finally { localStore.close(); }
+  const sqliteRows = () => {
+    const db = new DatabaseSync(sqlitePath, { readOnly: true });
+    try {
+      assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
+      return db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all().map(({ name }) => {
+        assert.match(name, /^[a-z_]+$/);
+        return [name, db.prepare(`SELECT * FROM "${name}"`).all().sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b), 'en'))];
+      });
+    } finally { db.close(); }
+  };
+  const cliPath = fileURLToPath(new URL('../apps/lattice-control/src/project-client.mjs', import.meta.url));
+  const configPath = path.join(coordinated.root, 'purge-config.json'), planPath = path.join(coordinated.root, 'purge-plan.json');
+  writeFileSync(configPath, JSON.stringify({
+    projectId: coordinated.seeded.targetProjectId, operationId: 'fixture-coordinator-absent',
+    nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'),
+    externalResources: [{ kind: 'codex', reference: 'thread:synthetic-unverified-reference', source: 'synthetic-fixture' }],
+  }, null, 2) + '\n');
+  const cli = (alias, action, flags, expectedCode = 0) => {
+    const result = command(process.execPath, [cliPath, alias, action, ...flags], coordinated.env, undefined, `cli-${alias}-${action}`, expectedCode === 0);
+    assert.equal(result.exitCode, expectedCode);
+    return JSON.parse((expectedCode === 0 ? result.stdout : result.stderr).trim());
+  };
+  const survivorFile = path.join(coordinated.seeded.survivorCanonicalPath, 'synthetic.txt');
+  const survivorFileBefore = hash(readFileSync(survivorFile));
+  const postgresBefore = rows(coordinated.env), sqliteBefore = sqliteRows();
+  const targetNeedles = ['targetProjectId', 'targetStreamId', 'targetTaskRef', 'targetCanonicalPath'].map(key => coordinated.seeded[key]);
+  const survivorNeedles = ['survivorProjectId', 'survivorStreamId', 'survivorTaskRef', 'survivorCanonicalPath'].map(key => coordinated.seeded[key]);
+  const survivorPgBefore = hash(selectRows(postgresBefore, survivorNeedles));
+  const survivorSqliteBefore = hash(sqliteBefore.map(([table, values]) => [table,
+    table === 'project_registration_claims' ? values.filter(row => row.canonical_path !== coordinated.seeded.targetCanonicalPath) : values]));
+  const inventory = cli('delete', 'inventory', ['--input', configPath, '--plan', planPath]);
+  const plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  assert.equal(inventory.status, 'READY', JSON.stringify(inventory.blockers));
+  assert.equal(plan.sqlite.catalogState, 'ABSENT');
+  assert.equal(plan.sqlite.authoritativeProject.projectId, coordinated.seeded.targetProjectId);
+  assert.equal(plan.sqlite.authoritativeProject.canonicalPath, coordinated.seeded.targetCanonicalPath);
+  assert.equal(plan.sqlite.authoritativeProject.scopeDigest, plan.postgres.scopeDigest);
+  assert.equal(plan.sqlite.counts.project_registration_claims, 1);
+  assert.equal(hash(rows(coordinated.env)), hash(postgresBefore));
+  assert.equal(hash(sqliteRows()), hash(sqliteBefore));
+  assert.ok(existsSync(coordinated.seeded.targetCanonicalPath));
+  check('standard-cli-inventory-binds-absent-catalog-to-live-postgres-without-mutation');
+
+  const resumed = cli('purge', 'resume', ['--plan', planPath, '--confirm', plan.digest, '--maintenance-offline']);
+  assert.equal(resumed.status, 'SCOPED_PURGED');
+  assert.equal(resumed.report.overallStatus, 'PARTIAL');
+  assert.equal(resumed.report.complete, false);
+  assert.equal(resumed.report.stages.find(stage => stage.kind === 'sqlite').initialCatalog, 'ABSENT');
+  assert.equal(existsSync(coordinated.seeded.targetCanonicalPath), false);
+  assert.equal(hash(readFileSync(survivorFile)), survivorFileBefore);
+  const postgresAfter = rows(coordinated.env), sqliteAfter = sqliteRows();
+  assert.equal(selectRows(postgresAfter, targetNeedles).length, 0);
+  assert.equal(hash(selectRows(postgresAfter, survivorNeedles)), survivorPgBefore);
+  assert.equal(hash(sqliteAfter), survivorSqliteBefore);
+  assert.equal(sqliteAfter.find(([name]) => name === 'project_registration_claims')[1].length, 1);
+  check('standard-cli-resume-clears-live-postgres-orphan-claim-and-files-with-survivors-unchanged', {
+    survivorPgBefore, survivorSqliteBefore, survivorFileBefore,
+  });
+
+  const verified = cli('delete', 'verify', ['--plan', planPath], 2);
+  assert.equal(verified.status, 'SCOPED_PURGED');
+  assert.equal(verified.report.overallStatus, 'PARTIAL');
+  assert.equal(verified.report.complete, false);
+  assert.equal(verified.externalCleanup, 'NOT_VERIFIED');
+  assert.equal(verified.report.external.find(group => group.kind === 'codex').resources[0].status, 'NOT_VERIFIED');
+  assert.ok(verified.report.remaining.length > 0);
+  assert.ok(verified.report.stages.every(stage => ['VERIFIED_ERASED', 'VERIFIED_ABSENT'].includes(stage.status)));
+  writeFileSync(path.join(runRoot, 'coordinator-absent-result.json'), JSON.stringify(verified, null, 2) + '\n');
+  check('standard-cli-verify-exits-two-with-partial-report-and-unverified-external-scope');
+
+  const replay = JSON.parse(command(args['seed-binary'], ['verify-survivor'], coordinated.env, undefined, 'absent-survivor-replay').stdout);
+  assert.equal(replay.status, 'VERIFIED');
+  assert.equal(replay.survivorTaskRef, coordinated.seeded.survivorTaskRef);
+  check('fresh-process-survivor-registry-and-task-replay-after-absent-catalog-purge');
+  const retried = cli('delete', 'resume', ['--plan', planPath, '--confirm', plan.digest, '--maintenance-offline']);
+  assert.equal(retried.status, 'SCOPED_PURGED');
+  assert.equal(retried.report.overallStatus, 'PARTIAL');
+  assert.equal(hash(rows(coordinated.env)), hash(postgresAfter));
+  assert.equal(hash(sqliteRows()), hash(sqliteAfter));
+  assert.equal(hash(readFileSync(survivorFile)), survivorFileBefore);
+  check('standard-cli-resume-retry-preserves-verified-survivor-state');
+  assert.deepEqual(sourceHashes(), evidence.sourceHashes);
+  evidence.capturedNodeSourcesUnchanged = true;
+  check('same-node-source-hashes-through-entire-cli-acceptance');
   }
   evidence.status = 'PASS';
 } catch (error) {

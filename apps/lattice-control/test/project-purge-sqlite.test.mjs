@@ -65,10 +65,26 @@ function otherSnapshot(f) {
   });
 }
 
+function removeCatalogProject(f, { retainClaim = false } = {}) {
+  const db = f.store.database;
+  db.prepare('DELETE FROM work_item_dependencies WHERE work_item_id IN (SELECT id FROM work_items WHERE project_id=?)').run(f.own.id);
+  db.prepare('DELETE FROM work_item_relations WHERE work_item_id IN (SELECT id FROM work_items WHERE project_id=?)').run(f.own.id);
+  db.prepare('DELETE FROM projects WHERE id=?').run(f.own.id);
+  if (!retainClaim) db.prepare('DELETE FROM project_registration_claims WHERE canonical_path=?').run(f.own.root_path);
+}
+
+function authoritativeOptions(f) {
+  return { ...f.options, authoritativeProject: {
+    source: 'POSTGRES_PREVIEW', projectId: f.own.id, canonicalPath: f.own.root_path, scopeDigest: 'c'.repeat(64),
+  } };
+}
+
 test('real LatticeStore deletion cascades owned rows, handles internal RESTRICT edges, and preserves other-project hash', async t => {
   const f = await fixture(t), beforeOther = otherSnapshot(f);
   const plan = previewProjectPurgeSqlite(f.options);
   assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.catalogState, 'PRESENT');
+  assert.equal(plan.authoritativeProject, null);
   assert.equal(plan.counts.projects, 1);
   assert.equal(plan.counts.work_items, 2);
   assert.equal(plan.counts.work_events, 2);
@@ -196,4 +212,142 @@ test('escaped Windows paths in retained JSON payloads block orphaning related re
   const plan = previewProjectPurgeSqlite(f.options);
   assert.ok(plan.blockers.includes('SQLITE_RETAINED_REFERENCE:work_events'));
   assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_BLOCKED/);
+});
+
+test('an absent catalog requires an explicit matching PostgreSQL identity and is not evidence of a completed purge', async t => {
+  const f = await fixture(t);
+  removeCatalogProject(f);
+  const before = hash(rows(f.store.database));
+  assert.throws(() => previewProjectPurgeSqlite(f.options), /PURGE_SQLITE_AUTHORITATIVE_IDENTITY_REQUIRED/);
+  const options = authoritativeOptions(f);
+  for (const mismatch of [
+    { source: 'USER_INPUT' }, { projectId: f.other.id }, { canonicalPath: f.other.root_path }, { scopeDigest: 'not-a-digest' },
+  ]) {
+    assert.throws(() => previewProjectPurgeSqlite({ ...options, authoritativeProject: { ...options.authoritativeProject, ...mismatch } }), /PURGE_SQLITE_AUTHORITATIVE_IDENTITY/);
+  }
+  const plan = previewProjectPurgeSqlite(options);
+  assert.equal(plan.catalogState, 'ABSENT');
+  assert.deepEqual(plan.authoritativeProject, options.authoritativeProject);
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.beforeDigest, plan.afterDigest);
+  assert.ok(Object.values(plan.counts).every(count => count === 0));
+  const transaction = beginProjectPurgeSqlite(plan);
+  assert.equal(transaction.alreadyApplied, false);
+  assert.equal(transaction.catalogWasAbsent, true);
+  transaction.commit();
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, true);
+  assert.equal(hash(rows(f.store.database)), before);
+  assert.throws(() => beginProjectPurgeSqlite({ ...plan, authoritativeProject: null }), /PURGE_SQLITE_AUTHORITATIVE_IDENTITY_REQUIRED/);
+  assert.throws(() => readbackProjectPurgeSqlite({ ...plan, authoritativeProject: null }), /PURGE_SQLITE_AUTHORITATIVE_IDENTITY_REQUIRED/);
+});
+
+test('an absent catalog deletes only its authority-bound orphan registration claim and supports exact retry', async t => {
+  const f = await fixture(t), beforeOther = otherSnapshot(f);
+  removeCatalogProject(f, { retainClaim: true });
+  const plan = previewProjectPurgeSqlite(authoritativeOptions(f));
+  assert.equal(plan.catalogState, 'ABSENT');
+  assert.equal(plan.counts.projects, 0);
+  assert.equal(plan.counts.project_registration_claims, 1);
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, false);
+  const transaction = beginProjectPurgeSqlite(plan);
+  assert.equal(transaction.alreadyApplied, false);
+  assert.equal(transaction.catalogWasAbsent, true);
+  transaction.commit();
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, true);
+  assert.equal(otherSnapshot(f), beforeOther);
+  assert.deepEqual(f.store.database.prepare('PRAGMA foreign_key_check').all(), []);
+  const retry = beginProjectPurgeSqlite(plan);
+  assert.equal(retry.alreadyApplied, true);
+  assert.equal(retry.catalogWasAbsent, true);
+  retry.commit();
+});
+
+test('a surviving project sharing an absent target root or registered canonical path blocks cleanup', async t => {
+  for (const location of ['root', 'registration']) {
+    const f = await fixture(t);
+    removeCatalogProject(f, { retainClaim: true });
+    if (location === 'root') f.store.database.prepare('UPDATE projects SET root_path=? WHERE id=?').run(f.own.root_path, f.other.id);
+    else f.store.database.prepare('UPDATE project_registration_details SET canonical_path=? WHERE project_id=?').run(f.own.root_path, f.other.id);
+    const before = hash(rows(f.store.database)), plan = previewProjectPurgeSqlite(authoritativeOptions(f));
+    assert.ok(plan.blockers.includes('SQLITE_SHARED_PROJECT_ROOT'));
+    assert.ok(plan.protectedRoots.includes(f.own.root_path));
+    assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_BLOCKED/);
+    assert.equal(readbackProjectPurgeSqlite(plan).complete, false);
+    assert.equal(hash(rows(f.store.database)), before);
+  }
+});
+
+test('an absent catalog still blocks retained project references and immutable decisions', async t => {
+  const f = await fixture(t), current = f.store.decisionStateIdentity();
+  f.store.recordDecision({
+    scope: `project:${f.own.id}`, subject: 'synthetic-retained-after-catalog-removal', content: 'Synthetic retained decision', rationale: 'Synthetic test',
+    source: { kind: 'user_confirmation', reference: 'thread:synthetic-purge-test/turn:2' },
+    clientRequestId: 'synthetic-absent-purge-decision', expectedRevision: current.revision, expectedDigest: current.digest,
+  });
+  removeCatalogProject(f);
+  f.store.appendEvent(f.otherWork.id, 'synthetic-absent-reference', { previousProjectId: f.own.id, previousRoot: f.own.root_path });
+  const before = hash(rows(f.store.database)), plan = previewProjectPurgeSqlite(authoritativeOptions(f));
+  assert.ok(plan.blockers.includes('SQLITE_RETAINED_REFERENCE:decisions'));
+  assert.ok(plan.blockers.includes('SQLITE_RETAINED_REFERENCE:work_events'));
+  assert.equal(plan.beforeDigest, plan.afterDigest);
+  assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_BLOCKED/);
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, false);
+  assert.throws(() => f.store.database.exec('DELETE FROM decisions'), /retained permanently/);
+  assert.equal(hash(rows(f.store.database)), before);
+  assert.doesNotThrow(() => f.store.decisionStateIdentity());
+});
+
+test('an absent catalog still requires the exact schema and relational integrity', async t => {
+  const f = await fixture(t);
+  removeCatalogProject(f);
+  f.store.database.exec('DROP TRIGGER installation_receipts_no_delete');
+  assert.throws(() => previewProjectPurgeSqlite(authoritativeOptions(f)), /schema|profile/iu);
+  const orphan = await fixture(t);
+  removeCatalogProject(orphan);
+  // An invalid legacy orphan must not be silently treated as an owned row.
+  orphan.store.database.exec('PRAGMA foreign_keys=OFF');
+  orphan.store.database.prepare('INSERT INTO project_registration_details(project_id,canonical_path,registered_at,refreshed_at) VALUES (?,?,?,?)')
+    .run(orphan.own.id, orphan.own.root_path, timestamp, timestamp);
+  orphan.store.database.exec('PRAGMA foreign_keys=ON');
+  assert.throws(() => previewProjectPurgeSqlite(authoritativeOptions(orphan)), /foreign key integrity/iu);
+});
+
+test('an absent catalog still discovers nested encoded Windows path references', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  removeCatalogProject(f);
+  f.store.appendEvent(f.otherWork.id, 'synthetic-nested-reference', { legacyPayload: JSON.stringify({ root: f.own.root_path }) });
+  const plan = previewProjectPurgeSqlite(authoritativeOptions(f));
+  assert.ok(plan.blockers.includes('SQLITE_RETAINED_REFERENCE:work_events'));
+  assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_BLOCKED/);
+});
+
+test('absent-catalog plans reject unrelated mutation, changed orphan claims, and reappearing catalog identity', async t => {
+  for (const mutation of ['other-row', 'claim', 'reappeared']) {
+    const f = await fixture(t);
+    removeCatalogProject(f, { retainClaim: true });
+    const plan = previewProjectPurgeSqlite(authoritativeOptions(f));
+    if (mutation === 'other-row') f.store.appendEvent(f.otherWork.id, 'synthetic-change', { text: 'changed after absent preview' });
+    else if (mutation === 'claim') f.store.database.prepare('UPDATE project_registration_claims SET generation=generation+1 WHERE canonical_path=?').run(f.own.root_path);
+    else f.store.database.prepare('INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES (?,?,?,?,?)')
+      .run(f.own.id, 'Reappeared synthetic A', f.own.root_path, timestamp, timestamp);
+    const before = hash(rows(f.store.database));
+    assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_STALE_SCOPE/);
+    assert.equal(readbackProjectPurgeSqlite(plan).complete, false);
+    assert.equal(hash(rows(f.store.database)), before);
+  }
+});
+
+test('old v1 present-catalog plans retain completion and exact retry behavior', async t => {
+  const f = await fixture(t), plan = previewProjectPurgeSqlite(f.options);
+  delete plan.catalogState;
+  delete plan.authoritativeProject;
+  const transaction = beginProjectPurgeSqlite(plan);
+  assert.equal(transaction.alreadyApplied, false);
+  assert.equal(transaction.catalogWasAbsent, false);
+  transaction.commit();
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, true);
+  const retry = beginProjectPurgeSqlite(plan);
+  assert.equal(retry.alreadyApplied, true);
+  assert.equal(retry.catalogWasAbsent, false);
+  retry.commit();
 });

@@ -27,6 +27,42 @@ async function fixture(t) {
 }
 const bound = (plan, options) => ({ ...options, planDigest: plan.planDigest });
 
+test('durable per-entry intent resumes after unlink but before the next progress save', async t => {
+  const f = await fixture(t), plan = await previewProjectPurgeFiles(f.options);
+  const pending = path.join(f.root, 'nested', 'data.txt');
+  const progress = { projectId: plan.projectId, planDigest: plan.planDigest, removed: [], pendingRemoval: pending };
+  await rm(pending); // Reproduce the exact crash window in this synthetic fixture.
+  const events = [];
+  const result = await applyProjectPurgeFiles(plan, { ...bound(plan, f.options), previousResult: progress,
+    onProgress: async state => { events.push(structuredClone(state)); } });
+  assert.equal(result.status, 'completed');
+  assert.ok(result.removed.includes(pending));
+  assert.ok(events.some(event => event.pendingRemoval !== null));
+  assert.equal(events.at(-1).pendingRemoval, null);
+  assert.equal(await readFile(path.join(f.other, 'keep.txt'), 'utf8'), 'other project unchanged');
+});
+
+test('a pending removal neither permits replacement bytes nor deletion of another entry', async t => {
+  const f = await fixture(t), plan = await previewProjectPurgeFiles(f.options);
+  const pending = path.join(f.root, 'nested', 'data.txt');
+  const receipt = { projectId: plan.projectId, planDigest: plan.planDigest, removed: [], pendingRemoval: pending };
+  await writeFile(pending, 'unapproved replacement content');
+  await assert.rejects(applyProjectPurgeFiles(plan, { ...bound(plan, f.options), previousResult: receipt }), /PURGE_FILE_SCOPE_CHANGED/);
+  receipt.pendingRemoval = path.join(f.other, 'keep.txt');
+  await assert.rejects(applyProjectPurgeFiles(plan, { ...bound(plan, f.options), previousResult: receipt }), /PURGE_FILE_RECEIPT_MISMATCH/);
+});
+
+test('failure to persist removal intent prevents filesystem mutation', async t => {
+  const f = await fixture(t), plan = await previewProjectPurgeFiles(f.options);
+  const result = await applyProjectPurgeFiles(plan, { ...bound(plan, f.options), onProgress: async state => {
+    if (state.pendingRemoval) throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
+  } });
+  assert.equal(result.status, 'failed');
+  assert.deepEqual(result.removed, []);
+  assert.equal(result.failed[0].code, 'ENOSPC');
+  assert.equal(await readFile(path.join(f.root, 'nested', 'data.txt'), 'utf8'), 'synthetic project data');
+});
+
 test('deletes the exact synthetic project and preserves the protected project; repeated apply is a no-op', async t => {
   const { root, other, options } = await fixture(t);
   const plan = await previewProjectPurgeFiles(options);

@@ -3,6 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 import io
+import shutil
+import subprocess
 from unittest.mock import patch
 
 SPEC = importlib.util.spec_from_file_location("bundle", Path(__file__).with_name("lattice-bundle.py"))
@@ -11,6 +13,110 @@ SPEC.loader.exec_module(B)
 
 
 class BundleTests(unittest.TestCase):
+    def purge_fixture(self):
+        source_temp = tempfile.TemporaryDirectory(prefix="lattice-purge-software-test-")
+        self.addCleanup(source_temp.cleanup)
+        source = Path(source_temp.name)
+        binary = source / "lattice-project-purge.exe"
+        binary.write_bytes(b"synthetic-maintenance-binary-not-executed")
+        repository = Path(__file__).resolve().parent.parent
+        payload = B.project_purge_payload(binary, B.sha(binary), repository)
+        runtime = self.root / "bin/latticed.exe"
+        runtime.write_bytes(b"synthetic-runtime-not-executed")
+        (self.root / "node").mkdir()
+        (self.root / "node/node.exe").write_bytes(b"synthetic-node-not-executed")
+        self.manifest["runtime_sha256"] = B.sha(runtime)
+        self.manifest["project_purge"] = B.copy_project_purge(
+            self.root, payload, B.sha(runtime), {"files": 0, "bytes": 0})
+        self.manifest["files"], self.manifest["total_bytes"] = B.inventory(self.root)
+        return self.save(), source, binary
+
+    def test_purge_capability_requires_complete_supply_before_creating_bundle(self):
+        runtime = self.root / "bin/runtime.exe"
+        output = self.root / "new-bundle"
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_SUPPLY_REQUIRED"):
+            B.build(output, runtime, B.sha(runtime), self.root, self.root, self.root, self.root,
+                    project_purge_binary=runtime)
+        self.assertFalse(output.exists())
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_BINARY_REQUIRED"):
+            B.project_purge_payload(self.root / "absent.exe", "a" * 64, self.root)
+        self.assertIsNone(B.project_purge_payload(None, None, None))
+
+    def test_purge_supply_rejects_wrong_binary_digest_and_missing_cli(self):
+        runtime = self.root / "bin/runtime.exe"
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_BINARY_DIGEST_REJECTED"):
+            B.project_purge_payload(runtime, "a" * 64, self.root)
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_SOURCE_REQUIRED"):
+            B.project_purge_payload(runtime, B.sha(runtime), self.root)
+
+    def test_purge_capability_verifies_exact_packaged_software_and_runtime_binding(self):
+        digest, _, _ = self.purge_fixture()
+        with patch.object(B, "verify_node") as node_verifier:
+            result = B.verify(self.root, digest)
+        node_verifier.assert_called_once_with(self.root / "node")
+        self.assertEqual(set(result["project_purge"]["files"]), {B.PROJECT_PURGE_BINARY, *B.PROJECT_PURGE_FILES})
+        self.assertEqual((self.root / B.PROJECT_PURGE_BINARY).read_bytes(), b"synthetic-maintenance-binary-not-executed")
+        self.manifest["project_purge"]["runtime_sha256"] = "a" * 64
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_BUNDLE_REJECTED"):
+            B.verify(self.root, self.save())
+
+    def test_build_includes_purge_capability_in_verified_local_artifact(self):
+        source = self.root / "software"
+        for directory in ("bin", "lib", "share", "DLLs", "Lib", "tcl", "cmd", "mingw64", "usr"):
+            (source / directory).mkdir(parents=True, exist_ok=True)
+            (source / directory / "fixture.txt").write_bytes(b"synthetic-software-directory")
+        for name in ("server_license.txt", "commandlinetools_3rd_party_licenses.txt", "python.exe",
+                     "python3.dll", "python312.dll", "vcruntime140.dll", "vcruntime140_1.dll", "LICENSE.txt",
+                     "node.exe", "LICENSE", "provenance.json", "lattice-project-purge.exe"):
+            (source / name).write_bytes(b"synthetic-software-fixture-not-executed")
+        output = self.root / "candidate"
+        runtime = self.root / "bin/runtime.exe"
+        binary = source / "lattice-project-purge.exe"
+        repository = Path(__file__).resolve().parent.parent
+        with patch.object(B, "verify_node"), patch.object(B.M, "vc_runtime_files"), \
+                patch.object(B, "verify_vc_documents"), patch.object(B, "bundle_vc_redist") as copy_crt, \
+                patch.object(B, "vc_redist_provenance", return_value={}):
+            # Vendor redistributables are independently covered above. This fixture
+            # verifies actual bundle creation and purge software inclusion only.
+            def fake_crt(root, *_):
+                notices = root / "licenses/visual-cpp-runtime"
+                notices.mkdir(parents=True)
+                (notices / "provenance.json").write_text("{}")
+            copy_crt.side_effect = fake_crt
+            result = B.build(output, runtime, B.sha(runtime), source, source, source, source,
+                             node=source, vc_redist=source,
+                             project_purge_binary=binary, project_purge_sha256=B.sha(binary),
+                             project_purge_source=repository)
+            manifest = B.verify(output, result["sha256"])
+        self.assertEqual(result["status"], "LOCAL_BUNDLE_VERIFIED")
+        self.assertEqual(manifest["project_purge"]["binary"], B.PROJECT_PURGE_BINARY)
+        self.assertEqual((output / B.PROJECT_PURGE_BINARY).read_bytes(), binary.read_bytes())
+        self.assertTrue((output / B.PROJECT_PURGE_ENTRYPOINT).is_file())
+        self.assertEqual(manifest["project_purge"]["runtime_sha256"], B.sha(runtime))
+
+    def test_purge_manifest_cannot_omit_required_file_even_with_recomputed_inventory(self):
+        self.purge_fixture()
+        required = "apps/lattice-control/data-scope-contract.json"
+        del self.manifest["project_purge"]["files"][required]
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_BUNDLE_REJECTED"):
+            B.verify(self.root, self.save())
+
+    def test_purge_payload_cannot_silently_claim_legacy_bundle(self):
+        self.purge_fixture()
+        del self.manifest["project_purge"]
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_CAPABILITY_REQUIRED"):
+            B.verify(self.root, self.save())
+
+    def test_packaged_purge_cli_dependency_closure_loads_help_without_a_database(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node executable unavailable")
+        self.purge_fixture()
+        result = subprocess.run([node, str(self.root / B.PROJECT_PURGE_ENTRYPOINT), "--help"],
+                                cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("preview", result.stdout)
+
     def test_vc_runtime_is_pinned_in_both_executable_directories(self):
         source = self.root / "redist"; source.mkdir()
         payloads = {"vcruntime140.dll": b"official-fixture-crt", "msvcp140.dll": b"official-fixture-cpp"}

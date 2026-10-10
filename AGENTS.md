@@ -78,6 +78,15 @@ tests prove only the tested behavior.
 
 ## Verification and delivery
 
+- All future LATTICE project deletion requests use the shared `project:purge`
+  workflow in `docs/PROJECT_PURGE.md` (also exposed as `control:project delete`
+  or `purge`). Inventory the exact project, preserve the confirmed plan, resume
+  the same operation after interruption, and verify each affected resource.
+  Do not replace it with ad hoc SQL, directory deletion, or catalog removal.
+  `SCOPED_PURGED` only proves the reported local scope; unknown external records
+  or blockers must remain visibly incomplete. A previous tool-policy denial
+  cannot be retried through this entry point or a different tool.
+
 - Keep each Runtime module independently testable and repairable. Reserve a
   complete three-core run for an explicit release-level integration check, never
   as the mandatory proof for routine module work.
