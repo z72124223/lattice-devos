@@ -2286,10 +2286,34 @@ pub fn verify_postgres_schema(
 // Zero-parameter verification reads use the typed extended protocol to send parse,
 // bind, and execute together. Every SQL statement still runs on each fresh
 // verification transaction; no catalog, identity, or authority result is cached.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn verify_runtime_store_schema(
     client: &mut Client,
     target: &MigrationTarget,
+) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
+    verify_store_schema_for_reading(client, target, DatabaseRole::Runtime)
+}
+
+/// The maintenance principal may inventory an active Store without asserting
+/// STOPPED bootstrap evidence or changing its grants. Mutation entry points
+/// continue to use verify_postgres_schema and its STOPPED requirement.
+pub(crate) fn verify_project_purge_inventory_schema(
+    client: &mut Client,
+    target: &MigrationTarget,
+) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
+    let evidence = verify_store_schema_for_reading(client, target, DatabaseRole::Migrator)?;
+    if evidence.global_schema_version < 5 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(evidence)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_store_schema_for_reading(
+    client: &mut Client,
+    target: &MigrationTarget,
+    role: DatabaseRole,
 ) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
     let store_v2_manifest = verify_v2_manifest_prefix()?;
     let mut transaction = client
@@ -2301,12 +2325,7 @@ pub(crate) fn verify_runtime_store_schema(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
         })?;
     harden_transaction(&mut transaction)?;
-    preflight_connection(
-        &mut transaction,
-        target,
-        DatabaseRole::Runtime,
-        SetupOperation::Verification,
-    )?;
+    preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
     if owned_schema_presence(&mut transaction)? != [true, true, true] {
         return Err(history_error());
     }
@@ -2365,12 +2384,7 @@ pub(crate) fn verify_runtime_store_schema(
         } else {
             verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, true)?
         };
-        preflight_connection(
-            &mut transaction,
-            target,
-            DatabaseRole::Runtime,
-            SetupOperation::Verification,
-        )?;
+        preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
         transaction.commit().map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
         })?;
@@ -2397,6 +2411,16 @@ pub(crate) fn verify_runtime_store_schema(
     }
     let v3_prefix = installed_schema_version == 3;
     verify_schema_objects_with_contract(&mut transaction, current_profile, v3_prefix)?;
+    if role == DatabaseRole::Migrator {
+        verify_autonomy_receipt_profile(&mut transaction)?;
+        if matches!(
+            current_profile,
+            CatalogProfile::V5CodebaseMemoryV3Current
+                | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+        ) {
+            verify_codebase_memory_v3_identity_for_role(&mut transaction, target, &manifest, role)?;
+        }
+    }
     let rows = read_history_rows(&mut transaction)?;
     let expected_history = match installed_schema_version {
         3 => &migration_manifest()[..4],
@@ -2408,12 +2432,7 @@ pub(crate) fn verify_runtime_store_schema(
     let database_uuid = read_database_identity(&mut transaction, target)?;
     verify_runtime_admission_present(&mut transaction)?;
     verify_roles_and_grants_with_contract(&mut transaction, current_profile, v3_prefix)?;
-    preflight_connection(
-        &mut transaction,
-        target,
-        DatabaseRole::Runtime,
-        SetupOperation::Verification,
-    )?;
+    preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
     })?;

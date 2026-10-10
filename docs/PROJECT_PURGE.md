@@ -55,7 +55,11 @@ npm.cmd run project:purge -- status --plan purge-plan.json
 npm.cmd run project:purge -- verify --plan purge-plan.json
 ```
 
-`preview` 與 `inventory` 是同一唯讀盤點動作，只保存可檢閱計畫；已有計畫檔不會被覆寫。`control:project delete` 和 `control:project purge` 轉交到同一入口，例如 `npm.cmd run control:project -- delete inventory --input config.json --plan purge-plan.json`。沒有略過盤點的快速刪除選項。
+`preview` 與 `inventory` 是同一唯讀盤點動作，只保存可檢閱計畫；已有計畫檔不會被覆寫。PostgreSQL 盤點以唯讀交易取得一致快照，可在服務運作中或尚未安裝維護 schema 時執行，仍回傳實際 counts；分別以 `MAINTENANCE_OFFLINE_REQUIRED`、`MAINTENANCE_EXTENSION_REQUIRED` 阻擋清除。已安裝但不符合精確 catalog／identity 的維護 schema 仍會拒絕，不能當成未安裝。盤點不會安裝元件、停止服務或修改資料庫。Serializable 唯讀交易使用 `DEFERRABLE` 等待安全快照，保留既有 30 秒查詢上限；逾時或查詢失敗仍回錯誤，不產生可執行計畫。
+
+停止服務並安裝相容的維護 schema 後，必須另存新盤點，重新確認其範圍。scope digest v2 納入維護元件是否存在及 admission 狀態，不能沿用改變前的摘要；尚未執行的舊版 v1 計畫也須重建。已提交的舊 operation 仍按原 project／digest 綁定及 afterDigest 驗證續作，不會重新執行 PostgreSQL 刪除。
+
+`control:project delete` 和 `control:project purge` 轉交到同一入口，例如 `npm.cmd run control:project -- delete inventory --input config.json --plan purge-plan.json`。沒有略過盤點的快速刪除選項。
 
 `BLOCKED` 必須先解決列出的原因並重新預覽。`apply` 必須使用完全相同的 digest，並確認 Control／專案寫入者已停止、檔案範圍保持靜止。Node 的路徑 API 不能對抗惡意並行 rename；這不是可在線上任意執行的安全保證。`resume` 沿用相同計畫、摘要及維護要求，不會自動重新盤點或解除鎖。
 
@@ -93,3 +97,7 @@ pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <latt
 ```
 
 PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.lattice` 下的證據，不連正式資料庫。Windows 檔案測試包含實際鎖檔及部分失敗續跑。協調層測試使用真 SQLite／檔案與受控 native adapter；真 PG fixture 的結果須另外報告，不能把 mock 當成完整部署驗收。
+
+`-Scenario inventory` 可單獨驗證運作中／未安裝維護元件的盤點不改動資料、離線要求仍生效，以及狀態改變後的舊摘要被拒絕。
+
+`-Scenario upgrade -LegacyPurgeBinary <舊版維護 binary 絕對路徑>` 使用真正舊版 binary 產生 v1 摘要與清除 receipt，再以新版 binary 讀回及重試原操作，驗證相容性。舊、新 binary 都會複製並核對 SHA-256；未提供舊版 binary 的一般測試不包含此驗證。

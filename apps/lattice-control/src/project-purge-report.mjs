@@ -30,6 +30,8 @@ export function externalPurgeInventory(input = []) {
 
 function blockerCode(blocker) { return typeof blocker === 'string' ? blocker : blocker?.code ?? 'UNKNOWN_BLOCKER'; }
 function nextStep(code) {
+  if (code === 'MAINTENANCE_EXTENSION_REQUIRED') return 'Use a compatible Runtime and install the purge maintenance schema while stopped, then create a fresh preview.';
+  if (code === 'MAINTENANCE_OFFLINE_REQUIRED') return 'Enter the existing offline maintenance lifecycle, then create and confirm a fresh preview before erasure.';
   if (code.includes('HARDLINK')) return 'Hard-link ownership and recovery are not supported; keep this scope blocked without changing shared link metadata to force acceptance.';
   if (code.includes('INTERLEAVED')) return 'Registry history requires a compatible maintenance migration; do not rewrite survivor receipts.';
   if (code.includes('IMMUTABLE') || code.includes('RETAINED_REFERENCE') || code.includes('UNSUPPORTED_REFERENCE')) return 'Resolve the owning module retention and reference contract before erasing; never disable its protection.';

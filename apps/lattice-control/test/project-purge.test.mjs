@@ -66,6 +66,32 @@ test('blocked preview cannot apply', async t => {
   assert.equal(f.applied, 0);
 });
 
+test('online inventory preserves maintenance blockers and counts without allowing mutation', async t => {
+  const f = await fixture(t), calls = [];
+  const native = async (binary, request) => {
+    calls.push(request.action);
+    assert.equal(request.action, 'preview');
+    return { ...await f.native(binary, request), status: 'BLOCKED', inventoryMode: 'READ_ONLY_SNAPSHOT',
+      maintenanceExtensionInstalled: false, maintenanceStopped: false,
+      blockers: [{ code: 'MAINTENANCE_EXTENSION_REQUIRED' }, { code: 'MAINTENANCE_OFFLINE_REQUIRED' }] };
+  };
+  const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath,
+    nativeBinary: path.join(f.root, 'native.exe'), statePath: f.statePath }, { native });
+  assert.equal(plan.postgres.inventoryMode, 'READ_ONLY_SNAPSHOT');
+  assert.equal(plan.postgres.maintenanceExtensionInstalled, false);
+  assert.equal(plan.postgres.maintenanceStopped, false);
+  assert.deepEqual(plan.postgres.counts, { projects: 1 });
+  const result = await statusProjectPurge(plan, { native });
+  assert.equal(result.status, 'BLOCKED');
+  assert.deepEqual(result.report.blockers.map(item => item.code), ['MAINTENANCE_EXTENSION_REQUIRED', 'MAINTENANCE_OFFLINE_REQUIRED']);
+  assert.ok(result.report.blockers.every(item => item.nextStep.includes('fresh preview')));
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native }), /PURGE_BLOCKED/);
+  assert.deepEqual(calls, ['preview']);
+  const db = new LatticeStore(f.databasePath); assert.ok(db.getProject(f.project.id)); db.close();
+  assert.equal(await readFile(path.join(f.target, 'target.txt'), 'utf8'), 'target content');
+  await assert.rejects(readFile(f.statePath), { code: 'ENOENT' });
+});
+
 test('filesystem drift is rejected before PostgreSQL deletion', async t => {
   const f = await fixture(t), plan = await f.preview();
   await writeFile(path.join(f.target, 'unapproved.txt'), 'new');

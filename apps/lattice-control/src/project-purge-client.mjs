@@ -4,14 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { previewProjectPurge, applyProjectPurge, statusProjectPurge } from './project-purge.mjs';
 import { projectPurgeReport } from './project-purge-report.mjs';
 
-export const projectPurgeUsage = `LATTICE 專案清除（所有專案共用的離線維護入口）
+export const projectPurgeUsage = `LATTICE 專案清除（所有專案共用；唯讀盤點、離線清除）
 npm run project:purge -- preview --input config.json --plan plan.json
 npm run project:purge -- inventory --input config.json --plan plan.json
 npm run project:purge -- apply --plan plan.json --confirm DIGEST --maintenance-offline
 npm run project:purge -- resume --plan plan.json --confirm DIGEST --maintenance-offline
 npm run project:purge -- status --plan plan.json
 npm run project:purge -- verify --plan plan.json
-preview/inventory 只盤點並保存相同格式計畫。resume 沿用同一計畫，不自動重建或解除鎖。
+preview/inventory 可在線上唯讀盤點；未停機或未安裝維護元件時仍列出範圍與阻擋原因。
+停止服務、安裝元件後須重新盤點並確認新摘要。resume 沿用同一計畫，不自動重建或解除鎖。
 verify 僅在所有清除範圍均已驗證時回傳 0；局部完成回傳 2，阻擋或錯誤回傳 1。
 封存或從名單移除不等於完整刪除；外部紀錄未驗證時不會回報完整清除。`;
 

@@ -4,8 +4,9 @@ param(
     [Parameter(Mandatory = $true)][string]$PurgeBinary,
     [Parameter(Mandatory = $true)][string]$SeedBinary,
     [Parameter(Mandatory = $true)][string]$RuntimeBinary,
+    [string]$LegacyPurgeBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','coordinator','coordinator-absent')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','coordinator','coordinator-absent','inventory','upgrade')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -24,7 +25,10 @@ $initialized = $false
 $serverIdentity = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
-foreach ($file in @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))) {
+if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
+$inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
+if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
+foreach ($file in $inputBinaries) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "FIXTURE_BINARY_MISSING: $file" }
 }
 if (-not $runRoot.StartsWith($fixtureBase + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'FIXTURE_PATH_REJECTED' }
@@ -32,9 +36,12 @@ if (-not $runRoot.StartsWith($fixtureBase + [IO.Path]::DirectorySeparatorChar, [
 $binRoot = Join-Path $runRoot 'bin'
 [IO.Directory]::CreateDirectory($binRoot) | Out-Null
 $copies = @{}
-foreach ($entry in @(@{name='purge';source=$PurgeBinary},@{name='seed';source=$SeedBinary},@{name='runtime';source=$RuntimeBinary})) {
+$binaryEntries = @(@{name='purge';source=$PurgeBinary},@{name='seed';source=$SeedBinary},@{name='runtime';source=$RuntimeBinary})
+if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $binaryEntries += @{name='legacy';source=$LegacyPurgeBinary} }
+foreach ($entry in $binaryEntries) {
     $source = [IO.Path]::GetFullPath($entry.source)
-    $copy = Join-Path $binRoot ([IO.Path]::GetFileName($source))
+    $copyName = if ($entry.name -eq 'legacy') { 'legacy-lattice-project-purge.exe' } else { [IO.Path]::GetFileName($source) }
+    $copy = Join-Path $binRoot $copyName
     $before = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
     [IO.File]::Copy($source, $copy, $false)
     $after = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash
@@ -42,15 +49,18 @@ foreach ($entry in @(@{name='purge';source=$PurgeBinary},@{name='seed';source=$S
     $copies[$entry.name] = @{ source=$source; path=$copy; sha256=$after.ToLowerInvariant() }
 }
 $PurgeBinary=$copies.purge.path; $SeedBinary=$copies.seed.path; $RuntimeBinary=$copies.runtime.path
+if ($copies.ContainsKey('legacy')) { $LegacyPurgeBinary = $copies.legacy.path }
 $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
     try {
-        foreach ($stage in @('main','interleaved','coordinator','coordinator-absent')) {
-            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -NodeBinary $NodeBinary -Scenario $stage)
+        $stages = @('main','interleaved','coordinator','coordinator-absent','inventory')
+        if ($copies.ContainsKey('legacy')) { $stages += 'upgrade' }
+        foreach ($stage in $stages) {
+            $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -LegacyPurgeBinary $LegacyPurgeBinary -NodeBinary $NodeBinary -Scenario $stage)
             $child = $childOutput[-1] | ConvertFrom-Json
             if ($child.status -cne 'PASS' -or -not $child.fixtureStopped) { throw "FIXTURE_STAGE_FAILED: $stage" }
-            foreach ($key in @('purge','seed','runtime')) {
+            foreach ($key in $copies.Keys) {
                 if ($child.binaryCopies.$key.sha256 -cne $copies[$key].sha256) { throw 'FIXTURE_MATRIX_BINARY_MISMATCH' }
             }
             $result.children += @{scenario=$stage;runRoot=$child.runRoot;status=$child.status;fixtureStopped=$child.fixtureStopped}
@@ -96,7 +106,9 @@ log_statement = 'none'
     $serverIdentity = @{ pid = $postmaster; startTicks = $process.StartTime.ToUniversalTime().Ticks }
     $dataDirectory = (& $psql -X -A -t -h 127.0.0.1 -p $port -U runtime_bootstrap -d postgres -v ON_ERROR_STOP=1 -c 'SHOW data_directory').Trim()
     if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($dataDirectory) -cne $cluster) { throw 'FIXTURE_DATABASE_IDENTITY_REJECTED' }
-    & $NodeBinary (Join-Path $PSScriptRoot 'test-project-purge-postgres.mjs') --binary $PurgeBinary --seed-binary $SeedBinary --runtime-binary $RuntimeBinary --port $port --run-root $runRoot --psql $psql --scenario $Scenario
+    $nodeArguments = @((Join-Path $PSScriptRoot 'test-project-purge-postgres.mjs'), '--binary', $PurgeBinary, '--seed-binary', $SeedBinary, '--runtime-binary', $RuntimeBinary, '--port', $port, '--run-root', $runRoot, '--psql', $psql, '--scenario', $Scenario)
+    if ($copies.ContainsKey('legacy')) { $nodeArguments += @('--legacy-binary', $LegacyPurgeBinary) }
+    & $NodeBinary @nodeArguments
     if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_SCENARIOS_FAILED' }
     foreach ($copy in $copies.Values) {
         if ((Get-FileHash -LiteralPath $copy.path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $copy.sha256) { throw 'FIXTURE_BINARY_CHANGED_DURING_RUN' }

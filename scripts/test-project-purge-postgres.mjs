@@ -10,7 +10,8 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'coordinator', 'coordinator-absent'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'coordinator', 'coordinator-absent', 'inventory', 'upgrade'].includes(args.scenario));
+if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
 assert.equal(marker.port, port);
@@ -20,7 +21,7 @@ assert.ok(path.basename(runRoot).match(/^[0-9a-f]{32}$/));
 const password = randomBytes(24).toString('hex');
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(LATTICE_|PG|DATABASE_URL$)/i.test(key)));
 const evidence = { schema: 'lattice.project-purge-live-scenarios.v1', status: 'RUNNING', port, checks: [], databases: [] };
-evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary'].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
+evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary', ...(args['legacy-binary'] ? ['legacy-binary'] : [])].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
 const redact = value => String(value ?? '').replaceAll(password, '[FIXTURE_PASSWORD]');
 let sequence = 0;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -35,12 +36,14 @@ function check(name, detail = {}) { evidence.checks.push({ name, passed: true, .
 function sql(env, statement) {
   return command(args.psql, ['-X', '-A', '-t', '-h', '127.0.0.1', '-p', String(port), '-U', 'runtime_bootstrap', '-d', `lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0, 8)}_base`, '-v', 'ON_ERROR_STOP=1', '-c', statement], env, undefined, 'sql').stdout.trim();
 }
-function native(env, request, expectedSuccess = true) {
-  const result = command(args.binary, [], env, JSON.stringify({ schema: 'lattice.project-purge.request.v1', ...request }), `native-${request.action}`, expectedSuccess);
+function native(env, request, expectedSuccess = true, binary = args.binary) {
+  const label = binary === args.binary ? 'native' : 'legacy-native';
+  const result = command(binary, [], env, JSON.stringify({ schema: 'lattice.project-purge.request.v1', ...request }), `${label}-${request.action}`, expectedSuccess);
   return { ...result, value: result.exitCode === 0 ? JSON.parse(result.stdout) : null };
 }
-function rows(env) {
-  const tables = JSON.parse(sql(env, `SELECT coalesce(json_agg(json_build_array(n.nspname,c.relname) ORDER BY n.nspname,c.relname),'[]') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='r' AND n.nspname NOT LIKE 'pg_%' AND n.nspname NOT IN ('information_schema','project_purge')`));
+function rows(env, { includeMaintenance = false } = {}) {
+  const excluded = includeMaintenance ? "'information_schema'" : "'information_schema','project_purge'";
+  const tables = JSON.parse(sql(env, `SELECT coalesce(json_agg(json_build_array(n.nspname,c.relname) ORDER BY n.nspname,c.relname),'[]') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind='r' AND n.nspname NOT LIKE 'pg_%' AND n.nspname NOT IN (${excluded})`));
   return tables.map(([schema, table]) => {
     assert.match(schema, /^[a-z_][a-z0-9_]*$/); assert.match(table, /^[a-z_][a-z0-9_]*$/);
     return [`${schema}.${table}`, JSON.parse(sql(env, `SELECT coalesce(json_agg(row_value ORDER BY row_value::text COLLATE "C"),'[]') FROM (SELECT to_jsonb(p) row_value FROM ONLY "${schema}"."${table}" p) r`))];
@@ -51,7 +54,7 @@ function selectRows(snapshot, needles) {
     : value !== null && typeof value === 'object' && Object.entries(value).some(([key, child]) => matches(key) || matches(child));
   return snapshot.map(([table, values]) => [table, values.filter(matches)]).filter(([, values]) => values.length);
 }
-function establish(order) {
+function establish(order, { install = true } = {}) {
   const runId = randomUUID().replaceAll('-', '');
   const root = path.join(runRoot, order);
   for (const name of ['project-a', 'project-b']) {
@@ -82,11 +85,136 @@ function establish(order) {
     assert.match(seeded[`${kind}StreamId`], /^[0-9a-f]{64}$/);
   }
   evidence.databases.push({ runId, order, seeded });
-  assert.equal(native(env, { action: 'install', authorization: 'INSTALL_PURGE_MAINTENANCE' }).value.status, 'INSTALLED');
+  if (install) assert.equal(native(env, { action: 'install', authorization: 'INSTALL_PURGE_MAINTENANCE' }).value.status, 'INSTALLED');
   return { env, seeded, root };
 }
 
 try {
+  if (args.scenario === 'upgrade') {
+  assert.notEqual(evidence.binaries.binary.sha256, evidence.binaries['legacy-binary'].sha256);
+  const { env, seeded } = establish('upgrade');
+  const request = { projectId: seeded.targetProjectId, operationId: 'fixture-receipt-upgrade' };
+  const beforePreview = rows(env, { includeMaintenance: true });
+  const legacyPreview = native(env, { action: 'preview', ...request }, true, args['legacy-binary']).value;
+  const candidatePreview = native(env, { action: 'preview', ...request }).value;
+  assert.equal(legacyPreview.status, 'READY');
+  assert.equal(candidatePreview.status, 'READY');
+  assert.notEqual(legacyPreview.scopeDigest, candidatePreview.scopeDigest);
+  assert.deepEqual(rows(env, { includeMaintenance: true }), beforePreview);
+  check('real-legacy-and-candidate-binaries-produce-distinct-scope-digests-for-same-live-fixture');
+  const survivorNeedles = ['survivorProjectId', 'survivorStreamId', 'survivorTaskRef', 'survivorCanonicalPath'].map(key => seeded[key]);
+  const targetNeedles = ['targetProjectId', 'targetStreamId', 'targetTaskRef', 'targetCanonicalPath'].map(key => seeded[key]);
+  const survivorBefore = hash(selectRows(beforePreview, survivorNeedles));
+  const legacyApply = { action: 'apply', ...request, expectedScopeDigest: legacyPreview.scopeDigest, authorization: 'ERASE_PROJECT_DATA' };
+  const originalReceipt = native(env, legacyApply, true, args['legacy-binary']).value;
+  assert.equal(originalReceipt.status, 'PURGED');
+  assert.equal(originalReceipt.scopeDigest, legacyPreview.scopeDigest);
+  const afterLegacy = rows(env, { includeMaintenance: true });
+  assert.equal(selectRows(rows(env), targetNeedles).length, 0);
+  assert.equal(hash(selectRows(afterLegacy, survivorNeedles)), survivorBefore);
+  assert.equal(sql(env, "SELECT count(*) FROM project_purge.receipts WHERE operation_id='fixture-receipt-upgrade'"), '1');
+  check('real-legacy-binary-creates-committed-purge-receipt-and-preserves-survivor');
+  const status = native(env, { action: 'status', ...request }).value;
+  const resumed = native(env, legacyApply).value;
+  assert.deepEqual(status, originalReceipt);
+  assert.deepEqual(resumed, originalReceipt);
+  assert.deepEqual(rows(env, { includeMaintenance: true }), afterLegacy);
+  check('candidate-status-and-idempotent-apply-replay-original-legacy-receipt-without-mutation');
+  const rebound = native(env, { ...legacyApply, expectedScopeDigest: candidatePreview.scopeDigest }, false);
+  assert.notEqual(rebound.exitCode, 0);
+  assert.match(rebound.stderr, /PROJECT_PURGE_IDEMPOTENCY_CONFLICT/);
+  assert.deepEqual(rows(env, { includeMaintenance: true }), afterLegacy);
+  check('upgrade-cannot-rebind-committed-legacy-operation-to-new-scope-digest');
+  const replay = JSON.parse(command(args['seed-binary'], ['verify-survivor'], env, undefined, 'upgrade-survivor-replay').stdout);
+  assert.equal(replay.status, 'VERIFIED');
+  assert.equal(replay.survivorTaskRef, seeded.survivorTaskRef);
+  check('fresh-process-survivor-replay-after-legacy-receipt-upgrade');
+  }
+
+  if (args.scenario === 'inventory') {
+  const { env, seeded } = establish('inventory', { install: false });
+  const request = { projectId: seeded.targetProjectId, operationId: 'fixture-inventory' };
+  const maintenanceCatalog = () => JSON.parse(sql(env, `SELECT json_build_object(
+    'namespace', (SELECT to_jsonb(n) FROM pg_namespace n WHERE n.nspname='project_purge'),
+    'relations', (SELECT coalesce(json_agg(to_jsonb(c) ORDER BY c.oid),'[]') FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='project_purge'),
+    'constraints', (SELECT coalesce(json_agg(to_jsonb(c) ORDER BY c.oid),'[]') FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname='project_purge'),
+    'routines', (SELECT coalesce(json_agg(to_jsonb(p) ORDER BY p.oid),'[]') FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='project_purge'))`));
+  const snapshot = () => ({ rows: rows(env, { includeMaintenance: true }), maintenance: maintenanceCatalog() });
+  const assertCounts = preview => {
+    assert.equal(preview.inventoryMode, 'READ_ONLY_SNAPSHOT');
+    assert.equal(preview.project.id, seeded.targetProjectId);
+    assert.equal(preview.project.canonicalPath, seeded.targetCanonicalPath);
+    assert.ok(preview.counts['control.task_ledger_streams'] >= 1);
+    assert.ok(preview.counts['control.project_registry_projects'] >= 1);
+    assert.match(preview.scopeDigest, /^[a-f0-9]{64}$/);
+  };
+  const beforeUninstalled = snapshot();
+  assert.equal(beforeUninstalled.maintenance.namespace, null);
+  const stoppedPreview = native(env, { action: 'preview', ...request }).value;
+  assertCounts(stoppedPreview);
+  assert.equal(stoppedPreview.status, 'BLOCKED');
+  assert.equal(stoppedPreview.maintenanceStopped, true);
+  assert.equal(stoppedPreview.maintenanceExtensionInstalled, false);
+  assert.ok(stoppedPreview.blockers.some(item => item.code === 'MAINTENANCE_EXTENSION_REQUIRED'));
+  assert.ok(!stoppedPreview.blockers.some(item => item.code === 'MAINTENANCE_OFFLINE_REQUIRED'));
+  const uninstalledApply = native(env, { action: 'apply', ...request, expectedScopeDigest: stoppedPreview.scopeDigest, authorization: 'ERASE_PROJECT_DATA' }, false);
+  assert.notEqual(uninstalledApply.exitCode, 0);
+  assert.equal(uninstalledApply.stderr.trim(), 'PROJECT_PURGE_EXTENSION_REJECTED');
+  assert.deepEqual(snapshot(), beforeUninstalled);
+  check('uninstalled-stopped-preview-inventories-real-project-and-apply-cannot-mutate');
+
+  // Only this owned synthetic cluster changes admission. The production purge
+  // must observe ACTIVE and reject maintenance writes without changing it.
+  const active = sql(env, "UPDATE control.runtime_admission SET admission_mode='ACTIVE',daemon_instance_id='task050-fresh-process',daemon_epoch=50,authority_revision=50,observation_digest=decode(repeat('a',64),'hex'),authority_head_digest=decode(repeat('b',64),'hex') WHERE singleton AND admission_mode='STOPPED' AND daemon_instance_id IS NULL AND daemon_epoch IS NULL AND authority_revision=0 AND observation_digest IS NULL AND authority_head_digest IS NULL RETURNING admission_mode");
+  assert.match(active, /^ACTIVE\r?\nUPDATE 1$/);
+  const beforeActive = snapshot();
+  const activePreview = native(env, { action: 'preview', ...request }).value;
+  assertCounts(activePreview);
+  assert.equal(activePreview.status, 'BLOCKED');
+  assert.equal(activePreview.maintenanceStopped, false);
+  assert.equal(activePreview.maintenanceExtensionInstalled, false);
+  assert.ok(activePreview.blockers.some(item => item.code === 'MAINTENANCE_EXTENSION_REQUIRED'));
+  assert.ok(activePreview.blockers.some(item => item.code === 'MAINTENANCE_OFFLINE_REQUIRED'));
+  assert.deepEqual(activePreview.counts, stoppedPreview.counts);
+  assert.deepEqual(snapshot(), beforeActive);
+  check('active-uninstalled-preview-is-read-only-and-reports-both-maintenance-blockers');
+  for (const attempted of [
+    { action: 'apply', ...request, expectedScopeDigest: activePreview.scopeDigest, authorization: 'ERASE_PROJECT_DATA' },
+    { action: 'install', authorization: 'INSTALL_PURGE_MAINTENANCE' },
+  ]) {
+    const rejected = native(env, attempted, false);
+    assert.notEqual(rejected.exitCode, 0);
+    assert.match(rejected.stderr, /PROJECT_PURGE_MAINTENANCE_(PROFILE_REQUIRED|OFFLINE_REQUIRED|EXTENSION_REQUIRED)/);
+  }
+  assert.deepEqual(snapshot(), beforeActive);
+  assert.equal(sql(env, "SELECT admission_mode FROM control.runtime_admission WHERE singleton"), 'ACTIVE');
+  check('active-apply-and-install-reject-with-all-rows-and-maintenance-catalog-unchanged');
+
+  const stopped = sql(env, "UPDATE control.runtime_admission SET admission_mode='STOPPED',daemon_instance_id=NULL,daemon_epoch=NULL,authority_revision=0,observation_digest=NULL,authority_head_digest=NULL WHERE singleton AND admission_mode='ACTIVE' AND daemon_instance_id='task050-fresh-process' AND daemon_epoch=50 AND authority_revision=50 AND observation_digest=decode(repeat('a',64),'hex') AND authority_head_digest=decode(repeat('b',64),'hex') RETURNING admission_mode");
+  assert.match(stopped, /^STOPPED\r?\nUPDATE 1$/);
+  assert.equal(native(env, { action: 'install', authorization: 'INSTALL_PURGE_MAINTENANCE' }).value.status, 'INSTALLED');
+  const beforeReady = snapshot();
+  assert.ok(beforeReady.maintenance.namespace);
+  const ready = native(env, { action: 'preview', ...request }).value;
+  assertCounts(ready);
+  assert.equal(ready.status, 'READY', JSON.stringify(ready.blockers));
+  assert.equal(ready.maintenanceStopped, true);
+  assert.equal(ready.maintenanceExtensionInstalled, true);
+  assert.deepEqual(ready.blockers, []);
+  assert.deepEqual(ready.counts, activePreview.counts);
+  assert.deepEqual(snapshot(), beforeReady);
+  check('fresh-stopped-installed-preview-is-ready-and-still-read-only');
+  for (const preview of [stoppedPreview, activePreview]) {
+    assert.notEqual(preview.scopeDigest, ready.scopeDigest);
+    const stale = native(env, { action: 'apply', ...request, expectedScopeDigest: preview.scopeDigest, authorization: 'ERASE_PROJECT_DATA' }, false);
+    assert.notEqual(stale.exitCode, 0);
+    assert.match(stale.stderr, /PROJECT_PURGE_STALE_SCOPE/);
+  }
+  assert.deepEqual(snapshot(), beforeReady);
+  assert.equal(sql(env, 'SELECT count(*) FROM project_purge.receipts'), '0');
+  check('blocked-online-or-uninstalled-digests-cannot-authorize-later-maintenance-apply');
+  }
+
   if (args.scenario === 'main') {
   const { env, seeded } = establish('survivor-first');
   assert.equal(typeof seeded.targetProjectId, 'string');

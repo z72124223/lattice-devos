@@ -62,7 +62,9 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   }
   const blockers = [...pg.blockers, ...sqlite.blockers, ...fileBlockers];
   const plan = { schema, ...base, nativeBinary, statePath, sqlite, files,
-    postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy },
+    postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy,
+      inventoryMode: pg.inventoryMode ?? 'LEGACY_MAINTENANCE_PREVIEW',
+      maintenanceExtensionInstalled: pg.maintenanceExtensionInstalled ?? null, maintenanceStopped: pg.maintenanceStopped ?? null },
     blockers,
     externalScope: ['Codex conversations and attachments', 'automations', 'remote repositories and published artifacts', 'backups and database WAL', 'separate Bot lifecycle database', 'Graphify external caches', 'this maintenance plan, progress, and receipts'],
     externalInventory: externalPurgeInventory(options.externalResources),

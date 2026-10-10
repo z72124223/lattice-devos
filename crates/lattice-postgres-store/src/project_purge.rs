@@ -497,7 +497,12 @@ fn prepare<C: GenericClient>(
             state.checkpoint().reservation_count() - prior.checkpoint().reservation_count(),
         );
     }
-    let scope_digest = digest(&serde_json::to_vec(&json!({"schema":"lattice.project-purge.scope.v1","database":target.expected_database_identity_sha256().as_str(),"project":project,"operation":operation,"rows":physical})).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
+    // Maintenance receipts are excluded from the data snapshot, but installing
+    // the extension changes apply eligibility and must invalidate old inventory.
+    let maintenance_installed = tables
+        .iter()
+        .any(|(schema, name)| schema == "project_purge" && name == "identity");
+    let scope_digest = digest(&serde_json::to_vec(&json!({"schema":"lattice.project-purge.scope.v2","database":target.expected_database_identity_sha256().as_str(),"project":project,"operation":operation,"maintenanceExtensionInstalled":maintenance_installed,"rows":physical})).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
     Ok(Plan {
         public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":"VERIFIED_SUFFIX_V1","filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
         prefix,
@@ -583,9 +588,10 @@ fn replay_receipt<C: GenericClient>(
     Ok(result)
 }
 
-/// Preview never installs or mutates. Apply requires an exact reviewed digest.
-/// The Store must be in its existing STOPPED maintenance admission, never forced
-/// here; this command changes neither daemon admission nor role grants.
+/// Preview uses a read-only snapshot even before maintenance installation or
+/// while the Store is active, reporting unmet maintenance conditions as blockers.
+/// Apply still requires the exact reviewed digest and existing STOPPED admission;
+/// this command changes neither daemon admission nor role grants.
 ///
 /// # Errors
 ///
@@ -616,8 +622,13 @@ pub fn execute_project_purge(
     if !["install", "preview", "apply", "status"].contains(&action) {
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }
-    verify_postgres_schema(client, target, DatabaseRole::Migrator)
-        .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
+    if action == "preview" {
+        crate::postgres_setup::verify_project_purge_inventory_schema(client, target)
+            .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
+    } else {
+        verify_postgres_schema(client, target, DatabaseRole::Migrator)
+            .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
+    }
     if action == "install" {
         if text(request, "authorization")? != "INSTALL_PURGE_MAINTENANCE" {
             return Err("PROJECT_PURGE_AUTHORIZATION_REQUIRED");
@@ -648,8 +659,37 @@ pub fn execute_project_purge(
     let mut tx = db(client
         .build_transaction()
         .isolation_level(IsolationLevel::Serializable)
+        .read_only(action == "preview")
+        .deferrable(action == "preview")
         .start())?;
     db(tx.batch_execute("SET LOCAL lock_timeout='2000'; SET LOCAL statement_timeout='30000'; SET LOCAL idle_in_transaction_session_timeout='30000'"))?;
+    if action == "preview" {
+        // Absence is allowed only for inventory. An installed extension must
+        // still pass its exact catalog and identity checks, never be ignored.
+        let installed: bool =
+            db(tx.query_one("SELECT to_regnamespace('project_purge') IS NOT NULL", &[]))?.get(0);
+        if installed {
+            extension(&mut tx)?;
+        }
+        let stopped: bool = db(tx.query_one("SELECT admission_mode='STOPPED' AND daemon_instance_id IS NULL AND daemon_epoch IS NULL AND authority_revision=0 AND observation_digest IS NULL AND authority_head_digest IS NULL FROM ONLY control.runtime_admission WHERE singleton", &[]))?.get(0);
+        let mut plan = prepare(&mut tx, target, text(request, "projectId")?, operation)?;
+        let blockers = plan.public["blockers"]
+            .as_array_mut()
+            .ok_or("PROJECT_PURGE_SERIALIZATION")?;
+        if !installed {
+            blockers.push(json!({"code":"MAINTENANCE_EXTENSION_REQUIRED"}));
+        }
+        if !stopped {
+            blockers.push(json!({"code":"MAINTENANCE_OFFLINE_REQUIRED"}));
+        }
+        if !blockers.is_empty() {
+            plan.public["status"] = json!("BLOCKED");
+        }
+        plan.public["inventoryMode"] = json!("READ_ONLY_SNAPSHOT");
+        plan.public["maintenanceExtensionInstalled"] = json!(installed);
+        plan.public["maintenanceStopped"] = json!(stopped);
+        return Ok(plan.public);
+    }
     if action == "apply" || action == "status" {
         db(tx.batch_execute("LOCK TABLE control.runtime_admission IN EXCLUSIVE MODE"))?;
     }
@@ -713,9 +753,6 @@ pub fn execute_project_purge(
         }
     }
     let plan = prepare(&mut tx, target, project, operation)?;
-    if action == "preview" {
-        return Ok(plan.public);
-    }
     if plan.public["status"] != "READY" {
         return Ok(plan.public);
     }
