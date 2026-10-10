@@ -129,6 +129,11 @@ async function manifest(roots, limits) {
     if (!stat) { if (depth === 0) { absentRoots.push(root); return; } fail('PURGE_FILE_SCOPE_CHANGED'); }
     const type = stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'directory' : stat.isFile() ? 'file' : 'unsupported';
     if (type === 'unsupported') fail('PURGE_FILE_UNSUPPORTED_TYPE');
+    // Unlinking one hard-link name changes the shared inode metadata. Without
+    // an ownership-aware adapter, later entries would invalidate our own plan;
+    // an unlisted sibling may also belong to another project. Reject before any
+    // PostgreSQL or filesystem mutation rather than relax the metadata checks.
+    if (type !== 'directory' && stat.nlink !== 1n) fail('PURGE_FILE_HARDLINK_UNSUPPORTED');
     if (type !== 'link' && key(await realpath(target)) !== key(target)) fail('PURGE_FILE_PATH_ALIAS');
     const gitRoot = gitDirectories.get(root);
     if (gitRoot && key(target) === key(path.join(gitRoot, 'commondir'))) fail('PURGE_FILE_SHARED_GIT_METADATA');
@@ -207,7 +212,7 @@ export async function validateProjectPurgeFiles(plan, options) {
     const entry = plan.entries.find(item => item.path === pending);
     if (!entry || removed.has(pending)) fail('PURGE_FILE_RECEIPT_MISMATCH');
     await checkAncestors(plan, entry);
-    // A durable intent precedes unlink. After a crash, absence is acceptable
+    // A saved intent precedes unlink. After a process crash, absence is acceptable
     // only for this exact planned entry, with the original ancestor identities.
     if (!(await inspect(pending))) removed.add(pending);
   }

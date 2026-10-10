@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, lstat, rename, rm, rmdir, symlink, readdir } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, lstat, rename, rm, rmdir, symlink, link, readdir } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import os from 'node:os';
@@ -26,6 +26,25 @@ async function fixture(t) {
   return { base, root, other, options: { projectId: 'synthetic-project-a', roots: [root], protectedRoots: [other] } };
 }
 const bound = (plan, options) => ({ ...options, planDigest: plan.planDigest });
+
+for (const destination of ['inside', 'outside']) {
+  test(`hard links ${destination} the project are rejected during inventory without removing any path`, async t => {
+    const f = await fixture(t);
+    const original = path.join(f.root, 'nested', 'data.txt');
+    const alias = path.join(destination === 'inside' ? f.root : f.other, 'hardlink.txt');
+    await link(original, alias);
+    const originalStat = await lstat(original, { bigint: true }), aliasStat = await lstat(alias, { bigint: true });
+    assert.equal(originalStat.nlink, 2n);
+    assert.equal(aliasStat.nlink, 2n);
+    assert.equal(originalStat.dev, aliasStat.dev);
+    assert.equal(originalStat.ino, aliasStat.ino);
+    t.diagnostic(`${process.platform}: both hard-link names report nlink=2 and the same device/inode`);
+    await assert.rejects(previewProjectPurgeFiles(f.options), { code: 'PURGE_FILE_HARDLINK_UNSUPPORTED' });
+    assert.equal(await readFile(original, 'utf8'), 'synthetic project data');
+    assert.equal(await readFile(alias, 'utf8'), 'synthetic project data');
+    assert.equal(await readFile(path.join(f.other, 'keep.txt'), 'utf8'), 'other project unchanged');
+  });
+}
 
 test('durable per-entry intent resumes after unlink but before the next progress save', async t => {
   const f = await fixture(t), plan = await previewProjectPurgeFiles(f.options);

@@ -91,6 +91,8 @@ async function loadState(plan) {
   } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 async function saveState(plan, state) {
+  // File sync plus rename supports process-crash continuation, not a verified
+  // power-loss ordering guarantee for directory entries (especially on Windows).
   const temporary = `${plan.statePath}.${randomUUID()}.tmp`;
   const file = await open(temporary, 'wx', 0o600);
   try { await file.writeFile(JSON.stringify(state, null, 2)); await file.sync(); }

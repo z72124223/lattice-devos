@@ -30,6 +30,7 @@ export function externalPurgeInventory(input = []) {
 
 function blockerCode(blocker) { return typeof blocker === 'string' ? blocker : blocker?.code ?? 'UNKNOWN_BLOCKER'; }
 function nextStep(code) {
+  if (code.includes('HARDLINK')) return 'Hard-link ownership and recovery are not supported; keep this scope blocked without changing shared link metadata to force acceptance.';
   if (code.includes('INTERLEAVED')) return 'Registry history requires a compatible maintenance migration; do not rewrite survivor receipts.';
   if (code.includes('IMMUTABLE') || code.includes('RETAINED_REFERENCE') || code.includes('UNSUPPORTED_REFERENCE')) return 'Resolve the owning module retention and reference contract before erasing; never disable its protection.';
   if (code.includes('ACTIVE') || code.includes('LEASE')) return 'Finish or stop the identified owner through its normal lifecycle, then create a fresh preview.';

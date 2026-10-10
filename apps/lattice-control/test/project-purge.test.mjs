@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, link, rm } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 import { LatticeStore } from '../src/store.mjs';
@@ -72,6 +72,22 @@ test('filesystem drift is rejected before PostgreSQL deletion', async t => {
   await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /SCOPE_CHANGED/);
   assert.equal(f.applied, 0);
   const db = new LatticeStore(f.databasePath); assert.ok(db.getProject(f.project.id)); db.database.close();
+});
+
+test('hard links block inventory and post-preview apply before PostgreSQL or SQLite deletion', async t => {
+  const f = await fixture(t), originalPlan = await f.preview();
+  const original = path.join(f.target, 'target.txt');
+  const alias = path.join(f.survivor, 'target-link.txt');
+  await link(original, alias);
+  const blocked = await f.preview();
+  assert.equal(blocked.status, 'BLOCKED');
+  assert.ok(blocked.blockers.includes('PURGE_FILE_HARDLINK_UNSUPPORTED'));
+  await assert.rejects(applyProjectPurge(blocked, { confirmDigest: blocked.digest, maintenanceOffline: true, native: f.native }), /PURGE_BLOCKED/);
+  await assert.rejects(applyProjectPurge(originalPlan, { confirmDigest: originalPlan.digest, maintenanceOffline: true, native: f.native }), /PURGE_FILE_HARDLINK_UNSUPPORTED/);
+  assert.equal(f.applied, 0);
+  const db = new LatticeStore(f.databasePath); assert.ok(db.getProject(f.project.id)); db.database.close();
+  assert.equal(await readFile(original, 'utf8'), 'target content');
+  assert.equal(await readFile(alias, 'utf8'), 'target content');
 });
 
 test('SQLite drift is rejected before PostgreSQL deletion', async t => {
