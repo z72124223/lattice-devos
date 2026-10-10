@@ -168,3 +168,12 @@ PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.latt
 `-Scenario bot-purge` 在兩個全新 cluster 驗證正常 Bot 登錄歸屬、原生閒置證據、Bot 先於 Registry 清除、Control SQLite 決策完整 lineage 清除與保留列號、角色防復活、CLI 續跑及 maintenance finalize；`all` 包含此案例。所有情境保存 Node source hashes 並在完成時核對未變。
 
 `-Scenario streaming -LegacyPurgeBinary <串流化前相容 binary 絕對路徑>` 比對 Unicode／大小寫／數字字串的小型原生圖譜，驗證新舊預覽完全相同、兩方向收據讀回及舊計畫接受。`-Scenario streaming-large` 使用正常 Graph API 在兩個專案寫入合計 110,000 列、超過 64 MiB；舊版應容量拒絕，新版仍完整檢查跨專案引用，刪除目標 55,000 列後核對保留 55,000 列原文摘要及原生 receipt，並重試同操作。兩種情境各使用新隔離 cluster，不連線正式庫；輸出記錄執行耗時及新舊 binary 雜湊。它們須明確選擇，不由未指定相容舊 binary 的 `all` 推定已驗證。
+
+
+### 舊資料一次遷移到目前格式
+
+維護 binary 提供 `preview-bot-adoption` 與 `adopt-bot-ownership`：共同輸入為固定 schema、`projectId` 與已核對的 `botService`；採納另須 `authorization: ADOPT_EXISTING_BOT_OWNERSHIP` 及預覽的 `expectedSnapshotDigest`。先用既有 `install-bot-ownership` 安裝固定 sidecar，主 Registry 必須維護離線。工具鎖住 Registry、Bot 原表與 sidecar，逐筆核對原始 register、request 摘要、連續 revision、收據身分與最後狀態，才新增當前歸屬。錯誤 UUID、事件缺口、摘要變動、已退休或跨 Store 綁定一律拒絕；roles/events 不變，可安全重跑。這只證明保存歷史與當前 Registry 的歸屬，不證明原生對話已停止，也不核准清除。
+
+舊 Control 圖譜缺少 `cache_digest` 時，從已驗證的 source/commit 重新分析到暫存目錄；新摘要驗證成功且原檔未變才在維護時段替換。不為舊內容直接補摘要。舊 Runtime commit 目錄只在逐檔符合來源 Git blob、staging 對應同一 snapshot，且內容清單已保存後，以不覆寫的 rename 移入 `sources/<sourceKey>/<commit>`；中斷後核對原／目標與同一清單續跑，前後內容必須相同。這是一次資料遷移，正常讀取器不保留舊格式分支。
+
+維護 source key 可唯讀解析 Registry junction，但需逐一排除其他 Registry 來源使用同一 key；一般 Graphify admission 仍拒絕 junction。檔案清除繼續只處理已計畫的 link 本身，不因解析歸屬而穿透刪除目標。

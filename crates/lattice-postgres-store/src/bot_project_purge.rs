@@ -136,7 +136,7 @@ pub fn install_bot_project_ownership(
     )
 }
 
-fn registry_lock<'a>(
+pub(super) fn registry_lock<'a>(
     client: &'a mut Client,
     target: &MigrationTarget,
     project: &str,
@@ -203,7 +203,7 @@ pub fn execute_bot_lifecycle_with_registry(
     Ok(result)
 }
 
-fn snapshot(client: &mut impl GenericClient) -> Result<Vec<(String, String)>> {
+pub(super) fn snapshot(client: &mut impl GenericClient) -> Result<Vec<(String, String)>> {
     let mut result = Vec::new();
     let mut bytes = 0usize;
     for table in [

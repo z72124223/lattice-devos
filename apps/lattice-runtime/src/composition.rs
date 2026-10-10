@@ -11871,12 +11871,18 @@ fn graph_source_work_root(
 }
 
 /// Derive the same source directory key as Runtime Graphify without creating or
-/// changing a path. A missing or aliased source is not guessed from a spelling.
+/// changing a path. This maintenance-only read may resolve a Registry junction;
+/// normal Graphify admission still rejects reparse points. Callers must compare
+/// survivor keys before selecting an owned work directory.
 ///
 /// # Errors
 /// Returns an error when the registered directory cannot be canonicalized.
 pub fn project_purge_graph_source_key(repository_root: &Path) -> Result<String, LatticedError> {
-    let root = graph_canonical_directory(repository_root)?;
+    let root = fs::canonicalize(repository_root)
+        .map_err(|_| LatticedError::new(LatticedErrorKind::GraphConfiguration))?;
+    if !root.is_dir() {
+        return Err(LatticedError::new(LatticedErrorKind::GraphConfiguration));
+    }
     let path = graph_source_work_root(Path::new(""), &root)?;
     path.file_name()
         .and_then(|name| name.to_str())
@@ -17547,6 +17553,30 @@ mod tests {
             graphify_wsl_executable_from_value(None, default_wsl.clone()),
             default_wsl
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn purge_source_key_reads_junction_without_relaxing_runtime_admission() {
+        let fixture = env::temp_dir().join(format!("lattice-purge-key-{}", process::id()));
+        let source = fixture.join("source");
+        let link = fixture.join("link");
+        fs::create_dir_all(&source).unwrap();
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/d", "/c", "mklink", "/J"])
+            .arg(&link)
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        assert_eq!(
+            project_purge_graph_source_key(&source).unwrap(),
+            project_purge_graph_source_key(&link).unwrap()
+        );
+        assert!(graph_canonical_directory(&link).is_err());
+        fs::remove_dir(&link).unwrap();
+        assert!(source.is_dir());
+        fs::remove_dir_all(fixture).unwrap();
     }
 
     #[test]

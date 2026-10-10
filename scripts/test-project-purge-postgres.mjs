@@ -421,15 +421,32 @@ try {
     const botService={port:botPort,runId:botRun,systemIdentifier:botSql('postgres','SELECT system_identifier::text FROM pg_control_system()').stdout.trim()};
     const botArgs=['--postgres-host','127.0.0.1','--postgres-port',String(botPort),'--postgres-run-id',botRun];
     command(args['lifecycle-binary'],['bot-lifecycle-install',...botArgs],env,undefined,'bot-base-install');
-    native(env,{action:'install-bot-ownership',authorization:'INSTALL_BOT_PROJECT_OWNERSHIP',botService});
+
     const owner='11111111-2222-3333-4444-555555555555';
     const registration=project=>({action:'register',request_id:'fixture-register',project_id:project,role_id:'fixture-role',expected_revision:0,expected_generation:0,owner_thread_id:owner,owner_host_id:'fixture',
       body:{work_ids:[],policy_digest:'a'.repeat(64),rules_digest:'b'.repeat(64),binding_receipt:{tool:'read_thread',target_thread_id:owner,target_host_id:'fixture',result_digest:'c'.repeat(64),readback_digest:'d'.repeat(64),evidence_ref:'synthetic-fixture:bot-purge',success:true,readback_verified:true,old_pending_count:0}}});
     const botCall=(value,success=true)=>command(args['lifecycle-binary'],['bot-lifecycle',...botArgs],env,JSON.stringify(value),'bot-lifecycle-call',success);
-    const missing=botCall(registration('not-in-registry'),false);
-    assert.notEqual(missing.exitCode,0);assert.match(missing.stderr,/REGISTRY_PROJECT_MISSING/);
     const originals=[seeded.targetProjectId,seeded.survivorProjectId].map(project=>JSON.parse(botCall(registration(project)).stdout));
     const botRows=()=>JSON.parse(botSql(botDb,"SELECT json_build_array((SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.roles p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.events p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_project_ownership.bindings p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_project_ownership.retired p) x))").stdout);
+    native(env,{action:'install-bot-ownership',authorization:'INSTALL_BOT_PROJECT_OWNERSHIP',botService});
+    const missing=botCall(registration('not-in-registry'),false);
+    assert.notEqual(missing.exitCode,0);assert.match(missing.stderr,/REGISTRY_PROJECT_MISSING/);
+    const legacy=botRows(); assert.equal(legacy[2].length,0);
+    assert.match(native(env,{action:'preview-bot-adoption',projectId:'not-in-registry',botService},false).stderr,/REGISTRY_PROJECT_MISSING/);
+    for (const projectId of [seeded.targetProjectId,seeded.survivorProjectId]) {
+      const request={projectId,botService};
+      const preview=native(env,{action:'preview-bot-adoption',...request}).value;
+      assert.equal(preview.status,'READY');assert.equal(preview.roleCount,1);
+      assert.match(native(env,{action:'adopt-bot-ownership',authorization:'ADOPT_EXISTING_BOT_OWNERSHIP',expectedSnapshotDigest:'0'.repeat(64),...request},false).stderr,/SNAPSHOT_CHANGED/);
+      botSql(botDb,`UPDATE bot_lifecycle.events SET request_digest=repeat('0',64) WHERE project_id='${projectId}'`);
+      assert.match(native(env,{action:'preview-bot-adoption',...request},false).stderr,/HISTORY_REJECTED/);
+      botSql(botDb,`UPDATE bot_lifecycle.events SET request_digest=encode(sha256(convert_to(request::text,'UTF8')),'hex') WHERE project_id='${projectId}'`);
+      const adopted=native(env,{action:'adopt-bot-ownership',authorization:'ADOPT_EXISTING_BOT_OWNERSHIP',expectedSnapshotDigest:preview.snapshotDigest,...request}).value;
+      assert.equal(adopted.status,'ADOPTED');assert.equal(adopted.nativeActivityVerified,false);
+      assert.equal(native(env,{action:'adopt-bot-ownership',authorization:'ADOPT_EXISTING_BOT_OWNERSHIP',expectedSnapshotDigest:preview.snapshotDigest,...request}).value.status,'ADOPTED');
+      assert.deepEqual(botRows().slice(0,2),legacy.slice(0,2));
+    }
+    check('legacy-adoption-verifies-history-cas-registry-replay-and-preserves-all-lifecycle-rows');
     const before=botRows();
     assert.equal(before[2].length,2);
     check('bot-registration-requires-current-registry-project-and-atomically-persists-binding');
