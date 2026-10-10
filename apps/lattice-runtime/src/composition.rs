@@ -11884,6 +11884,10 @@ pub fn project_purge_graph_source_key(repository_root: &Path) -> Result<String, 
         .ok_or_else(|| LatticedError::new(LatticedErrorKind::GraphConfiguration))
 }
 
+#[path = "purge_graph.rs"]
+mod purge_graph;
+pub use purge_graph::project_purge_graph_source;
+
 /// Recompute the current and portable predecessor selectors with the same
 /// canonicalization and byte-hash functions used when Runtime wrote analyses.
 /// Old selectors whose original inputs are missing are deliberately excluded.

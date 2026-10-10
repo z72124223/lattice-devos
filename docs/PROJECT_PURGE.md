@@ -13,8 +13,8 @@
 
 ## 支援範圍與拒絕條件
 
-- PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 512 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。
-- 2026-10-10 在含 584,134 筆 Graphify records 的既有資料庫上完成唯讀原生預覽，總耗時約 64 秒，未執行刪除。預覽仍列出既有舊 analysis 歸屬未明、跨專案 decision 引用及維護元件／離線條件等阻擋；這證明能完成盤點，不代表該專案已可刪除或已清空。
+- PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 4,096 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。
+- 2026-10-10 初次在含 584,134 筆 Graphify records 的既有資料庫上完成唯讀預覽，耗時約 64 秒。後續核對發現，當時 4 筆 decision 引用其實屬於目標專案，是 selector 漏表造成誤判；9 份舊 analysis 的兩組配置也已由實際 Git hash、工作目錄與執行環境路徑精確重算吻合。這些修正不代表已刪除正式專案。
 - PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。舊版 `VERIFIED_SUFFIX_V1` 只接受目標命令構成全域歷史最後一段，清除後回到原始保留前綴，完整重播仍從起點開始。沒有選擇資料保留政策的舊計畫維持此限制。
 - 選擇 `registryPolicy: "MINIMAL_ATTESTATION"` 後，`ATTESTED_EPOCH_V1` 可處理交錯歷史。清除前完整驗證舊歷史／前次受信任基準與新命令；清除後一般保留專案的原始命令、語意收據及 PostgreSQL 持久化收據保持原值，存於新的歷史基準。必須移除的跨專案歷史命令，在預覽列出命令承諾與 record-set 摘要，授權綁定同一範圍；舊指令 ID 以摘要保留並拒絕任何內容的重送。新的指令 ID 可登記已釋放的身分。
 - 這項政策的歷史保證為 `ATTESTED_FROM_SEAL`，新的命令從已驗證基準完整重播；不是刪除前全域歷史仍能從零重播。只有一份當前基準；下次清除會再次過濾，不能保留可能含新刪除目標的舊基準原文。其他專案的**目前狀態**仍引用目標時維持 `REGISTRY_CURRENT_SURVIVOR_REFERENCE`，必須先走該專案正常調和程序，不可用歷史刪除授權改掉它的現況。
@@ -39,6 +39,14 @@ Bot lifecycle 使用**獨立 PostgreSQL cluster**，安裝器禁止與 Store 共
 Bot 預覽列出待刪角色的 owner、revision／generation 與永久封存舊 project/role 組合的決策。Codex 用原生 `read_thread` 取得精確 owner 的最新 idle/completed、pending=0、in-flight=0 證據；`botBoundaryPath` 必須在原盤點設定中列出，apply/resume 的 `--bot-boundaries` 使用該路徑。證據有效期五分鐘，不能把測試 envelope 當作正式證據。角色必須沒有未完成交接或執行步驟，主 Store 必須 STOPPED。Bot 同交易寫最小 hash 防重憑證、清除目標 roles/events/bindings、驗證保留 rows 完全相同；先完成 Bot，再清除 Registry。舊 register/finish 寫入受到資料庫保護，防止重新建立已退役組合。這不會封存對話或停止程序。提交回覆遺失時先核對同 scope 的 receipt；Bot 已清而主 Store 尚未完成仍是部分完成。
 
 ## 執行入口
+
+PostgreSQL 決策依 `project_id` 清除完整 lineage，保留其他專案的原始 row 與 sequence。存在存活列的 FK 或文字引用時仍整筆阻擋。須先在離線維護狀態執行原生 `install-decisions`，授權值 `INSTALL_DECISION_PURGE`，安裝精確的後繼 catalog；只支援 `MINIMAL_ATTESTATION`。清除維持全域 revision 的寫入高水位，以既有算法重算存活決策 digest，並保留 decision/request ID 的分域 SHA-256 防重用紀錄。舊 expected pair 失效，下一次正常寫入從原高水位繼續；摘要並非匿名化。未安裝時仍能預覽歸屬與數量，但不能執行清除。
+
+Graphify 的 PostgreSQL 歸屬判定支援已驗證的同儲存庫工作目錄。每次預覽與執行都重新核對實際 canonical Git common directory，若任何存活 Registry 專案使用同一儲存庫，整組阻擋。Windows junction 僅供唯讀身分核對；不會因此放寬檔案刪除的連結邊界。身分承諾值綁入 scope digest，路徑改指向會使舊計畫失效。
+
+可由受控的本機環境設定 `LATTICE_GRAPHIFY_PURGE_SOURCE_HISTORY` 提供至多 16 組歷史輸入，JSON 物件只允許 `sourceRoot`、`runtimeRoot`、`gitExecutable` 三個絕對路徑（總長上限 16 KiB）。程式重新讀取 Git 實體 hash、來源身分與 Runtime 配置算法，且核對分析 commit 確實存在；只選取重算摘要完全相同的分析。不接受直接指定「某個 hash 屬於目標」。缺失輸入、未知配置與真正跨專案引用仍阻擋。這是主 Store 資料的歸屬證明，不能拿來宣稱無標頭的舊磁碟快取也已確定歸屬。
+
+原生唯讀預覽在同一次 PostgreSQL snapshot 中產生主庫與 Graphify 摘要，避免再排序讀取所有 Graphify records。仍維持既有摘要位元組、單筆上限及 60 秒 snapshot 時限。
 
 安裝維護 schema 前，必須先確認所有 Store 讀取者都使用包含本版精確維護 catalog profile 的相容版本。舊版會拒絕新增的維護表；只換清除 binary 而保留舊讀取者，無法視為完成部署。此工具不會自行更新或重啟既有服務。
 

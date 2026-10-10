@@ -61,6 +61,9 @@ function nativeBotInventory(value) {
   return { ...value, source: 'NATIVE_PURGE_READER' };
 }
 function nextStep(code) {
+  if (code === 'DECISION_PURGE_EXTENSION_REQUIRED') return 'Install the exact decision-purge catalog with install-decisions / INSTALL_DECISION_PURGE while stopped, then create a fresh preview. All readers must support the successor catalog.';
+  if (code === 'DECISION_PURGE_MINIMAL_ATTESTATION_REQUIRED') return 'Use the approved MINIMAL_ATTESTATION policy so retired decision and request identifiers remain blocked without retaining project content.';
+  if (code === 'DECISION_CROSS_PROJECT_LINEAGE') return 'A decision lineage connects the target and a surviving project. Resolve the actual dependency through the owning module before erasing either history.';
   if (code.startsWith('BOT_LIFECYCLE_')) return 'Use the dedicated service ownership extension, verify Registry binding and collect fresh native owner readbacks. Unknown legacy ownership or a running owner must be resolved before Registry erasure.';
   if (code.startsWith('GRAPH_')) return 'Recompute ownership with the original Runtime source and configuration. Unknown historical configurations or surviving cross-project references block erasure; an unmatched digest is not proof of unrelated data.';
   if (code.startsWith('PURGE_SQLITE_ACCESS_')) return 'Windows source and staging owner/group/DACL must match exactly; unsupported or unreadable access descriptors remain blocked without changing permissions.';

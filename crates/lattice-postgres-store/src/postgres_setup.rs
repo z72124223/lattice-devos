@@ -8728,7 +8728,16 @@ const MCP_PERMISSION_SQL: &str =
 const MCP_PERMISSION_FUNCTION_CATALOG_SHA256: &str =
     "0888683bacf531cf2d64ff1ce6c83bdcbd3e4ebbe823a1ee9f596af474263c9e";
 
+pub(crate) const DECISION_PURGE_SQL: &str =
+    include_str!("../../../db/extensions/control-product/decision-purge-v1.sql");
+const DECISION_PURGE_FUNCTION_CATALOG_SHA256: &str =
+    "4ffc51978b5944d905482fd9aaedb90362e24a38204446dc860ae4214e82206c";
+const DECISION_PURGE_TABLE_CATALOG_SHA256: &str =
+    "8fdfd1f1b2c01e5edc2c827d0098434731652c00dc5cb921d5cd074dd768ae03";
+
+#[allow(clippy::struct_excessive_bools)] // Independent, exactly pinned append-only catalog capabilities.
 struct ControlProductPrincipalProfile {
+    decision_purge: bool,
     relation_oids: Vec<i64>,
     function_oids: Vec<i64>,
     code_relations: bool,
@@ -8759,12 +8768,15 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
         b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
     )?;
-    let mcp_permission = functions == MCP_PERMISSION_FUNCTION_CATALOG_SHA256;
+    let decision_purge = functions == DECISION_PURGE_FUNCTION_CATALOG_SHA256;
+    let mcp_permission = decision_purge || functions == MCP_PERMISSION_FUNCTION_CATALOG_SHA256;
     let graph_usage = mcp_permission || functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
     let code_relations = graph_usage || functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
     if (!code_relations && functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256)
         || tables
-            != if graph_usage {
+            != if decision_purge {
+                DECISION_PURGE_TABLE_CATALOG_SHA256
+            } else if graph_usage {
                 GRAPH_USAGE_TABLE_CATALOG_SHA256
             } else {
                 CONTROL_PRODUCT_TABLE_CATALOG_SHA256
@@ -8781,7 +8793,16 @@ fn verify_optional_control_product_extension<C: GenericClient>(
           (SELECT count(*) FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product')",
         &[]).map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     for (index, expected) in [
-        (0, if graph_usage { 31_i64 } else { 26 }),
+        (
+            0,
+            if decision_purge {
+                33_i64
+            } else if graph_usage {
+                31
+            } else {
+                26
+            },
+        ),
         (
             1,
             if graph_usage {
@@ -8792,7 +8813,16 @@ fn verify_optional_control_product_extension<C: GenericClient>(
                 15
             },
         ),
-        (2, if graph_usage { 20 } else { 16 }),
+        (
+            2,
+            if decision_purge {
+                22
+            } else if graph_usage {
+                20
+            } else {
+                16
+            },
+        ),
         (3, 0),
         (4, 0),
         (5, 0),
@@ -8827,12 +8857,20 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
         .iter().map(|row| row.get(0)).collect();
     Ok(Some(ControlProductPrincipalProfile {
+        decision_purge,
         relation_oids,
         function_oids,
         code_relations,
         graph_usage,
         mcp_permission,
     }))
+}
+
+pub(crate) fn verify_decision_purge_extension<C: GenericClient>(
+    client: &mut C,
+) -> Result<bool, PostgresStoreSetupError> {
+    Ok(verify_optional_control_product_extension(client)?
+        .is_some_and(|profile| profile.decision_purge))
 }
 
 pub(crate) fn verify_graph_usage_extension<C: GenericClient>(

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history'].includes(args.scenario));
 if (['upgrade','streaming','streaming-large'].includes(args.scenario)) assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -98,6 +98,91 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
+  if(args.scenario==='decisions') {
+    const {env,seeded}=establish('decisions');
+    const runtimeSql=(query,success=true)=>command(args.psql,['-X','-At','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],{...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},`BEGIN ISOLATION LEVEL SERIALIZABLE; ${query}; COMMIT;`,'decision-runtime',success);
+    const head=()=>JSON.parse(sql(env,'SELECT row_to_json(s) FROM control_product.decision_state s'));
+    const mutation=(id,owner,parent=null,requestId=`${id}-request`,expected=head(),payload='fixture content',success=true)=>{
+      for(const value of [id,owner,requestId,parent??'']) assert.match(value,/^[a-zA-Z0-9_.:-]*$/);
+      const digest=hash({id,owner,parent,requestId,payload});
+      return runtimeSql(`SELECT control_product.decision_write_v1('${id}','${owner}',NULL,'fixture decision','${payload}','fixture rationale','approved_document','file:fixture#decision',${parent?`'${parent}'`:'NULL'},'${requestId}',${expected.revision},'${expected.digest}','${digest}')`,success);
+    };
+    for(const [id,owner,parent] of [['s1',seeded.survivorProjectId,null],['s2',seeded.survivorProjectId,'s1'],['s3',seeded.survivorProjectId,'s2'],['t1',seeded.targetProjectId,null],['t2',seeded.targetProjectId,'t1'],['t3',seeded.targetProjectId,'t2'],['t4',seeded.targetProjectId,'t3']]) mutation(id,owner,parent);
+    const beforeHead=head();assert.equal(beforeHead.revision,7);
+    const beforeReplay=mutation('s3',seeded.survivorProjectId,'s2').stdout;
+    const staleBefore=mutation('stale',seeded.survivorProjectId,'s3','stale-request',{revision:0,digest:'0'.repeat(64)},'fixture content',false);
+    assert.match(staleBefore.stderr,/DECISION_REVISION_MISMATCH/);
+    sql(env,'UPDATE control_product.decision_state SET revision=10000');
+    assert.match(mutation('capped',seeded.survivorProjectId,'s3','capped-request',head(),'fixture content',false).stderr,/DECISION_STORE_LIMIT_EXCEEDED/);
+    sql(env,'UPDATE control_product.decision_state SET revision=7');
+    const survivors=()=>sql(env,`SELECT jsonb_agg(to_jsonb(d) ORDER BY decision_sequence)::text FROM control_product.decisions d WHERE project_id='${seeded.survivorProjectId}'`);
+    const before=survivors();
+    const request={projectId:seeded.targetProjectId,operationId:'decision-purge',registryPolicy:'MINIMAL_ATTESTATION'};
+    const missing=native(env,{action:'preview',...request}).value;
+    assert.equal(missing.counts['control_product.decisions'],4);
+    assert.ok(missing.blockers.some(b=>b.code==='DECISION_PURGE_EXTENSION_REQUIRED'));
+    assert.ok(!missing.blockers.some(b=>b.table==='control_product.decisions'));
+    check('owned-decisions-selected-without-false-cross-project-block-and-migration-required');
+    assert.equal(native(env,{action:'install-decisions',authorization:'INSTALL_DECISION_PURGE'}).value.status,'INSTALLED');
+    assert.equal(mutation('s3',seeded.survivorProjectId,'s2').stdout,beforeReplay);
+    assert.match(mutation('stale',seeded.survivorProjectId,'s3','stale-request',{revision:0,digest:'0'.repeat(64)},'fixture content',false).stderr,/DECISION_REVISION_MISMATCH/);
+    sql(env,'UPDATE control_product.decision_state SET revision=10000');
+    assert.match(mutation('capped',seeded.survivorProjectId,'s3','capped-request',head(),'fixture content',false).stderr,/DECISION_STORE_LIMIT_EXCEEDED/);
+    sql(env,'UPDATE control_product.decision_state SET revision=7');
+    check('migration-preserves-exact-replay-stale-packet-and-sequence-limit-behavior');
+    assert.equal(native(env,{action:'install-epoch',authorization:'INSTALL_REGISTRY_EPOCH_MAINTENANCE'}).value.status,'INSTALLED');
+    sql(env,"UPDATE control_product.decisions SET supersedes_id='t4' WHERE decision_id='s1'");
+    const cross=native(env,{action:'preview',...request}).value;
+    assert.ok(cross.blockers.some(b=>b.code==='DECISION_CROSS_PROJECT_LINEAGE'));
+    assert.ok(cross.blockers.some(b=>b.table==='control_product.decisions'));
+    sql(env,"UPDATE control_product.decisions SET supersedes_id=NULL WHERE decision_id='s1'");
+    sql(env,"UPDATE control_product.decisions SET supersedes_id='s3' WHERE decision_id='t1'");
+    assert.ok(native(env,{action:'preview',...request}).value.blockers.some(b=>b.code==='DECISION_CROSS_PROJECT_LINEAGE'));
+    sql(env,"UPDATE control_product.decisions SET supersedes_id=NULL WHERE decision_id='t1'");
+    // A free-text reference without a foreign key is also retained and blocked.
+    sql(env,"UPDATE control_product.decisions SET content='reference t4' WHERE decision_id='s1'");
+    assert.ok(native(env,{action:'preview',...request}).value.blockers.some(b=>b.table==='control_product.decisions'));
+    sql(env,"UPDATE control_product.decisions SET content='fixture content' WHERE decision_id='s1'");
+    check('cross-project-lineage-and-text-references-block-whole-purge');
+    const preview=native(env,{action:'preview',...request}).value;
+    assert.equal(preview.status,'READY',JSON.stringify(preview.blockers));
+    // Exercise PostgreSQL's actual rollback between the two mutations; this is
+    // a fixture transaction, not a production failpoint or a purge result claim.
+    const decisionRows=()=>sql(env,'SELECT jsonb_agg(to_jsonb(d) ORDER BY decision_sequence)::text FROM control_product.decisions d');
+    const beforeFailure=decisionRows();
+    const injected=sql(env,`BEGIN; DELETE FROM control_product.decisions WHERE project_id='${seeded.targetProjectId}'; SELECT 1/0; COMMIT;`,false);
+    assert.notEqual(injected.exitCode,0);assert.match(injected.stderr,/division by zero/);
+    assert.equal(decisionRows(),beforeFailure);assert.deepEqual(head(),beforeHead);
+    assert.equal(sql(env,'SELECT count(*) FROM control_product.decision_retired_keys'),'0');
+    check('postgres-failure-after-lineage-delete-before-retirement-rolls-back-all-decision-rows');
+    const action={action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'};
+    const applied=native(env,action).value;assert.equal(applied.status,'PURGED');
+    assert.equal(survivors(),before);
+    assert.equal(sql(env,`SELECT count(*) FROM control_product.decisions WHERE project_id='${seeded.targetProjectId}'`),'0');
+    assert.equal(sql(env,'SELECT count(*) FROM control_product.decision_retired_keys'),'8');
+    assert.deepEqual(native(env,action).value,applied);
+    assert.deepEqual(native(env,{action:'status',...request}).value,applied);
+    const afterHead=head();assert.equal(afterHead.revision,7);assert.notEqual(afterHead.digest,beforeHead.digest);
+    check('purge-removes-entire-target-lineage-keeps-survivor-bytes-head-high-water-and-idempotent-readback');
+    const stale=mutation('s4',seeded.survivorProjectId,'s3','s4-request',beforeHead,'fixture content',false);
+    assert.match(stale.stderr,/DECISION_REVISION_MISMATCH/);
+    for(const [id,requestId] of [['t1','different-request'],['new-decision','t1-request'],['t4','t4-request']]) {
+      const replay=mutation(id,seeded.survivorProjectId,'s3',requestId,afterHead,'changed payload',false);
+      assert.match(replay.stderr,/DECISION_RETIRED_ID_REJECTED/);
+    }
+    sql(env,'UPDATE control_product.decision_state SET revision=10000');
+    assert.match(mutation('capped',seeded.survivorProjectId,'s3','capped-request',head(),'fixture content',false).stderr,/DECISION_STORE_LIMIT_EXCEEDED/);
+    sql(env,'UPDATE control_product.decision_state SET revision=7');
+    mutation('s4',seeded.survivorProjectId,'s3');
+    assert.equal(head().revision,8);
+    assert.equal(sql(env,"SELECT decision_sequence FROM control_product.decisions WHERE decision_id='s4'"),'8');
+    check('old-packets-and-retired-identities-rejected-next-normal-write-uses-sequence-eight');
+    sql(env,'GRANT SELECT ON control_product.decision_retired_keys TO lattice_runtime');
+    assert.notEqual(native(env,{action:'preview',projectId:seeded.survivorProjectId,operationId:'grant-drift',registryPolicy:'MINIMAL_ATTESTATION'},false).exitCode,0);
+    sql(env,'REVOKE SELECT ON control_product.decision_retired_keys FROM lattice_runtime');
+    assert.equal(native(env,{action:'preview',projectId:seeded.survivorProjectId,operationId:'restored',registryPolicy:'MINIMAL_ATTESTATION'}).value.status,'READY');
+    check('exact-catalog-rejects-retirement-table-permission-drift');
+  }
   if(['streaming','streaming-large'].includes(args.scenario)) {
     for(const large of [args.scenario==='streaming-large']) {
       const {env,seeded}=establish(large?'streaming-large':'streaming-small');
@@ -156,6 +241,57 @@ try {
         check('legacy-reader-replays-streaming-writer-receipt-and-old-plan-is-still-accepted');
       }
     }
+  }
+  if(args.scenario==='graph-history') {
+    const {env,seeded,root}=establish('graph-history');
+    const git=command('where.exe',['git.exe'],baseEnv,undefined,'history-git').stdout.trim().split(/\r?\n/)[0];
+    env.LATTICE_DELIVERY_GIT_EXE=git;
+    const a=path.join(root,'project-a'), b=path.join(root,'project-b'), linked=path.join(root,'historical-source');
+    command(git,['-C',a,'init'],baseEnv,undefined,'history-init');
+    writeFileSync(path.join(a,'source.txt'),'synthetic graph source');
+    command(git,['-C',a,'add','source.txt'],baseEnv,undefined,'history-add');
+    command(git,['-C',a,'-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','synthetic source'],baseEnv,undefined,'history-commit');
+    command(git,['-C',a,'worktree','add','--detach',linked,'HEAD'],baseEnv,undefined,'history-worktree');
+    const runtime=path.join(root,'historical-runtime');mkdirSync(runtime);
+    env.LATTICE_GRAPHIFY_SOURCE_ROOT=linked;env.LATTICE_GRAPHIFY_RUNTIME_ROOT=runtime;
+    command(args['epoch-binary'],['graph-install'],env,undefined,'history-memory-install');
+    const records=JSON.parse(command(args['epoch-binary'],['graph-seed-source'],env,undefined,'history-seed').stdout).records;
+    const targetGraph=records.find(r=>r.source==='target'),survivorGraph=records.find(r=>r.source==='survivor');
+    const before=rows(env);
+    const request={projectId:seeded.targetProjectId,operationId:'historical-graph'};
+    env.LATTICE_GRAPHIFY_SOURCE_ROOT=a;
+    const unknown=native(env,{action:'preview',...request}).value;
+    assert.ok(unknown.blockers.some(b=>b.code==='GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE'));
+    const history=[{sourceRoot:linked,runtimeRoot:runtime,gitExecutable:git}];
+    env.LATTICE_GRAPHIFY_PURGE_SOURCE_HISTORY=JSON.stringify(history);
+    const preview=native(env,{action:'preview',...request}).value;
+    assert.equal(preview.status,'READY',JSON.stringify(preview.blockers));
+    assert.equal(preview.graphSourceProof.targetAnalyses,1);assert.equal(preview.graphSourceProof.survivorAnalyses,1);
+    assert.equal(preview.graphSourceProof.unattributableAnalyses,0);
+    assert.deepEqual(rows(env),before);
+    check('historical-source-inputs-recompute-exact-selector-and-verify-linked-repository-commit');
+    const moved=path.join(root,'survivor-original');renameSync(b,moved);
+    symlinkSync(linked,b,process.platform==='win32'?'junction':'dir');
+    try {
+      const shared=native(env,{action:'preview',...request}).value;
+      assert.ok(shared.blockers.some(b=>b.code==='GRAPH_SOURCE_SHARED_WITH_SURVIVOR'));
+      const refused=native(env,{action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'},false);
+      assert.ok(refused.exitCode!==0 || refused.value?.status==='BLOCKED');
+      assert.deepEqual(rows(env),before);
+    } finally { unlinkSync(b);renameSync(moved,b); }
+    check('registry-survivor-junction-to-same-repository-blocks-and-stale-plan-cannot-erase');
+    const badRuntime=path.join(root,'different-runtime');mkdirSync(badRuntime);
+    const bad={...env,LATTICE_GRAPHIFY_PURGE_SOURCE_HISTORY:JSON.stringify([{...history[0],runtimeRoot:badRuntime}])};
+    assert.ok(native(bad,{action:'preview',...request}).value.blockers.some(b=>b.code==='GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE'));
+    check('changed-historical-input-does-not-assert-ownership');
+    const current=native(env,{action:'preview',...request}).value;
+    assert.equal(current.scopeDigest,preview.scopeDigest);
+    const applied=native(env,{action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value;
+    assert.equal(applied.status,'PURGED');
+    assert.equal(selectRows(rows(env),[targetGraph.receipt,targetGraph.configuration]).length,0);
+    assert.deepEqual(selectRows(rows(env),[survivorGraph.receipt,survivorGraph.configuration]),selectRows(before,[survivorGraph.receipt,survivorGraph.configuration]));
+    assert.equal(native(env,{action:'status',...request}).value.status,'PURGED');
+    check('historical-graph-purge-preserves-all-survivor-rows-and-status-verifies');
   }
   if(args.scenario==='graph-ownership') {
     const {env,seeded,root}=establish('graph-ownership');
