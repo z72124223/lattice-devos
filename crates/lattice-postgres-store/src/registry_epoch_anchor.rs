@@ -442,6 +442,7 @@ fn no_follow(options: &mut OpenOptions) {
     let _ = options;
 }
 
+#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))] // Windows requires the installed native callback.
 fn require_file_audit() -> AnchorResult<()> {
     #[cfg(not(unix))]
     if FILE_AUDIT.get().is_none() {
