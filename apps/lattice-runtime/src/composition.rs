@@ -11874,6 +11874,18 @@ fn graph_source_work_root(
     Ok(work_root.join("sources").join(source.as_str()))
 }
 
+/// Derive the same source directory key as Runtime Graphify without creating or
+/// changing a path. A missing or aliased source is not guessed from a spelling.
+///
+/// # Errors
+/// Returns an error when the registered directory cannot be canonicalized.
+pub fn project_purge_graph_source_key(repository_root: &Path) -> Result<String, LatticedError> {
+    let root=graph_canonical_directory(repository_root)?;
+    let path=graph_source_work_root(Path::new(""),&root)?;
+    path.file_name().and_then(|name|name.to_str()).map(str::to_owned)
+        .ok_or_else(||LatticedError::new(LatticedErrorKind::GraphConfiguration))
+}
+
 fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String), LatticedError> {
     let repository_root = graph_canonical_directory(Path::new(&required_environment(
         "LATTICE_GRAPHIFY_SOURCE_ROOT",

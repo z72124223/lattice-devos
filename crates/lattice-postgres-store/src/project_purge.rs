@@ -20,6 +20,45 @@ type Result<T> = std::result::Result<T, &'static str>;
 const SCHEMA: &str = "lattice.project-purge.result.v1";
 const PARAMS: &str = " AND $1::text IS NOT NULL AND $2::text[] IS NOT NULL AND $3::text[] IS NOT NULL AND $4::text[] IS NOT NULL";
 
+/// Read the actual Graph/Memory relations without interpreting legacy shared
+/// project keys as Registry ownership. The caller first verifies the Store.
+///
+/// # Errors
+/// Rejects unknown relations, oversized snapshots and unavailable reads.
+pub fn inspect_project_purge_graph(client: &mut Client) -> Result<Value> {
+    let mut tx = db(client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start())?;
+    db(tx.batch_execute("SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='2s'"))?;
+    let tables: Vec<_> = all_tables(&mut tx)?
+        .into_iter()
+        .filter(|(schema, name)| {
+            schema == "memory"
+                && ![
+                    "codebase_memory_extension_identity",
+                    "codebase_memory_extension_ledger",
+                ]
+                .contains(&name.as_str())
+        })
+        .collect();
+    let rows = snapshots(&mut tx, &tables)?;
+    let counts: BTreeMap<_, _> = rows
+        .iter()
+        .map(|(key, values)| (key.clone(), values.len()))
+        .collect();
+    let empty = counts.values().all(|count| *count == 0);
+    let snapshot = digest(&serde_json::to_vec(&rows).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
+    db(tx.commit())?;
+    Ok(
+        json!({"schema":"lattice.project-purge.graph-inventory.v1","ownership":"LATTICE",
+        "scope":"VERIFIED_MAIN_STORE_MEMORY","discovery":if empty{"VERIFIED_EMPTY"}else{"OBSERVED"},
+        "counts":counts,"snapshotDigest":snapshot,"identityBinding":if empty{"NOT_APPLICABLE"}else{"LEGACY_SOURCE_BINDING_NOT_PROVEN"},
+        "erasureImplemented":false}),
+    )
+}
+
 fn digest(bytes: &[u8]) -> String {
     let mut value = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {

@@ -21,17 +21,20 @@ function absolute(value) {
   return path.resolve(value);
 }
 
-function scope({ projectId, roots, protectedRoots }) {
+function scope({ projectId, roots, protectedRoots, runtimeGraphRoots = [] }) {
   if (typeof projectId !== 'string' || !projectId.trim() || projectId.length > 128 || /[\x00-\x1f\x7f]/u.test(projectId)) fail('PURGE_FILE_PROJECT_INVALID');
   if (!Array.isArray(roots) || roots.length > 128 || !Array.isArray(protectedRoots) || protectedRoots.length > 4096) fail('PURGE_FILE_SCOPE_INVALID');
   const canonicalRoots = roots.map(absolute).sort(compare);
   const protectedPaths = [...new Set(protectedRoots.map(absolute))].sort(compare);
+  if(!Array.isArray(runtimeGraphRoots)||runtimeGraphRoots.length>128) fail('PURGE_FILE_SCOPE_INVALID');
+  const graphRoots=[...new Set(runtimeGraphRoots.map(absolute))].sort(compare);
+  if(graphRoots.some(root=>!canonicalRoots.includes(root))) fail('PURGE_FILE_SCOPE_INVALID');
   for (const [index, root] of canonicalRoots.entries()) {
     if (within(os.homedir(), root) || within(self, root) || root === path.parse(root).root) fail('PURGE_FILE_UNSAFE_ROOT');
     if (canonicalRoots.some((other, otherIndex) => index !== otherIndex && overlap(root, other))) fail('PURGE_FILE_OVERLAPPING_ROOTS');
     if (protectedPaths.some(other => overlap(root, other))) fail('PURGE_FILE_PROTECTED_ROOT');
   }
-  return { projectId, roots: canonicalRoots, protectedRoots: protectedPaths };
+  return { projectId, roots: canonicalRoots, protectedRoots: protectedPaths, ...(graphRoots.length?{runtimeGraphRoots:graphRoots}:{}) };
 }
 
 function limitsFor(limits = {}) {
@@ -90,7 +93,7 @@ async function checkProtectedAliases({ roots, protectedRoots }) {
   }
 }
 
-async function manifest(roots, limits) {
+async function manifest(roots, limits, runtimeGraphRoots = []) {
   const entries = [], absentRoots = [];
   let bytes = 0;
   async function gitDirectory(root) {
@@ -153,7 +156,15 @@ async function manifest(roots, limits) {
       }
       names.sort(compare);
       if (names.length && gitRoot && ['worktrees', 'modules'].some(name => key(target) === key(path.join(gitRoot, name)))) fail('PURGE_FILE_SHARED_GIT_METADATA');
-      if (depth > 0 && names.some(name => key(name) === '.git')) fail('PURGE_FILE_NESTED_REPOSITORY');
+      if (depth > 0 && names.some(name => key(name) === '.git')) {
+        // Graph snapshots contain an intentionally empty .git directory to
+        // prevent discovery of an ancestor repository. Only explicitly bound
+        // Runtime-derived roots may contain this sentinel, never real metadata.
+        if(!runtimeGraphRoots.includes(root)) fail('PURGE_FILE_NESTED_REPOSITORY');
+        const sentinel=path.join(target,names.find(name=>key(name)==='.git')), sentinelStat=await inspect(sentinel);
+        if(!sentinelStat?.isDirectory()||sentinelStat.isSymbolicLink()) fail('PURGE_FILE_NESTED_REPOSITORY');
+        for await(const _child of await opendir(sentinel)) fail('PURGE_FILE_NESTED_REPOSITORY');
+      }
       for (const name of names) {
         // Names come from the directory, but still reject ambiguous Windows aliases.
         const child = absolute(path.join(target, name));
@@ -173,7 +184,8 @@ function boundPlan(plan, options) {
   const { planDigest, ...payload } = plan;
   if (planDigest !== options.planDigest || digest(payload) !== planDigest) fail('PURGE_FILE_PLAN_DIGEST_MISMATCH');
   const authoritative = scope(options);
-  if (digest(authoritative) !== digest({ projectId: plan.projectId, roots: plan.roots, protectedRoots: plan.protectedRoots })) fail('PURGE_FILE_SCOPE_MISMATCH');
+  if (digest(authoritative) !== digest({ projectId: plan.projectId, roots: plan.roots, protectedRoots: plan.protectedRoots,
+    ...(plan.runtimeGraphRoots?.length?{runtimeGraphRoots:plan.runtimeGraphRoots}:{}) })) fail('PURGE_FILE_SCOPE_MISMATCH');
   limitsFor(plan.limits);
   return authoritative;
 }
@@ -195,7 +207,7 @@ export async function previewProjectPurgeFiles(options) {
   const authoritative = scope(options), limits = limitsFor(options.limits);
   await checkProtectedAliases(authoritative);
   const ancestors = await ancestry(authoritative.roots);
-  const tree = await manifest(authoritative.roots, limits);
+  const tree = await manifest(authoritative.roots, limits, authoritative.runtimeGraphRoots);
   const after = await ancestry(authoritative.roots);
   if (digest(ancestors) !== digest(after)) fail('PURGE_FILE_SCOPE_CHANGED');
   const payload = { schema: SCHEMA, ...authoritative, limits, ancestors, ...tree };
@@ -216,7 +228,7 @@ export async function validateProjectPurgeFiles(plan, options) {
     // only for this exact planned entry, with the original ancestor identities.
     if (!(await inspect(pending))) removed.add(pending);
   }
-  const current = await manifest(authoritative.roots, plan.limits);
+  const current = await manifest(authoritative.roots, plan.limits, authoritative.runtimeGraphRoots);
   const absent = new Set(current.absentRoots);
   const expected = plan.entries.filter(entry => !absent.has(entry.root) && !removed.has(entry.path));
   if (expected.length !== current.entries.length) fail('PURGE_FILE_SCOPE_CHANGED');

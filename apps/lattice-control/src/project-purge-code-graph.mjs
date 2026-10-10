@@ -179,3 +179,64 @@ export async function readbackControlCodeGraphPurge(plan) {
   return { ...result, remainingPlannedRoots,
     complete: result.discovery === 'COMPLETE' && !result.roots.length && !remainingPlannedRoots.length };
 }
+
+// Runtime snapshots use the frozen native domain hash of fs::canonicalize of
+// the Registry source. Their key is not the Control graph.json cache key.
+async function runtimeInventory({ projectId, workDirectory, sourceKey, binding }) {
+  const result = { schema:'lattice.project-purge-runtime-graph.v1', projectId:projectIdentity(projectId),
+    workDirectory, sourceKey, binding, roots:[], blockers:[], discovery:'COMPLETE' };
+  if (workDirectory === null) return { ...result, discovery:'NOT_CONFIGURED' };
+  workDirectory=absolute(workDirectory); result.workDirectory=workDirectory;
+  try {
+    const before=await ancestry(workDirectory);
+    if (before.stat) {
+      const names=[];
+      for await (const child of await opendir(workDirectory)) {
+        if(names.length>=MAX_CHILDREN) fail('PURGE_CODE_GRAPH_ENTRY_LIMIT');
+        names.push(child.name);
+      }
+      if(names.some(name=>name!=='sources')) fail('PURGE_CODE_GRAPH_LEGACY_WORK_ROOT_UNCLASSIFIED');
+      const sources=path.join(workDirectory,'sources'), sourceState=await ancestry(sources);
+      if(sourceState.stat) {
+        if(binding!=='REGISTRY_CANONICAL_PATH'||!hex(sourceKey)) fail('PURGE_CODE_GRAPH_SOURCE_BINDING_REQUIRED');
+        let count=0;
+        for await(const child of await opendir(sources)) {
+          if(++count>MAX_CHILDREN) fail('PURGE_CODE_GRAPH_ENTRY_LIMIT');
+          if(!hex(child.name)) fail('PURGE_CODE_GRAPH_UNKNOWN_ENTRY');
+          const root=path.join(sources,child.name);
+          await directory(root,await inspect(root));
+          if(child.name===sourceKey) result.roots.push(root);
+        }
+        const after=await inspect(sources);
+        if(!after||version(after)!==version(sourceState.stat)) fail('PURGE_CODE_GRAPH_SCOPE_CHANGED');
+      }
+      const after=await inspect(workDirectory);
+      if(!after||version(after)!==version(before.stat)) fail('PURGE_CODE_GRAPH_SCOPE_CHANGED');
+    }
+    if(JSON.stringify(before.entries)!==JSON.stringify((await ancestry(workDirectory)).entries)) fail('PURGE_CODE_GRAPH_SCOPE_CHANGED');
+  } catch(error) {
+    result.blockers.push({code:/^PURGE_CODE_GRAPH_[A-Z_]+$/u.test(error.message)?error.message:'PURGE_CODE_GRAPH_READ_FAILED'});
+    result.discovery='BLOCKED';
+  }
+  return result;
+}
+
+export async function previewRuntimeGraphPurge({projectId,workDirectory=null,source=null}) {
+  return runtimeInventory({projectId,workDirectory,sourceKey:source?.sourceKey??null,binding:source?.binding??'NOT_VERIFIED'});
+}
+function runtimePlan(plan) {
+  if(!plan||plan.schema!=='lattice.project-purge-runtime-graph.v1'||!['COMPLETE','NOT_CONFIGURED'].includes(plan.discovery)
+    ||plan.blockers?.length||!Array.isArray(plan.roots)||plan.roots.length>1) fail('PURGE_CODE_GRAPH_PLAN_INVALID');
+  if(plan.roots.length&&(plan.binding!=='REGISTRY_CANONICAL_PATH'||!hex(plan.sourceKey)
+    ||plan.roots[0]!==path.join(absolute(plan.workDirectory),'sources',plan.sourceKey))) fail('PURGE_CODE_GRAPH_PLAN_INVALID');
+  return plan;
+}
+export async function validateRuntimeGraphPurge(plan) {
+  const current=await runtimeInventory(runtimePlan(plan));
+  if(current.blockers.length||current.roots.some(root=>!plan.roots.includes(root))) fail('PURGE_CODE_GRAPH_SCOPE_CHANGED');
+  return current;
+}
+export async function readbackRuntimeGraphPurge(plan) {
+  const current=await runtimeInventory(runtimePlan(plan));
+  return {...current,complete:current.discovery==='COMPLETE'&&current.roots.length===0};
+}

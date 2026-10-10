@@ -2,11 +2,13 @@ import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { open, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { previewProjectPurgeSqlite, beginProjectPurgeSqlite, readbackProjectPurgeSqlite } from './project-purge-sqlite.mjs';
 import { previewProjectPurgeFiles, validateProjectPurgeFiles, applyProjectPurgeFiles, readbackProjectPurgeFiles } from './project-purge-files.mjs';
 import { externalPurgeInventory, projectPurgeReport } from './project-purge-report.mjs';
-import { previewControlCodeGraphPurge, validateControlCodeGraphPurge, readbackControlCodeGraphPurge } from './project-purge-code-graph.mjs';
+import { previewControlCodeGraphPurge, validateControlCodeGraphPurge, readbackControlCodeGraphPurge,
+  previewRuntimeGraphPurge, validateRuntimeGraphPurge, readbackRuntimeGraphPurge } from './project-purge-code-graph.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new Error(code); };
@@ -22,9 +24,32 @@ const containsPath = (parent, child) => {
   return relative === '' || (!path.isAbsolute(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`));
 };
 const request = (plan, action) => ({ schema: 'lattice.project-purge.request.v1', action, projectId: plan.projectId, operationId: plan.operationId,
+  ...(plan.botService ? { botService: plan.botService } : {}),
   ...(plan.registryPolicy ? { registryPolicy: plan.registryPolicy } : {}),
   ...(plan.postgres?.scopeDigest ? { expectedScopeDigest: plan.postgres.scopeDigest } : {}) });
-const fileOptions = plan => ({ projectId: plan.projectId, planDigest: plan.files.planDigest, roots: plan.files.roots, protectedRoots: plan.files.protectedRoots });
+const fileOptions = plan => ({ projectId: plan.projectId, planDigest: plan.files.planDigest, roots: plan.files.roots, protectedRoots: plan.files.protectedRoots,
+  runtimeGraphRoots:plan.runtimeGraph?.roots??[] });
+
+async function configuredBotService(value) {
+  if (value === undefined) {
+    const marker = path.join(homedir(), 'AppData/Local/LATTICE/bot-lifecycle-postgres/v1/identity.json');
+    let file;
+    try {
+      file = await open(marker, 'r');
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > 16384 || stat.nlink !== 1) fail('PURGE_BOT_SERVICE_MARKER_INVALID');
+      const observed = JSON.parse(await file.readFile('utf8'));
+      if (observed.schemaVersion !== 1 || observed.host !== '127.0.0.1' || observed.initialized !== true) fail('PURGE_BOT_SERVICE_MARKER_INVALID');
+      value = { port: observed.port, runId: observed.runId, systemIdentifier: observed.systemIdentifier };
+    } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+    finally { await file?.close(); }
+  }
+  if (value === null) return null;
+  if (!value || Object.keys(value).length !== 3 || Object.keys(value).some(key => !['port','runId','systemIdentifier'].includes(key))
+      || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535
+      || !/^[a-f0-9]{32}$/u.test(value.runId) || !/^[0-9]{1,20}$/u.test(value.systemIdentifier)) fail('PURGE_BOT_SERVICE_INVALID');
+  return { port:value.port, runId:value.runId, systemIdentifier:value.systemIdentifier };
+}
 
 // No shell, credentials in argv, service lifecycle actions, or policy fallback.
 export function nativeProjectPurge(binary, input) {
@@ -51,6 +76,7 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   const databasePath = absolute(options.databasePath), nativeBinary = absolute(options.nativeBinary), statePath = absolute(options.statePath);
   if (options.registryPolicy !== undefined && options.registryPolicy !== 'MINIMAL_ATTESTATION') fail('PURGE_REGISTRY_POLICY_INVALID');
   const base = { projectId: options.projectId, operationId: options.operationId ?? randomUUID(),
+    botService: await configuredBotService(options.botService),
     ...(options.registryPolicy ? { registryPolicy: options.registryPolicy } : {}) };
   const pg = await native(nativeBinary, request(base, 'preview'));
   if (!['READY', 'BLOCKED'].includes(pg.status) || pg.project?.id !== options.projectId || !Array.isArray(pg.blockers)
@@ -60,6 +86,8 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     authoritativeProject: { source: 'POSTGRES_PREVIEW', projectId: base.projectId, canonicalPath, scopeDigest: pg.scopeDigest } });
   const codeGraph = await previewControlCodeGraphPurge({ projectId: base.projectId,
     cacheDirectory: absolute(options.codeGraphCacheDirectory ?? path.join(process.env.LOCALAPPDATA || process.cwd(), 'LATTICE/control/code-graphs')) });
+  const runtimeGraph=await previewRuntimeGraphPurge({projectId:base.projectId,source:pg.runtimeGraphSource,
+    workDirectory:options.runtimeGraphWorkDirectory??process.env.LATTICE_GRAPHIFY_WORK_ROOT??null});
   const projectRoots = [...new Set([sqlite.canonicalPath, ...pg.filesystemRoots.map(entry => absolute(entry.path))])];
   // The cache directory is shared by all projects. Even an empty or currently
   // target-only cache cannot authorize recursive deletion of that shared root.
@@ -67,21 +95,25 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     codeGraph.blockers.push({ code: 'PURGE_CODE_GRAPH_SHARED_ROOT_OVERLAP', path: codeGraph.cacheDirectory });
     codeGraph.discovery = 'BLOCKED';
   }
-  const roots = [...new Set([...projectRoots, ...codeGraph.roots])];
+  if(runtimeGraph.workDirectory && projectRoots.some(root=>containsPath(root,runtimeGraph.workDirectory)||containsPath(runtimeGraph.workDirectory,root))) {
+    runtimeGraph.blockers.push({code:'PURGE_CODE_GRAPH_SHARED_ROOT_OVERLAP'}); runtimeGraph.discovery='BLOCKED';
+  }
+  const roots = [...new Set([...projectRoots, ...codeGraph.roots, ...runtimeGraph.roots])];
   const protectedRoots = [...new Set([...sqlite.protectedRoots, ...pg.protectedRoots.map(absolute), databasePath,
     ...['-wal', '-shm', '-journal', '.purge-next', '.purge-next-journal', '.purge-swap', '.purge-swap.tmp'].map(suffix => databasePath + suffix),
     nativeBinary, statePath, `${statePath}.lock`, `${statePath}.tmp`, fileURLToPath(import.meta.url), ...(options.protectedRoots ?? []).map(absolute)])];
   let files;
   const fileBlockers = [];
-  try { files = await previewProjectPurgeFiles({ projectId: base.projectId, roots, protectedRoots }); }
+  try { files = await previewProjectPurgeFiles({ projectId: base.projectId, roots, protectedRoots, runtimeGraphRoots:runtimeGraph.roots }); }
   catch (error) {
     if (!/^PURGE_FILE_[A-Z_]+$/.test(error.message)) throw error;
     fileBlockers.push(error.message);
     files = { projectId: base.projectId, roots, protectedRoots, status: 'BLOCKED', blockers: fileBlockers };
   }
-  const blockers = [...pg.blockers, ...sqlite.blockers, ...codeGraph.blockers, ...fileBlockers];
-  const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph,
+  const blockers = [...pg.blockers, ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...fileBlockers];
+  const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph, runtimeGraph,
     postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy, history: pg.history ?? null,
+      relatedStores: pg.relatedStores ?? null,
       inventoryMode: pg.inventoryMode ?? 'LEGACY_MAINTENANCE_PREVIEW',
       maintenanceExtensionInstalled: pg.maintenanceExtensionInstalled ?? null, maintenanceStopped: pg.maintenanceStopped ?? null },
     blockers,
@@ -100,6 +132,7 @@ function validatePlan(plan) {
   absolute(plan.statePath); absolute(plan.nativeBinary);
   if (plan.codeGraph && (plan.codeGraph.projectId !== plan.projectId
     || plan.codeGraph.roots.some(root => !plan.files.roots.includes(root)))) fail('PURGE_PLAN_INVALID');
+  if(plan.runtimeGraph&&(plan.runtimeGraph.projectId!==plan.projectId||plan.runtimeGraph.roots.some(root=>!plan.files.roots.includes(root)))) fail('PURGE_PLAN_INVALID');
   if (plan.sqlite.catalogState === 'ABSENT') {
     const authority = plan.sqlite.authoritativeProject;
     if (authority?.source !== 'POSTGRES_PREVIEW' || authority.projectId !== plan.projectId
@@ -145,6 +178,7 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     transaction = beginProjectPurgeSqlite(plan.sqlite);
     await validateProjectPurgeFiles(plan.files, { ...fileOptions(plan), previousResult: state.files });
     if (plan.codeGraph) await validateControlCodeGraphPurge(plan.codeGraph, { allowPlannedPartial: Boolean(state.files) });
+    if(plan.runtimeGraph) await validateRuntimeGraphPurge(plan.runtimeGraph);
     let receipt = await native(plan.nativeBinary, request(plan, 'status'));
     if (!matchingReceipt(plan, receipt)) {
       if (!['NOT_FOUND', 'UNKNOWN_OPERATION'].includes(receipt.status)) fail('PURGE_NATIVE_RECEIPT_MISMATCH');
@@ -163,8 +197,10 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     state.sqlite = readbackProjectPurgeSqlite(plan.sqlite);
     const fileReadback = await readbackProjectPurgeFiles(plan.files, fileOptions(plan));
     state.codeGraph = plan.codeGraph ? await readbackControlCodeGraphPurge(plan.codeGraph) : null;
+    state.runtimeGraph = plan.runtimeGraph ? await readbackRuntimeGraphPurge(plan.runtimeGraph) : null;
     const finalReceipt = await native(plan.nativeBinary, request(plan, 'status'));
     if (!state.sqlite.complete || !fileReadback.complete || (plan.codeGraph && !state.codeGraph.complete)
+      || (plan.runtimeGraph?.discovery==='COMPLETE'&&!state.runtimeGraph.complete)
       || !matchingReceipt(plan, finalReceipt)) fail('PURGE_READBACK_INCOMPLETE');
     state.postgres = finalReceipt;
     state.status = 'SCOPED_PURGED'; state.files.readback = fileReadback;
@@ -189,8 +225,10 @@ export async function statusProjectPurge(plan, { native = nativeProjectPurge } =
   const sqlite = readbackProjectPurgeSqlite(plan.sqlite);
   const files = await readbackProjectPurgeFiles(plan.files, fileOptions(plan));
   const codeGraph = plan.codeGraph ? await readbackControlCodeGraphPurge(plan.codeGraph) : null;
+  const runtimeGraph = plan.runtimeGraph ? await readbackRuntimeGraphPurge(plan.runtimeGraph) : null;
   const result = { operationId: plan.operationId, planDigest: plan.digest,
-    status: state && matchingReceipt(plan, receipt) && sqlite.complete && files.complete && (!plan.codeGraph || codeGraph.complete) ? 'SCOPED_PURGED' : 'INCOMPLETE',
-    postgres: receipt, sqlite, files, codeGraph, externalCleanup: 'NOT_VERIFIED', externalScope: plan.externalScope };
+    status: state && matchingReceipt(plan, receipt) && sqlite.complete && files.complete && (!plan.codeGraph || codeGraph.complete)
+      && (plan.runtimeGraph?.discovery!=='COMPLETE'||runtimeGraph?.complete) ? 'SCOPED_PURGED' : 'INCOMPLETE',
+    postgres: receipt, sqlite, files, codeGraph, runtimeGraph, externalCleanup: 'NOT_VERIFIED', externalScope: plan.externalScope };
   return { ...result, report: projectPurgeReport(plan, result) };
 }

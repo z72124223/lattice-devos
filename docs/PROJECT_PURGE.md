@@ -2,7 +2,7 @@
 
 這是所有 LATTICE 專案共用的標準清除流程。未來刪除專案一律走同一入口：盤點 → 確認範圍 → 清除 → 必要時續作 → 逐項驗證。Codex 負責核對 ID、摘要、維護狀態及證據；使用者確認實際清除範圍，不需要自行解讀技術摘要。
 
-目前工具能清除已支援的 PostgreSQL、Control SQLite 及檔案範圍；外部資源會列入同一份報告，但沒有自動刪除及驗證介面。封存、從名單移除及本機部分清除都不得宣稱為整個專案清空。一般 Control API 沒有新增遠端刪除入口。原始碼或測試通過也不代表已安裝到使用者的 Runtime。
+目前工具能清除已支援的 PostgreSQL、Control SQLite 及檔案範圍；尚未實作的 LATTICE 管轄資料與真正外部資源分別列在同一份報告。維護紀錄、Runtime Graphify 和獨立 Bot lifecycle DB 仍屬 LATTICE，不能因尚未有轉接器就稱作外部事項。封存、從名單移除及本機部分清除都不得宣稱為整個專案清空。一般 Control API 沒有新增遠端刪除入口。原始碼或測試通過也不代表已安裝到使用者的 Runtime。
 
 ## 先確認範圍
 
@@ -26,6 +26,10 @@
 - 硬連結：目前在盤點及執行前驗證時拒絕 `nlink > 1` 的檔案或連結，即使所有名稱看似位於同一專案。移除其中一個名稱會改變共用檔案的連結數與時間戳；本版沒有完整的硬連結歸屬與續作轉接器，因此須在任何 PostgreSQL／檔案刪除前阻擋，不能先刪一半再卡住，也不能略過時間戳驗證或改動外部連結以強行通過。
 - Control 圖譜磁碟快取：從共用快取目錄盤點全部直接子目錄，以 graph.json 格式、project_id、source_root、目錄鍵及內容摘要建立歸屬，涵蓋同專案不同 checkout。只有確定屬於目標的快取才加入相同檔案清單；內容變更、新增目標快取、未知目錄、缺失標頭、連結及超出盤點上限均阻擋。共用快取目錄與專案刪除根重疊也阻擋，以保護其他專案快取。此項不涵蓋 Runtime 的共用 Graphify 記憶體／索引或仍運作的 Control 記憶體快取，執行仍需停止相關寫入者。
 - 這不是磁碟安全抹除：SQLite／PostgreSQL 的備份、WAL、儲存媒體殘留及外部副本不由本入口保證消失。它驗證的是支援範圍的邏輯資料與路徑不再存在。
+
+Runtime Graphify 的檔案範圍可由 `runtimeGraphWorkDirectory` 或既有 `LATTICE_GRAPHIFY_WORK_ROOT` 指定。原生程式以 Registry 路徑重用 Runtime 的 canonicalize 與相同 domain hash，將 `sources/<source key>` 加入固定刪除清單；其他 source 目錄保留。只在此已綁定範圍允許空的巢狀 `.git` 快照邊界，含任何 Git metadata 的目錄仍拒絕。未知舊平鋪格式、別名、無法核對的來源均阻擋。未配置 work root 不代表没有快取。主 Store 的實際 Memory 表另行唯讀盤點；有舊 analysis 時仍須證明其歸屬，不能把固定的 `task032-delivery` 當成 Registry ID。
+
+Bot lifecycle 使用**獨立 PostgreSQL cluster**，安裝器禁止與 Store 共用服務。協調層讀取既有 `%USERPROFILE%/AppData/Local/LATTICE/bot-lifecycle-postgres/v1/identity.json` 的 port、runId、systemIdentifier，或接受同形的 `botService` 設定（不含密碼）。原生端唯讀比對服務 system identifier、拒絕主 Store cluster，再驗證專用 DB schema 與 roles/events；缺失配置、連線失敗及 schema 不符都維持未知。只有這個已核對服務內的不存在／空資料庫可以標示無資料，不代表所有其他主機或服務都不存在。相同或不同文字 project_id 都不足以證明 Registry 歸屬，有資料時保留未完成。
 
 ## 執行入口
 
@@ -72,7 +76,7 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 
 `BLOCKED` 必須先解決列出的原因並重新預覽。`apply` 必須使用完全相同的 digest，並確認 Control／專案寫入者已停止、檔案範圍保持靜止。Node 的路徑 API 不能對抗惡意並行 rename；這不是可在線上任意執行的安全保證。`resume` 沿用相同計畫、摘要及維護要求，不會自動重新盤點或解除鎖。
 
-`externalResources` 可省略，僅接受 `kind`、`reference`、`source`。七種分類為 `codex`、`automations`、`git`、`graphify`、`botLifecycle`、`backups`、`maintenance`。每一類都保留 discovery 狀態；沒有填資源不等於不存在。呼叫者不能自行填入已刪除、已驗證或完成狀態來取得通過。
+`externalResources` 可省略，僅接受 `kind`、`reference`、`source`。七種分類為 `codex`、`automations`、`git`、`graphify`、`botLifecycle`、`backups`、`maintenance`。這個歷史欄位名稱為相容而保留，不代表七類皆是外部：報告的 `ownership` 區分 LATTICE、Codex 及混合範圍，LATTICE 未完成項標成 `PRODUCT_WORK_REQUIRED`，並列出具體下一步。沒有填資源不等於不存在。呼叫者不能自行填入已刪除、已驗證或完成狀態來取得通過；`latticeScopeComplete` 與全域 `complete` 分別保留，兩者目前都未達成。
 
 `codeGraphCacheDirectory` 可省略，預設與 Control 相同：`%LOCALAPPDATA%/LATTICE/control/code-graphs`。若 Control 使用自訂目錄，必須提供實際目錄。報告將這個可驗證磁碟範圍獨立列為 `controlCodeGraph`；即使通過，外部 `graphify` 分類仍未完整驗證。沒有此盤點欄位的舊計畫保持原範圍，不能據此聲稱已清掉快取。
 
@@ -119,6 +123,8 @@ pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <latt
 PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.lattice` 下的證據，不連正式資料庫。Windows 檔案測試包含實際鎖檔及部分失敗續跑。協調層測試使用真 SQLite／檔案與受控 native adapter；真 PG fixture 的結果須另外報告，不能把 mock 當成完整部署驗收。
 
 `-Scenario inventory` 可單獨驗證運作中／未安裝維護元件的盤點不改動資料、離線要求仍生效，以及狀態改變後的舊摘要被拒絕。
+
+`-Scenario bot-inventory` 使用全新且沒有 Store 的獨立 cluster，經真實安裝器和正常 Bot register API 寫入合成憑證，驗證不存在、空資料庫、有資料、文字 ID 不符，以及服務身分不符；不讀取使用者的 Bot 服務。`coordinator-absent` 另以真實 native source key 驗證 Runtime 快照清除、空 Git 邊界及另一專案快照原文保持不變。
 
 `-Scenario epoch` 與 `-Scenario epoch-reference` 使用各自的新 cluster，驗證交錯歷史／跨專案拒絕紀錄、外部憑證、原始持久化收據精確重送、兩次清除及新命令。Pending 案例由 fixture 寫入真實預覽綁定的提交前／提交後檔案狀態，驗證後續程序恢復；這是中斷狀態模擬，不是突然斷電驗收。`project_purge_epoch_fixture` 使用 Runtime 的實際原生檔案識別及 Store，要求合成資料目錄 marker 和 fixture opt-in，且拒絕已知正式埠；不會加入交付套件。
 

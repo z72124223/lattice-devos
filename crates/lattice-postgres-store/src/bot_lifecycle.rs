@@ -201,6 +201,150 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
     Ok(version)
 }
 
+/// Read-only inventory for the configured service's separate lifecycle store.
+/// An exact textual key is reported, never promoted into a Registry ownership
+/// binding. Empty/absent and unreachable/unsupported are distinct outcomes.
+///
+/// # Errors
+/// Rejects invalid configuration, unknown schema, oversized data and failed reads.
+pub fn inspect_project_purge_bot_lifecycle(
+    port: u16,
+    run_id: &str,
+    password: &str,
+    expected_system_identifier: &str,
+    project_id: &str,
+) -> Result<Value> {
+    let name = database(run_id)?;
+    if expected_system_identifier.is_empty()
+        || expected_system_identifier.len() > 20
+        || !expected_system_identifier
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+    {
+        return Err("BOT_LIFECYCLE_CLUSTER_IDENTITY_REJECTED");
+    }
+    let mut catalog = connect(port, run_id, password, "bootstrap")?;
+    let mut catalog_read = catalog
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .map_err(|e| error(&e))?;
+    catalog_read
+        .batch_execute("SET LOCAL statement_timeout='15s'")
+        .map_err(|e| error(&e))?;
+    let identity: String = catalog_read
+        .query_one(
+            "SELECT system_identifier::text FROM pg_control_system()",
+            &[],
+        )
+        .map_err(|e| error(&e))?
+        .get(0);
+    let shared: bool = catalog_read
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname LIKE 'lattice_task019_%')",
+            &[],
+        )
+        .map_err(|e| error(&e))?
+        .get(0);
+    if identity != expected_system_identifier || shared {
+        return Err("BOT_LIFECYCLE_CLUSTER_IDENTITY_REJECTED");
+    }
+    let exists: bool = catalog_read
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=$1)",
+            &[&name],
+        )
+        .map_err(|e| error(&e))?
+        .get(0);
+    catalog_read.commit().map_err(|e| error(&e))?;
+    let database_commitment = digest(name.as_bytes());
+    if !exists {
+        return Ok(json!({
+            "schema":"lattice.project-purge.bot-inventory.v1", "ownership":"LATTICE",
+            "discovery":"VERIFIED_ABSENT", "databaseCommitment":database_commitment,
+            "databasePresent":false, "identityBinding":"NOT_APPLICABLE",
+            "scope":"VERIFIED_DEDICATED_BOT_SERVICE", "counts":{"roles":0,"events":0},
+        }));
+    }
+    let mut client = connect(port, run_id, password, "migrator")?;
+    let mut tx = client
+        .build_transaction()
+        .read_only(true)
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .map_err(|e| error(&e))?;
+    tx.batch_execute("SET LOCAL statement_timeout='15s'; SET LOCAL lock_timeout='2s'")
+        .map_err(|e| error(&e))?;
+    let version = verify(&mut tx, run_id)?;
+    let columns: Vec<String> = tx.query(
+        "SELECT c.relname||'.'||a.attname||':'||format_type(a.atttypid,a.atttypmod)||':'||a.attnotnull::text
+         FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+         WHERE n.nspname='bot_lifecycle' AND c.relkind='r' AND a.attnum>0 AND NOT a.attisdropped
+         ORDER BY c.relname,a.attnum", &[],
+    ).map_err(|e| error(&e))?.into_iter().map(|row| row.get(0)).collect();
+    if columns
+        != [
+            "events.project_id:text:true",
+            "events.role_id:text:true",
+            "events.request_id:text:true",
+            "events.request_digest:text:true",
+            "events.request:jsonb:true",
+            "events.receipt:jsonb:true",
+            "events.created_at:timestamp with time zone:true",
+            "identity.singleton:boolean:true",
+            "identity.run_id:text:true",
+            "identity.sql_sha256:text:true",
+            "roles.project_id:text:true",
+            "roles.role_id:text:true",
+            "roles.state:jsonb:true",
+        ]
+    {
+        return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
+    }
+    let mut snapshot = Vec::new();
+    let mut totals = serde_json::Map::new();
+    let mut matches = serde_json::Map::new();
+    let mut keys = std::collections::BTreeSet::new();
+    let mut bytes = 0usize;
+    for table in ["roles", "events"] {
+        let rows = tx.query(&format!(
+            "SELECT project_id,to_jsonb(p)::text FROM ONLY bot_lifecycle.{table} p ORDER BY to_jsonb(p)::text LIMIT 10001"
+        ), &[]).map_err(|e| error(&e))?;
+        if rows.len() > 10000 {
+            return Err("BOT_LIFECYCLE_PURGE_INVENTORY_LIMIT");
+        }
+        let mut matched = 0usize;
+        for row in &rows {
+            let key: String = row.get(0);
+            let value: String = row.get(1);
+            bytes = bytes.saturating_add(value.len());
+            if bytes > 32 * 1024 * 1024 {
+                return Err("BOT_LIFECYCLE_PURGE_INVENTORY_LIMIT");
+            }
+            if key == project_id {
+                matched += 1;
+            }
+            keys.insert(key);
+            snapshot.push((table, value));
+        }
+        totals.insert(table.to_owned(), json!(rows.len()));
+        matches.insert(table.to_owned(), json!(matched));
+    }
+    tx.commit().map_err(|e| error(&e))?;
+    let empty = snapshot.is_empty();
+    Ok(json!({
+        "schema":"lattice.project-purge.bot-inventory.v1", "ownership":"LATTICE",
+        "discovery":if empty { "VERIFIED_EMPTY" } else { "OBSERVED" },
+        "databasePresent":true, "databaseCommitment":database_commitment, "contractVersion":version,
+        "scope":"VERIFIED_DEDICATED_BOT_SERVICE", "counts":totals, "exactKeyMatches":matches,
+        "distinctProjectKeys":keys.len(),
+        "identityBinding":if empty { "NOT_APPLICABLE" } else { "TEXT_KEY_ONLY_REGISTRY_BINDING_NOT_PROVEN" },
+        "snapshotDigest":digest(&serde_json::to_vec(&snapshot).map_err(|_| "BOT_LIFECYCLE_DATABASE_REJECTED")?),
+        "erasureImplemented":false,
+    }))
+}
+
 /// Explicit versioned migration; schema extension and control enrollment share
 /// one serializable transaction. Never called by runtime reads or installation.
 ///

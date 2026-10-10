@@ -292,6 +292,71 @@ test('external resource inventory is bounded and never accepts claimed deletion 
   assert.equal(report.external[0].discovery, 'NOT_VERIFIED');
   assert.equal(report.external[0].resources[0].status, 'NOT_VERIFIED');
   assert.equal(report.remaining.length, 7);
+  assert.equal(report.latticeScopeComplete, false);
+  for (const kind of ['graphify', 'botLifecycle', 'maintenance']) {
+    const scope = report.external.find(item => item.kind === kind);
+    assert.equal(scope.ownership, 'LATTICE');
+    assert.equal(scope.disposition, 'PRODUCT_WORK_REQUIRED');
+    assert.equal(report.remaining.find(item => item.kind === kind).reason, 'LATTICE_OWNED_CLEANUP_NOT_IMPLEMENTED');
+  }
+  assert.equal(report.external.find(item => item.kind === 'backups').ownership, 'MIXED');
+  assert.match(report.explanation, /Additional LATTICE-owned data/);
+});
+
+test('native lifecycle inventory distinguishes absent, unreachable, observed and unproven ownership', async t => {
+  const f = await fixture(t), plan = await f.preview();
+  const absent = { schema: 'lattice.project-purge.bot-inventory.v1', ownership: 'LATTICE',
+    discovery: 'VERIFIED_ABSENT', databaseCommitment: 'd'.repeat(64), databasePresent: false,
+    identityBinding: 'NOT_APPLICABLE', scope: 'VERIFIED_DEDICATED_BOT_SERVICE', counts: { roles: 0, events: 0 } };
+  const report = observation => projectPurgeReport(plan, { status: 'SCOPED_PURGED', postgres: { relatedStores: { botLifecycle: observation } } });
+  assert.equal(report(absent).external.find(scope => scope.kind === 'botLifecycle').disposition, 'NO_DATA_IN_CONFIGURED_STORE');
+  assert.equal(report(absent).remaining.some(scope => scope.kind === 'botLifecycle'), false);
+  assert.equal(report(absent).latticeScopeComplete, false);
+  for (const invalid of [{ ...absent, counts: { roles: 1, events: 0 } }, { ...absent, databasePresent: true }, { ...absent, scope: 'CALLER_CLAIM' }]) {
+    assert.equal(report(invalid).remaining.some(scope => scope.kind === 'botLifecycle'), true);
+  }
+  const unknown = { ...absent, discovery: 'NOT_VERIFIED', reason: 'BOT_LIFECYCLE_DATABASE_UNAVAILABLE' };
+  assert.equal(report(unknown).external.find(scope => scope.kind === 'botLifecycle').observation.reason, unknown.reason);
+  const observed = { ...absent, discovery: 'OBSERVED', databasePresent: true, snapshotDigest: 'e'.repeat(64),
+    counts: { roles: 1, events: 4 }, exactKeyMatches: { roles: 0, events: 0 }, identityBinding: 'TEXT_KEY_ONLY_REGISTRY_BINDING_NOT_PROVEN' };
+  assert.equal(report(observed).external.find(scope => scope.kind === 'botLifecycle').disposition, 'PRODUCT_WORK_REQUIRED');
+});
+
+test('Runtime source cache is purged with an empty Git sentinel and survivor files unchanged', async t => {
+  const f=await fixture(t), work=path.join(f.root,'runtime-graph'), sourceKey='c'.repeat(64);
+  const a=path.join(work,'sources',sourceKey), b=path.join(work,'sources','d'.repeat(64));
+  const snapshot=path.join(a,'1'.repeat(40),'snapshots','synthetic');
+  await mkdir(path.join(snapshot,'.git'),{recursive:true}); await mkdir(b,{recursive:true});
+  await writeFile(path.join(snapshot,'source.txt'),'target code snapshot'); await writeFile(path.join(b,'keep.txt'),'survivor graph');
+  const native=async(binary,request)=>({...await f.native(binary,request),
+    ...(request.action==='preview'?{runtimeGraphSource:{sourceKey,binding:'REGISTRY_CANONICAL_PATH'}}:{}),
+    relatedStores:{runtimeGraph:{schema:'lattice.project-purge.graph-inventory.v1',ownership:'LATTICE',
+      discovery:'VERIFIED_EMPTY',scope:'VERIFIED_MAIN_STORE_MEMORY',snapshotDigest:'e'.repeat(64),counts:{}}}});
+  const options={projectId:f.project.id,databasePath:f.databasePath,nativeBinary:path.join(f.root,'native.exe'),
+    statePath:f.statePath,codeGraphCacheDirectory:f.codeGraphCacheDirectory,runtimeGraphWorkDirectory:work,botService:null};
+  const plan=await previewProjectPurge(options,{native});
+  assert.equal(plan.status,'READY',JSON.stringify(plan.blockers)); assert.deepEqual(plan.runtimeGraph.roots,[a]);
+  const result=await applyProjectPurge(plan,{confirmDigest:plan.digest,maintenanceOffline:true,native});
+  assert.equal(result.runtimeGraph.complete,true);
+  assert.equal(result.report.remaining.some(item=>item.kind==='graphify'),false);
+  await assert.rejects(readFile(path.join(snapshot,'source.txt')),/ENOENT/);
+  assert.equal(await readFile(path.join(b,'keep.txt'),'utf8'),'survivor graph');
+  assert.equal((await statusProjectPurge(plan,{native})).runtimeGraph.complete,true);
+});
+
+test('unknown legacy Runtime directories and nested real Git metadata block before erasure', async t => {
+  const f=await fixture(t), work=path.join(f.root,'runtime-graph'), sourceKey='c'.repeat(64);
+  const sentinel=path.join(work,'sources',sourceKey,'snapshot','.git');
+  await mkdir(sentinel,{recursive:true}); await writeFile(path.join(sentinel,'config'),'real metadata');
+  const native=async(binary,request)=>({...await f.native(binary,request),runtimeGraphSource:{sourceKey,binding:'REGISTRY_CANONICAL_PATH'}});
+  const options={projectId:f.project.id,databasePath:f.databasePath,nativeBinary:path.join(f.root,'native.exe'),
+    statePath:f.statePath,codeGraphCacheDirectory:f.codeGraphCacheDirectory,runtimeGraphWorkDirectory:work,botService:null};
+  const plan=await previewProjectPurge(options,{native});
+  assert.equal(plan.status,'BLOCKED'); assert.ok(plan.blockers.includes('PURGE_FILE_NESTED_REPOSITORY'));
+  await mkdir(path.join(work,'legacy-layout'));
+  const legacy=await previewProjectPurge(options,{native});
+  assert.ok(legacy.blockers.some(item=>item.code==='PURGE_CODE_GRAPH_LEGACY_WORK_ROOT_UNCLASSIFIED'));
+  assert.equal(f.applied,0);
 });
 
 test('standard CLI rejects unknown, duplicate and incomplete deletion arguments before side effects', async () => {

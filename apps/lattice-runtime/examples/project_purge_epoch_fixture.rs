@@ -29,6 +29,33 @@ fn main() {
     lattice_runtime::initialize_registry_anchor_file_audit().unwrap();
     let run = std::env::var("LATTICE_TASK019_RUN_ID").unwrap();
     let password = std::env::var("LATTICE_TASK019_PASSWORD").unwrap();
+    let mode = std::env::args().nth(1).unwrap();
+    if mode == "bot-install" {
+        println!(
+            "{}",
+            lattice_postgres_store::install_bot_lifecycle(port, &run, &password).unwrap()
+        );
+        return;
+    }
+    if mode == "bot-register" {
+        for project in ["purge-target", "unrelated-alias"] {
+            let owner = "11111111-2222-3333-4444-555555555555";
+            let value = lattice_postgres_store::execute_bot_lifecycle(port, &run, &password, &json!({
+                "action":"register","request_id":"fixture-register","project_id":project,"role_id":"fixture-role",
+                "expected_revision":0,"expected_generation":0,"owner_thread_id":owner,"owner_host_id":"fixture",
+                "body":{"work_ids":[],"policy_digest":"a".repeat(64),"rules_digest":"b".repeat(64),
+                    "binding_receipt":{"tool":"read_thread","target_thread_id":owner,"target_host_id":"fixture",
+                        "result_digest":"c".repeat(64),"readback_digest":"d".repeat(64),
+                        "evidence_ref":"synthetic-fixture:bot-inventory","success":true,"readback_verified":true,"old_pending_count":0}}
+            })).unwrap();
+            assert_eq!(value["status"], "APPLIED");
+        }
+        println!(
+            "{}",
+            json!({"status":"REGISTERED","syntheticEvidence":true})
+        );
+        return;
+    }
     let (mut admin, target) = connect_project_purge(port, &run, &password).unwrap();
     let client = Config::new()
         .host("127.0.0.1")
@@ -66,7 +93,6 @@ fn main() {
             .unwrap(),
         )
     };
-    let mode = std::env::args().nth(1).unwrap();
     match mode.as_str() {
         "retry-survivor" => {
             let before = registry.load().unwrap().state().clone();

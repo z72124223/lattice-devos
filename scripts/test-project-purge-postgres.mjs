@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'upgrade'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'upgrade'].includes(args.scenario));
 if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -91,6 +91,46 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
+  if (args.scenario === 'bot-inventory') {
+    const runId=randomUUID().replaceAll('-',''), root=path.join(runRoot,'bot-inventory');
+    mkdirSync(root); writeFileSync(path.join(root,'project-purge-fixture.marker'),runId+'\n');
+    const env={...baseEnv,LATTICE_TASK019_PORT:String(port),LATTICE_TASK019_RUN_ID:runId,LATTICE_TASK019_PASSWORD:password,LATTICE_PURGE_FIXTURE_ONLY:'1',LATTICE_PURGE_FIXTURE_ROOT:root};
+    const botSql=(database,statement)=>command(args.psql,['-X','-A','-t','-h','127.0.0.1','-p',String(port),'-U','runtime_bootstrap','-d',database,'-v','ON_ERROR_STOP=1','-f','-'],{...env,PGCLIENTENCODING:'UTF8'},statement,'bot-sql').stdout.trim();
+    botSql('postgres',`CREATE ROLE lattice_migrator NOLOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; CREATE ROLE lattice_runtime NOLOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+      CREATE ROLE lattice_migrator_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${password}'; CREATE ROLE lattice_runtime_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${password}';
+      GRANT lattice_migrator TO lattice_migrator_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; GRANT lattice_runtime TO lattice_runtime_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;`);
+    const botService={port,runId,systemIdentifier:botSql('postgres','SELECT system_identifier::text FROM pg_control_system()')};
+    const request={action:'inspect-bot',projectId:'purge-target',botService};
+    const inspect=()=>native(env,request).value;
+    assert.equal(inspect().discovery,'VERIFIED_ABSENT');
+    check('native-bot-inventory-proves-configured-database-absent');
+    command(args['epoch-binary'],['bot-install'],env,undefined,'bot-install');
+    const empty=inspect();
+    assert.equal(empty.discovery,'VERIFIED_EMPTY',JSON.stringify(empty));
+    assert.deepEqual(empty.counts,{roles:0,events:0});
+    check('native-bot-inventory-verifies-exact-installed-empty-schema');
+    command(args['epoch-binary'],['bot-register'],env,undefined,'bot-register');
+    const snapshot=()=>botSql(`lattice_bot_lifecycle_${runId}`,"SELECT json_build_array((SELECT json_agg(r ORDER BY r::text) FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.roles p) x),(SELECT json_agg(r ORDER BY r::text) FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.events p) x))");
+    const before=snapshot();
+    const populated=inspect();
+    assert.equal(populated.discovery,'OBSERVED',JSON.stringify(populated));
+    assert.deepEqual(populated.counts,{roles:2,events:2});
+    assert.deepEqual(populated.exactKeyMatches,{roles:1,events:1});
+    assert.equal(populated.identityBinding,'TEXT_KEY_ONLY_REGISTRY_BINDING_NOT_PROVEN');
+    assert.equal(populated.distinctProjectKeys,2);
+    assert.deepEqual(inspect(),populated);
+    assert.equal(snapshot(),before);
+    check('real-bot-records-counted-without-mutation-or-invented-registry-ownership');
+    const missed=native(env,{...request,projectId:'purge-survivor'}).value;
+    assert.equal(missed.discovery,'OBSERVED');
+    assert.deepEqual(missed.exactKeyMatches,{roles:0,events:0});
+    assert.equal(missed.identityBinding,'TEXT_KEY_ONLY_REGISTRY_BINDING_NOT_PROVEN');
+    check('different-bot-project-key-does-not-falsely-prove-absence');
+    const wrong=native(env,{...request,botService:{...botService,systemIdentifier:'1'}},false);
+    assert.notEqual(wrong.exitCode,0); assert.match(wrong.stderr,/CLUSTER_IDENTITY_REJECTED/);
+    assert.equal(snapshot(),before);
+    check('wrong-dedicated-service-identity-rejected-without-mutation');
+  }
   if (args.scenario === 'upgrade') {
   assert.notEqual(evidence.binaries.binary.sha256, evidence.binaries['legacy-binary'].sha256);
   const { env, seeded } = establish('upgrade');
@@ -484,7 +524,7 @@ try {
   const coordinatorBefore = rows(coordinated.env);
   const coordinatorSurvivors = [coordinated.seeded.survivorProjectId, coordinated.seeded.survivorStreamId, coordinated.seeded.survivorTaskRef];
   const survivorPgBefore = hash(selectRows(coordinatorBefore, coordinatorSurvivors));
-  const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator' });
+  const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator', botService:null });
   assert.equal(plan.status, 'READY', JSON.stringify(plan.blockers));
   assert.equal(plan.sqlite.strategy, 'REBUILD_SURVIVORS_V1');
   writeFileSync(path.join(runRoot, 'coordinator-plan.json'), JSON.stringify(plan, null, 2) + '\n');
@@ -530,6 +570,18 @@ try {
     .map(root => graphCache(coordinated.seeded.targetProjectId, root));
   const survivorCache = graphCache(coordinated.seeded.survivorProjectId, coordinated.seeded.survivorCanonicalPath);
   const survivorCacheBefore = hash(readFileSync(path.join(survivorCache, 'graph.json')));
+  const runtimeGraphWorkDirectory=path.join(coordinated.root,'runtime-graph');
+  const runtimeRoots={};
+  for(const kind of ['target','survivor']) {
+    const preview=native(coordinated.env,{action:'preview',projectId:coordinated.seeded[kind+'ProjectId'],operationId:'fixture-source-key-'+kind}).value;
+    assert.equal(preview.runtimeGraphSource.binding,'REGISTRY_CANONICAL_PATH');
+    assert.equal(preview.relatedStores.runtimeGraph.discovery,'VERIFIED_EMPTY');
+    const graphRoot=path.join(runtimeGraphWorkDirectory,'sources',preview.runtimeGraphSource.sourceKey);
+    const snapshot=path.join(graphRoot,'1'.repeat(40),'snapshots','synthetic');
+    mkdirSync(path.join(snapshot,'.git'),{recursive:true});
+    writeFileSync(path.join(snapshot,'source.txt'),'synthetic-'+kind+'-graph-source');
+    runtimeRoots[kind]={graphRoot,snapshot};
+  }
   const { LatticeStore } = await import('../apps/lattice-control/src/store.mjs');
   const { DatabaseSync } = await import('node:sqlite');
   const sqlitePath = path.join(coordinated.root, 'control-fixture.sqlite');
@@ -565,7 +617,7 @@ try {
   writeFileSync(configPath, JSON.stringify({
     projectId: coordinated.seeded.targetProjectId, operationId: 'fixture-coordinator-absent',
     nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'),
-    codeGraphCacheDirectory,
+    codeGraphCacheDirectory, runtimeGraphWorkDirectory, botService:null,
     externalResources: [{ kind: 'codex', reference: 'thread:synthetic-unverified-reference', source: 'synthetic-fixture' }],
   }, null, 2) + '\n');
   const cli = (alias, action, flags, expectedCode = 0) => {
@@ -604,6 +656,10 @@ try {
   assert.equal(existsSync(coordinated.seeded.targetCanonicalPath), false);
   assert.equal(hash(readFileSync(survivorFile)), survivorFileBefore);
   assert.ok(targetCaches.every(root => !existsSync(root)));
+  assert.equal(existsSync(runtimeRoots.target.graphRoot),false);
+  assert.equal(readFileSync(path.join(runtimeRoots.survivor.snapshot,'source.txt'),'utf8'),'synthetic-survivor-graph-source');
+  assert.equal(resumed.runtimeGraph.complete,true);
+  check('native-runtime-source-hash-binds-cache-cleanup-and-survivor-remains-byte-identical');
   assert.equal(hash(readFileSync(path.join(survivorCache, 'graph.json'))), survivorCacheBefore);
   assert.equal(resumed.report.stages.find(stage => stage.kind === 'controlCodeGraph').status, 'VERIFIED_ABSENT');
   check('standard-cli-clears-multiple-owned-control-caches-and-preserves-survivor-cache', { survivorCacheBefore });

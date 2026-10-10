@@ -7,7 +7,7 @@ param(
     [string]$EpochFixtureBinary,
     [string]$LegacyPurgeBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','upgrade')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','upgrade')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -27,7 +27,7 @@ $serverIdentity = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
 if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
-if ($Scenario -in @('epoch','epoch-reference','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
+if ($Scenario -in @('epoch','epoch-reference','bot-inventory','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
 if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $inputBinaries += $EpochFixtureBinary }
@@ -59,7 +59,7 @@ $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
     try {
-        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory')
+        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory')
         if ($copies.ContainsKey('legacy')) { $stages += 'upgrade' }
         foreach ($stage in $stages) {
             $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -EpochFixtureBinary $EpochFixtureBinary -LegacyPurgeBinary $LegacyPurgeBinary -NodeBinary $NodeBinary -Scenario $stage)
