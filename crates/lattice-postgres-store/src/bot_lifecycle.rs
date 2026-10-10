@@ -5,6 +5,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+#[path = "bot_ownership_adoption.rs"]
+mod ownership_adoption;
+pub use ownership_adoption::adopt_bot_project_ownership;
 #[path = "bot_project_purge.rs"]
 mod project_purge;
 pub use project_purge::{

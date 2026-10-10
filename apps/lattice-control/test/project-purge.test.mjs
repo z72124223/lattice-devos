@@ -67,6 +67,32 @@ async function fixture(t) {
     get applied() { return applied; }, loseReply() { loseReply = true; }, changeReadback() { readbackChanged = true; }, block() { blockers = ['CROSS_SCOPE_RETAINED_REFERENCE']; } };
 }
 
+test('Windows Registry extended drive paths retain scope and reject namespace aliases', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  const native = async (binary, request) => {
+    const value = await f.native(binary, request);
+    if (request.action === 'preview') {
+      value.project.canonicalPath = path.toNamespacedPath(f.target);
+      value.filesystemRoots = [{ path: path.toNamespacedPath(f.target), source: 'registry' }];
+      value.protectedRoots = [path.toNamespacedPath(f.survivor)];
+    }
+    return value;
+  };
+  const options = { projectId: f.project.id, databasePath: f.databasePath, nativeBinary: path.join(f.root, 'native.exe'),
+    statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory };
+  const plan = await previewProjectPurge(options, { native });
+  assert.equal(plan.status, 'READY'); assert.deepEqual(plan.files.roots, [f.target]);
+  assert.equal(plan.sqlite.canonicalPath, f.target); assert.ok(plan.files.protectedRoots.includes(f.survivor));
+  for (const alias of ['\\\\?\\UNC\\server\\share', '\\\\?\\GLOBALROOT\\Device\\volume',
+    '\\\\?\\C:\\target\\..\\survivor', '\\\\?\\C:\\target.\\data', '\\\\?\\C:\\target \\data',
+    '\\\\?\\C:\\target:stream', '\\\\?\\C:\\NUL.txt', '\\\\?\\C:\\COM¹', '\\\\?\\C:/target']) {
+    await assert.rejects(previewProjectPurge(options, { native: async (binary, request) => {
+      const value = await native(binary, request); value.project.canonicalPath = alias; return value;
+    } }), /PURGE_PATH_INVALID/);
+  }
+  assert.equal(f.applied, 0);
+});
+
 async function cache(f, projectId, sourceRoot) {
   const graph = { schema_version: 'lattice.control.code-graph.v1', source: 'GRAPHIFY', authority: 'DERIVED',
     commit: '1'.repeat(40), nodes: [], edges: [], project_id: projectId, source_root: sourceRoot,

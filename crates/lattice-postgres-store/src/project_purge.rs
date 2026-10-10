@@ -726,6 +726,7 @@ fn prepare<C: GenericClient>(
         );
     }
     let streams: Vec<String> = db(client.query("SELECT encode(stream_id,'hex') FROM ONLY control.task_ledger_streams WHERE project_id=$1 ORDER BY stream_id", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
+    let registry_source_roots = protected_roots.clone();
     let tasks: Vec<String> = db(client.query("SELECT task_ref::text FROM ONLY control.task_submission_envelopes WHERE project_id=$1 ORDER BY task_ref", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
     let tables = all_tables(client)?;
     let table_names: BTreeSet<String> = tables
@@ -1102,7 +1103,7 @@ fn prepare<C: GenericClient>(
     if let Ok(root) = registry_epoch::anchor_root(database) {
         protected_roots.push(root.to_string_lossy().into_owned());
     }
-    let mut public = json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"graphSourceProof":graph_proof,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers});
+    let mut public = json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"graphSourceProof":graph_proof,"filesystemRoots":roots,"registrySourceRoots":registry_source_roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers});
     if let Some(decision) = &decision {
         public["decisionHistory"] = decision.history();
     }

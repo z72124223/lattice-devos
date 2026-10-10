@@ -14,6 +14,16 @@ const hash = value => createHash('sha256').update(JSON.stringify(value)).digest(
 const fail = code => { throw new Error(code); };
 const schema = 'lattice.project-purge.workflow.v1';
 const absolute = value => {
+  // Registry canonicalization on Windows emits extended drive paths. Only
+  // strip the prefix when ordinary Win32 parsing preserves every component.
+  if (process.platform === 'win32' && typeof value === 'string' && value.startsWith('\\\\?\\')) {
+    value = value.slice(4);
+    if (!/^[A-Za-z]:\\/u.test(value)) fail('PURGE_PATH_INVALID');
+    const rest = value.slice(3).replace(/\\$/u, '');
+    if (rest && rest.split('\\').some(part => !part || part === '.' || part === '..'
+      || /[. ]$/u.test(part) || /[:/<>"|?*\x00-\x1f\x7f]/u.test(part)
+      || /^(?:CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)/iu.test(part))) fail('PURGE_PATH_INVALID');
+  }
   if (typeof value !== 'string' || !path.isAbsolute(value)
     || (process.platform === 'win32' && !/^[A-Za-z]:[\\/]/u.test(value))) fail('PURGE_PATH_INVALID');
   return path.resolve(value);

@@ -1,8 +1,8 @@
 //! Dedicated local maintenance binary. Never loaded by the ordinary MCP runtime.
 use lattice_postgres_store::{
-    connect_project_purge, execute_bot_project_purge, execute_project_purge_with_graph_source,
-    inspect_project_purge_bot_lifecycle, inspect_project_purge_graph,
-    install_bot_project_ownership,
+    adopt_bot_project_ownership, connect_project_purge, execute_bot_project_purge,
+    execute_project_purge_with_graph_source, inspect_project_purge_bot_lifecycle,
+    inspect_project_purge_graph, install_bot_project_ownership,
 };
 use std::io::{self, Read};
 use std::process::ExitCode;
@@ -77,7 +77,14 @@ fn run() -> Result<serde_json::Value, &'static str> {
     }
     if matches!(
         request["action"].as_str(),
-        Some("install-bot-ownership" | "preview-bot" | "apply-bot" | "status-bot")
+        Some(
+            "preview-bot-adoption"
+                | "adopt-bot-ownership"
+                | "install-bot-ownership"
+                | "preview-bot"
+                | "apply-bot"
+                | "status-bot"
+        )
     ) {
         let service = bot_service
             .as_ref()
@@ -110,6 +117,20 @@ fn run() -> Result<serde_json::Value, &'static str> {
             return install_bot_project_ownership(bot_port, bot_run, &password, system);
         }
         let (mut client, target) = connect_project_purge(port, &run_id, &password)?;
+        if matches!(
+            request["action"].as_str(),
+            Some("preview-bot-adoption" | "adopt-bot-ownership")
+        ) {
+            return adopt_bot_project_ownership(
+                &mut client,
+                &target,
+                bot_port,
+                bot_run,
+                &password,
+                system,
+                &request,
+            );
+        }
         return execute_bot_project_purge(
             &mut client,
             &target,
@@ -145,7 +166,14 @@ fn run() -> Result<serde_json::Value, &'static str> {
                     std::path::Path::new(canonical),
                 ) {
                     Ok(key) => {
-                        serde_json::json!({"sourceKey":key,"binding":"REGISTRY_CANONICAL_PATH"})
+                        let unique = result["registrySourceRoots"].as_array().is_some_and(|roots| roots.iter().all(|root| {
+                            root.as_str().and_then(|root| lattice_runtime::composition::project_purge_graph_source_key(std::path::Path::new(root)).ok()).is_some_and(|other|other!=key)
+                        }));
+                        if unique {
+                            serde_json::json!({"sourceKey":key,"binding":"REGISTRY_CANONICAL_PATH"})
+                        } else {
+                            serde_json::json!({"binding":"NOT_VERIFIED","reason":"REGISTERED_SOURCE_UNIQUENESS_NOT_PROVEN"})
+                        }
                     }
                     Err(_) => {
                         serde_json::json!({"binding":"NOT_VERIFIED","reason":"REGISTERED_SOURCE_DIRECTORY_UNAVAILABLE"})
