@@ -4,9 +4,33 @@ import { mkdir, mkdtemp, writeFile, readFile, link, rm } from 'node:fs/promises'
 import path from 'node:path';
 import test from 'node:test';
 import { LatticeStore } from '../src/store.mjs';
-import { previewProjectPurge, applyProjectPurge, statusProjectPurge } from '../src/project-purge.mjs';
+import { previewProjectPurge as previewProjectPurgeNative, applyProjectPurge, statusProjectPurge } from '../src/project-purge.mjs';
 import { runProjectPurgeCli } from '../src/project-purge-client.mjs';
 import { externalPurgeInventory, projectPurgeReport } from '../src/project-purge-report.mjs';
+import { finalizeProjectPurge, resumeProjectPurgeFinalization, readProjectPurgeAttestation } from '../src/project-purge-finalize.mjs';
+
+// Synthetic unit fixtures must never pick up a developer's installed Bot service.
+const previewProjectPurge = (options, dependencies) => previewProjectPurgeNative({ botService: null, ...options }, dependencies);
+
+async function finalizationFixture(t) {
+  const f = await fixture(t), planPath = path.join(f.root, 'plan.json'), configPath = path.join(f.root, 'config.json');
+  const config = JSON.stringify({ projectId: f.project.id, synthetic: true });
+  await writeFile(configPath, config);
+  const native = async (binary, request) => ({ ...await f.native(binary, request), afterDigest: 'f'.repeat(64),
+    relatedStores: {
+      runtimeGraph: { schema: 'lattice.project-purge.graph-inventory.v1', ownership: 'LATTICE', discovery: 'VERIFIED_EMPTY',
+        scope: 'VERIFIED_MAIN_STORE_MEMORY', snapshotDigest: 'e'.repeat(64), counts: {} },
+      botLifecycle: { schema: 'lattice.project-purge.bot-inventory.v1', ownership: 'LATTICE', discovery: 'VERIFIED_ABSENT',
+        scope: 'VERIFIED_DEDICATED_BOT_SERVICE', databasePresent: false, databaseCommitment: 'd'.repeat(64), counts: { roles: 0, events: 0 } },
+    } });
+  const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath, nativeBinary: path.join(f.root, 'native.exe'),
+    statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory, runtimeGraphWorkDirectory: path.join(f.root, 'runtime-graph'),
+    maintenance: { planPath, configPath, configDigest: createHash('sha256').update(config).digest('hex') } }, { native });
+  await writeFile(planPath, JSON.stringify(plan, null, 2));
+  await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native });
+  const options = { confirmDigest: plan.digest, maintenanceOffline: true, status: value => statusProjectPurge(value, { native }) };
+  return { f, plan, options, file: plan.maintenance.finalizationPath, planPath, configPath };
+}
 
 async function fixture(t) {
   const parent = path.resolve('.lattice/project-purge-workflow-tests');
@@ -279,6 +303,74 @@ test('unsafe filesystem scope yields an inspectable blocked plan without deletin
   assert.equal(f.applied, 0);
 });
 
+test('lost Bot reply preserves Registry and resumes with the same Bot receipt before main erasure', async t => {
+  const f = await fixture(t); let botReceipt = null, botApplied = 0;
+  const native = async (binary, request) => {
+    if (request.action === 'preview-bot') return { schema: 'lattice.project-purge.bot.v1', status: 'READY', scopeDigest: 'c'.repeat(64), blockers: [] };
+    if (request.action === 'status-bot') return botReceipt ?? { status: 'NOT_FOUND' };
+    if (request.action === 'apply-bot') {
+      botApplied++; botReceipt = { schema: 'lattice.project-purge.bot.v1', status: 'PURGED', scopeDigest: 'c'.repeat(64), afterDigest: 'd'.repeat(64) };
+      throw new Error('PURGE_NATIVE_TIMEOUT_OUTCOME_UNKNOWN');
+    }
+    if (request.action === 'apply') assert.equal(botReceipt?.status, 'PURGED');
+    return f.native(binary, request);
+  };
+  const plan = await previewProjectPurge({ projectId: f.project.id, databasePath: f.databasePath, nativeBinary: path.join(f.root, 'native.exe'),
+    statePath: f.statePath, codeGraphCacheDirectory: f.codeGraphCacheDirectory,
+    botService: { port: 65400, runId: 'f'.repeat(32), systemIdentifier: '123' } }, { native });
+  const options = { confirmDigest: plan.digest, maintenanceOffline: true, native };
+  await assert.rejects(applyProjectPurge(plan, options), /OUTCOME_UNKNOWN/);
+  assert.equal(f.applied, 0); assert.ok(await readFile(path.join(f.target, 'target.txt')));
+  const result = await applyProjectPurge(plan, options);
+  assert.equal(result.status, 'SCOPED_PURGED'); assert.equal(botApplied, 1); assert.equal(f.applied, 1);
+});
+
+test('finalization erases only planned maintenance files and retains a content-free completion attestation', async t => {
+  const { f, plan, options, file, planPath, configPath } = await finalizationFixture(t);
+  const unrelated = path.join(f.root, 'unrelated-plan.json'); await writeFile(unrelated, 'keep exact bytes');
+  const result = await finalizeProjectPurge(plan, options);
+  assert.equal(result.status, 'LOGICAL_SCOPE_COMPLETE'); assert.equal(result.complete, false); assert.equal(result.latticeScopeComplete, true);
+  for (const removed of [planPath, configPath, f.statePath]) await assert.rejects(readFile(removed), /ENOENT/);
+  assert.equal(await readFile(unrelated, 'utf8'), 'keep exact bytes');
+  assert.equal(JSON.stringify(result).includes(f.project.id), false); assert.equal(JSON.stringify(result).includes(f.root), false);
+  assert.deepEqual(await readProjectPurgeAttestation(file), result);
+  assert.deepEqual(await resumeProjectPurgeFinalization(file, options), result);
+});
+
+test('unresolved owned data and changed metadata block finalization while preserving recovery evidence', async t => {
+  const { f, plan, options, file, planPath, configPath } = await finalizationFixture(t);
+  await assert.rejects(finalizeProjectPurge(plan, { ...options, status: async value => {
+    const result = await options.status(value); result.report.remaining.push({ kind: 'controlDecisions' }); return result;
+  } }), /OWNED_SCOPE_INCOMPLETE/);
+  await assert.rejects(readFile(file), /ENOENT/); assert.ok(await readFile(planPath)); assert.ok(await readFile(f.statePath));
+  await writeFile(configPath, 'different metadata');
+  await assert.rejects(finalizeProjectPurge(plan, options), /CONFIG_CHANGED/);
+  assert.equal(await readFile(configPath, 'utf8'), 'different metadata');
+});
+
+test('finalization resumes after an acknowledged metadata deletion without needing deleted plan or progress files', async t => {
+  const { plan, options, file } = await finalizationFixture(t);
+  let interrupted = false;
+  await assert.rejects(finalizeProjectPurge(plan, { ...options, fault: (step, record) => {
+    if (!interrupted && step === 'after-progress' && record.progress.removed.length) { interrupted = true; throw new Error('SYNTHETIC_INTERRUPTION'); }
+  } }), /FILES_INCOMPLETE/);
+  assert.equal(interrupted, true);
+  const result = await resumeProjectPurgeFinalization(file, options);
+  assert.equal(result.status, 'LOGICAL_SCOPE_COMPLETE');
+  assert.deepEqual(await readProjectPurgeAttestation(file), result);
+});
+
+test('final attestation replacement resumes from the exact predecessor and never treats two missing records as success', async t => {
+  const { plan, options, file } = await finalizationFixture(t);
+  await assert.rejects(finalizeProjectPurge(plan, { ...options, fault: (step, record) => {
+    if (step === 'after-write' && record.schema === 'lattice.project-purge.attestation.v1') throw new Error('SYNTHETIC_INTERRUPTION');
+  } }), /SYNTHETIC_INTERRUPTION/);
+  assert.ok(await readFile(`${file}.next`)); await assert.rejects(readProjectPurgeAttestation(file), /INCOMPLETE/);
+  const result = await resumeProjectPurgeFinalization(file, options);
+  assert.equal(result.status, 'LOGICAL_SCOPE_COMPLETE'); await assert.rejects(readFile(`${file}.next`), /ENOENT/);
+  await assert.rejects(resumeProjectPurgeFinalization(path.join(path.dirname(file), 'missing.json'), options), /RECORD_MISSING/);
+});
+
 test('external resource inventory is bounded and never accepts claimed deletion or absence', async t => {
   const f = await fixture(t), plan = await f.preview();
   assert.throws(() => externalPurgeInventory([{ kind: 'codex', reference: 'thread-1', source: 'native list', status: 'DELETED' }]), /INVENTORY_INVALID/);
@@ -296,8 +388,8 @@ test('external resource inventory is bounded and never accepts claimed deletion 
   for (const kind of ['graphify', 'botLifecycle', 'maintenance']) {
     const scope = report.external.find(item => item.kind === kind);
     assert.equal(scope.ownership, 'LATTICE');
-    assert.equal(scope.disposition, 'PRODUCT_WORK_REQUIRED');
-    assert.equal(report.remaining.find(item => item.kind === kind).reason, 'LATTICE_OWNED_CLEANUP_NOT_IMPLEMENTED');
+    assert.equal(scope.disposition, 'VERIFICATION_REQUIRED');
+    assert.equal(report.remaining.find(item => item.kind === kind).reason, 'LATTICE_OWNED_SCOPE_NOT_VERIFIED');
   }
   assert.equal(report.external.find(item => item.kind === 'backups').ownership, 'MIXED');
   assert.match(report.explanation, /Additional LATTICE-owned data/);
@@ -319,7 +411,7 @@ test('native lifecycle inventory distinguishes absent, unreachable, observed and
   assert.equal(report(unknown).external.find(scope => scope.kind === 'botLifecycle').observation.reason, unknown.reason);
   const observed = { ...absent, discovery: 'OBSERVED', databasePresent: true, snapshotDigest: 'e'.repeat(64),
     counts: { roles: 1, events: 4 }, exactKeyMatches: { roles: 0, events: 0 }, identityBinding: 'TEXT_KEY_ONLY_REGISTRY_BINDING_NOT_PROVEN' };
-  assert.equal(report(observed).external.find(scope => scope.kind === 'botLifecycle').disposition, 'PRODUCT_WORK_REQUIRED');
+  assert.equal(report(observed).external.find(scope => scope.kind === 'botLifecycle').disposition, 'VERIFICATION_REQUIRED');
 });
 
 test('Graph completion requires native source ownership and matching survivor readback', async t => {

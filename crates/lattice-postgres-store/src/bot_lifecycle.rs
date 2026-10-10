@@ -5,6 +5,13 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
 
+#[path = "bot_project_purge.rs"]
+mod project_purge;
+pub use project_purge::{
+    bot_lifecycle_requires_registry, execute_bot_lifecycle_with_registry,
+    execute_bot_project_purge, install_bot_project_ownership,
+};
+
 pub const BOT_LIFECYCLE_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v1.sql");
 pub const BOT_LIFECYCLE_V2_SQL: &str = include_str!("../../../db/extensions/bot-lifecycle/v2.sql");
 pub const BOT_LIFECYCLE_ARCHIVE_SQL: &str =
@@ -70,6 +77,11 @@ fn error(e: &postgres::Error) -> &'static str {
             return "BOT_LIFECYCLE_REVISION_CONFLICT";
         }
         match d.message() {
+            "BOT_LIFECYCLE_PROJECT_RETIRED" => "BOT_LIFECYCLE_PROJECT_RETIRED",
+            "BOT_LIFECYCLE_REGISTRY_BINDING_REQUIRED" => "BOT_LIFECYCLE_REGISTRY_BINDING_REQUIRED",
+            "BOT_LIFECYCLE_LEGACY_OWNERSHIP_UNATTRIBUTABLE" => {
+                "BOT_LIFECYCLE_LEGACY_OWNERSHIP_UNATTRIBUTABLE"
+            }
             "BOT_LIFECYCLE_INPUT_REJECTED" => "BOT_LIFECYCLE_INPUT_REJECTED",
             "BOT_LIFECYCLE_NATIVE_EVIDENCE_REJECTED" => "BOT_LIFECYCLE_NATIVE_EVIDENCE_REJECTED",
             "BOT_LIFECYCLE_NATIVE_TARGET_MISMATCH" => "BOT_LIFECYCLE_NATIVE_TARGET_MISMATCH",
@@ -198,6 +210,7 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
             return Err("BOT_LIFECYCLE_SCHEMA_REJECTED");
         }
     }
+    project_purge::verify(client)?;
     Ok(version)
 }
 

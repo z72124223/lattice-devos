@@ -2,7 +2,7 @@
 
 這是所有 LATTICE 專案共用的標準清除流程。未來刪除專案一律走同一入口：盤點 → 確認範圍 → 清除 → 必要時續作 → 逐項驗證。Codex 負責核對 ID、摘要、維護狀態及證據；使用者確認實際清除範圍，不需要自行解讀技術摘要。
 
-目前工具能清除已支援的 PostgreSQL、Control SQLite 及檔案範圍；尚未實作的 LATTICE 管轄資料與真正外部資源分別列在同一份報告。維護紀錄、Runtime Graphify 和獨立 Bot lifecycle DB 仍屬 LATTICE，不能因尚未有轉接器就稱作外部事項。封存、從名單移除及本機部分清除都不得宣稱為整個專案清空。一般 Control API 沒有新增遠端刪除入口。原始碼或測試通過也不代表已安裝到使用者的 Runtime。
+工具涵蓋主 PostgreSQL、Control SQLite、登記檔案、Control／Runtime Graphify 與已綁定的独立 Bot lifecycle DB，最後可清除本次維護檔案。歸屬未知、其他專案引用或執行中工作仍明確阻擋；維護紀錄、Graphify 與 Bot 都屬 LATTICE。封存或從名單移除不得宣稱專案清空。一般 Control API 沒有遠端刪除入口。原始碼或測試通過不代表已安裝到使用者的 Runtime。
 
 ## 先確認範圍
 
@@ -29,7 +29,9 @@
 
 Runtime Graphify 的檔案範圍可由 `runtimeGraphWorkDirectory` 或既有 `LATTICE_GRAPHIFY_WORK_ROOT` 指定。原生程式以 Registry 路徑重用 Runtime 的 canonicalize 與相同 domain hash，將 `sources/<source key>` 加入固定刪除清單；其他 source 目錄保留。只在此已綁定範圍允許空的巢狀 `.git` 快照邊界，含任何 Git metadata 的目錄仍拒絕。未知舊平鋪格式、別名、無法核對的來源均阻擋。未配置 work root 不代表没有快取。主 Store 的實際 Memory 表另行唯讀盤點；有舊 analysis 時仍須證明其歸屬，不能把固定的 `task032-delivery` 當成 Registry ID。
 
-Bot lifecycle 使用**獨立 PostgreSQL cluster**，安裝器禁止與 Store 共用服務。協調層讀取既有 `%USERPROFILE%/AppData/Local/LATTICE/bot-lifecycle-postgres/v1/identity.json` 的 port、runId、systemIdentifier，或接受同形的 `botService` 設定（不含密碼）。原生端唯讀比對服務 system identifier、拒絕主 Store cluster，再驗證專用 DB schema 與 roles/events；缺失配置、連線失敗及 schema 不符都維持未知。只有這個已核對服務內的不存在／空資料庫可以標示無資料，不代表所有其他主機或服務都不存在。相同或不同文字 project_id 都不足以證明 Registry 歸屬，有資料時保留未完成。
+Bot lifecycle 使用**獨立 PostgreSQL cluster**，安裝器禁止與 Store 共用服務。協調層讀取既有 `%USERPROFILE%/AppData/Local/LATTICE/bot-lifecycle-postgres/v1/identity.json` 的 port、runId、systemIdentifier，或接受同形的 `botService` 設定（不含密碼）。原生端核對 system identifier、專用 schema、原函式及權限；未配置或讀取失敗保持未知。明確執行原生 `install-bot-ownership`、授權值 `INSTALL_BOT_PROJECT_OWNERSHIP` 才加入 ownership extension。此後新的 `lattice-runtime bot-lifecycle` register 以既有主 Store 環境設定驗證 Registry，持有讀鎖直到 Bot 登錄與 binding 一起提交。這是應用程式的跨資料庫驗證，不是假稱跨叢集 FK。舊自由 project key 不會自動認領。
+
+Bot 預覽列出待刪角色的 owner、revision／generation 與永久封存舊 project/role 組合的決策。Codex 用原生 `read_thread` 取得精確 owner 的最新 idle/completed、pending=0、in-flight=0 證據；`botBoundaryPath` 必須在原盤點設定中列出，apply/resume 的 `--bot-boundaries` 使用該路徑。證據有效期五分鐘，不能把測試 envelope 當作正式證據。角色必須沒有未完成交接或執行步驟，主 Store 必須 STOPPED。Bot 同交易寫最小 hash 防重憑證、清除目標 roles/events/bindings、驗證保留 rows 完全相同；先完成 Bot，再清除 Registry。舊 register/finish 寫入受到資料庫保護，防止重新建立已退役組合。這不會封存對話或停止程序。提交回覆遺失時先核對同 scope 的 receipt；Bot 已清而主 Store 尚未完成仍是部分完成。
 
 ## 執行入口
 
@@ -76,18 +78,22 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 
 `BLOCKED` 必須先解決列出的原因並重新預覽。`apply` 必須使用完全相同的 digest，並確認 Control／專案寫入者已停止、檔案範圍保持靜止。Node 的路徑 API 不能對抗惡意並行 rename；這不是可在線上任意執行的安全保證。`resume` 沿用相同計畫、摘要及維護要求，不會自動重新盤點或解除鎖。
 
-`externalResources` 可省略，僅接受 `kind`、`reference`、`source`。七種分類為 `codex`、`automations`、`git`、`graphify`、`botLifecycle`、`backups`、`maintenance`。這個歷史欄位名稱為相容而保留，不代表七類皆是外部：報告的 `ownership` 區分 LATTICE、Codex 及混合範圍，LATTICE 未完成項標成 `PRODUCT_WORK_REQUIRED`，並列出具體下一步。沒有填資源不等於不存在。呼叫者不能自行填入已刪除、已驗證或完成狀態來取得通過；`latticeScopeComplete` 與全域 `complete` 分別保留，兩者目前都未達成。
+`externalResources` 可省略，僅接受 `kind`、`reference`、`source`。七種分類為 `codex`、`automations`、`git`、`graphify`、`botLifecycle`、`backups`、`maintenance`。這個歷史欄位名稱為相容而保留，不代表七類皆是外部：報告的 `ownership` 區分 LATTICE、Codex 及混合範圍，LATTICE 未驗證項標成 `VERIFICATION_REQUIRED`，並列出具體下一步。沒有填資源不等於不存在。呼叫者不能自行填入已刪除、已驗證或完成狀態來取得通過；`latticeScopeComplete` 與全域 `complete` 分別保留，前者須經 finalize 收尾才可達成，後者包含外部範圍。
 
 `codeGraphCacheDirectory` 可省略，預設與 Control 相同：`%LOCALAPPDATA%/LATTICE/control/code-graphs`。若 Control 使用自訂目錄，必須提供實際目錄。報告將這個可驗證磁碟範圍獨立列為 `controlCodeGraph`；即使通過，外部 `graphify` 分類仍未完整驗證。沒有此盤點欄位的舊計畫保持原範圍，不能據此聲稱已清掉快取。
 
 使用最小驗證憑證前，以原生入口的 `install-epoch` action 與 `INSTALL_REGISTRY_EPOCH_MAINTENANCE` 授權安裝精確的可選 catalog；仍須已停止 Store。它包含一般清除 receipt schema，不改 admission 或角色權限。舊 Runtime 不支援此新增 catalog，須先準備相容讀取者；schema 安裝不是 Runtime 部署。安裝完成後重新產生預覽，核對 `history` 的 redactedSurvivorCommands、assurance 與限制，再確認同一計畫。
 
-每次輸出均包含同一格式的清除報告。`apply`／`resume`／`status` 在本機範圍完成時 exit 0，但報告仍為 `PARTIAL`、`complete: false`；`verify` 對這種情況回傳 exit 2。阻擋或錯誤回傳 exit 1。由於外部驗證尚未實作，本版 `verify` 不會回傳完整通過，任何自動化均不得用 `apply` 的 exit 0 宣稱整個專案清空。
+`apply`／`resume`／`status` 在本機階段完成時 exit 0，報告維持 `PARTIAL`、`complete: false`；全域 `verify` 對此回傳 exit 2。阻擋或錯誤為 exit 1。所有已配置、可證歸屬的 LATTICE 邏輯資料讀回通過後，執行 `finalize --plan plan.json --confirm DIGEST --maintenance-offline` 清除原盤點綁定的 config、plan、progress 與 native boundary 檔。未知 legacy decisions、未驗證 Bot／Graph 或未完成清除都阻擋收尾。
+
+收尾產生 `LOGICAL_SCOPE_COMPLETE`／`latticeScopeComplete: true` 的最小憑證；全域 `complete` 仍為 false。這個契約指已配置的運作中 LATTICE 邏輯儲存，不涵蓋舊備份、WAL、物理媒體、其他主機副本及 Codex 對話永久清除。已批准的 Registry seal、操作收據、防重 tombstone 與收尾憑證是有意保留的驗證產物，不是待刪專案內容；低熵識別的雜湊仍可被離線猜測。
+
+finalize 的檔案允許清單在原 preview 綁定，收尾不能追加任意路徑。它核對 config 原始雜湊、計畫與進度歸屬，再固定各檔案內容及身分，逐檔記錄 intent、移除、讀回。原路徑內容或身分變更就保留並阻擋。最後先同步最小憑證暫存檔，再原子取代含內容的恢復 manifest；憑證保留前一 manifest 摘要。`resume-finalize --finalization <盤點列出的路徑> --confirm DIGEST --maintenance-offline` 可在 plan／progress 已被移除後續作；只接受精確 predecessor 相連的暫存紀錄。兩份都不存在不算成功，未知鎖不自動解除。`verify-finalization --finalization <路徑>` 驗證已保留憑證，並非持續重查已被移除計畫的專案。此機制不防同使用者篡改，也不保證突然斷電的自動恢復。
 
 ## 交易、部分失敗與續跑
 
 1. 以獨占 operation lock 防止同一進度檔同時執行；一般清除在 SQLite `BEGIN IMMEDIATE` 內核對原始摘要並保持鎖。收據重建則先建立資料庫旁的 `.purge-swap` 維護標記、完成 WAL checkpoint 並切換 DELETE journal，再持有 `BEGIN EXCLUSIVE`；新 Control 在開啟資料庫前見到維護標記會拒絕。
-2. 先核對檔案 manifest、PostgreSQL scope digest／blockers，再執行 PostgreSQL 清除交易。
+2. 先核對檔案 manifest、PostgreSQL scope digest／blockers，再清除已綁定 Bot，最後執行主 PostgreSQL 清除交易。
 3. 以 operation ID 與 scope digest 讀回 PostgreSQL receipt，接著逐項移除檔案；最後才提交 SQLite 清除。
 4. 三個儲存系統無法組成單一原子交易。中斷、鎖檔、權限錯誤或回覆遺失都記為 `INCOMPLETE`；不能宣稱已回復原狀。已提交的 PostgreSQL 清除不能由 SQLite rollback 撤銷。
 5. 用原計畫、原 operation ID 與進度檔續跑。PostgreSQL 回覆遺失時先讀回 receipt，不再次刪除。每個檔案移除前先寫入 intent 並同步進度，移除後再保存結果；若在兩者之間崩潰，續作只會對原計畫中那一項的缺失進行核對。未知路徑、內容變更及預覽以外的變動仍會拒絕。歷史 receipt 還要符合目前資料的 `afterDigest`；即使是保留專案後續合法變更，也須重新核對，不能只憑舊成功紀錄宣稱目前已清空。
@@ -109,6 +115,8 @@ Graph PostgreSQL 歸屬使用 Runtime 原本的來源設定摘要：同一個路
 `scripts/lattice-bundle.py build` 可用三個成組參數加入清除功能：`--project-purge-binary`、`--project-purge-sha256`、`--project-purge-source`。最後一項是提供本版 Node 依賴檔案的 repository 根目錄。三者必須同時提供；打包及驗證會核對固定的 binary／CLI 檔案清單與 SHA-256，並將 `project_purge` 能力綁到同一套件的 Runtime hash。套件內直接使用 `node apps/lattice-control/src/project-purge-client.mjs --help` 查看入口。
 
 此能力仍須明確加入套件；舊套件維持相容，不會因 repository 新增檔案而自動取得刪除功能。套件驗證也不會解除資料庫、共用 Git、交錯歷史或工具政策的阻擋。
+
+啟用 Bot ownership 的候選套件同時傳入 `--lifecycle-binary` 與 `--lifecycle-sha256`，納入相容的 `bin/lattice-runtime.exe`；打包與讀回驗證會核對此 companion 的固定檔名與 SHA-256。既有主機使用舊 CLI 時，不可因維護 binary 已更新就假定正常 Bot 登錄也已具備 Registry 綁定。
 
 只需要本機離線維護工具時，可用 `build-maintenance`，參數為 `--bundle`、`--runtime`、`--runtime-sha256`、`--node`、三個 purge 參數，以及 `--vc-redist`／`--vc-license`／`--vc-redist-list`。固定清單包含相容 Runtime、清除 binary、Node/CLI 依賴閉包、VC runtime 及授權來源；不重複複製 PostgreSQL、Python、Git 或 Graphify。用 `verify-maintenance --bundle ... --sha256 ...` 核對。這是本機候選維護包，不能交給一般 `install` 假裝完整依賴部署。
 

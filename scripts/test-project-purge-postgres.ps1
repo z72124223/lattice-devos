@@ -6,8 +6,9 @@ param(
     [Parameter(Mandatory = $true)][string]$RuntimeBinary,
     [string]$EpochFixtureBinary,
     [string]$LegacyPurgeBinary,
+    [string]$LifecycleBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','graph-ownership','upgrade')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','graph-ownership','upgrade')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -24,13 +25,16 @@ $postgresBinary = Join-Path $pgBin 'postgres.exe'
 $psql = Join-Path $pgBin 'psql.exe'
 $initialized = $false
 $serverIdentity = $null
+$botFixture = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
 if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
+if ($Scenario -eq 'bot-purge' -and [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $LifecycleBinary = Join-Path (Split-Path -Parent $RuntimeBinary) 'lattice-runtime.exe' }
 if ($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
 if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $inputBinaries += $EpochFixtureBinary }
+if (-not [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $inputBinaries += $LifecycleBinary }
 foreach ($file in $inputBinaries) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "FIXTURE_BINARY_MISSING: $file" }
 }
@@ -42,6 +46,7 @@ $copies = @{}
 $binaryEntries = @(@{name='purge';source=$PurgeBinary},@{name='seed';source=$SeedBinary},@{name='runtime';source=$RuntimeBinary})
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $binaryEntries += @{name='legacy';source=$LegacyPurgeBinary} }
 if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $binaryEntries += @{name='epoch';source=$EpochFixtureBinary} }
+if (-not [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $binaryEntries += @{name='lifecycle';source=$LifecycleBinary} }
 foreach ($entry in $binaryEntries) {
     $source = [IO.Path]::GetFullPath($entry.source)
     $copyName = if ($entry.name -eq 'legacy') { 'legacy-lattice-project-purge.exe' } else { [IO.Path]::GetFileName($source) }
@@ -55,6 +60,7 @@ foreach ($entry in $binaryEntries) {
 $PurgeBinary=$copies.purge.path; $SeedBinary=$copies.seed.path; $RuntimeBinary=$copies.runtime.path
 if ($copies.ContainsKey('legacy')) { $LegacyPurgeBinary = $copies.legacy.path }
 if ($copies.ContainsKey('epoch')) { $EpochFixtureBinary = $copies.epoch.path }
+if ($copies.ContainsKey('lifecycle')) { $LifecycleBinary = $copies.lifecycle.path }
 $result.binaryCopies = $copies
 if ($Scenario -eq 'all') {
     $result.children = @()
@@ -112,8 +118,30 @@ log_statement = 'none'
     $dataDirectory = (& $psql -X -A -t -h 127.0.0.1 -p $port -U runtime_bootstrap -d postgres -v ON_ERROR_STOP=1 -c 'SHOW data_directory').Trim()
     if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($dataDirectory) -cne $cluster) { throw 'FIXTURE_DATABASE_IDENTITY_REJECTED' }
     $nodeArguments = @((Join-Path $PSScriptRoot 'test-project-purge-postgres.mjs'), '--binary', $PurgeBinary, '--seed-binary', $SeedBinary, '--runtime-binary', $RuntimeBinary, '--port', $port, '--run-root', $runRoot, '--psql', $psql, '--scenario', $Scenario)
+    if ($Scenario -eq 'bot-purge') {
+        $botPath = [IO.Path]::GetFullPath((Join-Path $runRoot 'bot-cluster'))
+        if (-not $botPath.StartsWith($runRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'FIXTURE_BOT_PATH_REJECTED' }
+        $botListener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+        $botListener.Start(); $botPort = $botListener.LocalEndpoint.Port; $botListener.Stop()
+        if ($botPort -in @($port,4317,5432,55432,58743,64272)) { throw 'FIXTURE_BOT_PORT_REJECTED' }
+        & (Join-Path $pgBin 'initdb.exe') -D $botPath -U runtime_bootstrap --auth-host=trust --auth-local=trust --encoding=UTF8 --no-locale --data-checksums *> (Join-Path $runRoot 'bot-initdb.log')
+        if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_BOT_INITDB_FAILED' }
+        $botFixture = @{ path=$botPath; port=$botPort; pid=$null; startTicks=$null }
+        $botFixture | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $runRoot 'bot-fixture-owner.json') -Encoding utf8NoBOM
+        @("listen_addresses = '127.0.0.1'", "port = $botPort", "max_connections = 15", "shared_buffers = '16MB'", "log_statement = 'none'") | Add-Content -LiteralPath (Join-Path $botPath 'postgresql.conf') -Encoding utf8NoBOM
+        $botArguments = '-D "{0}" -l "{1}" -w -t 30 start' -f $botPath, (Join-Path $runRoot 'bot-postgres.log')
+        $botLauncher = Start-Process -FilePath $pgCtl -ArgumentList $botArguments -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runRoot 'bot-start.out.log') -RedirectStandardError (Join-Path $runRoot 'bot-start.err.log')
+        if (-not $botLauncher.WaitForExit(35000) -or $botLauncher.ExitCode -ne 0) { throw 'FIXTURE_BOT_START_FAILED' }
+        $botProcess = Get-Process -Id ([int](Get-Content -LiteralPath (Join-Path $botPath 'postmaster.pid') -TotalCount 1))
+        if ($botProcess.Path -cne $postgresBinary) { throw 'FIXTURE_BOT_PROCESS_REJECTED' }
+        $botFixture.pid=$botProcess.Id; $botFixture.startTicks=$botProcess.StartTime.ToUniversalTime().Ticks
+        $botDataDirectory = (& $psql -X -A -t -h 127.0.0.1 -p $botPort -U runtime_bootstrap -d postgres -v ON_ERROR_STOP=1 -c 'SHOW data_directory').Trim()
+        if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($botDataDirectory) -cne $botPath) { throw 'FIXTURE_BOT_IDENTITY_REJECTED' }
+        $nodeArguments += @('--bot-port', $botPort)
+    }
     if ($copies.ContainsKey('legacy')) { $nodeArguments += @('--legacy-binary', $LegacyPurgeBinary) }
     if ($copies.ContainsKey('epoch')) { $nodeArguments += @('--epoch-binary', $EpochFixtureBinary) }
+    if ($copies.ContainsKey('lifecycle')) { $nodeArguments += @('--lifecycle-binary', $LifecycleBinary) }
     & $NodeBinary @nodeArguments
     if ($LASTEXITCODE -ne 0) { throw 'FIXTURE_SCENARIOS_FAILED' }
     foreach ($copy in $copies.Values) {
@@ -125,6 +153,15 @@ log_statement = 'none'
     $result.error = $_.Exception.Message
     throw
 } finally {
+    if ($botFixture -and (Test-Path -LiteralPath (Join-Path $botFixture.path 'postmaster.pid'))) {
+        $botMarker = Get-Content -LiteralPath (Join-Path $runRoot 'bot-fixture-owner.json') -Raw | ConvertFrom-Json
+        if ($botMarker.path -cne $botFixture.path -or $botMarker.port -ne $botFixture.port) { throw 'FIXTURE_BOT_STOP_OWNERSHIP_REJECTED' }
+        $liveBot = Get-Process -Id ([int](Get-Content -LiteralPath (Join-Path $botFixture.path 'postmaster.pid') -TotalCount 1))
+        if ($liveBot.Path -cne $postgresBinary -or ($botFixture.pid -and ($liveBot.Id -ne $botFixture.pid -or $liveBot.StartTime.ToUniversalTime().Ticks -ne $botFixture.startTicks))) { throw 'FIXTURE_BOT_STOP_PROCESS_CHANGED' }
+        & $pgCtl -D $botFixture.path -m fast -w -t 30 stop *> (Join-Path $runRoot 'bot-stop.log')
+        $result.botFixtureStopped = ($LASTEXITCODE -eq 0 -and -not (Test-Path -LiteralPath (Join-Path $botFixture.path 'postmaster.pid')))
+        if (-not $result.botFixtureStopped) { throw 'FIXTURE_BOT_STOP_FAILED' }
+    }
     # No recursive filesystem deletion: preserve this complete synthetic fixture as evidence.
     $marker = Get-Content -LiteralPath $markerPath -Raw | ConvertFrom-Json
     $pidPath = Join-Path $cluster 'postmaster.pid'

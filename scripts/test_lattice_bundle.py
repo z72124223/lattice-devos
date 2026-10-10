@@ -336,6 +336,25 @@ class MaintenanceBundleTests(unittest.TestCase):
         self.assertFalse(any((self.root / name).exists() for name in ("postgres", "python", "git", "graphify", "platform")))
         self.assertEqual(data["project_purge"]["runtime_sha256"], B.sha(self.root / "bin/latticed.exe"))
 
+    def test_lifecycle_companion_is_pinned_and_verified_in_the_maintenance_closure(self):
+        binary = self.base / "lifecycle.exe"
+        binary.write_bytes(b"synthetic-registry-bound-lifecycle-not-executed")
+        self.arguments.update(lifecycle_binary=binary, lifecycle_sha256=B.sha(binary))
+        digest = self.build()
+        data = B.verify_maintenance(self.root, digest)
+        self.assertEqual(data["project_purge"]["lifecycle_binary"], B.PROJECT_PURGE_LIFECYCLE_BINARY)
+        companion = self.root / B.PROJECT_PURGE_LIFECYCLE_BINARY
+        self.assertEqual(companion.read_bytes(), binary.read_bytes())
+        companion.write_bytes(b"changed-binary")
+        with self.assertRaisesRegex(B.M.Rejected, "BUNDLE_CONTENT_CHANGED"):
+            B.verify_maintenance(self.root, digest)
+
+    def test_lifecycle_companion_hash_is_required_before_bundle_creation(self):
+        self.arguments.update(lifecycle_binary=self.arguments["runtime"], lifecycle_sha256="0" * 64)
+        with self.assertRaisesRegex(B.M.Rejected, "PROJECT_PURGE_LIFECYCLE_DIGEST_REJECTED"):
+            self.build()
+        self.assertFalse(self.root.exists())
+
     def test_cli_build_and_verify_maintenance_use_the_distinct_profile(self):
         output = self.base / "cli-output"
         arguments = ["lattice-bundle.py", "build-maintenance", "--bundle", str(output)]

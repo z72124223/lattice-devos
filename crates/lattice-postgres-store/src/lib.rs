@@ -3,20 +3,25 @@
 mod bot_lifecycle;
 mod control_product;
 pub use bot_lifecycle::{
-    BOT_LIFECYCLE_SQL, BOT_LIFECYCLE_V2_SQL, execute_bot_lifecycle, install_bot_lifecycle,
-    inspect_project_purge_bot_lifecycle, migrate_bot_lifecycle, reconcile_bot_lifecycle_archive,
+    BOT_LIFECYCLE_SQL, BOT_LIFECYCLE_V2_SQL, bot_lifecycle_requires_registry,
+    execute_bot_lifecycle, execute_bot_lifecycle_with_registry, execute_bot_project_purge,
+    inspect_project_purge_bot_lifecycle, install_bot_lifecycle, install_bot_project_ownership,
+    migrate_bot_lifecycle, reconcile_bot_lifecycle_archive,
 };
 mod foreman_coordination;
 mod graph_usage;
 mod live;
 mod migrations;
 mod postgres_setup;
-mod project_registry;
 mod project_purge;
-pub mod registry_epoch_anchor;
+mod project_registry;
 mod registry_epoch;
+pub mod registry_epoch_anchor;
+pub use project_purge::{
+    PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge,
+    execute_project_purge_with_graph_source, inspect_project_purge_graph,
+};
 pub use registry_epoch::REGISTRY_EPOCH_SQL;
-pub use project_purge::{PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge, execute_project_purge_with_graph_source, inspect_project_purge_graph};
 mod schema_v6_profile;
 mod task_ledger;
 

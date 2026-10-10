@@ -27,6 +27,11 @@ const request = (plan, action) => ({ schema: 'lattice.project-purge.request.v1',
   ...(plan.botService ? { botService: plan.botService } : {}),
   ...(plan.registryPolicy ? { registryPolicy: plan.registryPolicy } : {}),
   ...(plan.postgres?.scopeDigest ? { expectedScopeDigest: plan.postgres.scopeDigest } : {}) });
+const botRequest = (plan, action) => ({ schema: 'lattice.project-purge.request.v1', action,
+  projectId: plan.projectId, operationId: plan.operationId, botService: plan.botService,
+  ...(plan.bot?.scopeDigest ? { expectedBotScopeDigest: plan.bot.scopeDigest } : {}) });
+const botComplete = (plan, result) => !plan.bot || (plan.bot.status === 'VERIFIED_ABSENT'
+  ? result?.status === 'VERIFIED_ABSENT' : result?.status === 'PURGED' && result.scopeDigest === plan.bot.scopeDigest);
 const fileOptions = plan => ({ projectId: plan.projectId, planDigest: plan.files.planDigest, roots: plan.files.roots, protectedRoots: plan.files.protectedRoots,
   runtimeGraphRoots:plan.runtimeGraph?.roots??[] });
 
@@ -64,7 +69,7 @@ export function nativeProjectPurge(binary, input) {
     child.stdout.on('data', data => { bytes += Buffer.byteLength(data); if (bytes > 1048576) { child.kill(); finish(new Error('PURGE_NATIVE_OUTPUT_LIMIT')); } else output += data; });
     child.stderr.on('data', data => { bytes += data.length; if (bytes > 1048576) { child.kill(); finish(new Error('PURGE_NATIVE_OUTPUT_LIMIT')); } else errorOutput += data.toString(); });
     child.on('close', code => {
-      if (code !== 0) return finish(new Error(/^(?:PROJECT_PURGE|REGISTRY)_[A-Z_]{1,100}$/.test(errorOutput.trim()) ? errorOutput.trim() : 'PURGE_NATIVE_FAILED'));
+      if (code !== 0) return finish(new Error(/^(?:PROJECT_PURGE|REGISTRY|BOT_LIFECYCLE)_[A-Z_]{1,100}$/.test(errorOutput.trim()) ? errorOutput.trim() : 'PURGE_NATIVE_FAILED'));
       try { finish(null, JSON.parse(output)); } catch { finish(new Error('PURGE_NATIVE_RESPONSE_INVALID')); }
     });
     child.stdin.on('error', () => {});
@@ -78,9 +83,23 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   const base = { projectId: options.projectId, operationId: options.operationId ?? randomUUID(),
     botService: await configuredBotService(options.botService),
     ...(options.registryPolicy ? { registryPolicy: options.registryPolicy } : {}) };
+  const maintenance = options.maintenance ? {
+    schema: 'lattice.project-purge.maintenance-scope.v1',
+    planPath: absolute(options.maintenance.planPath), configPath: absolute(options.maintenance.configPath),
+    configDigest: options.maintenance.configDigest, statePath,
+    boundaryPath: options.botBoundaryPath ? absolute(options.botBoundaryPath) : null,
+    finalizationPath: path.join(path.dirname(statePath), `purge-${hash(base.operationId)}.attestation.json`),
+  } : null;
+  if (maintenance && (!/^[a-f0-9]{64}$/u.test(maintenance.configDigest) || new Set([
+    maintenance.planPath, maintenance.configPath, statePath, maintenance.boundaryPath,
+    maintenance.finalizationPath,
+  ].filter(Boolean).map(p => p.toLowerCase())).size !== (maintenance.boundaryPath ? 5 : 4))) fail('PURGE_MAINTENANCE_SCOPE_INVALID');
   const pg = await native(nativeBinary, request(base, 'preview'));
   if (!['READY', 'BLOCKED'].includes(pg.status) || pg.project?.id !== options.projectId || !Array.isArray(pg.blockers)
       || !Array.isArray(pg.protectedRoots) || !Array.isArray(pg.filesystemRoots) || !/^[a-f0-9]{64}$/.test(pg.scopeDigest)) fail('PURGE_NATIVE_RESPONSE_INVALID');
+  const bot = base.botService ? await native(nativeBinary, botRequest(base, 'preview-bot')) : null;
+  if (bot && (bot.schema !== 'lattice.project-purge.bot.v1' || !['READY','BLOCKED','VERIFIED_ABSENT'].includes(bot.status)
+    || (bot.status === 'READY' && !/^[a-f0-9]{64}$/u.test(bot.scopeDigest)))) fail('PURGE_BOT_RESPONSE_INVALID');
   const canonicalPath = absolute(pg.project.canonicalPath);
   const sqlite = previewProjectPurgeSqlite({ databasePath, projectId: base.projectId, canonicalPath,
     authoritativeProject: { source: 'POSTGRES_PREVIEW', projectId: base.projectId, canonicalPath, scopeDigest: pg.scopeDigest } });
@@ -101,7 +120,10 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   const roots = [...new Set([...projectRoots, ...codeGraph.roots, ...runtimeGraph.roots])];
   const protectedRoots = [...new Set([...sqlite.protectedRoots, ...pg.protectedRoots.map(absolute), databasePath,
     ...['-wal', '-shm', '-journal', '.purge-next', '.purge-next-journal', '.purge-swap', '.purge-swap.tmp'].map(suffix => databasePath + suffix),
-    nativeBinary, statePath, `${statePath}.lock`, `${statePath}.tmp`, fileURLToPath(import.meta.url), ...(options.protectedRoots ?? []).map(absolute)])];
+    nativeBinary, statePath, `${statePath}.lock`, `${statePath}.tmp`, fileURLToPath(import.meta.url),
+    ...(maintenance ? [maintenance.planPath, maintenance.configPath, maintenance.boundaryPath,
+      maintenance.finalizationPath, `${maintenance.finalizationPath}.next`, `${maintenance.finalizationPath}.lock`].filter(Boolean) : []),
+    ...(options.protectedRoots ?? []).map(absolute)])];
   let files;
   const fileBlockers = [];
   try { files = await previewProjectPurgeFiles({ projectId: base.projectId, roots, protectedRoots, runtimeGraphRoots:runtimeGraph.roots }); }
@@ -110,8 +132,8 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     fileBlockers.push(error.message);
     files = { projectId: base.projectId, roots, protectedRoots, status: 'BLOCKED', blockers: fileBlockers };
   }
-  const blockers = [...pg.blockers, ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...fileBlockers];
-  const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph, runtimeGraph,
+  const blockers = [...pg.blockers, ...(bot?.blockers ?? []), ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...fileBlockers];
+  const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph, runtimeGraph, bot, maintenance,
     postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy, history: pg.history ?? null,
       graphSourceProof:pg.graphSourceProof??null,
       relatedStores: pg.relatedStores ?? null,
@@ -151,7 +173,7 @@ async function loadState(plan) {
 async function saveState(plan, state) {
   // File sync plus rename supports process-crash continuation, not a verified
   // power-loss ordering guarantee for directory entries (especially on Windows).
-  const temporary = `${plan.statePath}.${randomUUID()}.tmp`;
+  const temporary = `${plan.statePath}.tmp`;
   const file = await open(temporary, 'wx', 0o600);
   try { await file.writeFile(JSON.stringify(state, null, 2)); await file.sync(); }
   finally { await file.close(); }
@@ -166,7 +188,7 @@ function matchingReceipt(plan, receipt) {
   return receipt?.status === 'PURGED' && receipt.phase === 'POSTGRES_ONLY' && receipt.operationId === plan.operationId && receipt.scopeDigest === plan.postgres.scopeDigest;
 }
 
-export async function applyProjectPurge(plan, { confirmDigest, maintenanceOffline, native = nativeProjectPurge } = {}) {
+export async function applyProjectPurge(plan, { confirmDigest, maintenanceOffline, botBoundaries = [], native = nativeProjectPurge } = {}) {
   validatePlan(plan);
   if (confirmDigest !== plan.digest || maintenanceOffline !== true) fail('PURGE_EXACT_CONFIRMATION_REQUIRED');
   if (plan.status !== 'READY' || plan.blockers.length) fail('PURGE_BLOCKED');
@@ -186,6 +208,15 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
       if (transaction.alreadyApplied && plan.sqlite.catalogState !== 'ABSENT') fail('PURGE_SQLITE_ABSENT_WITHOUT_NATIVE_RECEIPT');
       const current = await native(plan.nativeBinary, request(plan, 'preview'));
       if (current.scopeDigest !== plan.postgres.scopeDigest || current.status !== 'READY' || current.blockers?.length) fail('PURGE_NATIVE_STALE_SCOPE');
+      if (plan.bot) {
+        let bot = await native(plan.nativeBinary, botRequest(plan, 'status-bot'));
+        if (!botComplete(plan, bot)) {
+          if (bot.status !== 'NOT_FOUND') fail('PURGE_BOT_RECEIPT_MISMATCH');
+          bot = await native(plan.nativeBinary, { ...botRequest(plan, 'apply-bot'), authorization: 'ERASE_PROJECT_DATA', botBoundaries });
+          if (!botComplete(plan, bot)) fail('PURGE_BOT_RECEIPT_MISMATCH');
+        }
+        state.bot = bot; state.status = 'PARTIAL'; await saveState(plan, state);
+      }
       receipt = await native(plan.nativeBinary, { ...request(plan, 'apply'), expectedScopeDigest: plan.postgres.scopeDigest, authorization: 'ERASE_PROJECT_DATA' });
       if (!matchingReceipt(plan, receipt)) fail('PURGE_NATIVE_RECEIPT_MISMATCH');
     }
@@ -200,8 +231,10 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     state.codeGraph = plan.codeGraph ? await readbackControlCodeGraphPurge(plan.codeGraph) : null;
     state.runtimeGraph = plan.runtimeGraph ? await readbackRuntimeGraphPurge(plan.runtimeGraph) : null;
     const finalReceipt = await native(plan.nativeBinary, request(plan, 'status'));
+    state.bot = plan.bot ? await native(plan.nativeBinary, botRequest(plan, 'status-bot')) : null;
     if (!state.sqlite.complete || !fileReadback.complete || (plan.codeGraph && !state.codeGraph.complete)
       || (plan.runtimeGraph?.discovery==='COMPLETE'&&!state.runtimeGraph.complete)
+      || !botComplete(plan, state.bot)
       || !matchingReceipt(plan, finalReceipt)) fail('PURGE_READBACK_INCOMPLETE');
     state.postgres = finalReceipt;
     state.status = 'SCOPED_PURGED'; state.files.readback = fileReadback;
@@ -227,9 +260,10 @@ export async function statusProjectPurge(plan, { native = nativeProjectPurge } =
   const files = await readbackProjectPurgeFiles(plan.files, fileOptions(plan));
   const codeGraph = plan.codeGraph ? await readbackControlCodeGraphPurge(plan.codeGraph) : null;
   const runtimeGraph = plan.runtimeGraph ? await readbackRuntimeGraphPurge(plan.runtimeGraph) : null;
+  const bot = plan.bot ? await native(plan.nativeBinary, botRequest(plan, 'status-bot')) : null;
   const result = { operationId: plan.operationId, planDigest: plan.digest,
     status: state && matchingReceipt(plan, receipt) && sqlite.complete && files.complete && (!plan.codeGraph || codeGraph.complete)
-      && (plan.runtimeGraph?.discovery!=='COMPLETE'||runtimeGraph?.complete) ? 'SCOPED_PURGED' : 'INCOMPLETE',
-    postgres: receipt, sqlite, files, codeGraph, runtimeGraph, externalCleanup: 'NOT_VERIFIED', externalScope: plan.externalScope };
+      && (plan.runtimeGraph?.discovery!=='COMPLETE'||runtimeGraph?.complete) && botComplete(plan, bot) ? 'SCOPED_PURGED' : 'INCOMPLETE',
+    postgres: receipt, sqlite, files, codeGraph, runtimeGraph, bot, externalCleanup: 'NOT_VERIFIED', externalScope: plan.externalScope };
   return { ...result, report: projectPurgeReport(plan, result) };
 }

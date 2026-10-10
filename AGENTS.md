@@ -86,6 +86,11 @@ tests prove only the tested behavior.
   `SCOPED_PURGED` only proves the reported local scope; unknown external records
   or blockers must remain visibly incomplete. A previous tool-policy denial
   cannot be retried through this entry point or a different tool.
+  For owned Bot roles collect fresh native owner readbacks at the preview-bound
+  evidence path. Finish known maintenance artifacts with `finalize`; resume its
+  exact finalization manifest after interruption. `LOGICAL_SCOPE_COMPLETE`
+  covers configured LATTICE logical stores and retained minimal attestations,
+  not permanent Codex erasure, historical backups or physical media wiping.
 
 - Important purge decisions about data retention, historical verification or
   irreversible scope changes require a cross-check with Claude before choosing

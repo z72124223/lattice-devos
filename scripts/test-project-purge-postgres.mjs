@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'graph-ownership', 'upgrade'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade'].includes(args.scenario));
 if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -21,7 +21,7 @@ assert.ok(path.basename(runRoot).match(/^[0-9a-f]{32}$/));
 const password = randomBytes(24).toString('hex');
 const baseEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(LATTICE_|PG|DATABASE_URL$)/i.test(key)));
 const evidence = { schema: 'lattice.project-purge-live-scenarios.v1', status: 'RUNNING', port, checks: [], databases: [] };
-evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary', ...(args['legacy-binary'] ? ['legacy-binary'] : []), ...(args['epoch-binary'] ? ['epoch-binary'] : [])].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
+evidence.binaries = Object.fromEntries(['binary', 'seed-binary', 'runtime-binary', ...(args['legacy-binary'] ? ['legacy-binary'] : []), ...(args['epoch-binary'] ? ['epoch-binary'] : []), ...(args['lifecycle-binary'] ? ['lifecycle-binary'] : [])].map(key => [key, { path: path.resolve(args[key]), sha256: createHash('sha256').update(readFileSync(args[key])).digest('hex') }]));
 const redact = value => String(value ?? '').replaceAll(password, '[FIXTURE_PASSWORD]');
 let sequence = 0;
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -144,6 +144,88 @@ try {
     assert.equal(survivor.records[0].reflection,survivorGraph.reflection);
     assert.equal(native(env,{action:'status',...request}).value.status,'PURGED');
     check('real-graph-child-closure-erased-and-fresh-process-survivor-receipt-replays-unchanged');
+  }
+  if (args.scenario === 'bot-purge') {
+    const {env,seeded,root}=establish('bot-purge');
+    const botPort=Number(args['bot-port']), botRun=randomUUID().replaceAll('-','');
+    const botMarker=JSON.parse(readFileSync(path.join(runRoot,'bot-fixture-owner.json'),'utf8'));
+    assert.equal(botMarker.port,botPort); assert.equal(path.dirname(botMarker.path),runRoot);
+    assert.ok(botPort!==port&&![4317,5432,55432,58743,64272].includes(botPort));
+    const botDb=`lattice_bot_lifecycle_${botRun}`;
+    const botSql=(database,statement,success=true,user='runtime_bootstrap')=>command(args.psql,
+      ['-X','-A','-t','-h','127.0.0.1','-p',String(botPort),'-U',user,'-d',database,'-v','ON_ERROR_STOP=1','-f','-'],
+      {...env,PGCLIENTENCODING:'UTF8'},statement,'bot-purge-sql',success);
+    botSql('postgres',`CREATE ROLE lattice_migrator NOLOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS; CREATE ROLE lattice_runtime NOLOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS;
+      CREATE ROLE lattice_migrator_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${password}'; CREATE ROLE lattice_runtime_login LOGIN NOSUPERUSER NOINHERIT NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD '${password}';
+      GRANT lattice_migrator TO lattice_migrator_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE; GRANT lattice_runtime TO lattice_runtime_login WITH ADMIN FALSE, INHERIT FALSE, SET TRUE;`);
+    const botService={port:botPort,runId:botRun,systemIdentifier:botSql('postgres','SELECT system_identifier::text FROM pg_control_system()').stdout.trim()};
+    const botArgs=['--postgres-host','127.0.0.1','--postgres-port',String(botPort),'--postgres-run-id',botRun];
+    command(args['lifecycle-binary'],['bot-lifecycle-install',...botArgs],env,undefined,'bot-base-install');
+    native(env,{action:'install-bot-ownership',authorization:'INSTALL_BOT_PROJECT_OWNERSHIP',botService});
+    const owner='11111111-2222-3333-4444-555555555555';
+    const registration=project=>({action:'register',request_id:'fixture-register',project_id:project,role_id:'fixture-role',expected_revision:0,expected_generation:0,owner_thread_id:owner,owner_host_id:'fixture',
+      body:{work_ids:[],policy_digest:'a'.repeat(64),rules_digest:'b'.repeat(64),binding_receipt:{tool:'read_thread',target_thread_id:owner,target_host_id:'fixture',result_digest:'c'.repeat(64),readback_digest:'d'.repeat(64),evidence_ref:'synthetic-fixture:bot-purge',success:true,readback_verified:true,old_pending_count:0}}});
+    const botCall=(value,success=true)=>command(args['lifecycle-binary'],['bot-lifecycle',...botArgs],env,JSON.stringify(value),'bot-lifecycle-call',success);
+    const missing=botCall(registration('not-in-registry'),false);
+    assert.notEqual(missing.exitCode,0);assert.match(missing.stderr,/REGISTRY_PROJECT_MISSING/);
+    const originals=[seeded.targetProjectId,seeded.survivorProjectId].map(project=>JSON.parse(botCall(registration(project)).stdout));
+    const botRows=()=>JSON.parse(botSql(botDb,"SELECT json_build_array((SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.roles p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_lifecycle.events p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_project_ownership.bindings p) x),(SELECT coalesce(json_agg(r ORDER BY r::text),'[]') FROM (SELECT to_jsonb(p) r FROM bot_project_ownership.retired p) x))").stdout);
+    const before=botRows();
+    assert.equal(before[2].length,2);
+    check('bot-registration-requires-current-registry-project-and-atomically-persists-binding');
+    const req={botService,projectId:seeded.targetProjectId,operationId:'fixture-bot-purge'};
+    const preview=native(env,{action:'preview-bot',...req}).value;
+    assert.equal(preview.status,'READY',JSON.stringify(preview));assert.equal(preview.roleCount,1);assert.equal(preview.eventCount,1);
+    assert.deepEqual(botRows(),before);
+    const boundaries=[{roleId:'fixture-role',revision:1,generation:1,boundary:{source:'codex.read_thread',observed_at:new Date().toISOString(),thread_id:owner,host_id:'fixture',latest_turn_id:'22222222-2222-3333-4444-555555555555',thread_updated_at:1,status:'idle',latest_turn_status:'completed',pending_input_count:0,in_flight_count:0,readback_digest:'e'.repeat(64),evidence_ref:'synthetic-fixture:read-thread'}}];
+    for(const mutation of ['running','stale-generation','stale-time']) {
+      const bad=structuredClone(boundaries);
+      if(mutation==='running')bad[0].boundary.status='running';
+      if(mutation==='stale-generation')bad[0].generation=0;
+      if(mutation==='stale-time')bad[0].boundary.observed_at='2020-01-01T00:00:00.000Z';
+      const rejected=native(env,{action:'apply-bot',...req,expectedBotScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA',botBoundaries:bad},false);
+      assert.notEqual(rejected.exitCode,0);assert.match(rejected.stderr,/NATIVE_BOUNDARY_REJECTED/);assert.deepEqual(botRows(),before);
+    }
+    check('running-stale-owner-and-stale-native-readback-block-before-any-bot-erasure');
+    botSql(botDb,'ALTER TABLE bot_lifecycle.roles DISABLE TRIGGER project_retirement_v1');
+    assert.match(native(env,{action:'preview-bot',...req},false).stderr,/OWNERSHIP_SCHEMA_REJECTED/);
+    botSql(botDb,'ALTER TABLE bot_lifecycle.roles ENABLE TRIGGER project_retirement_v1');
+    command(args['lifecycle-binary'],['bot-lifecycle-install',...botArgs],env,undefined,'old-installer-retains-new-trigger');
+    assert.equal(native(env,{action:'preview-bot',...req}).value.scopeDigest,preview.scopeDigest);
+    assert.deepEqual(botRows(),before);
+    check('disabled-retirement-trigger-rejected-and-existing-installer-preserves-protection');
+    const {LatticeStore}=await import('../apps/lattice-control/src/store.mjs');
+    const sqlitePath=path.join(root,'control.sqlite'), store=new LatticeStore(sqlitePath);store.close();
+    const configPath=path.join(root,'purge-config.json'),planPath=path.join(root,'purge-plan.json'),boundaryPath=path.join(root,'native-boundaries.json');
+    writeFileSync(configPath,JSON.stringify({projectId:seeded.targetProjectId,operationId:req.operationId,nativeBinary:path.resolve(args.binary),databasePath:sqlitePath,statePath:path.join(root,'progress.json'),codeGraphCacheDirectory:path.join(root,'control-graph'),runtimeGraphWorkDirectory:path.join(root,'runtime-graph'),botService,botBoundaryPath:boundaryPath}));
+    const cliPath=fileURLToPath(new URL('../apps/lattice-control/src/project-purge-client.mjs',import.meta.url));
+    const cli=(action,flags)=>JSON.parse(command(process.execPath,[cliPath,action,...flags],env,undefined,`bot-purge-cli-${action}`).stdout);
+    const plan=cli('inventory',['--input',configPath,'--plan',planPath]);assert.equal(plan.status,'READY',JSON.stringify(plan.blockers));assert.equal(plan.bot.scopeDigest,preview.scopeDigest);
+    boundaries[0].boundary.observed_at=new Date().toISOString();writeFileSync(boundaryPath,JSON.stringify(boundaries));
+    const applied=cli('apply',['--plan',planPath,'--confirm',plan.digest,'--maintenance-offline','--bot-boundaries',boundaryPath]);
+    assert.equal(applied.status,'SCOPED_PURGED');assert.equal(applied.bot.status,'PURGED');
+    assert.equal(applied.report.remaining.some(item=>item.kind==='botLifecycle'),false);
+    const after=botRows();
+    for(let i=0;i<3;i++)assert.deepEqual(after[i],before[i].filter(row=>row.project_id===seeded.survivorProjectId));
+    assert.equal(after[3].length,1);assert.deepEqual(Object.keys(after[3][0]),['pair_digest']);
+    const bRead=JSON.parse(botCall({action:'read',project_id:seeded.survivorProjectId,role_id:'fixture-role'}).stdout);
+    assert.deepEqual(bRead.current,originals[1].current);
+    assert.equal(existsSync(seeded.targetCanonicalPath),false);assert.equal(existsSync(seeded.survivorCanonicalPath),true);
+    assert.equal(sql(env,"SELECT count(*) FROM control.project_registry_projects WHERE project_id='purge-target'"),'0');
+    check('real-two-cluster-cli-purges-bot-before-registry-and-preserves-survivor-state-and-receipts');
+    const old=botSql(botDb,`SET ROLE lattice_runtime; BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT bot_lifecycle.apply_v1('${JSON.stringify(registration(seeded.targetProjectId))}'::jsonb); COMMIT;`,false,'lattice_runtime_login');
+    assert.notEqual(old.exitCode,0);assert.match(old.stderr,/PROJECT_RETIRED/);assert.deepEqual(botRows(),after);
+    assert.equal(native(env,{action:'status-bot',...req,expectedBotScopeDigest:preview.scopeDigest}).value.status,'PURGED');
+    assert.equal(cli('resume',['--plan',planPath,'--confirm',plan.digest,'--maintenance-offline']).status,'SCOPED_PURGED');
+    assert.deepEqual(botRows(),after);
+    check('old-apply-function-cannot-recreate-retired-pair-and-exact-retry-works-after-registry-erasure');
+    const finalized=cli('finalize',['--plan',planPath,'--confirm',plan.digest,'--maintenance-offline']);
+    assert.equal(finalized.status,'LOGICAL_SCOPE_COMPLETE');assert.equal(finalized.latticeScopeComplete,true);assert.equal(finalized.complete,false);
+    for(const file of [configPath,planPath,boundaryPath,path.join(root,'progress.json')])assert.equal(existsSync(file),false);
+    assert.equal(JSON.stringify(finalized).includes(seeded.targetProjectId),false);assert.equal(JSON.stringify(finalized).includes(root),false);
+    assert.deepEqual(cli('verify-finalization',['--finalization',plan.maintenance.finalizationPath]),finalized);
+    assert.deepEqual(cli('resume-finalize',['--finalization',plan.maintenance.finalizationPath,'--confirm',plan.digest,'--maintenance-offline']),finalized);
+    check('cli-finalizes-planned-maintenance-files-and-retains-only-content-free-attestation');
   }
   if (args.scenario === 'bot-inventory') {
     const runId=randomUUID().replaceAll('-',''), root=path.join(runRoot,'bot-inventory');

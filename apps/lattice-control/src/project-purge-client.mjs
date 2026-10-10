@@ -1,8 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
 import { previewProjectPurge, applyProjectPurge, statusProjectPurge } from './project-purge.mjs';
 import { projectPurgeReport } from './project-purge-report.mjs';
+import { finalizeProjectPurge, resumeProjectPurgeFinalization, readProjectPurgeAttestation } from './project-purge-finalize.mjs';
 
 export const projectPurgeUsage = `LATTICE 專案清除（所有專案共用；唯讀盤點、離線清除）
 npm run project:purge -- preview --input config.json --plan plan.json
@@ -11,6 +13,10 @@ npm run project:purge -- apply --plan plan.json --confirm DIGEST --maintenance-o
 npm run project:purge -- resume --plan plan.json --confirm DIGEST --maintenance-offline
 npm run project:purge -- status --plan plan.json
 npm run project:purge -- verify --plan plan.json
+npm run project:purge -- finalize --plan plan.json --confirm DIGEST --maintenance-offline
+npm run project:purge -- resume-finalize --finalization attestation.json --confirm DIGEST --maintenance-offline
+npm run project:purge -- verify-finalization --finalization attestation.json
+Bot 清除需要時，在 apply/resume 加上 --bot-boundaries 已於盤點綁定路徑的最新原生證據檔。
 preview/inventory 可在線上唯讀盤點；未停機或未安裝維護元件時仍列出範圍與阻擋原因。
 停止服務、安裝元件後須重新盤點並確認新摘要。resume 沿用同一計畫，不自動重建或解除鎖。
 verify 僅在所有清除範圍均已驗證時回傳 0；局部完成回傳 2，阻擋或錯誤回傳 1。
@@ -21,8 +27,11 @@ function parse(argv) {
   const [action, ...args] = argv;
   const allowed = {
     preview: ['--input', '--plan'], inventory: ['--input', '--plan'],
-    apply: ['--plan', '--confirm', '--maintenance-offline'], resume: ['--plan', '--confirm', '--maintenance-offline'],
+    apply: ['--plan', '--confirm', '--maintenance-offline', '--bot-boundaries'], resume: ['--plan', '--confirm', '--maintenance-offline', '--bot-boundaries'],
     status: ['--plan'], verify: ['--plan'],
+    finalize: ['--plan', '--confirm', '--maintenance-offline'],
+    'resume-finalize': ['--finalization', '--confirm', '--maintenance-offline'],
+    'verify-finalization': ['--finalization'],
   };
   if (!Object.hasOwn(allowed, action)) throw new Error('PURGE_CLI_ACTION_INVALID');
   if (args.length === 1 && args[0] === '--help') return { help: true };
@@ -37,36 +46,48 @@ function parse(argv) {
       options[key] = value;
     }
   }
-  if (!options['--plan']) throw new Error('PURGE_PLAN_REQUIRED');
+  if (['resume-finalize','verify-finalization'].includes(action)) {
+    if (!options['--finalization']) throw new Error('PURGE_FINALIZATION_PATH_REQUIRED');
+  } else if (!options['--plan']) throw new Error('PURGE_PLAN_REQUIRED');
   if (['preview', 'inventory'].includes(action) && !options['--input']) throw new Error('PURGE_INPUT_REQUIRED');
-  if (['apply', 'resume'].includes(action)
+  if (['apply', 'resume', 'finalize', 'resume-finalize'].includes(action)
     && (!/^[a-f0-9]{64}$/.test(options['--confirm'] ?? '') || !options['--maintenance-offline'])) throw new Error('PURGE_EXACT_CONFIRMATION_REQUIRED');
   return options;
 }
 
-async function jsonFile(file) {
+async function jsonFile(file, withBytes = false) {
   const bytes = await readFile(file);
   if (bytes.length > 16 * 1024 * 1024) throw new Error('PURGE_INPUT_TOO_LARGE');
-  try { return JSON.parse(bytes.toString('utf8')); } catch { throw new Error('PURGE_INPUT_INVALID_JSON'); }
+  try { const value = JSON.parse(bytes.toString('utf8')); return withBytes ? { value, bytes } : value; } catch { throw new Error('PURGE_INPUT_INVALID_JSON'); }
 }
 
 export async function runProjectPurgeCli(argv, { preview = previewProjectPurge, apply = applyProjectPurge, status = statusProjectPurge } = {}) {
   try {
     const options = parse(argv);
     if (options.help) return { output: `${projectPurgeUsage}\n`, exitCode: 0 };
+    if (['resume-finalize','verify-finalization','finalize'].includes(options.action)) {
+      const result = options.action === 'resume-finalize'
+        ? await resumeProjectPurgeFinalization(path.resolve(options['--finalization']), { confirmDigest: options['--confirm'], maintenanceOffline: options['--maintenance-offline'] })
+        : options.action === 'verify-finalization' ? await readProjectPurgeAttestation(path.resolve(options['--finalization']))
+        : await finalizeProjectPurge(await jsonFile(path.resolve(options['--plan'])), { confirmDigest: options['--confirm'], maintenanceOffline: options['--maintenance-offline'], status });
+      return { output: `${JSON.stringify(result, null, 2)}\n`, exitCode: 0 };
+    }
     const planPath = path.resolve(options['--plan']);
     let result, plan;
     if (['preview', 'inventory'].includes(options.action)) {
       const inputPath = path.resolve(options['--input']);
-      const config = await jsonFile(inputPath);
-      if (!config || Array.isArray(config) || Object.keys(config).some(key => !['projectId', 'operationId', 'nativeBinary', 'databasePath', 'statePath', 'protectedRoots', 'externalResources', 'codeGraphCacheDirectory', 'runtimeGraphWorkDirectory', 'botService', 'registryPolicy'].includes(key))) throw new Error('PURGE_CONFIG_INVALID');
-      plan = await preview({ ...config, protectedRoots: [...(config.protectedRoots ?? []), planPath, inputPath] });
+      const { value: config, bytes } = await jsonFile(inputPath, true);
+      if (!config || Array.isArray(config) || Object.keys(config).some(key => !['projectId', 'operationId', 'nativeBinary', 'databasePath', 'statePath', 'protectedRoots', 'externalResources', 'codeGraphCacheDirectory', 'runtimeGraphWorkDirectory', 'botService', 'botBoundaryPath', 'registryPolicy'].includes(key))) throw new Error('PURGE_CONFIG_INVALID');
+      plan = await preview({ ...config, protectedRoots: [...(config.protectedRoots ?? []), planPath, inputPath],
+        maintenance: { planPath, configPath: inputPath, configDigest: createHash('sha256').update(bytes).digest('hex') } });
       await writeFile(planPath, JSON.stringify(plan, null, 2), { flag: 'wx', mode: 0o600 });
       result = { ...plan, report: projectPurgeReport(plan) };
     } else {
       plan = await jsonFile(planPath);
+      if (options['--bot-boundaries'] && plan.maintenance && path.resolve(options['--bot-boundaries']) !== plan.maintenance.boundaryPath) throw new Error('PURGE_BOUNDARY_PATH_NOT_PLANNED');
       result = ['apply', 'resume'].includes(options.action)
-        ? await apply(plan, { confirmDigest: options['--confirm'], maintenanceOffline: options['--maintenance-offline'] })
+        ? await apply(plan, { confirmDigest: options['--confirm'], maintenanceOffline: options['--maintenance-offline'],
+          botBoundaries: options['--bot-boundaries'] ? await jsonFile(path.resolve(options['--bot-boundaries'])) : [] })
         : await status(plan);
     }
     const report = result.report ?? projectPurgeReport(plan, result);

@@ -435,6 +435,28 @@ pub fn execute(command: RuntimeCommand) -> Result<Value, RuntimeError> {
                     lattice_postgres_store::migrate_bot_lifecycle(
                         port, &run_id, &password, &request,
                     )
+                } else if request["action"] == "register"
+                    && lattice_postgres_store::bot_lifecycle_requires_registry(
+                        port, &run_id, &password,
+                    )
+                    .map_err(RuntimeError::BotLifecycle)?
+                {
+                    let store_port = std::env::var("LATTICE_TASK019_PORT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .ok_or(RuntimeError::BotLifecycle(
+                            "BOT_LIFECYCLE_REGISTRY_CONFIGURATION_REQUIRED",
+                        ))?;
+                    let store_run = std::env::var("LATTICE_TASK019_RUN_ID").map_err(|_| {
+                        RuntimeError::BotLifecycle("BOT_LIFECYCLE_REGISTRY_CONFIGURATION_REQUIRED")
+                    })?;
+                    let (mut store, target) = lattice_postgres_store::connect_project_purge(
+                        store_port, &store_run, &password,
+                    )
+                    .map_err(RuntimeError::BotLifecycle)?;
+                    lattice_postgres_store::execute_bot_lifecycle_with_registry(
+                        &mut store, &target, port, &run_id, &password, &request,
+                    )
                 } else {
                     lattice_postgres_store::execute_bot_lifecycle(
                         port, &run_id, &password, &request,

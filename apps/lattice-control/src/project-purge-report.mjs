@@ -41,7 +41,7 @@ export function externalPurgeInventory(input = []) {
   });
   return Object.entries(externalKinds).map(([kind, description]) => ({
     kind, description, ownership: scopeOwnership[kind], discovery: 'NOT_VERIFIED',
-    disposition: scopeOwnership[kind] === 'LATTICE' ? 'PRODUCT_WORK_REQUIRED' : 'NATIVE_OR_OWNER_ACTION_REQUIRED',
+    disposition: scopeOwnership[kind] === 'LATTICE' ? 'VERIFICATION_REQUIRED' : 'NATIVE_OR_OWNER_ACTION_REQUIRED',
     nextStep: scopeActions[kind], resources: resources.filter(item => item.kind === kind),
   }));
 }
@@ -61,6 +61,7 @@ function nativeBotInventory(value) {
   return { ...value, source: 'NATIVE_PURGE_READER' };
 }
 function nextStep(code) {
+  if (code.startsWith('BOT_LIFECYCLE_')) return 'Use the dedicated service ownership extension, verify Registry binding and collect fresh native owner readbacks. Unknown legacy ownership or a running owner must be resolved before Registry erasure.';
   if (code.startsWith('GRAPH_')) return 'Recompute ownership with the original Runtime source and configuration. Unknown historical configurations or surviving cross-project references block erasure; an unmatched digest is not proof of unrelated data.';
   if (code.startsWith('PURGE_SQLITE_ACCESS_')) return 'Windows source and staging owner/group/DACL must match exactly; unsupported or unreadable access descriptors remain blocked without changing permissions.';
   if (code === 'REGISTRY_EPOCH_EXTENSION_REQUIRED') return 'Install the compatible Registry epoch extension while stopped, then review a fresh preview with minimal historical attestation.';
@@ -87,7 +88,12 @@ export function projectPurgeReport(plan, result = null) {
   if (bot) {
     const scope = external.find(item => item.kind === 'botLifecycle');
     Object.assign(scope, { discovery: bot.discovery, observation: bot,
-      disposition: ['VERIFIED_ABSENT', 'VERIFIED_EMPTY'].includes(bot.discovery) ? 'NO_DATA_IN_CONFIGURED_STORE' : 'PRODUCT_WORK_REQUIRED' });
+      disposition: ['VERIFIED_ABSENT', 'VERIFIED_EMPTY'].includes(bot.discovery) ? 'NO_DATA_IN_CONFIGURED_STORE' : 'VERIFICATION_REQUIRED' });
+  }
+  if (result?.bot?.schema === 'lattice.project-purge.bot.v1' && result.bot.status === 'PURGED'
+    && result.bot.scopeDigest === plan.bot?.scopeDigest && /^[a-f0-9]{64}$/u.test(result.bot.afterDigest ?? '')) {
+    Object.assign(external.find(item => item.kind === 'botLifecycle'), { discovery: 'VERIFIED_ERASED',
+      disposition: 'NO_TARGET_DATA_IN_VERIFIED_SCOPE', observation: result.bot });
   }
   const graphPg=(result?result.postgres?.relatedStores:plan.postgres.relatedStores)?.runtimeGraph;
   const graph=external.find(item=>item.kind==='graphify');
@@ -141,7 +147,7 @@ export function projectPurgeReport(plan, result = null) {
     remaining: [
       ...(plan.sqlite.retainedDecisionRows > 0 ? [{ kind: 'controlDecisions', reason: 'FREEFORM_SCOPE_HAS_NO_STRUCTURAL_PROJECT_OWNERSHIP' }] : []),
       ...external.filter(item => !['NO_DATA_IN_CONFIGURED_STORE','NO_TARGET_DATA_IN_VERIFIED_SCOPE'].includes(item.disposition)).map(item => ({ kind: item.kind, ownership: item.ownership,
-        reason: item.ownership === 'LATTICE' ? 'LATTICE_OWNED_CLEANUP_NOT_IMPLEMENTED' : 'DISCOVERY_AND_ERASURE_NOT_VERIFIED',
+        reason: item.ownership === 'LATTICE' ? 'LATTICE_OWNED_SCOPE_NOT_VERIFIED' : 'DISCOVERY_AND_ERASURE_NOT_VERIFIED',
         nextStep: item.nextStep })),
     ],
     explanation: scopedComplete

@@ -26,6 +26,7 @@ MAINTENANCE_SCHEMA = "lattice.windows-project-purge-maintenance.v1"
 MAINTENANCE_PROFILE = "offline-project-purge"
 PROJECT_PURGE_SCHEMA = "lattice.project-purge.bundle.v1"
 PROJECT_PURGE_BINARY = "bin/lattice-project-purge.exe"
+PROJECT_PURGE_LIFECYCLE_BINARY = "bin/lattice-runtime.exe"
 PROJECT_PURGE_ENTRYPOINT = "apps/lattice-control/src/project-purge-client.mjs"
 PROJECT_PURGE_FILES = (
     PROJECT_PURGE_ENTRYPOINT,
@@ -34,6 +35,7 @@ PROJECT_PURGE_FILES = (
     "apps/lattice-control/src/project-purge-sqlite.mjs",
     "apps/lattice-control/src/project-purge-sqlite-swap.mjs",
     "apps/lattice-control/src/project-purge-report.mjs",
+    "apps/lattice-control/src/project-purge-finalize.mjs",
     "apps/lattice-control/src/project-purge-code-graph.mjs",
     "apps/lattice-control/src/code-graph.mjs",
     "apps/lattice-control/src/code-graph-model.mjs",
@@ -189,8 +191,9 @@ def inventory(root):
     return dict(sorted(result.items())), size
 
 
-def maintenance_files():
+def maintenance_files(lifecycle=False):
     return {PROJECT_PURGE_BINARY, *PROJECT_PURGE_FILES, "bin/latticed.exe",
+            *((PROJECT_PURGE_LIFECYCLE_BINARY,) if lifecycle else ()),
             *("node/" + name for name in ("node.exe", "LICENSE", "provenance.json")),
             *("bin/" + name for name in M.VC_RUNTIME_FILES),
             *("licenses/visual-cpp-runtime/" + name for name in
@@ -210,7 +213,7 @@ def verify(root, expected, *, maintenance=False):
                          "runtime_sha256", "vc_runtime", "project_purge"}
                 or data["profile"] != MAINTENANCE_PROFILE or data["distribution_status"] != "LOCAL_CANDIDATE"):
             raise M.Rejected("MAINTENANCE_MANIFEST_REJECTED")
-        if set(data["files"]) != maintenance_files():
+        if set(data["files"]) != maintenance_files("lifecycle_binary" in data.get("project_purge", {})):
             raise M.Rejected("MAINTENANCE_FILE_SET_REJECTED")
     for name in data["files"]:
         path = PurePosixPath(name)
@@ -222,8 +225,14 @@ def verify(root, expected, *, maintenance=False):
     if "project_purge" in data:
         feature = data["project_purge"]
         required = {PROJECT_PURGE_BINARY, *PROJECT_PURGE_FILES}
+        fields = {"schema", "entrypoint", "binary", "runtime_sha256", "files"}
+        if isinstance(feature, dict) and "lifecycle_binary" in feature:
+            if feature["lifecycle_binary"] != PROJECT_PURGE_LIFECYCLE_BINARY:
+                raise M.Rejected("PROJECT_PURGE_BUNDLE_REJECTED")
+            fields.add("lifecycle_binary")
+            required.add(PROJECT_PURGE_LIFECYCLE_BINARY)
         if (not isinstance(feature, dict)
-                or set(feature) != {"schema", "entrypoint", "binary", "runtime_sha256", "files"}
+                or set(feature) != fields
                 or feature["schema"] != PROJECT_PURGE_SCHEMA
                 or feature["entrypoint"] != PROJECT_PURGE_ENTRYPOINT
                 or feature["binary"] != PROJECT_PURGE_BINARY
@@ -275,9 +284,9 @@ def copy_tree(source, target, excluded=(), budget=None):
             raise M.Rejected("BUNDLE_SOURCE_CHANGED")
 
 
-def project_purge_payload(binary, expected, source):
+def project_purge_payload(binary, expected, source, lifecycle_binary=None, lifecycle_expected=None):
     """Select only the reviewed maintenance executable and its software closure."""
-    if binary is None and expected is None and source is None:
+    if binary is None and expected is None and source is None and lifecycle_binary is None and lifecycle_expected is None:
         return None
     if binary is None or expected is None or source is None:
         raise M.Rejected("PROJECT_PURGE_SUPPLY_REQUIRED")
@@ -289,6 +298,12 @@ def project_purge_payload(binary, expected, source):
     if sha(binary) != expected:
         raise M.Rejected("PROJECT_PURGE_BINARY_DIGEST_REJECTED")
     result = {PROJECT_PURGE_BINARY: (binary, expected)}
+    if lifecycle_binary is not None or lifecycle_expected is not None:
+        if lifecycle_binary is None or lifecycle_expected is None or not lifecycle_binary.is_absolute():
+            raise M.Rejected("PROJECT_PURGE_LIFECYCLE_SUPPLY_REQUIRED")
+        if sha(lifecycle_binary) != lifecycle_expected:
+            raise M.Rejected("PROJECT_PURGE_LIFECYCLE_DIGEST_REJECTED")
+        result[PROJECT_PURGE_LIFECYCLE_BINARY] = (lifecycle_binary, lifecycle_expected)
     for name in PROJECT_PURGE_FILES:
         original = source / name
         if not original.exists():
@@ -318,11 +333,13 @@ def copy_project_purge(root, payload, runtime_sha, budget):
     copy_payload(root, payload, budget)
     return {"schema": PROJECT_PURGE_SCHEMA, "entrypoint": PROJECT_PURGE_ENTRYPOINT,
             "binary": PROJECT_PURGE_BINARY, "runtime_sha256": runtime_sha,
+            **({"lifecycle_binary": PROJECT_PURGE_LIFECYCLE_BINARY} if PROJECT_PURGE_LIFECYCLE_BINARY in payload else {}),
             "files": {name: value[1] for name, value in sorted(payload.items())}}
 
 
 def build_maintenance(root, runtime, runtime_sha, node, vc_redist, vc_license, vc_redist_list,
-                      project_purge_binary, project_purge_sha256, project_purge_source):
+                      project_purge_binary, project_purge_sha256, project_purge_source,
+                      lifecycle_binary=None, lifecycle_sha256=None):
     """An offline maintenance payload, not an installable dependency bundle."""
     if not all((runtime, runtime_sha, node, vc_redist, vc_license, vc_redist_list,
                 project_purge_binary, project_purge_sha256, project_purge_source)):
@@ -340,7 +357,7 @@ def build_maintenance(root, runtime, runtime_sha, node, vc_redist, vc_license, v
             raise M.Rejected("BUNDLE_SOURCE_OUTPUT_OVERLAP")
     if sha(runtime) != runtime_sha:
         raise M.Rejected("RUNTIME_DIGEST_MISMATCH")
-    purge = project_purge_payload(project_purge_binary, project_purge_sha256, project_purge_source)
+    purge = project_purge_payload(project_purge_binary, project_purge_sha256, project_purge_source, lifecycle_binary, lifecycle_sha256)
     verify_node(node)
     crt = M.vc_runtime_files(vc_redist, required=True)
     verify_vc_documents(vc_license, vc_redist_list)
@@ -372,10 +389,11 @@ def build_maintenance(root, runtime, runtime_sha, node, vc_redist, vc_license, v
 
 def build(root, runtime, runtime_sha, postgres, python, git, graphify, node=None, archive=None,
           vc_redist=None, vc_license=None, vc_redist_list=None,
-          project_purge_binary=None, project_purge_sha256=None, project_purge_source=None):
+          project_purge_binary=None, project_purge_sha256=None, project_purge_source=None,
+          lifecycle_binary=None, lifecycle_sha256=None):
     if sha(runtime) != runtime_sha:
         raise M.Rejected("RUNTIME_DIGEST_MISMATCH")
-    purge_payload = project_purge_payload(project_purge_binary, project_purge_sha256, project_purge_source)
+    purge_payload = project_purge_payload(project_purge_binary, project_purge_sha256, project_purge_source, lifecycle_binary, lifecycle_sha256)
     if not root.is_absolute():
         raise M.Rejected("ABSOLUTE_PATH_REQUIRED")
     M.CONFIG.regular_path(root)
@@ -497,6 +515,8 @@ def main():
     parser.add_argument("--project-purge-binary", type=Path, help="opt in to the offline purge capability with its reviewed executable")
     parser.add_argument("--project-purge-sha256", help="expected SHA-256 of the purge executable; required with purge capability")
     parser.add_argument("--project-purge-source", type=Path, help="repository root supplying the exact purge CLI dependency closure")
+    parser.add_argument("--lifecycle-binary", type=Path, help="matching Registry-bound Bot lifecycle CLI executable")
+    parser.add_argument("--lifecycle-sha256", help="expected SHA-256 of the lifecycle CLI executable")
     parser.add_argument("--postgres", type=Path)
     parser.add_argument("--python", type=Path)
     parser.add_argument("--git", type=Path)
@@ -506,7 +526,7 @@ def main():
     parser.add_argument("--graph-source", type=Path)
     parser.add_argument("--wsl", type=Path)
     args = parser.parse_args()
-    if args.action not in ("build", "build-maintenance") and any((args.project_purge_binary, args.project_purge_sha256, args.project_purge_source)):
+    if args.action not in ("build", "build-maintenance") and any((args.project_purge_binary, args.project_purge_sha256, args.project_purge_source, args.lifecycle_binary, args.lifecycle_sha256)):
         raise M.Rejected("PROJECT_PURGE_BUILD_OPTION_ONLY")
     if args.action == "supply-node":
         if args.node is None:
@@ -520,13 +540,13 @@ def main():
             raise M.Rejected("MAINTENANCE_OPTION_REJECTED")
         result = build_maintenance(args.bundle, args.runtime, args.runtime_sha256, args.node,
                                    args.vc_redist, args.vc_license, args.vc_redist_list,
-                                   args.project_purge_binary, args.project_purge_sha256, args.project_purge_source)
+                                   args.project_purge_binary, args.project_purge_sha256, args.project_purge_source, args.lifecycle_binary, args.lifecycle_sha256)
     elif args.action == "build":
         if not all((args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify, args.node)):
             raise M.Rejected("BUNDLE_BUILD_ARGUMENTS_REQUIRED")
         result = build(args.bundle, args.runtime, args.runtime_sha256, args.postgres, args.python, args.git, args.graphify,
                        args.node, args.archive, args.vc_redist, args.vc_license, args.vc_redist_list,
-                       args.project_purge_binary, args.project_purge_sha256, args.project_purge_source)
+                       args.project_purge_binary, args.project_purge_sha256, args.project_purge_source, args.lifecycle_binary, args.lifecycle_sha256)
     elif args.action == "install":
         if not all((args.sha256, args.state, args.graph_source, args.wsl)):
             raise M.Rejected("BUNDLE_INSTALL_ARGUMENTS_REQUIRED")

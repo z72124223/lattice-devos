@@ -1,7 +1,8 @@
 //! Dedicated local maintenance binary. Never loaded by the ordinary MCP runtime.
 use lattice_postgres_store::{
-    connect_project_purge, execute_project_purge_with_graph_source,
+    connect_project_purge, execute_bot_project_purge, execute_project_purge_with_graph_source,
     inspect_project_purge_bot_lifecycle, inspect_project_purge_graph,
+    install_bot_project_ownership,
 };
 use std::io::{self, Read};
 use std::process::ExitCode;
@@ -66,6 +67,51 @@ fn run() -> Result<serde_json::Value, &'static str> {
             request["projectId"]
                 .as_str()
                 .ok_or("PROJECT_PURGE_INPUT_REJECTED")?,
+        );
+    }
+    if matches!(
+        request["action"].as_str(),
+        Some("install-bot-ownership" | "preview-bot" | "apply-bot" | "status-bot")
+    ) {
+        let service = bot_service
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or("BOT_LIFECYCLE_SERVICE_NOT_CONFIGURED")?;
+        if service.len() != 3
+            || service
+                .keys()
+                .any(|key| !["port", "runId", "systemIdentifier"].contains(&key.as_str()))
+        {
+            return Err("BOT_LIFECYCLE_CONFIGURATION_REJECTED");
+        }
+        let bot_port = service["port"]
+            .as_u64()
+            .and_then(|v| u16::try_from(v).ok())
+            .ok_or("BOT_LIFECYCLE_CONFIGURATION_REJECTED")?;
+        let bot_run = service["runId"]
+            .as_str()
+            .ok_or("BOT_LIFECYCLE_CONFIGURATION_REJECTED")?;
+        let system = service["systemIdentifier"]
+            .as_str()
+            .ok_or("BOT_LIFECYCLE_CONFIGURATION_REJECTED")?;
+        if request["action"] == "install-bot-ownership" {
+            if request.as_object().unwrap().len() != 3
+                || request["schema"] != "lattice.project-purge.request.v1"
+                || request["authorization"] != "INSTALL_BOT_PROJECT_OWNERSHIP"
+            {
+                return Err("BOT_LIFECYCLE_INPUT_REJECTED");
+            }
+            return install_bot_project_ownership(bot_port, bot_run, &password, system);
+        }
+        let (mut client, target) = connect_project_purge(port, &run_id, &password)?;
+        return execute_bot_project_purge(
+            &mut client,
+            &target,
+            bot_port,
+            bot_run,
+            &password,
+            system,
+            &request,
         );
     }
     let (mut client, target) = connect_project_purge(port, &run_id, &password)?;
