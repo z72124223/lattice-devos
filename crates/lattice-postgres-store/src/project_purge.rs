@@ -1,6 +1,7 @@
 //! Bounded operator-only physical erasure for a complete Registry command suffix.
 //! A successful result is deliberately PG-only; the caller must separately erase
 //! its local catalog/files and cannot infer success from a project being absent.
+use crate::project_purge_snapshot::SnapshotHasher;
 use crate::project_registry::{load_registry_for_maintenance, load_registry_for_transition};
 use crate::registry_epoch::{self, EpochMigration};
 use crate::{DatabaseRole, MigrationTarget, verify_postgres_schema};
@@ -8,12 +9,13 @@ use lattice_contracts::ProjectId;
 use lattice_project_registry::{
     VerifiedRegistryState, preview_required_redactions, project_purge_prefix,
 };
+use postgres::fallible_iterator::FallibleIterator;
 use postgres::{Client, Config, GenericClient, IsolationLevel, NoTls, Transaction};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const PROJECT_PURGE_SQL: &str = include_str!("../../../db/extensions/project-purge/v1.sql");
 type GraphSourceResolver<'a> = dyn Fn(&str) -> Result<Vec<String>> + 'a;
@@ -44,13 +46,10 @@ pub fn inspect_project_purge_graph(client: &mut Client) -> Result<Value> {
                 .contains(&name.as_str())
         })
         .collect();
-    let rows = snapshots(&mut tx, &tables)?;
-    let counts: BTreeMap<_, _> = rows
-        .iter()
-        .map(|(key, values)| (key.clone(), values.len()))
-        .collect();
+    let rows = stream_snapshot(&mut tx, &tables, None, None, |_| false)?;
+    let counts = rows.counts;
     let empty = counts.values().all(|count| *count == 0);
-    let snapshot = digest(&serde_json::to_vec(&rows).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
+    let snapshot = rows.digest;
     db(tx.commit())?;
     Ok(
         json!({"schema":"lattice.project-purge.graph-inventory.v1","ownership":"LATTICE",
@@ -93,22 +92,31 @@ fn operation_key(operation: &str) -> String {
     )
 }
 fn references(value: &Value, project: &str, canonical: &str, keys: &[&String]) -> bool {
+    references_normalized(value, &canonical.replace('\\', "/").to_lowercase(), &|s| {
+        s.contains(project) || keys.iter().any(|key| s.contains(key.as_str()))
+    })
+}
+fn reference_text(s: &str, normalized_path: &str, matches_key: &impl Fn(&str) -> bool) -> bool {
+    matches_key(s)
+        || s.replace('\\', "/").to_lowercase().contains(normalized_path)
+        // JSON scalars other than strings cannot contain a nested reference.
+        || (s.trim_start_matches([' ', '\t', '\r', '\n']).starts_with(['{', '[', '"'])
+            && serde_json::from_str::<Value>(s).is_ok_and(|nested|
+                references_normalized(&nested, normalized_path, matches_key)))
+}
+fn references_normalized(
+    value: &Value,
+    normalized_path: &str,
+    matches_key: &impl Fn(&str) -> bool,
+) -> bool {
     match value {
-        Value::String(s) => {
-            s.contains(project)
-                || s.replace('\\', "/")
-                    .to_lowercase()
-                    .contains(&canonical.replace('\\', "/").to_lowercase())
-                || keys.iter().any(|key| s.contains(key.as_str()))
-                || serde_json::from_str::<Value>(s)
-                    .is_ok_and(|nested| references(&nested, project, canonical, keys))
-        }
+        Value::String(s) => reference_text(s, normalized_path, matches_key),
         Value::Array(values) => values
             .iter()
-            .any(|v| references(v, project, canonical, keys)),
+            .any(|v| references_normalized(v, normalized_path, matches_key)),
         Value::Object(values) => values.iter().any(|(k, v)| {
-            references(&Value::String(k.clone()), project, canonical, keys)
-                || references(v, project, canonical, keys)
+            reference_text(k, normalized_path, matches_key)
+                || references_normalized(v, normalized_path, matches_key)
         }),
         _ => false,
     }
@@ -423,6 +431,9 @@ fn all_tables<C: GenericClient>(client: &mut C) -> Result<Vec<(String, String)>>
         }
         tables.push((schema, name));
     }
+    // The old BTreeMap serialized table keys in Rust byte order, independent
+    // of the database locale. Preserve that order before streaming the map.
+    tables.sort_by_cached_key(|(schema, name)| format!("{schema}.{name}"));
     Ok(tables)
 }
 
@@ -466,6 +477,179 @@ fn snapshots<C: GenericClient>(
     Ok(result)
 }
 
+struct SnapshotSelection<'a> {
+    predicates: &'a [(String, String)],
+    params: &'a [&'a (dyn postgres::types::ToSql + Sync)],
+}
+struct StreamedSnapshot {
+    digest: String,
+    scope_digest: Option<String>,
+    survivor_digest: String,
+    counts: BTreeMap<String, u64>,
+    selected_counts: BTreeMap<String, u64>,
+    blockers: Vec<Value>,
+}
+
+fn snapshot_statement_budget(started: Instant, original_ms: i64) -> Result<String> {
+    let remaining = Duration::from_mins(1)
+        .checked_sub(started.elapsed())
+        .ok_or("PROJECT_PURGE_SNAPSHOT_DEADLINE_EXCEEDED")?;
+    let millis = i64::try_from(remaining.as_millis())
+        .map_err(|_| "PROJECT_PURGE_SNAPSHOT_DEADLINE_EXCEEDED")?;
+    if millis == 0 {
+        return Err("PROJECT_PURGE_SNAPSHOT_DEADLINE_EXCEEDED");
+    }
+    Ok(if original_ms > 0 {
+        millis.min(original_ms)
+    } else {
+        millis
+    }
+    .to_string())
+}
+
+fn set_snapshot_budget<C: GenericClient>(
+    client: &mut C,
+    started: Instant,
+    original_ms: i64,
+) -> Result<()> {
+    let budget = snapshot_statement_budget(started, original_ms)?;
+    db(client.query_one("SELECT set_config('statement_timeout',$1,true)", &[&budget]))?;
+    Ok(())
+}
+
+// Stream sorted row strings through the exact old JSON serialization. Only a
+// single row payload is interpreted at a time; cardinality and total bytes no
+// longer bound unrelated surviving projects. An oversized individual row and
+// PostgreSQL's existing statement/lock deadlines still fail closed.
+#[allow(clippy::too_many_lines)]
+fn stream_snapshot<C: GenericClient>(
+    client: &mut C,
+    tables: &[(String, String)],
+    scope: Option<&Value>,
+    selection: Option<&SnapshotSelection<'_>>,
+    mut has_reference: impl FnMut(&str) -> bool,
+) -> Result<StreamedSnapshot> {
+    let started = Instant::now();
+    let original_timeout: i64 = db(client.query_one(
+        "SELECT setting::bigint FROM pg_settings WHERE name='statement_timeout'",
+        &[],
+    ))?
+    .get(0);
+    let mut physical = SnapshotHasher::new(scope)?;
+    let mut survivors = SnapshotHasher::new(None)?;
+    let mut counts = BTreeMap::new();
+    let mut selected_counts = BTreeMap::new();
+    let mut blockers = Vec::new();
+    for (schema, name) in tables {
+        if schema == "project_purge" {
+            continue;
+        }
+        let table = format!("{schema}.{name}");
+        let retained_table = selection.is_some()
+            && !table.starts_with("control.project_registry_")
+            && schema != "registry_epoch";
+        let predicate =
+            selection.and_then(|value| value.predicates.iter().find(|(key, _)| key == &table));
+        let (condition, parameters) =
+            predicate.map_or(("false", ""), |(_, value)| (value.as_str(), PARAMS));
+        let params = if predicate.is_some() {
+            selection.map_or(&[][..], |value| value.params)
+        } else {
+            &[][..]
+        };
+        // OFFSET 0 is a planner barrier: serialize each row once, rather than
+        // expanding to_jsonb separately for the size guard, output and sort.
+        let query = format!(
+            "SELECT CASE WHEN octet_length(source.value)<=67108864 THEN source.value ELSE NULL END,source.selected FROM (SELECT to_jsonb(p)::text value,({condition}) IS TRUE selected FROM ONLY {}.{} p WHERE true{parameters} OFFSET 0) source ORDER BY source.value COLLATE \"C\"",
+            quoted(schema),
+            quoted(name)
+        );
+        set_snapshot_budget(client, started, original_timeout)?;
+        db(client.execute(
+            &format!("DECLARE lattice_purge_rows NO SCROLL CURSOR FOR {query}"),
+            params,
+        ))?;
+        physical.table(&table)?;
+        if retained_table {
+            survivors.table(&table)?;
+        }
+        let mut count = 0u64;
+        let mut selected = 0u64;
+        let mut references = 0u64;
+        loop {
+            set_snapshot_budget(client, started, original_timeout)?;
+            let mut rows = db(client.query_raw(
+                "FETCH FORWARD 512 FROM lattice_purge_rows",
+                std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>(),
+            ))?;
+            let mut fetched = 0usize;
+            while let Some(row) = db(rows.next())? {
+                if started.elapsed() > Duration::from_mins(1) {
+                    return Err("PROJECT_PURGE_SNAPSHOT_DEADLINE_EXCEEDED");
+                }
+                fetched += 1;
+                let raw = row
+                    .get::<_, Option<String>>(0)
+                    .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+                let is_selected: bool = row.get(1);
+                physical.row(&raw)?;
+                count = count
+                    .checked_add(1)
+                    .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+                if is_selected {
+                    selected = selected
+                        .checked_add(1)
+                        .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+                } else if retained_table {
+                    survivors.row(&raw)?;
+                    if has_reference(&raw) {
+                        references = references
+                            .checked_add(1)
+                            .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+                    }
+                }
+            }
+            if fetched < 512 {
+                break;
+            }
+        }
+        set_snapshot_budget(client, started, original_timeout)?;
+        db(client.batch_execute("CLOSE lattice_purge_rows"))?;
+        physical.end_table();
+        if retained_table {
+            survivors.end_table();
+        }
+        counts.insert(table.clone(), count);
+        if predicate.is_some() {
+            selected_counts.insert(table.clone(), selected);
+        }
+        if references > 0 {
+            blockers.push(json!({"code":"CROSS_SCOPE_OR_UNSUPPORTED_REFERENCE","table":table,"count":references}));
+        }
+    }
+    snapshot_statement_budget(started, original_timeout)?;
+    db(client.query_one(
+        "SELECT set_config('statement_timeout',$1,true)",
+        &[&original_timeout.to_string()],
+    ))?;
+    let (digest, scope_digest) = physical.finish();
+    Ok(StreamedSnapshot {
+        digest,
+        scope_digest,
+        survivor_digest: survivors.finish().0,
+        counts,
+        selected_counts,
+        blockers,
+    })
+}
+
+fn snapshot_digest<C: GenericClient>(
+    client: &mut C,
+    tables: &[(String, String)],
+) -> Result<String> {
+    Ok(stream_snapshot(client, tables, None, None, |_| false)?.digest)
+}
+
 #[allow(clippy::too_many_lines)]
 fn prepare<C: GenericClient>(
     client: &mut C,
@@ -506,10 +690,28 @@ fn prepare<C: GenericClient>(
     let streams: Vec<String> = db(client.query("SELECT encode(stream_id,'hex') FROM ONLY control.task_ledger_streams WHERE project_id=$1 ORDER BY stream_id", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
     let tasks: Vec<String> = db(client.query("SELECT task_ref::text FROM ONLY control.task_submission_envelopes WHERE project_id=$1 ORDER BY task_ref", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
     let tables = all_tables(client)?;
-    let physical = snapshots(client, &tables)?;
-    let graph_rows = physical
-        .get("memory.codebase_memory_analyses")
-        .map_or(0, Vec::len);
+    let table_names: BTreeSet<String> = tables
+        .iter()
+        .map(|(schema, name)| format!("{schema}.{name}"))
+        .collect();
+    let mut graph_groups = BTreeMap::<String, u64>::new();
+    if table_names.contains("memory.codebase_memory_analyses") {
+        let mut rows = db(client.query_raw("SELECT encode(configuration_digest,'hex'),count(*)::bigint FROM ONLY memory.codebase_memory_analyses GROUP BY configuration_digest", std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>()))?;
+        while let Some(row) = db(rows.next())? {
+            graph_groups.insert(
+                row.get(0),
+                u64::try_from(row.get::<_, i64>(1))
+                    .map_err(|_| "PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?,
+            );
+            if graph_groups.len() > 100_000 {
+                return Err("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED");
+            }
+        }
+    }
+    let graph_rows = graph_groups
+        .values()
+        .try_fold(0u64, |sum, count| sum.checked_add(*count))
+        .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
     let mut graph_configurations = Vec::new();
     let mut survivor_graph_configurations = Vec::new();
     let mut graph_proof = json!(null);
@@ -550,35 +752,28 @@ fn prepare<C: GenericClient>(
                 _ => blockers.push(json!({"code":"GRAPH_SOURCE_CONFIGURATION_NOT_PROVEN"})),
             }
         }
-        let mut target_count = 0usize;
-        let mut survivor_count = 0usize;
-        for row in physical
-            .get("memory.codebase_memory_analyses")
-            .into_iter()
-            .flatten()
-        {
-            let value: Value =
-                serde_json::from_str(row).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?;
-            let configuration = value["configuration_digest"]
-                .as_str()
-                .and_then(|value| value.strip_prefix("\\x"))
-                .unwrap_or("");
-            if graph_configurations
-                .iter()
-                .any(|value| value == configuration)
-            {
-                target_count += 1;
-            } else if survivor_graph_configurations
-                .iter()
-                .any(|value| value == configuration)
-            {
-                survivor_count += 1;
+        let mut target_count = 0u64;
+        let mut survivor_count = 0u64;
+        for (configuration, count) in &graph_groups {
+            if graph_configurations.contains(configuration) {
+                target_count += count;
+            } else if survivor_graph_configurations.contains(configuration) {
+                survivor_count += count;
             }
         }
+        let gateway_count: i64 = if table_names.contains("memory.openclaw_gateway_commands") {
+            db(client.query_one(
+                "SELECT count(*)::bigint FROM ONLY memory.openclaw_gateway_commands",
+                &[],
+            ))?
+            .get(0)
+        } else {
+            0
+        };
         graph_proof = json!({"binding":if graph_configurations.is_empty(){"NOT_PROVEN"}else{"RECOMPUTED_RUNTIME_SOURCE_CONFIGURATION"},
             "configurations":graph_configurations,"targetAnalyses":target_count,"survivorAnalyses":survivor_count,
             "unattributableAnalyses":graph_rows-target_count-survivor_count,
-            "unclassifiedGatewayCommands":physical.get("memory.openclaw_gateway_commands").map_or(0,Vec::len),
+            "unclassifiedGatewayCommands":gateway_count,
             "unmatchedDisposition":"UNATTRIBUTABLE_NOT_PROVEN_UNRELATED"});
         if graph_rows > target_count + survivor_count {
             blockers.push(json!({"code":"GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE","count":graph_rows-target_count-survivor_count}));
@@ -586,7 +781,7 @@ fn prepare<C: GenericClient>(
     }
     let mut claims = Vec::<String>::new();
     let mut roots = vec![json!({"path":canonical,"source":"POSTGRES_REGISTRY_OBSERVATION"})];
-    if physical.contains_key("control_product.conversation_claims") {
+    if table_names.contains("control_product.conversation_claims") {
         protected_roots.extend(db(client.query("SELECT worktree_path FROM ONLY control_product.conversation_claims WHERE project_id<>$1 AND worktree_path<>'' ORDER BY claim_id", &[&project]))?.into_iter().map(|row|row.get::<_,String>(0)));
         for row in db(client.query("SELECT claim_id,worktree_path FROM ONLY control_product.conversation_claims WHERE project_id=$1 ORDER BY claim_id", &[&project]))? {
             claims.push(row.get(0));
@@ -621,11 +816,19 @@ fn prepare<C: GenericClient>(
         .chain(claims.iter())
         .collect();
     if !epoch_policy {
+        let registry_tables: Vec<_> = tables
+            .iter()
+            .filter(|(schema, name)| schema == "control" && name.starts_with("project_registry_"))
+            .cloned()
+            .collect();
+        let registry_rows = snapshots(client, &registry_tables)?;
         blockers.extend(registry_survivor_reference_blockers(
-            &physical, project, canonical, &keys,
+            &registry_rows,
+            project,
+            canonical,
+            &keys,
         )?);
     }
-    let mut selected = BTreeMap::<String, Vec<String>>::new();
     let mut deletes = Vec::new();
     let mut predicates: Vec<(String, String)> = selectors()
         .into_iter()
@@ -648,80 +851,68 @@ fn prepare<C: GenericClient>(
             ("memory.codebase_memory_analyses".into(),format!("p.analysis_digest IN ({analyses})")),
         ]);
     }
+    let mut graph_reference_keys = BTreeSet::<String>::new();
     for (table, predicate) in predicates {
-        if !physical.contains_key(&table) {
+        if !table_names.contains(&table) {
             continue;
         }
-        let sql = format!(
-            "SELECT to_jsonb(p)::text FROM ONLY {table} p WHERE ({predicate}){PARAMS} ORDER BY to_jsonb(p)::text COLLATE \"C\""
-        );
-        let rows: Vec<String> = db(client.query(&sql, &params))?
-            .into_iter()
-            .map(|r| r.get(0))
-            .collect();
-        selected.insert(table.clone(), rows);
-        deletes.push((table, predicate));
-    }
-    let mut graph_reference_keys = Vec::<String>::new();
-    for (table, rows) in &selected {
         if table.starts_with("memory.") {
-            for row in rows {
-                let value: Value =
-                    serde_json::from_str(row).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?;
-                // Record IDs are content-addressed and may be identical in
-                // unrelated analyses; only source-qualified parent keys are
-                // cross-scope references.
-                for key in [
-                    "analysis_digest",
-                    "receipt_digest",
-                    "retrieval_digest",
-                    "reflection_receipt_digest",
-                ] {
-                    if let Some(value) = value
-                        .get(key)
-                        .and_then(Value::as_str)
-                        .and_then(|v| v.strip_prefix("\\x"))
-                    {
-                        graph_reference_keys.push(value.to_owned());
-                    }
+            // Only parent identities are needed before scanning surviving rows.
+            // DISTINCT avoids retaining the same analysis key for every record.
+            let query = format!(
+                "SELECT DISTINCT reference FROM ONLY {table} p CROSS JOIN LATERAL (VALUES(to_jsonb(p)->>'analysis_digest'),(to_jsonb(p)->>'receipt_digest'),(to_jsonb(p)->>'retrieval_digest'),(to_jsonb(p)->>'reflection_receipt_digest')) keys(reference) WHERE ({predicate}){PARAMS} AND reference IS NOT NULL"
+            );
+            let mut rows = db(client.query_raw(&query, params.iter().copied()))?;
+            while let Some(row) = db(rows.next())? {
+                let value: String = row.get(0);
+                if let Some(value) = value.strip_prefix("\\x") {
+                    graph_reference_keys.insert(value.to_owned());
+                }
+                if graph_reference_keys.len() > 100_000 {
+                    return Err("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED");
                 }
             }
         }
+        deletes.push((table, predicate));
     }
     let mut keys = keys;
     keys.extend(graph_reference_keys.iter());
-    // Registry references were scanned through their precise ownership above.
-    // Full replay, exact suffix and post-erasure verification separately prove
-    // its survivor bytes; the aggregate checkpoint is not survivor content.
-    let mut survivors = physical.clone();
-    for (table, rows) in &physical {
-        if table.starts_with("control.project_registry_") || table.starts_with("registry_epoch.") {
-            continue;
-        }
-        let selected_rows = selected.get(table).cloned().unwrap_or_default();
-        let retained: Vec<String> = rows
-            .iter()
-            .filter(|r| !selected_rows.contains(r))
-            .cloned()
-            .collect();
-        let reference_count = retained
-            .iter()
-            .filter(|r| {
-                serde_json::from_str(r).map_or(true, |v| references(&v, project, canonical, &keys))
-            })
-            .count();
-        if reference_count > 0 {
-            blockers.push(json!({"code":"CROSS_SCOPE_OR_UNSUPPORTED_REFERENCE","table":table,"count":reference_count}));
-        }
-        survivors.insert(table.clone(), retained);
+    // Preserve v2/v3/v4 scope bytes, including their full legacy rows map.
+    // Serialization streams those bytes into SHA-256 without storing the map.
+    let maintenance_installed = table_names.contains("project_purge.identity");
+    let mut scope_value = json!({"schema":"lattice.project-purge.scope.v2","database":database,"project":project,"operation":operation,"maintenanceExtensionInstalled":maintenance_installed,"rows":null});
+    if epoch_policy {
+        scope_value["schema"] = json!("lattice.project-purge.scope.v3");
+        scope_value["registryPolicy"] = json!("MINIMAL_ATTESTATION");
     }
-    survivors.retain(|table, _| {
-        !table.starts_with("control.project_registry_") && !table.starts_with("registry_epoch.")
-    });
-    let mut counts: BTreeMap<String, u64> = selected
-        .iter()
-        .map(|(k, v)| (k.clone(), v.len() as u64))
-        .collect();
+    if !graph_configurations.is_empty() {
+        scope_value["schema"] = json!("lattice.project-purge.scope.v4");
+        scope_value["graphSourceProof"] = graph_proof.clone();
+    }
+    let reference_keys = aho_corasick::AhoCorasick::new(
+        std::iter::once(project).chain(keys.iter().map(|key| key.as_str())),
+    )
+    .map_err(|_| "PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+    let normalized_path = canonical.replace('\\', "/").to_lowercase();
+    let snapshot = stream_snapshot(
+        client,
+        &tables,
+        Some(&scope_value),
+        Some(&SnapshotSelection {
+            predicates: &deletes,
+            params: &params,
+        }),
+        |raw| {
+            serde_json::from_str(raw).map_or(true, |value| {
+                references_normalized(&value, &normalized_path, &|text| {
+                    reference_keys.is_match(text)
+                })
+            })
+        },
+    )?;
+    blockers.extend(snapshot.blockers);
+    let scope_digest = snapshot.scope_digest.ok_or("PROJECT_PURGE_SERIALIZATION")?;
+    let mut counts = snapshot.selected_counts;
     if let Some(prior) = &prefix {
         counts.insert(
             "control.project_registry_commands".into(),
@@ -740,23 +931,6 @@ fn prepare<C: GenericClient>(
             state.checkpoint().reservation_count() - prior.checkpoint().reservation_count(),
         );
     }
-    // Maintenance receipts are excluded from the data snapshot, but installing
-    // the extension changes apply eligibility and must invalidate old inventory.
-    let maintenance_installed = tables
-        .iter()
-        .any(|(schema, name)| schema == "project_purge" && name == "identity");
-    let mut scope_value = json!({"schema":"lattice.project-purge.scope.v2","database":database,"project":project,"operation":operation,"maintenanceExtensionInstalled":maintenance_installed,"rows":physical});
-    // Preserve old v2 receipt/plan bindings exactly; explicit attestation is v3.
-    if epoch_policy {
-        scope_value["schema"] = json!("lattice.project-purge.scope.v3");
-        scope_value["registryPolicy"] = json!("MINIMAL_ATTESTATION");
-    }
-    if !graph_configurations.is_empty() {
-        scope_value["schema"] = json!("lattice.project-purge.scope.v4");
-        scope_value["graphSourceProof"] = graph_proof.clone();
-    }
-    let scope_digest =
-        digest(&serde_json::to_vec(&scope_value).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
     let mut epoch = None;
     let mut history = json!(null);
     if epoch_policy {
@@ -829,9 +1003,7 @@ fn prepare<C: GenericClient>(
         tasks,
         claims,
         deletes,
-        survivor_digest: digest(
-            &serde_json::to_vec(&survivors).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?,
-        ),
+        survivor_digest: snapshot.survivor_digest,
     })
 }
 
@@ -891,14 +1063,14 @@ fn erase(
     if &readback != prefix {
         return Err("PROJECT_PURGE_READBACK_FAILED");
     }
-    let tables = all_tables(transaction)?;
-    let mut survivors = snapshots(transaction, &tables)?;
-    survivors.retain(|table, _| {
-        !table.starts_with("control.project_registry_") && !table.starts_with("registry_epoch.")
-    });
-    if digest(&serde_json::to_vec(&survivors).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?)
-        != plan.survivor_digest
-    {
+    let tables: Vec<_> = all_tables(transaction)?
+        .into_iter()
+        .filter(|(schema, name)| {
+            !format!("{schema}.{name}").starts_with("control.project_registry_")
+                && schema != "registry_epoch"
+        })
+        .collect();
+    if snapshot_digest(transaction, &tables)? != plan.survivor_digest {
         return Err("PROJECT_PURGE_SURVIVOR_CHANGED");
     }
     Ok(())
@@ -923,10 +1095,7 @@ fn replay_receipt<C: GenericClient>(
         return Err("PROJECT_PURGE_IDEMPOTENCY_CONFLICT");
     }
     let tables = all_tables(client)?;
-    let current = digest(
-        &serde_json::to_vec(&snapshots(client, &tables)?)
-            .map_err(|_| "PROJECT_PURGE_SERIALIZATION")?,
-    );
+    let current = snapshot_digest(client, &tables)?;
     if current != text(&result, "afterDigest")? {
         return Err("PROJECT_PURGE_READBACK_CHANGED");
     }
@@ -1184,10 +1353,7 @@ pub fn execute_project_purge_with_graph_source(
     }
     erase(&mut tx, target, project, &plan)?;
     let tables = all_tables(&mut tx)?;
-    let after_digest = digest(
-        &serde_json::to_vec(&snapshots(&mut tx, &tables)?)
-            .map_err(|_| "PROJECT_PURGE_SERIALIZATION")?,
-    );
+    let after_digest = snapshot_digest(&mut tx, &tables)?;
     let mut result = json!({"schema":SCHEMA,"status":"PURGED","phase":"POSTGRES_ONLY","operationId":operation,"scopeDigest":scope,"afterDigest":after_digest,"registryStrategy":plan.public["registryStrategy"],"counts":plan.public["counts"],"blockers":[]});
     result["graphSourceProof"] = plan.public["graphSourceProof"].clone();
     if let Some(epoch) = &plan.epoch {
@@ -1221,6 +1387,117 @@ mod tests {
     use super::{references, registry_survivor_reference_blockers};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn snapshot_budget_never_disables_or_extends_the_statement_deadline() {
+        let now = std::time::Instant::now();
+        assert_eq!(
+            super::snapshot_statement_budget(now, 15_000).unwrap(),
+            "15000"
+        );
+        let nearly_expired = now.checked_sub(std::time::Duration::from_secs(59)).unwrap();
+        let remaining: u64 = super::snapshot_statement_budget(nearly_expired, 30_000)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=1_000).contains(&remaining));
+        assert!(
+            super::snapshot_statement_budget(
+                now.checked_sub(std::time::Duration::from_mins(1)).unwrap(),
+                30_000
+            )
+            .is_err()
+        );
+        let bounded: u64 = super::snapshot_statement_budget(now, 0)
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60_000).contains(&bounded));
+    }
+
+    #[test]
+    fn compiled_reference_keys_preserve_contains_existence_semantics() {
+        for patterns in [
+            vec![],
+            vec![""],
+            vec!["abc", "abc", "bc", "繁體"],
+            vec!["target-ID", "AbC"],
+        ] {
+            let matcher = aho_corasick::AhoCorasick::new(&patterns).unwrap();
+            for text in [
+                "",
+                "abc",
+                "ABC",
+                "zabc",
+                "target-id",
+                "target-ID",
+                "繁體字",
+                "\\u0061bc",
+            ] {
+                assert_eq!(
+                    matcher.is_match(text),
+                    patterns.iter().any(|pattern| text.contains(pattern))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn normalized_reference_scan_preserves_legacy_nested_json_semantics() {
+        fn legacy(value: &Value, project: &str, canonical: &str, keys: &[&String]) -> bool {
+            match value {
+                Value::String(s) => {
+                    s.contains(project)
+                        || s.replace('\\', "/")
+                            .to_lowercase()
+                            .contains(&canonical.replace('\\', "/").to_lowercase())
+                        || keys.iter().any(|key| s.contains(key.as_str()))
+                        || serde_json::from_str::<Value>(s)
+                            .is_ok_and(|nested| legacy(&nested, project, canonical, keys))
+                }
+                Value::Array(values) => values
+                    .iter()
+                    .any(|value| legacy(value, project, canonical, keys)),
+                Value::Object(values) => values.iter().any(|(key, value)| {
+                    legacy(&Value::String(key.clone()), project, canonical, keys)
+                        || legacy(value, project, canonical, keys)
+                }),
+                _ => false,
+            }
+        }
+        let key = "f".repeat(64);
+        let matcher = aho_corasick::AhoCorasick::new(["target-id", key.as_str()]).unwrap();
+        for value in [
+            json!(null),
+            json!(true),
+            json!(18_446_744_073_709_551_615_u64),
+            json!(0.125),
+            json!("ordinary field"),
+            json!("123"),
+            json!("false"),
+            json!(r#"  {"value":"\u0074arget-id"}"#),
+            json!({"nested":["C:/PROJECT/İ/src.rs", {"value":key}]}),
+            json!({"target-id":"unrelated"}),
+            json!("[malformed"),
+        ] {
+            let mut nested = value;
+            for _ in 0..4 {
+                assert_eq!(
+                    references(&nested, "target-id", "C:\\Project\\İ", &[&key]),
+                    legacy(&nested, "target-id", "C:\\Project\\İ", &[&key])
+                );
+                assert_eq!(
+                    super::references_normalized(
+                        &nested,
+                        &"C:\\Project\\İ".replace('\\', "/").to_lowercase(),
+                        &|s| matcher.is_match(s)
+                    ),
+                    legacy(&nested, "target-id", "C:\\Project\\İ", &[&key])
+                );
+                nested = Value::String(nested.to_string());
+            }
+        }
+    }
 
     fn registry_rows() -> BTreeMap<String, Vec<String>> {
         BTreeMap::from([

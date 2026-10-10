@@ -8,7 +8,7 @@ param(
     [string]$LegacyPurgeBinary,
     [string]$LifecycleBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','graph-ownership','upgrade')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','graph-ownership','upgrade','streaming','streaming-large')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -28,9 +28,9 @@ $serverIdentity = $null
 $botFixture = $null
 $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = $runId; status = 'RUNNING'; runRoot = $runRoot; productionDatabaseAccess = $false }
 
-if ($Scenario -eq 'upgrade' -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
+if ($Scenario -in @('upgrade','streaming','streaming-large') -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
 if ($Scenario -in @('bot-purge','all') -and [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $LifecycleBinary = Join-Path (Split-Path -Parent $RuntimeBinary) 'lattice-runtime.exe' }
-if ($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
+if ($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','streaming','streaming-large','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
 if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $inputBinaries += $EpochFixtureBinary }

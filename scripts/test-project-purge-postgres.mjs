@@ -10,8 +10,8 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade'].includes(args.scenario));
-if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large'].includes(args.scenario));
+if (['upgrade','streaming','streaming-large'].includes(args.scenario)) assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
 assert.equal(marker.port, port);
@@ -32,8 +32,9 @@ const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
 }));
 evidence.sourceHashes = sourceHashes();
 function command(executable, argv, env, input, label, expectedSuccess = true) {
+  const startedAt = performance.now();
   const result = spawnSync(executable, argv, { env, input, encoding: 'utf8', windowsHide: true, timeout: 180000, maxBuffer: 8 * 1024 * 1024 });
-  const record = { label, exitCode: result.status, error: result.error?.code ?? null, stdout: redact(result.stdout), stderr: redact(result.stderr) };
+  const record = { label, elapsedMs: Math.round(performance.now()-startedAt), exitCode: result.status, error: result.error?.code ?? null, stdout: redact(result.stdout), stderr: redact(result.stderr) };
   writeFileSync(path.join(runRoot, `${String(++sequence).padStart(2, '0')}-${label}.json`), JSON.stringify(record, null, 2) + '\n');
   if (expectedSuccess) assert.equal(result.status, 0, `${label}: ${record.stderr || record.error}`);
   return record;
@@ -97,6 +98,65 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
+  if(['streaming','streaming-large'].includes(args.scenario)) {
+    for(const large of [args.scenario==='streaming-large']) {
+      const {env,seeded}=establish(large?'streaming-large':'streaming-small');
+      env.LATTICE_DELIVERY_GIT_EXE=command('where.exe',['git.exe'],baseEnv,undefined,'fixture-git-path').stdout.trim().split(/\r?\n/)[0];
+      command(args['epoch-binary'],['graph-install'],env,undefined,'graph-install');
+      const graph=JSON.parse(command(args['epoch-binary'],[large?'graph-seed-large':'graph-seed-compat'],env,undefined,'graph-seed-streaming').stdout).records;
+      const survivor=graph.find(row=>row.source==='survivor');
+      const request={projectId:seeded.targetProjectId,operationId:large?'stream-large':'stream-small'};
+      const old=native(env,{action:'preview',...request},!large,args['legacy-binary']);
+      if(large) {
+        assert.equal(old.exitCode,2); assert.match(old.stderr,/PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED/);
+        const size=JSON.parse(sql(env,"SELECT json_build_object('count',count(*),'bytes',sum(octet_length(to_jsonb(p)::text))) FROM memory.codebase_memory_records p"));
+        assert.equal(size.count,110000); assert.ok(size.bytes>64*1024*1024);
+        check('valid-native-graph-fixture-exceeds-both-old-total-bounds',size);
+      }
+      const preview=native(env,{action:'preview',...request}).value;
+      assert.equal(preview.status,'READY',JSON.stringify(preview.blockers));
+      if(!large) {
+        assert.deepEqual(preview,old.value);
+        check('native-old-and-streaming-small-graph-preview-commitments-are-identical');
+      }
+      const analysis=sql(env,`SELECT encode(analysis_digest,'hex') FROM memory.codebase_memory_analyses WHERE configuration_digest=decode('${survivor.configuration}','hex')`);
+      assert.match(analysis,/^[a-f0-9]{64}$/);
+      const survivorDigest=()=>sql(env,`SELECT md5(string_agg(to_jsonb(p)::text,E'\\n' ORDER BY to_jsonb(p)::text COLLATE "C")) FROM memory.codebase_memory_records p WHERE analysis_digest=decode('${analysis}','hex')`);
+      const before=survivorDigest();
+      if(large) {
+        const last=sql(env,`SELECT subject FROM memory.codebase_memory_records WHERE analysis_digest=decode('${analysis}','hex') AND ordinal=55000`);
+        assert.match(last,/^[a-z0-9 ]+$/);
+        sql(env,`UPDATE memory.codebase_memory_records SET subject=subject||' ${seeded.targetProjectId}' WHERE analysis_digest=decode('${analysis}','hex') AND ordinal=55000`);
+        const cross=native(env,{action:'preview',...request}).value;
+        assert.ok(cross.blockers.some(row=>row.code==='CROSS_SCOPE_OR_UNSUPPORTED_REFERENCE'&&row.table==='memory.codebase_memory_records'));
+        sql(env,`UPDATE memory.codebase_memory_records SET subject='${last}' WHERE analysis_digest=decode('${analysis}','hex') AND ordinal=55000`);
+        assert.equal(survivorDigest(),before);
+        check('large-stream-still-scans-surviving-rows-for-target-references');
+      }
+      const apply={action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'};
+      const result=native(env,apply,true,large?args.binary:args['legacy-binary']).value;
+      assert.equal(result.status,'PURGED');
+      assert.equal(result.counts['memory.codebase_memory_records'],large?55000:8);
+      assert.equal(survivorDigest(),before);
+      assert.deepEqual(native(env,{action:'status',...request}).value,result);
+      assert.deepEqual(native(env,apply).value,result);
+      const readback=JSON.parse(command(args['epoch-binary'],['graph-verify-survivor'],env,undefined,'stream-survivor-readback').stdout);
+      assert.equal(readback.records[0].receipt,survivor.receipt);
+      assert.equal(readback.records[0].reflection,survivor.reflection);
+      check(large?'large-stream-purge-preserves-survivor-bytes-and-fresh-runtime-receipt':'stream-reader-replays-pre-streaming-purge-receipt-without-changing-digests');
+      if(!large) {
+        const second={projectId:seeded.survivorProjectId,operationId:'stream-reverse-compat'};
+        const legacy=native(env,{action:'preview',...second},true,args['legacy-binary']).value;
+        assert.deepEqual(native(env,{action:'preview',...second}).value,legacy);
+        const action={action:'apply',...second,expectedScopeDigest:legacy.scopeDigest,authorization:'ERASE_PROJECT_DATA'};
+        const written=native(env,action).value;
+        assert.equal(written.status,'PURGED');
+        assert.deepEqual(native(env,{action:'status',...second},true,args['legacy-binary']).value,written);
+        assert.deepEqual(native(env,action,true,args['legacy-binary']).value,written);
+        check('legacy-reader-replays-streaming-writer-receipt-and-old-plan-is-still-accepted');
+      }
+    }
+  }
   if(args.scenario==='graph-ownership') {
     const {env,seeded,root}=establish('graph-ownership');
     env.LATTICE_DELIVERY_GIT_EXE=command('where.exe',['git.exe'],baseEnv,undefined,'fixture-git-path').stdout.trim().split(/\r?\n/)[0];
