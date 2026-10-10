@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'upgrade'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'graph-ownership', 'upgrade'].includes(args.scenario));
 if (args.scenario === 'upgrade') assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -91,6 +91,60 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
+  if(args.scenario==='graph-ownership') {
+    const {env,seeded,root}=establish('graph-ownership');
+    env.LATTICE_DELIVERY_GIT_EXE=command('where.exe',['git.exe'],baseEnv,undefined,'fixture-git-path').stdout.trim().split(/\r?\n/)[0];
+    command(args['epoch-binary'],['graph-install'],env,undefined,'graph-install');
+    const records=JSON.parse(command(args['epoch-binary'],['graph-seed'],env,undefined,'graph-seed').stdout).records;
+    const targetGraph=records.find(record=>record.source==='target'), survivorGraph=records.find(record=>record.source==='survivor');
+    const before=rows(env);
+    const graphRows=()=>rows(env).filter(([table])=>table.startsWith('memory.'));
+    const beforeGraph=graphRows();
+    const request={projectId:seeded.targetProjectId,operationId:'fixture-graph-ownership'};
+    const preview=native(env,{action:'preview',...request}).value;
+    assert.equal(preview.status,'READY',JSON.stringify(preview.blockers));
+    for(const table of ['analyses','records','retrieval_audits','receipts','reflections']) assert.equal(preview.counts['memory.codebase_memory_'+table],1);
+    assert.equal(preview.graphSourceProof.targetAnalyses,1);
+    assert.equal(preview.graphSourceProof.survivorAnalyses,1);
+    assert.equal(preview.graphSourceProof.unattributableAnalyses,0);
+    assert.deepEqual(rows(env),before);
+    check('real-memory-rows-under-shared-project-key-classified-by-runtime-source-digest');
+    const changedGit=path.join(root,'different-git.exe');
+    writeFileSync(changedGit,'synthetic changed Git bytes; never executed');
+    const unknown=native({...env,LATTICE_DELIVERY_GIT_EXE:changedGit},{action:'preview',...request}).value;
+    assert.equal(unknown.status,'BLOCKED');
+    assert.ok(unknown.blockers.some(item=>item.code==='GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE'));
+    assert.deepEqual(graphRows(),beforeGraph);
+    check('unmatched-historical-runtime-configuration-blocks-without-claiming-unrelated');
+    assert.match(targetGraph.reflection,/^[a-f0-9]{64}$/);
+    sql(env,`UPDATE memory.codebase_memory_reflections SET project_id='purge-survivor' WHERE reflection_receipt_digest=decode('${targetGraph.reflection}','hex')`);
+    const crossBefore=rows(env);
+    const cross=native(env,{action:'preview',...request}).value;
+    assert.equal(cross.status,'BLOCKED');
+    assert.ok(cross.blockers.some(item=>item.code==='CROSS_SCOPE_OR_UNSUPPORTED_REFERENCE'&&item.table==='memory.codebase_memory_reflections'));
+    const refused=native(env,{action:'apply',...request,expectedScopeDigest:cross.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value;
+    assert.equal(refused.status,'BLOCKED'); assert.deepEqual(rows(env),crossBefore);
+    sql(env,`UPDATE memory.codebase_memory_reflections SET project_id='task032-delivery' WHERE reflection_receipt_digest=decode('${targetGraph.reflection}','hex')`);
+    assert.deepEqual(rows(env),before);
+    check('cross-project-reflection-reference-blocks-before-erasure-and-retains-every-row');
+    const applied=native(env,{action:'apply',...request,expectedScopeDigest:preview.scopeDigest,authorization:'ERASE_PROJECT_DATA'}).value;
+    assert.equal(applied.status,'PURGED',JSON.stringify(applied));
+    const after=graphRows();
+    const targetNeedles=[targetGraph.receipt,targetGraph.configuration];
+    assert.equal(selectRows(after,targetNeedles).length,0);
+    const survivorBefore=selectRows(beforeGraph,[survivorGraph.receipt,survivorGraph.configuration]);
+    assert.deepEqual(selectRows(after,[survivorGraph.receipt,survivorGraph.configuration]),survivorBefore);
+    for(const table of ['analyses','records','retrieval_audits','receipts','reflections']) {
+      const retained=after.find(([name])=>name==='memory.codebase_memory_'+table)[1];
+      assert.equal(retained.length,1);
+      assert.ok(beforeGraph.find(([name])=>name==='memory.codebase_memory_'+table)[1].some(row=>JSON.stringify(row)===JSON.stringify(retained[0])));
+    }
+    const survivor=JSON.parse(command(args['epoch-binary'],['graph-verify-survivor'],env,undefined,'graph-survivor-readback').stdout);
+    assert.equal(survivor.records[0].receipt,survivorGraph.receipt);
+    assert.equal(survivor.records[0].reflection,survivorGraph.reflection);
+    assert.equal(native(env,{action:'status',...request}).value.status,'PURGED');
+    check('real-graph-child-closure-erased-and-fresh-process-survivor-receipt-replays-unchanged');
+  }
   if (args.scenario === 'bot-inventory') {
     const runId=randomUUID().replaceAll('-',''), root=path.join(runRoot,'bot-inventory');
     mkdirSync(root); writeFileSync(path.join(root,'project-purge-fixture.marker'),runId+'\n');

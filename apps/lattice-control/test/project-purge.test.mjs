@@ -322,6 +322,28 @@ test('native lifecycle inventory distinguishes absent, unreachable, observed and
   assert.equal(report(observed).external.find(scope => scope.kind === 'botLifecycle').disposition, 'PRODUCT_WORK_REQUIRED');
 });
 
+test('Graph completion requires native source ownership and matching survivor readback', async t => {
+  const f = await fixture(t), plan = await f.preview();
+  const proof = { binding: 'RECOMPUTED_RUNTIME_SOURCE_CONFIGURATION', targetAnalyses: 1,
+    survivorAnalyses: 1, unattributableAnalyses: 0, unclassifiedGatewayCommands: 0 };
+  const observation = { schema: 'lattice.project-purge.graph-inventory.v1', ownership: 'LATTICE',
+    discovery: 'OBSERVED', scope: 'VERIFIED_MAIN_STORE_MEMORY', snapshotDigest: 'e'.repeat(64),
+    counts: { 'memory.codebase_memory_analyses': 1 } };
+  const report = (p = proof, o = observation, complete = true) => projectPurgeReport(plan, {
+    status: 'SCOPED_PURGED', runtimeGraph: { complete },
+    postgres: { status: 'PURGED', graphSourceProof: p, relatedStores: { runtimeGraph: o } },
+  });
+  assert.equal(report().remaining.some(item => item.kind === 'graphify'), false);
+  assert.equal(report().complete, false);
+  for (const invalid of [null, { ...proof, unattributableAnalyses: 1 },
+    { ...proof, unclassifiedGatewayCommands: 1 }, { ...proof, survivorAnalyses: 2 },
+    { ...proof, binding: 'CALLER_CLAIM' }]) {
+    assert.equal(report(invalid).remaining.some(item => item.kind === 'graphify'), true);
+  }
+  assert.equal(report(proof, { ...observation, snapshotDigest: null }).remaining.some(item => item.kind === 'graphify'), true);
+  assert.equal(report(proof, observation, false).remaining.some(item => item.kind === 'graphify'), true);
+});
+
 test('Runtime source cache is purged with an empty Git sentinel and survivor files unchanged', async t => {
   const f=await fixture(t), work=path.join(f.root,'runtime-graph'), sourceKey='c'.repeat(64);
   const a=path.join(work,'sources',sourceKey), b=path.join(work,'sources','d'.repeat(64));

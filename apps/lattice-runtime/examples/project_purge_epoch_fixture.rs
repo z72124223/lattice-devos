@@ -10,6 +10,8 @@ use lattice_project_registry::{CommandId, RegistryCommand, RepositoryObservation
 use postgres::{Config, NoTls};
 use serde_json::json;
 use std::path::PathBuf;
+#[path = "support/project_purge_graph.rs"]
+mod graph_fixture;
 
 fn digest(byte: char) -> ContentDigest {
     ContentDigest::from_sha256(byte.to_string().repeat(64)).unwrap()
@@ -57,6 +59,15 @@ fn main() {
         return;
     }
     let (mut admin, target) = connect_project_purge(port, &run, &password).unwrap();
+    if mode.starts_with("graph-") {
+        if mode == "graph-install" {
+            graph_fixture::install(&mut admin, &target, &run);
+            println!("{}", json!({"status":"INSTALLED"}));
+        } else {
+            graph_fixture::run(port, &run, &password, &target, &root, &mode);
+        }
+        return;
+    }
     let client = Config::new()
         .host("127.0.0.1")
         .port(port)

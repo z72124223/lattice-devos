@@ -11886,6 +11886,23 @@ pub fn project_purge_graph_source_key(repository_root: &Path) -> Result<String, 
         .ok_or_else(||LatticedError::new(LatticedErrorKind::GraphConfiguration))
 }
 
+/// Recompute the current and portable predecessor selectors with the same
+/// canonicalization and byte-hash functions used when Runtime wrote analyses.
+/// Old selectors whose original inputs are missing are deliberately excluded.
+///
+/// # Errors
+/// Rejects missing source/Git/platform configuration rather than inferring an owner.
+pub fn project_purge_graph_configuration_digests(root:&str)->Result<Vec<String>,&'static str> {
+    let root=graph_canonical_directory(Path::new(root)).map_err(|_|"GRAPH_SOURCE_UNAVAILABLE")?;
+    let git=required_environment("LATTICE_DELIVERY_GIT_EXE").map_err(|_|"GRAPH_GIT_IDENTITY_UNAVAILABLE")?;
+    let git_sha=graph_executable_sha256(Path::new(&git)).map_err(|_|"GRAPH_GIT_IDENTITY_UNAVAILABLE")?;
+    let mut values=vec![
+        runtime_graph_configuration_digest(&root,&git_sha).map_err(|_|"GRAPH_SOURCE_CONFIGURATION_UNAVAILABLE")?.as_str().to_owned(),
+        legacy_runtime_graph_configuration_digest(&root,&git_sha).map_err(|_|"GRAPH_SOURCE_CONFIGURATION_UNAVAILABLE")?.as_str().to_owned(),
+    ];
+    values.sort(); values.dedup(); Ok(values)
+}
+
 fn runtime_graph_source_from_environment() -> Result<(RuntimeGraphSource, String), LatticedError> {
     let repository_root = graph_canonical_directory(Path::new(&required_environment(
         "LATTICE_GRAPHIFY_SOURCE_ROOT",

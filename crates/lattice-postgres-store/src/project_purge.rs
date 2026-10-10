@@ -603,6 +603,7 @@ fn prepare<C: GenericClient>(
     operation: &str,
     epoch_policy: bool,
     resume_scope: Option<&str>,
+    graph_source: Option<&dyn Fn(&str) -> Result<Vec<String>>>,
 ) -> Result<Plan> {
     let id = ProjectId::new(project).map_err(|_| "PROJECT_PURGE_INPUT_REJECTED")?;
     let database = target.expected_database_identity_sha256().as_str();
@@ -635,6 +636,83 @@ fn prepare<C: GenericClient>(
     let tasks: Vec<String> = db(client.query("SELECT task_ref::text FROM ONLY control.task_submission_envelopes WHERE project_id=$1 ORDER BY task_ref", &[&project]))?.into_iter().map(|r| r.get(0)).collect();
     let tables = all_tables(client)?;
     let physical = snapshots(client, &tables)?;
+    let graph_rows = physical
+        .get("memory.codebase_memory_analyses")
+        .map_or(0, Vec::len);
+    let mut graph_configurations = Vec::new();
+    let mut survivor_graph_configurations = Vec::new();
+    let mut graph_proof = json!(null);
+    if graph_rows > 0 {
+        if let Some(resolve) = graph_source {
+            match resolve(canonical) {
+                Ok(mut values)
+                    if !values.is_empty()
+                        && values.len() <= 16
+                        && values.iter().all(|value| {
+                            value.len() == 64
+                                && value
+                                    .bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        }) =>
+                {
+                    values.sort();
+                    values.dedup();
+                    // Recompute every surviving source too: two lexical paths
+                    // can canonicalize to one directory on the actual platform.
+                    for other in &protected_roots {
+                        match resolve(other) {
+                            Ok(other_values)
+                                if other_values.iter().all(|value| !values.contains(value)) =>
+                            {
+                                survivor_graph_configurations.extend(other_values)
+                            }
+                            Ok(_) => {
+                                blockers.push(json!({"code":"GRAPH_SOURCE_SHARED_WITH_SURVIVOR"}))
+                            }
+                            Err(_) => blockers.push(
+                                json!({"code":"GRAPH_SURVIVOR_SOURCE_UNIQUENESS_NOT_PROVEN"}),
+                            ),
+                        }
+                    }
+                    graph_configurations = values;
+                }
+                _ => blockers.push(json!({"code":"GRAPH_SOURCE_CONFIGURATION_NOT_PROVEN"})),
+            }
+        }
+        let mut target_count = 0usize;
+        let mut survivor_count = 0usize;
+        for row in physical
+            .get("memory.codebase_memory_analyses")
+            .into_iter()
+            .flatten()
+        {
+            let value: Value =
+                serde_json::from_str(row).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?;
+            let configuration = value["configuration_digest"]
+                .as_str()
+                .and_then(|value| value.strip_prefix("\\x"))
+                .unwrap_or("");
+            if graph_configurations
+                .iter()
+                .any(|value| value == configuration)
+            {
+                target_count += 1;
+            } else if survivor_graph_configurations
+                .iter()
+                .any(|value| value == configuration)
+            {
+                survivor_count += 1;
+            }
+        }
+        graph_proof = json!({"binding":if graph_configurations.is_empty(){"NOT_PROVEN"}else{"RECOMPUTED_RUNTIME_SOURCE_CONFIGURATION"},
+            "configurations":graph_configurations,"targetAnalyses":target_count,"survivorAnalyses":survivor_count,
+            "unattributableAnalyses":graph_rows-target_count-survivor_count,
+            "unclassifiedGatewayCommands":physical.get("memory.openclaw_gateway_commands").map_or(0,Vec::len),
+            "unmatchedDisposition":"UNATTRIBUTABLE_NOT_PROVEN_UNRELATED"});
+        if graph_rows > target_count + survivor_count {
+            blockers.push(json!({"code":"GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE","count":graph_rows-target_count-survivor_count}));
+        }
+    }
     let mut claims = Vec::<String>::new();
     let mut roots = vec![json!({"path":canonical,"source":"POSTGRES_REGISTRY_OBSERVATION"})];
     if physical.contains_key("control_product.conversation_claims") {
@@ -678,8 +756,29 @@ fn prepare<C: GenericClient>(
     }
     let mut selected = BTreeMap::<String, Vec<String>>::new();
     let mut deletes = Vec::new();
-    for (table, predicate) in selectors() {
-        if !physical.contains_key(table) {
+    let mut predicates: Vec<(String, String)> = selectors()
+        .into_iter()
+        .map(|(table, predicate)| (table.into(), predicate.into()))
+        .collect();
+    if !graph_configurations.is_empty() {
+        let values = graph_configurations
+            .iter()
+            .map(|value| format!("'{value}'"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let analyses = format!(
+            "SELECT analysis_digest FROM memory.codebase_memory_analyses WHERE encode(configuration_digest,'hex') IN ({values})"
+        );
+        predicates.extend([
+            ("memory.codebase_memory_reflections".into(),format!("p.graph_receipt_digest IN (SELECT r.receipt_digest FROM memory.codebase_memory_receipts r JOIN memory.codebase_memory_analyses a ON a.analysis_digest=r.analysis_digest WHERE a.analysis_digest IN ({analyses}) AND (p.project_id=a.project_id OR p.project_id=$1))")),
+            ("memory.codebase_memory_receipts".into(),format!("p.analysis_digest IN ({analyses})")),
+            ("memory.codebase_memory_retrieval_audits".into(),format!("p.analysis_digest IN ({analyses})")),
+            ("memory.codebase_memory_records".into(),format!("p.analysis_digest IN ({analyses})")),
+            ("memory.codebase_memory_analyses".into(),format!("p.analysis_digest IN ({analyses})")),
+        ]);
+    }
+    for (table, predicate) in predicates {
+        if !physical.contains_key(&table) {
             continue;
         }
         let sql = format!(
@@ -689,9 +788,37 @@ fn prepare<C: GenericClient>(
             .into_iter()
             .map(|r| r.get(0))
             .collect();
-        selected.insert(table.into(), rows);
-        deletes.push((table.into(), predicate.into()));
+        selected.insert(table.clone(), rows);
+        deletes.push((table, predicate));
     }
+    let mut graph_reference_keys = Vec::<String>::new();
+    for (table, rows) in &selected {
+        if table.starts_with("memory.") {
+            for row in rows {
+                let value: Value =
+                    serde_json::from_str(row).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?;
+                // Record IDs are content-addressed and may be identical in
+                // unrelated analyses; only source-qualified parent keys are
+                // cross-scope references.
+                for key in [
+                    "analysis_digest",
+                    "receipt_digest",
+                    "retrieval_digest",
+                    "reflection_receipt_digest",
+                ] {
+                    if let Some(value) = value
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .and_then(|v| v.strip_prefix("\\x"))
+                    {
+                        graph_reference_keys.push(value.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    let mut keys = keys;
+    keys.extend(graph_reference_keys.iter());
     // Registry references were scanned through their precise ownership above.
     // Full replay, exact suffix and post-erasure verification separately prove
     // its survivor bytes; the aggregate checkpoint is not survivor content.
@@ -752,6 +879,10 @@ fn prepare<C: GenericClient>(
     if epoch_policy {
         scope_value["schema"] = json!("lattice.project-purge.scope.v3");
         scope_value["registryPolicy"] = json!("MINIMAL_ATTESTATION");
+    }
+    if !graph_configurations.is_empty() {
+        scope_value["schema"] = json!("lattice.project-purge.scope.v4");
+        scope_value["graphSourceProof"] = graph_proof.clone();
     }
     let scope_digest =
         digest(&serde_json::to_vec(&scope_value).map_err(|_| "PROJECT_PURGE_SERIALIZATION")?);
@@ -820,7 +951,7 @@ fn prepare<C: GenericClient>(
         protected_roots.push(root.to_string_lossy().into_owned());
     }
     Ok(Plan {
-        public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
+        public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"graphSourceProof":graph_proof,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
         prefix,
         epoch,
         streams,
@@ -956,6 +1087,21 @@ pub fn execute_project_purge(
     target: &MigrationTarget,
     request: &Value,
 ) -> Result<Value> {
+    execute_project_purge_with_graph_source(client, target, request, None)
+}
+
+/// Same maintenance transaction with a trusted native Runtime source resolver.
+/// Untrusted request JSON cannot provide its own configuration digests.
+///
+/// # Errors
+/// Has the same failure boundary as execute_project_purge; source drift blocks.
+#[allow(clippy::too_many_lines)]
+pub fn execute_project_purge_with_graph_source(
+    client: &mut Client,
+    target: &MigrationTarget,
+    request: &Value,
+    graph_source: Option<&dyn Fn(&str) -> Result<Vec<String>>>,
+) -> Result<Value> {
     let object = request.as_object().ok_or("PROJECT_PURGE_INPUT_REJECTED")?;
     if object.keys().any(|k| {
         ![
@@ -1065,6 +1211,7 @@ pub fn execute_project_purge(
             operation,
             epoch_policy,
             request.get("expectedScopeDigest").and_then(Value::as_str),
+            graph_source,
         )?;
         let blockers = plan.public["blockers"]
             .as_array_mut()
@@ -1152,6 +1299,7 @@ pub fn execute_project_purge(
         operation,
         epoch_policy,
         Some(text(request, "expectedScopeDigest")?),
+        graph_source,
     )?;
     if plan.public["status"] != "READY" {
         return Ok(plan.public);
@@ -1170,6 +1318,7 @@ pub fn execute_project_purge(
             .map_err(|_| "PROJECT_PURGE_SERIALIZATION")?,
     );
     let mut result = json!({"schema":SCHEMA,"status":"PURGED","phase":"POSTGRES_ONLY","operationId":operation,"scopeDigest":scope,"afterDigest":after_digest,"registryStrategy":plan.public["registryStrategy"],"counts":plan.public["counts"],"blockers":[]});
+    result["graphSourceProof"] = plan.public["graphSourceProof"].clone();
     if let Some(epoch) = &plan.epoch {
         result["registrySealDigest"] = json!(epoch.next.seal_digest.as_str());
         result["history"] = plan.public["history"].clone();

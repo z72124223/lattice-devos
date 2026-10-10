@@ -100,6 +100,8 @@ Attested Registry 在 PG 刪除前先寫外部 `Pending(previous, next, operatio
 
 SQLite 重建在 PG 與檔案成功後才填入 `.purge-next` 保留資料檔；關閉來源與暫存資料庫後，兩側的 WAL／SHM／journal 必須不存在，才保存綁定原計畫的新舊檔摘要並替換。換檔前失敗可從原檔與暫存檔繼續；換檔後但移除標記前失敗，只有新檔摘要正確且暫存檔已消失才接受完成。未知檔案、缺失 DB、錯誤計畫、旁檔、連結或內容變動一律阻擋，不補造新資料庫。未完整落盤的 marker 暫存檔、尚未登記身分的 staging、或中斷重建留下的 journal 需要先依原計畫人工核對，不能任意刪除來解鎖。成功時不保留原 DB 副本；OS 區塊、備份及稽核設定仍不在抹除保證中。舊客戶端不識別此標記，維護前必須停止全部寫入者；沒有宣稱已排除所有 OS handle。
 
+Graph PostgreSQL 歸屬使用 Runtime 原本的來源設定摘要：同一個路徑正規化函式、Git 執行檔內容摘要及平台設定。維護 binary 自行重算，請求不能提供自選摘要。它會檢查其他 Registry 專案沒有共用來源，再按來源清除 analysis、records、retrieval audits、receipts 與 reflections；保留資料逐列摘要必須完全不變。共用舊 Graph project ID 不再等於共用所有權。無法重算的歷史設定、其他專案跨向待刪收據的引用、未分類 gateway command 都不能當成無關資料；其中 ownership 或引用阻擋仍在時不會刪除。這項驗證沒有宣稱使用者任意刪去來源後仍能反推所有權。
+
 計畫／進度檔本身保留路徑及清除證據；它們也是最終資料保留決策的一部分。不要將實際專案計畫、資料庫或含機密的測試輸出提交 Git。
 
 ## 套件交付

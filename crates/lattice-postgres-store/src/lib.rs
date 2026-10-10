@@ -16,7 +16,7 @@ mod project_purge;
 pub mod registry_epoch_anchor;
 mod registry_epoch;
 pub use registry_epoch::REGISTRY_EPOCH_SQL;
-pub use project_purge::{PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge, inspect_project_purge_graph};
+pub use project_purge::{PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge, execute_project_purge_with_graph_source, inspect_project_purge_graph};
 mod schema_v6_profile;
 mod task_ledger;
 

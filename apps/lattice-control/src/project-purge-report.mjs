@@ -61,6 +61,7 @@ function nativeBotInventory(value) {
   return { ...value, source: 'NATIVE_PURGE_READER' };
 }
 function nextStep(code) {
+  if (code.startsWith('GRAPH_')) return 'Recompute ownership with the original Runtime source and configuration. Unknown historical configurations or surviving cross-project references block erasure; an unmatched digest is not proof of unrelated data.';
   if (code.startsWith('PURGE_SQLITE_ACCESS_')) return 'Windows source and staging owner/group/DACL must match exactly; unsupported or unreadable access descriptors remain blocked without changing permissions.';
   if (code === 'REGISTRY_EPOCH_EXTENSION_REQUIRED') return 'Install the compatible Registry epoch extension while stopped, then review a fresh preview with minimal historical attestation.';
   if (code === 'REGISTRY_CURRENT_SURVIVOR_REFERENCE') return 'Another project still uses this identity in its current state; reconcile that project through its normal commands before generating a new purge preview.';
@@ -98,6 +99,17 @@ export function projectPurgeReport(plan, result = null) {
       &&graphPg.counts&&Object.values(graphPg.counts).every(count=>count===0)) {
       graph.disposition='NO_DATA_IN_CONFIGURED_STORE';
     }
+    const proof=result?.postgres?.graphSourceProof;
+    if(result?.status==='SCOPED_PURGED'&&result?.runtimeGraph?.complete===true&&result.postgres.status==='PURGED'
+      &&proof?.binding==='RECOMPUTED_RUNTIME_SOURCE_CONFIGURATION'&&proof.unattributableAnalyses===0
+      &&proof.unclassifiedGatewayCommands===0&&Number.isSafeInteger(proof.targetAnalyses)&&Number.isSafeInteger(proof.survivorAnalyses)
+      &&proof.targetAnalyses>=0&&proof.survivorAnalyses>=0
+      &&graphPg.scope==='VERIFIED_MAIN_STORE_MEMORY'&&['VERIFIED_EMPTY','OBSERVED'].includes(graphPg.discovery)
+      &&/^[a-f0-9]{64}$/u.test(graphPg.snapshotDigest??'')
+      &&graphPg.counts?.['memory.codebase_memory_analyses']===proof.survivorAnalyses) {
+      graph.disposition='NO_TARGET_DATA_IN_VERIFIED_SCOPE';
+      graph.observation.ownershipProof=proof;
+    }
   }
   const blockers = (plan.blockers ?? []).map(item => ({ code: blockerCode(item), detail: item, nextStep: nextStep(blockerCode(item)) }));
   return {
@@ -128,7 +140,7 @@ export function projectPurgeReport(plan, result = null) {
     history: plan.postgres.history ?? null,
     remaining: [
       ...(plan.sqlite.retainedDecisionRows > 0 ? [{ kind: 'controlDecisions', reason: 'FREEFORM_SCOPE_HAS_NO_STRUCTURAL_PROJECT_OWNERSHIP' }] : []),
-      ...external.filter(item => item.disposition !== 'NO_DATA_IN_CONFIGURED_STORE').map(item => ({ kind: item.kind, ownership: item.ownership,
+      ...external.filter(item => !['NO_DATA_IN_CONFIGURED_STORE','NO_TARGET_DATA_IN_VERIFIED_SCOPE'].includes(item.disposition)).map(item => ({ kind: item.kind, ownership: item.ownership,
         reason: item.ownership === 'LATTICE' ? 'LATTICE_OWNED_CLEANUP_NOT_IMPLEMENTED' : 'DISCOVERY_AND_ERASURE_NOT_VERIFIED',
         nextStep: item.nextStep })),
     ],

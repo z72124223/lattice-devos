@@ -113,6 +113,7 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   const blockers = [...pg.blockers, ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...fileBlockers];
   const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph, runtimeGraph,
     postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy, history: pg.history ?? null,
+      graphSourceProof:pg.graphSourceProof??null,
       relatedStores: pg.relatedStores ?? null,
       inventoryMode: pg.inventoryMode ?? 'LEGACY_MAINTENANCE_PREVIEW',
       maintenanceExtensionInstalled: pg.maintenanceExtensionInstalled ?? null, maintenanceStopped: pg.maintenanceStopped ?? null },

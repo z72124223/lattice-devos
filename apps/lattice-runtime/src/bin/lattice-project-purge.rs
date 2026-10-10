@@ -1,7 +1,7 @@
 //! Dedicated local maintenance binary. Never loaded by the ordinary MCP runtime.
 use lattice_postgres_store::{
-    connect_project_purge, execute_project_purge, inspect_project_purge_bot_lifecycle,
-    inspect_project_purge_graph,
+    connect_project_purge, execute_project_purge_with_graph_source,
+    inspect_project_purge_bot_lifecycle, inspect_project_purge_graph,
 };
 use std::io::{self, Read};
 use std::process::ExitCode;
@@ -69,7 +69,12 @@ fn run() -> Result<serde_json::Value, &'static str> {
         );
     }
     let (mut client, target) = connect_project_purge(port, &run_id, &password)?;
-    let mut result = execute_project_purge(&mut client, &target, &request)?;
+    let mut result = execute_project_purge_with_graph_source(
+        &mut client,
+        &target,
+        &request,
+        Some(&lattice_runtime::composition::project_purge_graph_configuration_digests),
+    )?;
     if let Some(project_id) = request.get("projectId").and_then(serde_json::Value::as_str) {
         let observed = inspect_bot(project_id).unwrap_or_else(|code| {
             serde_json::json!({
