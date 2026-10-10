@@ -1,3 +1,5 @@
+// These end-to-end fixtures keep their ordered assertions and owned JSON inputs together.
+#![allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 //! Opt-in proof against an independently bootstrapped, disposable Store v8 database.
 use super::*;
 use postgres::{Config, NoTls};

@@ -37,6 +37,8 @@ pub type AnchorFileAudit = fn(&File) -> io::Result<AnchorFileIdentity>;
 static FILE_AUDIT: OnceLock<AnchorFileAudit> = OnceLock::new();
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// # Errors
+/// Fails if an audit callback was already installed.
 pub fn install_anchor_file_audit(audit: AnchorFileAudit) -> AnchorResult<()> {
     FILE_AUDIT
         .set(audit)
@@ -102,6 +104,8 @@ impl From<io::Error> for AnchorError {
 pub struct AnchorDigest(String);
 
 impl AnchorDigest {
+    /// # Errors
+    /// Rejects zero or malformed SHA-256 digests.
     pub fn new(value: &str) -> AnchorResult<Self> {
         if value.len() != 64
             || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -112,6 +116,7 @@ impl AnchorDigest {
         Ok(Self(value.to_ascii_lowercase()))
     }
 
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -124,6 +129,8 @@ pub struct ActiveAnchor {
 }
 
 impl ActiveAnchor {
+    /// # Errors
+    /// Rejects epoch zero.
     pub fn new(epoch: u64, seal_digest: AnchorDigest) -> AnchorResult<Self> {
         if epoch == 0 {
             return Err(AnchorError::InvalidEpoch);
@@ -168,6 +175,8 @@ pub struct RegistryEpochAnchor {
 
 impl RegistryEpochAnchor {
     /// Construct from trusted host configuration. This performs no writes.
+    /// # Errors
+    /// Rejects non-absolute paths and invalid database digests.
     pub fn new(root: PathBuf, database_identity_digest: &str) -> AnchorResult<Self> {
         validate_absolute(&root)?;
         Ok(Self {
@@ -177,6 +186,8 @@ impl RegistryEpochAnchor {
     }
 
     /// No mkdir, lock creation, recovery, or stale-lock removal occurs here.
+    /// # Errors
+    /// Rejects aliases, locks, malformed records and failed file reads.
     pub fn read(&self) -> AnchorResult<AnchorState> {
         if !inspect_existing(&self.root, true)? {
             return Ok(AnchorState::Absent);
@@ -194,6 +205,8 @@ impl RegistryEpochAnchor {
     }
 
     /// Explicitly create the root only. Never bootstrap an active seal from DB.
+    /// # Errors
+    /// Rejects unsafe paths, existing locks and failed file operations.
     pub fn initialize(&self) -> AnchorResult<AnchorState> {
         let _lock = self.lock(true)?;
         self.read_unlocked()
@@ -201,6 +214,8 @@ impl RegistryEpochAnchor {
 
     /// Exact compare-and-prepare. Repeating the identical pending operation is
     /// idempotent; another pending operation or mismatched previous state fails.
+    /// # Errors
+    /// Rejects unsafe paths, locked or mismatched state and failed writes.
     pub fn prepare(
         &self,
         expected_previous: Option<&ActiveAnchor>,
@@ -226,6 +241,8 @@ impl RegistryEpochAnchor {
 
     /// The caller must independently match the committed DB receipt before this
     /// step. No database value is read or accepted as a replacement seal here.
+    /// # Errors
+    /// Rejects unsafe paths, locked or mismatched pending state and failed writes.
     pub fn activate(&self, expected_pending: &PendingAnchor) -> AnchorResult<ActiveAnchor> {
         expected_pending.validate()?;
         let _lock = self.lock(false)?;
@@ -321,12 +338,11 @@ impl Drop for OwnedLock {
     fn drop(&mut self) {
         // Release only this acquired lock. A stale or replaced lock is never
         // removed. Failure to prove ownership leaves the file in place.
-        if let Ok((file, identity)) = open_regular(&self.path) {
-            if identity == self.identity
-                && read_bounded(&file).is_ok_and(|body| body == self.token.as_bytes())
-            {
-                let _ = fs::remove_file(&self.path);
-            }
+        if let Ok((file, identity)) = open_regular(&self.path)
+            && identity == self.identity
+            && read_bounded(&file).is_ok_and(|body| body == self.token.as_bytes())
+        {
+            let _ = fs::remove_file(&self.path);
         }
     }
 }
@@ -797,7 +813,11 @@ mod tests {
             fixture.anchor.read(),
             Err(AnchorError::InvalidDocument)
         ));
-        fs::write(&path, vec![b' '; MAX_ANCHOR_BYTES as usize + 1]).unwrap();
+        fs::write(
+            &path,
+            vec![b' '; usize::try_from(MAX_ANCHOR_BYTES).unwrap() + 1],
+        )
+        .unwrap();
         assert!(matches!(fixture.anchor.read(), Err(AnchorError::TooLarge)));
         let mut value: Value = serde_json::from_slice(&original).unwrap();
         value["sealDigest"] = json!("0".repeat(64));

@@ -15,6 +15,7 @@ use serde_json::Value;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::path::PathBuf;
 
 pub const REGISTRY_EPOCH_SQL: &str = include_str!("../../../db/extensions/registry-epoch/v1.sql");
@@ -33,12 +34,15 @@ fn query<T>(result: std::result::Result<T, postgres::Error>) -> Result<T> {
 pub(crate) fn digest(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
 }
 
 /// Whitelist only a complete exact extension. An unexpected trigger, privilege,
 /// function body, type or relation is an error, not an absent capability.
+#[allow(clippy::too_many_lines)] // Exact catalog validation is kept together for auditability.
 pub(crate) fn optional_catalog<C: GenericClient>(client: &mut C) -> Result<Option<EpochCatalog>> {
     let exists: bool =
         query(client.query_one("SELECT to_regnamespace('registry_epoch') IS NOT NULL", &[]))?

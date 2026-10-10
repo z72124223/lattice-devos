@@ -21,6 +21,7 @@ use std::path::PathBuf;
 fn digest(c: char) -> ContentDigest {
     ContentDigest::from_sha256(c.to_string().repeat(64)).unwrap()
 }
+#[allow(clippy::too_many_lines)] // Preserve the ordered synthetic setup and assertions.
 fn main() {
     assert_eq!(
         std::env::var("LATTICE_PURGE_FIXTURE_ONLY").as_deref(),

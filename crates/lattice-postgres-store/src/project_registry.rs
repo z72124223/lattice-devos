@@ -965,6 +965,7 @@ pub(crate) fn load_registry_for_transition<C: GenericClient>(
     load_registry_for_maintenance_inner(client, target, Some(epoch))
 }
 
+#[allow(clippy::option_option)] // None loads the host anchor; Some(None) explicitly verifies pre-epoch history.
 fn load_registry_for_maintenance_inner<C: GenericClient>(
     client: &mut C,
     target: &MigrationTarget,
@@ -1001,7 +1002,7 @@ fn registry_query<C: GenericClient>(
     }
 }
 
-#[allow(clippy::too_many_lines)] // Both transports share one unchanged full replay verifier.
+#[allow(clippy::too_many_lines, clippy::option_option)] // Both transports share one unchanged full replay verifier.
 fn load_registry_queries<C: GenericClient>(
     client: &mut C,
     persistence: &PostgresProjectRegistryPersistenceEvidence,
@@ -1154,7 +1155,7 @@ fn parse_state_row(row: &Row) -> PostgresProjectRegistryResult<RegistryCheckpoin
 }
 
 /// The seal binds the original SQL rows as well as the pure semantic records.
-/// Convert only that authenticated payload to PostgreSQL's fixed row type. The
+/// Convert only that authenticated payload to `PostgreSQL`'s fixed row type. The
 /// roundtrip check rejects omitted/extra fields and coercions, with no table write.
 fn load_archived_receipts<C: GenericClient>(
     client: &mut C,

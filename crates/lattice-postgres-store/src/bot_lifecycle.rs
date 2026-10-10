@@ -220,6 +220,7 @@ fn verify(client: &mut impl GenericClient, run_id: &str) -> Result<u8> {
 ///
 /// # Errors
 /// Rejects invalid configuration, unknown schema, oversized data and failed reads.
+#[allow(clippy::too_many_lines)] // Keep the bounded catalog inventory and readback in one transaction.
 pub fn inspect_project_purge_bot_lifecycle(
     port: u16,
     run_id: &str,
@@ -327,7 +328,7 @@ pub fn inspect_project_purge_bot_lifecycle(
         if rows.len() > 10000 {
             return Err("BOT_LIFECYCLE_PURGE_INVENTORY_LIMIT");
         }
-        let mut matched = 0usize;
+        let mut match_count = 0usize;
         for row in &rows {
             let key: String = row.get(0);
             let value: String = row.get(1);
@@ -336,13 +337,13 @@ pub fn inspect_project_purge_bot_lifecycle(
                 return Err("BOT_LIFECYCLE_PURGE_INVENTORY_LIMIT");
             }
             if key == project_id {
-                matched += 1;
+                match_count += 1;
             }
             keys.insert(key);
             snapshot.push((table, value));
         }
         totals.insert(table.to_owned(), json!(rows.len()));
-        matches.insert(table.to_owned(), json!(matched));
+        matches.insert(table.to_owned(), json!(match_count));
     }
     tx.commit().map_err(|e| error(&e))?;
     let empty = snapshot.is_empty();

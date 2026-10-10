@@ -2295,7 +2295,7 @@ pub(crate) fn verify_runtime_store_schema(
 
 /// The maintenance principal may inventory an active Store without asserting
 /// STOPPED bootstrap evidence or changing its grants. Mutation entry points
-/// continue to use verify_postgres_schema and its STOPPED requirement.
+/// continue to use `verify_postgres_schema` and its STOPPED requirement.
 pub(crate) fn verify_project_purge_inventory_schema(
     client: &mut Client,
     target: &MigrationTarget,
@@ -8020,7 +8020,9 @@ fn read_forbidden_schema_object_counts<C: GenericClient>(
     // A new optional maintenance guard is accepted only after its entire
     // independently versioned catalog and privileges pass exact verification.
     if crate::registry_epoch::optional_catalog(client)
-        .map_err(|_| catalog_error())?.is_some() {
+        .map_err(|_| catalog_error())?
+        .is_some()
+    {
         counts[1] = counts[1].checked_sub(1).ok_or_else(catalog_error)?;
     }
     Ok(counts)
@@ -8694,9 +8696,14 @@ fn verify_exact_principal_database_core<C: GenericClient>(
     verify_login_principal_closure(client)?;
     // The new read-only SECURITY DEFINER entry is permitted only with the exact
     // complete epoch catalog. All existing profile counts stay frozen.
-    let epoch_functions = i64::from(crate::registry_epoch::optional_catalog(client)
-        .map_err(|_| permission_error())?.is_some());
-    dangerous_functions.checked_sub(epoch_functions).ok_or_else(permission_error)
+    let epoch_functions = i64::from(
+        crate::registry_epoch::optional_catalog(client)
+            .map_err(|_| permission_error())?
+            .is_some(),
+    );
+    dangerous_functions
+        .checked_sub(epoch_functions)
+        .ok_or_else(permission_error)
 }
 
 /// SQL for the independently versioned, same-database Control product facts.
@@ -9197,7 +9204,9 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
         crate::project_purge::optional_maintenance_relations(client)
             .map_err(|_| permission_error())?,
     );
-    if let Some(epoch) = crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())? {
+    if let Some(epoch) =
+        crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())?
+    {
         foreman_relation_oids.extend(epoch.relation_oids);
     }
     let forbidden = client
@@ -9264,7 +9273,9 @@ fn verify_external_function_principal_closure<C: GenericClient>(
     if let Some(product) = product {
         foreman_function_oids.extend_from_slice(&product.function_oids);
     }
-    if let Some(epoch) = crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())? {
+    if let Some(epoch) =
+        crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())?
+    {
         foreman_function_oids.extend(epoch.function_oids);
     }
     let forbidden = client

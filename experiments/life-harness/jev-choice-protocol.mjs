@@ -1,3 +1,4 @@
+// Historical experiment only. The delivered Control service does not load JEV.
 export const MODEL = 'jev-1.13.0';
 export const ENDPOINT = 'https://api.typesafe.ai/v1/systemone';
 // Local byte budgets, not tokenizer measurements or the service's token limits.

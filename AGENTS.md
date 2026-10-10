@@ -9,11 +9,15 @@ smallest workflow and verification that can prove the requested result.
   do not restore the retired browser dashboard, visual work tree/code graph,
   separate conversation UI, or Windows desktop shell. Keep their durable data
   and the backend task, relationship, decision, and evidence APIs.
-- LATTICE is one local Runtime with three core functions: LATTICE control,
+- LATTICE is one Runtime on the selected local or cloud execution host, with three core functions: LATTICE control,
   PostgreSQL durable facts, and Graphify derived relationship memory. Use the
   `GRAPHIFY` integration mode for the main product. Hermes reflection is retired:
   do not restore an activation path, login, configuration, or reflection workflow.
   Codex owns reasoning and review.
+- Cloud delivery includes LATTICE and Life-Harness. JEV is excluded from the
+  delivered Control service; its retained experiments are historical research.
+  Cloud task snapshots do not prove continuous service or shared durable storage.
+  PostgreSQL and Graphify host compatibility must be verified on that host.
 - PostgreSQL is the only authoritative durable truth. Graphify is rebuilt from
   that truth when necessary.
 - PostgreSQL failure makes durable Runtime work unavailable. Graphify failure is

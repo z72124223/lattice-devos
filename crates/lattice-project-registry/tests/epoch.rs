@@ -115,10 +115,19 @@ fn interleaved_history_becomes_attested_baseline_without_rewriting_survivor() {
     assert_eq!(old.record().ordinal(), 2);
     assert_eq!(old.record_set(), original_b.record_set());
     assert_eq!(old.record().receipt(), original_b.receipt());
-    assert_eq!(baseline.retained_command(&id("register-bravo")).unwrap(),Some(old.record()));
-    assert_eq!(baseline.retained_command(&id("register-alpha")),Err(RegistryError::CommandRedacted));
-    assert_eq!(before.history_assurance(),"FULL_GENESIS_REPLAY");
-    assert_eq!(baseline.history_assurance(),"ATTESTED_BASELINE_AND_REPLAYED_TAIL");
+    assert_eq!(
+        baseline.retained_command(&id("register-bravo")).unwrap(),
+        Some(old.record())
+    );
+    assert_eq!(
+        baseline.retained_command(&id("register-alpha")),
+        Err(RegistryError::CommandRedacted)
+    );
+    assert_eq!(before.history_assurance(), "FULL_GENESIS_REPLAY");
+    assert_eq!(
+        baseline.history_assurance(),
+        "ATTESTED_BASELINE_AND_REPLAYED_TAIL"
+    );
     let encoded = String::from_utf8(
         canonicalize(&plan.baseline().to_canonical_value())
             .unwrap()

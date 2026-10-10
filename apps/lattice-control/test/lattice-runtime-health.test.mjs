@@ -279,6 +279,40 @@ test("the configuration loader requires the current delivery configuration", asy
   assert.equal(configuration.environment.LATTICE_TASK019_PASSWORD, secret);
 });
 
+test("an isolated Runtime configuration can be selected without changing the Codex configuration", async () => {
+  const previous = process.env.LATTICE_RUNTIME_CONFIG_PATH;
+  const isolated = path.resolve("cloud-state", "runtime.toml");
+  const executable = path.resolve("cloud-tools", "latticed");
+  const launcher = path.resolve("cloud-tools", "codex");
+  const readPaths = [];
+  const options = {
+    readText: async (target) => {
+      readPaths.push(target);
+      return [
+        "[mcp_servers.lattice]", `command = ${JSON.stringify(executable)}`,
+        "[mcp_servers.lattice.env]", `LATTICE_DELIVERY_LAUNCHER = ${JSON.stringify(launcher)}`,
+        `LATTICE_DELIVERY_ROOT = ${JSON.stringify(path.resolve("cloud-state"))}`,
+      ].join("\n");
+    },
+    verifyExecutable: async () => {},
+  };
+  try {
+    process.env.LATTICE_RUNTIME_CONFIG_PATH = isolated;
+    assert.equal((await loadLatticeRuntimeConfiguration(options)).executablePath, executable);
+    const explicit = path.resolve("other-runtime.toml");
+    await loadLatticeRuntimeConfiguration({ ...options, configPath: explicit });
+    assert.deepEqual(readPaths, [isolated, explicit]);
+    process.env.LATTICE_RUNTIME_CONFIG_PATH = "relative/runtime.toml";
+    await assert.rejects(loadLatticeRuntimeConfiguration(options), {
+      message: "LATTICE_RUNTIME_CONFIGURATION_LOADER_INVALID",
+    });
+    assert.equal(readPaths.length, 2);
+  } finally {
+    if (previous === undefined) delete process.env.LATTICE_RUNTIME_CONFIG_PATH;
+    else process.env.LATTICE_RUNTIME_CONFIG_PATH = previous;
+  }
+});
+
 test("a missing configured Runtime is reported as stopped", async () => {
   const status = await probeConfiguredLatticeRuntime({
     loadConfiguration: async () => {

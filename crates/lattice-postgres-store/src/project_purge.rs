@@ -16,6 +16,7 @@ use std::fmt::Write;
 use std::time::Duration;
 
 pub const PROJECT_PURGE_SQL: &str = include_str!("../../../db/extensions/project-purge/v1.sql");
+type GraphSourceResolver<'a> = dyn Fn(&str) -> Result<Vec<String>> + 'a;
 type Result<T> = std::result::Result<T, &'static str>;
 const SCHEMA: &str = "lattice.project-purge.result.v1";
 const PARAMS: &str = " AND $1::text IS NOT NULL AND $2::text[] IS NOT NULL AND $3::text[] IS NOT NULL AND $4::text[] IS NOT NULL";
@@ -465,136 +466,6 @@ fn snapshots<C: GenericClient>(
     Ok(result)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{references, registry_survivor_reference_blockers};
-    use serde_json::{Value, json};
-    use std::collections::BTreeMap;
-
-    fn registry_rows() -> BTreeMap<String, Vec<String>> {
-        BTreeMap::from([
-            ("control.project_registry_commands".into(), vec![
-                json!({"project_id":"target-id","observation_digest":"target-observation"}).to_string(),
-                json!({"project_id":"survivor-id","observation_digest":"survivor-observation"}).to_string(),
-            ]),
-            ("control.project_registry_projects".into(), vec![
-                json!({"project_id":"target-id","accepted_observation_digest":"target-observation"}).to_string(),
-                json!({"project_id":"survivor-id","accepted_observation_digest":"survivor-observation"}).to_string(),
-            ]),
-            ("control.project_registry_identity_reservations".into(), vec![
-                json!({"project_id":"target-id"}).to_string(),
-                json!({"project_id":"survivor-id"}).to_string(),
-            ]),
-            ("control.project_registry_observations".into(), vec![
-                json!({"observation_digest":"target-observation","canonical_root":"C:/fixture/target"}).to_string(),
-                json!({"observation_digest":"survivor-observation","canonical_root":"C:/fixture/survivor"}).to_string(),
-            ]),
-            ("control.project_registry_state".into(), vec![
-                json!({"aggregate":"target-id"}).to_string(),
-            ]),
-        ])
-    }
-
-    #[test]
-    fn registry_scan_excludes_target_owned_rows_and_the_global_checkpoint() {
-        let physical = registry_rows();
-        assert!(
-            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn registry_scan_counts_survivor_denial_and_shared_observation_without_content() {
-        let mut physical = registry_rows();
-        physical
-            .get_mut("control.project_registry_commands")
-            .unwrap()
-            .push(
-                json!({"project_id":"survivor-id","denial_existing_project_id":"target-id",
-                "observation_digest":"target-observation"})
-                .to_string(),
-            );
-        let original = physical.clone();
-        assert_eq!(
-            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
-                .unwrap(),
-            vec![
-                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_commands","count":1}),
-                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
-            ]
-        );
-        assert_eq!(physical, original);
-    }
-
-    #[test]
-    fn registry_scan_follows_each_survivor_observation_reference() {
-        for (table, field) in [
-            (
-                "control.project_registry_commands",
-                "before_observation_digest",
-            ),
-            (
-                "control.project_registry_projects",
-                "accepted_observation_digest",
-            ),
-            (
-                "control.project_registry_projects",
-                "pending_observation_digest",
-            ),
-            (
-                "control.project_registry_projects",
-                "authority_observation_digest",
-            ),
-        ] {
-            let mut physical = registry_rows();
-            let row = json!({"project_id":"survivor-id",field:"target-observation"});
-            physical.get_mut(table).unwrap().push(row.to_string());
-            assert_eq!(
-                registry_survivor_reference_blockers(
-                    &physical,
-                    "target-id",
-                    "C:/fixture/target",
-                    &[]
-                )
-                .unwrap(),
-                vec![
-                    json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
-                ]
-            );
-        }
-    }
-
-    #[test]
-    fn reference_scan_decodes_windows_paths_and_nested_json_text() {
-        let canonical = r"C:\Fixture\Project-A";
-        let encoded = serde_json::to_string(&json!({"retainedPath":canonical})).unwrap();
-        let row = json!({"envelope":encoded});
-        assert!(references(&row, "target-id", canonical, &[]));
-        assert!(references(
-            &json!({"path":"c:/fixture/project-a/file"}),
-            "target-id",
-            canonical,
-            &[]
-        ));
-        assert!(!references(
-            &json!({"path":"c:/fixture/project-b/file"}),
-            "target-id",
-            canonical,
-            &[]
-        ));
-        let stream = "0123456789abcdef".to_owned();
-        assert!(references(
-            &Value::String(format!("\\x{stream}")),
-            "target-id",
-            canonical,
-            &[&stream]
-        ));
-    }
-}
-
-// Keep the complete, closed ownership scan together for review.
 #[allow(clippy::too_many_lines)]
 fn prepare<C: GenericClient>(
     client: &mut C,
@@ -603,7 +474,7 @@ fn prepare<C: GenericClient>(
     operation: &str,
     epoch_policy: bool,
     resume_scope: Option<&str>,
-    graph_source: Option<&dyn Fn(&str) -> Result<Vec<String>>>,
+    graph_source: Option<&GraphSourceResolver<'_>>,
 ) -> Result<Plan> {
     let id = ProjectId::new(project).map_err(|_| "PROJECT_PURGE_INPUT_REJECTED")?;
     let database = target.expected_database_identity_sha256().as_str();
@@ -664,10 +535,10 @@ fn prepare<C: GenericClient>(
                             Ok(other_values)
                                 if other_values.iter().all(|value| !values.contains(value)) =>
                             {
-                                survivor_graph_configurations.extend(other_values)
+                                survivor_graph_configurations.extend(other_values);
                             }
                             Ok(_) => {
-                                blockers.push(json!({"code":"GRAPH_SOURCE_SHARED_WITH_SURVIVOR"}))
+                                blockers.push(json!({"code":"GRAPH_SOURCE_SHARED_WITH_SURVIVOR"}));
                             }
                             Err(_) => blockers.push(
                                 json!({"code":"GRAPH_SURVIVOR_SOURCE_UNIQUENESS_NOT_PROVEN"}),
@@ -1094,13 +965,13 @@ pub fn execute_project_purge(
 /// Untrusted request JSON cannot provide its own configuration digests.
 ///
 /// # Errors
-/// Has the same failure boundary as execute_project_purge; source drift blocks.
+/// Has the same failure boundary as `execute_project_purge`; source drift blocks.
 #[allow(clippy::too_many_lines)]
 pub fn execute_project_purge_with_graph_source(
     client: &mut Client,
     target: &MigrationTarget,
     request: &Value,
-    graph_source: Option<&dyn Fn(&str) -> Result<Vec<String>>>,
+    graph_source: Option<&GraphSourceResolver<'_>>,
 ) -> Result<Value> {
     let object = request.as_object().ok_or("PROJECT_PURGE_INPUT_REJECTED")?;
     if object.keys().any(|k| {
@@ -1344,3 +1215,134 @@ pub fn execute_project_purge_with_graph_source(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{references, registry_survivor_reference_blockers};
+    use serde_json::{Value, json};
+    use std::collections::BTreeMap;
+
+    fn registry_rows() -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([
+            ("control.project_registry_commands".into(), vec![
+                json!({"project_id":"target-id","observation_digest":"target-observation"}).to_string(),
+                json!({"project_id":"survivor-id","observation_digest":"survivor-observation"}).to_string(),
+            ]),
+            ("control.project_registry_projects".into(), vec![
+                json!({"project_id":"target-id","accepted_observation_digest":"target-observation"}).to_string(),
+                json!({"project_id":"survivor-id","accepted_observation_digest":"survivor-observation"}).to_string(),
+            ]),
+            ("control.project_registry_identity_reservations".into(), vec![
+                json!({"project_id":"target-id"}).to_string(),
+                json!({"project_id":"survivor-id"}).to_string(),
+            ]),
+            ("control.project_registry_observations".into(), vec![
+                json!({"observation_digest":"target-observation","canonical_root":"C:/fixture/target"}).to_string(),
+                json!({"observation_digest":"survivor-observation","canonical_root":"C:/fixture/survivor"}).to_string(),
+            ]),
+            ("control.project_registry_state".into(), vec![
+                json!({"aggregate":"target-id"}).to_string(),
+            ]),
+        ])
+    }
+
+    #[test]
+    fn registry_scan_excludes_target_owned_rows_and_the_global_checkpoint() {
+        let physical = registry_rows();
+        assert!(
+            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn registry_scan_counts_survivor_denial_and_shared_observation_without_content() {
+        let mut physical = registry_rows();
+        physical
+            .get_mut("control.project_registry_commands")
+            .unwrap()
+            .push(
+                json!({"project_id":"survivor-id","denial_existing_project_id":"target-id",
+                "observation_digest":"target-observation"})
+                .to_string(),
+            );
+        let original = physical.clone();
+        assert_eq!(
+            registry_survivor_reference_blockers(&physical, "target-id", "C:/fixture/target", &[])
+                .unwrap(),
+            vec![
+                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_commands","count":1}),
+                json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
+            ]
+        );
+        assert_eq!(physical, original);
+    }
+
+    #[test]
+    fn registry_scan_follows_each_survivor_observation_reference() {
+        for (table, field) in [
+            (
+                "control.project_registry_commands",
+                "before_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "accepted_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "pending_observation_digest",
+            ),
+            (
+                "control.project_registry_projects",
+                "authority_observation_digest",
+            ),
+        ] {
+            let mut physical = registry_rows();
+            let row = json!({"project_id":"survivor-id",field:"target-observation"});
+            physical.get_mut(table).unwrap().push(row.to_string());
+            assert_eq!(
+                registry_survivor_reference_blockers(
+                    &physical,
+                    "target-id",
+                    "C:/fixture/target",
+                    &[]
+                )
+                .unwrap(),
+                vec![
+                    json!({"code":"REGISTRY_SURVIVOR_REFERENCE","table":"control.project_registry_observations","count":1}),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn reference_scan_decodes_windows_paths_and_nested_json_text() {
+        let canonical = r"C:\Fixture\Project-A";
+        let encoded = serde_json::to_string(&json!({"retainedPath":canonical})).unwrap();
+        let row = json!({"envelope":encoded});
+        assert!(references(&row, "target-id", canonical, &[]));
+        assert!(references(
+            &json!({"path":"c:/fixture/project-a/file"}),
+            "target-id",
+            canonical,
+            &[]
+        ));
+        assert!(!references(
+            &json!({"path":"c:/fixture/project-b/file"}),
+            "target-id",
+            canonical,
+            &[]
+        ));
+        let stream = "0123456789abcdef".to_owned();
+        assert!(references(
+            &Value::String(format!("\\x{stream}")),
+            "target-id",
+            canonical,
+            &[&stream]
+        ));
+    }
+}
+
+// Keep the complete, closed ownership scan together for review.

@@ -258,28 +258,15 @@ pub(crate) fn verify_runtime_profile(
     }
     verify_reviewed_wsl_system_files(profile)?;
 
-    let payload = collect_wsl_payload(&runtime_root)?;
-    if payload.entries.len() != GRAPHIFY_WSL_RUNTIME_FILE_COUNT
-        || payload.byte_count != GRAPHIFY_WSL_RUNTIME_BYTE_COUNT
-    {
-        return Err(identity_error("GRAPHIFY_WSL_PAYLOAD_SHAPE_MISMATCH"));
-    }
-    if payload.manifest_sha256 != GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256 {
-        return Err(identity_error("GRAPHIFY_WSL_PAYLOAD_DIGEST_MISMATCH"));
-    }
-    let install_report_sha256 = identity_file_sha256(&runtime_root.join(INSTALL_REPORT_RELATIVE))?;
-    if install_report_sha256 != GRAPHIFY_WSL_INSTALL_REPORT_SHA256 {
-        return Err(identity_error(
-            "GRAPHIFY_WSL_INSTALL_REPORT_DIGEST_MISMATCH",
-        ));
-    }
+    let payload = verify_pinned_payload(&runtime_root)?;
+    let install_report_sha256 = GRAPHIFY_WSL_INSTALL_REPORT_SHA256;
 
     let legacy_identity = reviewed_execution_identity_digest(
         &launcher_sha256,
         &payload.manifest_sha256,
         payload.entries.len(),
         payload.byte_count,
-        &install_report_sha256,
+        install_report_sha256,
     );
     if !profile.portable && legacy_identity != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256 {
         return Err(identity_error("GRAPHIFY_WSL_EXECUTION_IDENTITY_MISMATCH"));
@@ -300,6 +287,112 @@ pub(crate) fn verify_runtime_profile(
         manifest_sha256: payload.manifest_sha256,
         execution_identity_sha256,
     })
+}
+
+/// Native Linux uses the same reviewed system and Python payload, without a
+/// Windows launcher. Unknown distributions or package revisions remain rejected.
+pub(crate) fn verify_native_linux_runtime(
+    runtime_root: &Path,
+) -> GraphifyAdapterResult<ReviewedGraphifyRuntime> {
+    if !cfg!(target_os = "linux") {
+        return Err(identity_error(
+            "GRAPHIFY_NATIVE_LINUX_HOST_PLATFORM_REJECTED",
+        ));
+    }
+    if !runtime_root.is_absolute() {
+        return Err(identity_error(
+            "GRAPHIFY_NATIVE_LINUX_RUNTIME_PATH_REJECTED",
+        ));
+    }
+    require_regular_directory(
+        runtime_root,
+        "GRAPHIFY_NATIVE_LINUX_RUNTIME_DIRECTORY_REJECTED",
+    )?;
+    let runtime_root = fs::canonicalize(runtime_root)
+        .map_err(|_| identity_error("GRAPHIFY_NATIVE_LINUX_RUNTIME_RESOLVE_FAILED"))?;
+    require_regular_directory(
+        &runtime_root,
+        "GRAPHIFY_NATIVE_LINUX_RUNTIME_DIRECTORY_REJECTED",
+    )?;
+    for (path, expected, code) in [
+        (
+            GRAPHIFY_WSL_OS_RELEASE_PATH,
+            GRAPHIFY_WSL_OS_RELEASE_SHA256,
+            "GRAPHIFY_NATIVE_LINUX_OS_RELEASE_DIGEST_MISMATCH",
+        ),
+        (
+            GRAPHIFY_WSL_PYTHON_PATH,
+            GRAPHIFY_WSL_PYTHON_SHA256,
+            "GRAPHIFY_NATIVE_LINUX_PYTHON_DIGEST_MISMATCH",
+        ),
+        (
+            GRAPHIFY_WSL_BWRAP_PATH,
+            GRAPHIFY_WSL_BWRAP_SHA256,
+            "GRAPHIFY_NATIVE_LINUX_BWRAP_DIGEST_MISMATCH",
+        ),
+    ] {
+        let path = Path::new(path);
+        require_regular_file(path, code)?;
+        if identity_file_sha256(path)? != expected {
+            return Err(identity_error(code));
+        }
+    }
+    let payload = verify_pinned_payload(&runtime_root)?;
+    Ok(ReviewedGraphifyRuntime {
+        wsl_executable: PathBuf::from(GRAPHIFY_WSL_BWRAP_PATH),
+        runtime_root,
+        launcher_sha256: GRAPHIFY_WSL_BWRAP_SHA256.to_owned(),
+        manifest_sha256: payload.manifest_sha256,
+        execution_identity_sha256: native_linux_execution_identity_digest(),
+    })
+}
+
+fn native_linux_execution_identity_digest() -> String {
+    // Reuse the complete reviewed system/payload/sandbox policy as a bound
+    // input, then distinguish native execution from both Windows profiles.
+    let policy = reviewed_execution_identity_digest(
+        GRAPHIFY_WSL_BWRAP_SHA256,
+        GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256,
+        GRAPHIFY_WSL_RUNTIME_FILE_COUNT,
+        GRAPHIFY_WSL_RUNTIME_BYTE_COUNT,
+        GRAPHIFY_WSL_INSTALL_REPORT_SHA256,
+    );
+    framed_digest(&[
+        b"lattice-graphify-native-linux-execution-1.0",
+        b"direct-exec=/usr/bin/bwrap",
+        b"host=linux",
+        policy.as_bytes(),
+    ])
+}
+
+/// Binds the fixed native Linux profile into a caller's configuration digest.
+/// This is a selection identity, not evidence that its files or sandbox ran.
+#[must_use]
+pub fn native_linux_selection_digest() -> String {
+    framed_digest(&[
+        b"lattice-graphify-native-linux-platform-selection-1.0",
+        native_linux_execution_identity_digest().as_bytes(),
+    ])
+}
+
+fn verify_pinned_payload(runtime_root: &Path) -> GraphifyAdapterResult<PayloadManifest> {
+    let payload = collect_wsl_payload(runtime_root)?;
+    if payload.entries.len() != GRAPHIFY_WSL_RUNTIME_FILE_COUNT
+        || payload.byte_count != GRAPHIFY_WSL_RUNTIME_BYTE_COUNT
+    {
+        return Err(identity_error("GRAPHIFY_WSL_PAYLOAD_SHAPE_MISMATCH"));
+    }
+    if payload.manifest_sha256 != GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256 {
+        return Err(identity_error("GRAPHIFY_WSL_PAYLOAD_DIGEST_MISMATCH"));
+    }
+    let install_report_sha256 = identity_file_sha256(&runtime_root.join(INSTALL_REPORT_RELATIVE))?;
+    if install_report_sha256 != GRAPHIFY_WSL_INSTALL_REPORT_SHA256 {
+        return Err(identity_error(
+            "GRAPHIFY_WSL_INSTALL_REPORT_DIGEST_MISMATCH",
+        ));
+    }
+
+    Ok(payload)
 }
 
 #[cfg(windows)]
@@ -675,6 +768,25 @@ mod tests {
             payload.manifest_sha256,
             GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256
         );
+    }
+
+    #[test]
+    fn native_linux_identity_is_distinct_and_unreviewed_payload_is_rejected() {
+        assert_ne!(
+            native_linux_execution_identity_digest(),
+            GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256
+        );
+        assert_eq!(native_linux_execution_identity_digest().len(), 64);
+        let fixture = TestDirectory::new("native-unreviewed-payload");
+        fs::create_dir_all(fixture.path().join("site-packages")).expect("packages");
+        fs::write(fixture.path().join("install-report.json"), b"{}\n").expect("report");
+        assert_eq!(
+            verify_pinned_payload(fixture.path())
+                .expect_err("no self-pinning")
+                .code(),
+            "GRAPHIFY_WSL_PAYLOAD_SHAPE_MISMATCH"
+        );
+        assert!(verify_native_linux_runtime(fixture.path()).is_err());
     }
 
     #[test]

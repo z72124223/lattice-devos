@@ -277,6 +277,69 @@ test('the canonical Windows PowerShell display also preserves the limited receip
   assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
 });
 
+test('canonical Linux native shell displays preserve the same bound advisory receipt', async context => {
+  // Pinned Codex shell-command/src/bash.rs accepts [shell, -c|-lc, script].
+  // shlex 1.3 emits these shell/flag tokens bare and the restricted script in
+  // double quotes. These are data fixtures, not live Linux process evidence.
+  for (const shell of ['/bin/bash', '/usr/bin/bash', '/bin/sh', '/usr/bin/sh', '/bin/zsh', '/usr/bin/zsh']) {
+    for (const flag of ['-lc', '-c']) await context.test(`${shell} ${flag}`, async subtest => {
+      const sample = fixture(subtest), inner = sample.diagnostic.commandActions[0].command;
+      sample.diagnostic.command = `${shell} ${flag} ${JSON.stringify(inner)}`;
+      assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
+    });
+  }
+});
+
+test('Linux receipt display rejects altered wrappers, argv, actions and producer source', async context => {
+  const linux = inner => ({ command: `/bin/bash -lc ${JSON.stringify(inner)}`,
+    commandActions: [{ type: 'unknown', command: inner }] });
+  const mutations = [
+    ['relative shell', item => { item.command = item.command.replace('/bin/bash', 'bash'); }],
+    ['untrusted absolute shell', item => { item.command = item.command.replace('/bin/bash', '/tmp/bash'); }],
+    ['shell path traversal', item => { item.command = item.command.replace('/bin/bash', '/bin/../bin/bash'); }],
+    ['unsupported shell', item => { item.command = item.command.replace('/bin/bash', '/bin/fish'); }],
+    ['quoted executable', item => { item.command = item.command.replace('/bin/bash', '"/bin/bash"'); }],
+    ['extra wrapper flag', item => { item.command = item.command.replace(' -lc ', ' --noprofile -lc '); }],
+    ['split flags', item => { item.command = item.command.replace(' -lc ', ' -l -c '); }],
+    ['interactive flag', item => { item.command = item.command.replace(' -lc ', ' -ilc '); }],
+    ['extra argv', item => { item.command += ' extra'; }],
+    ['environment wrapper', item => { item.command = `env ${item.command}`; }],
+    ['wrapper prefix', item => { item.command = `printf injected; ${item.command}`; }],
+    ['wrapper suffix', item => { item.command += '; printf injected'; }],
+    ['wrapper pipe', item => { item.command += ' | cat'; }],
+    ['wrapper redirect', item => { item.command += ' > receipt.json'; }],
+    ['inner prefix', (item, inner) => Object.assign(item, linux(`printf injected; ${inner}`))],
+    ['inner suffix', (item, inner) => Object.assign(item, linux(`${inner}; printf injected`))],
+    ['extra inner argv', (item, inner) => Object.assign(item, linux(`${inner} --unexpected`))],
+    ['changed helper source', (item, inner) => Object.assign(item, linux(inner.replace('relative-module-diagnostic-cli.mjs', 'untrusted-cli.mjs')))],
+    ['action mismatch', item => { item.commandActions[0].command += ' --unexpected'; }],
+    ['extra action', item => { item.commandActions.push(clone(item.commandActions[0])); }],
+  ];
+  for (const [name, mutate] of mutations) await context.test(name, async subtest => {
+    const sample = fixture(subtest), inner = sample.diagnostic.commandActions[0].command;
+    Object.assign(sample.diagnostic, linux(inner)); mutate(sample.diagnostic, inner);
+    await withoutFileAccess(sample, () => assert.rejects(sample.call(), { code: 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED' }));
+  });
+});
+
+test('Linux receipts still bind the full failure command, request digest and native identity', async context => {
+  for (const mutation of ['none', 'stripped failure', 'request digest', 'turn binding']) await context.test(mutation, async subtest => {
+    const sample = fixture(subtest);
+    sample.failure.command = `/bin/sh -c ${JSON.stringify(sample.failure.commandActions[0].command)}`;
+    sample.receipt.failureEventSha256 = failureEventDigest(sample.failure);
+    sample.diagnostic.command = `/bin/bash -lc ${JSON.stringify(sample.diagnostic.commandActions[0].command)}`;
+    if (mutation === 'stripped failure') sample.receipt.failureEventSha256 = rawFailureDigest({
+      ...sample.failure, command: sample.failure.commandActions[0].command });
+    if (mutation === 'request digest') sample.receipt.requestSha256 = '0'.repeat(64);
+    if (mutation === 'turn binding') sample.receipt.binding.turnId = 'another-turn';
+    sample.syncReceipt();
+    if (mutation === 'none') assertLimitedTrust(await withoutFileAccess(sample, sample.call), sample);
+    else await withoutFileAccess(sample, () => assert.rejects(sample.call(), {
+      code: mutation === 'request digest' ? 'CONTROL_DIAGNOSTIC_COMMAND_REJECTED' : 'CONTROL_DIAGNOSTIC_BINDING_REJECTED',
+    }));
+  });
+});
+
 test('unsupported request path quoting fails closed', async context => {
   for (const character of ["'", '"', '\u2018', '\u2019', '\u201c', '\u201d', '$', '`', '!', '^']) {
     await context.test(`path character U+${character.codePointAt(0).toString(16)}`, async subtest => {

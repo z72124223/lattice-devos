@@ -10,6 +10,8 @@ const SCHEMA: &str = "lattice.project-purge.bot.v1";
 
 /// Existing services keep their old registration contract until the explicit
 /// ownership extension is installed. They remain unpurgeable when unattributable.
+/// # Errors
+/// Rejects incompatible catalogs, invalid ownership or unavailable database operations.
 pub fn bot_lifecycle_requires_registry(port: u16, run: &str, password: &str) -> Result<bool> {
     let mut client = connect(port, run, password, "runtime")?;
     super::verify(&mut client, run)?;
@@ -98,6 +100,8 @@ pub(super) fn verify(client: &mut impl GenericClient) -> Result<bool> {
 }
 
 /// Install only the fixed additive extension; old ownership is never inferred.
+/// # Errors
+/// Rejects incompatible catalogs, invalid ownership or unavailable database operations.
 pub fn install_bot_project_ownership(
     port: u16,
     run: &str,
@@ -157,6 +161,8 @@ fn registry_lock<'a>(
 /// Registration binds only a currently verified Registry project. The native
 /// application holds Registry locks until the dedicated Bot transaction commits.
 #[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Rejects incompatible catalogs, invalid ownership or unavailable database operations.
 pub fn execute_bot_lifecycle_with_registry(
     main: &mut Client,
     target: &MigrationTarget,
@@ -248,6 +254,8 @@ fn receipt(
 /// Preview or erase proven Bot rows before the main Registry is erased. Status
 /// uses the exact committed receipt and therefore works after Registry erasure.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+/// # Errors
+/// Rejects incompatible catalogs, invalid ownership or unavailable database operations.
 pub fn execute_bot_project_purge(
     main: &mut Client,
     target: &MigrationTarget,
@@ -467,7 +475,12 @@ pub fn execute_bot_project_purge(
         for owner in &owners {
             tx.execute(
                 &format!("DELETE FROM ONLY {table} WHERE project_id=$1 AND role_id=$2"),
-                &[&project, &owner["roleId"].as_str().unwrap()],
+                &[
+                    &project,
+                    &owner["roleId"]
+                        .as_str()
+                        .ok_or("BOT_LIFECYCLE_DATABASE_REJECTED")?,
+                ],
             )
             .map_err(|e| error(&e))?;
         }
@@ -487,17 +500,20 @@ pub fn execute_bot_project_purge(
         .iter()
         .filter(|(t, _)| t == "bot_project_ownership.retired")
         .map(|(_, v)| {
-            serde_json::from_str::<Value>(v).unwrap()["pair_digest"]
+            serde_json::from_str::<Value>(v)
+                .map_err(|_| "BOT_LIFECYCLE_DATABASE_REJECTED")?["pair_digest"]
                 .as_str()
-                .unwrap()
-                .to_owned()
+                .map(str::to_owned)
+                .ok_or("BOT_LIFECYCLE_DATABASE_REJECTED")
         })
-        .collect();
+        .collect::<Result<_>>()?;
     for owner in &owners {
         expected_retired.insert(digest(
             format!(
                 "lattice.bot-project-retirement.v1\n{project}\n{}",
-                owner["roleId"].as_str().unwrap()
+                owner["roleId"]
+                    .as_str()
+                    .ok_or("BOT_LIFECYCLE_DATABASE_REJECTED")?
             )
             .as_bytes(),
         ));
@@ -506,12 +522,13 @@ pub fn execute_bot_project_purge(
         .iter()
         .filter(|(t, _)| t == "bot_project_ownership.retired")
         .map(|(_, v)| {
-            serde_json::from_str::<Value>(v).unwrap()["pair_digest"]
+            serde_json::from_str::<Value>(v)
+                .map_err(|_| "BOT_LIFECYCLE_DATABASE_REJECTED")?["pair_digest"]
                 .as_str()
-                .unwrap()
-                .to_owned()
+                .map(str::to_owned)
+                .ok_or("BOT_LIFECYCLE_DATABASE_REJECTED")
         })
-        .collect();
+        .collect::<Result<_>>()?;
     if retained != expected_retained
         || expected_retired != actual_retired
         || !survivors
@@ -528,7 +545,7 @@ pub fn execute_bot_project_purge(
             &op,
             &scope,
             &after_digest,
-            &(owners.len() as i64),
+            &i64::try_from(owners.len()).map_err(|_| "BOT_LIFECYCLE_DATABASE_REJECTED")?,
             &event_count,
         ],
     )

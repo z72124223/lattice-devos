@@ -8,6 +8,10 @@
     "node": ">=24.15.0"
   },
   "scripts": {
+    "cloud:setup": "node scripts/cloud/runtime.mjs setup",
+    "cloud:start": "node scripts/cloud/runtime.mjs start",
+    "cloud:ready": "node scripts/cloud/runtime.mjs ready",
+    "cloud:test": "node --test scripts/cloud/runtime.test.mjs",
     "check": "node scripts/check-project.mjs",
     "control:start": "node apps/lattice-control/src/server.mjs",
     "control:codex-lifecycle-acceptance": "node scripts/run-codex-app-server-lifecycle-acceptance.mjs",
