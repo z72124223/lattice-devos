@@ -61,6 +61,7 @@ async function runFixture({
   tickets = [],
   gitBranch = "product/fixture",
   nestedGitWorktree = false,
+  localFixture = false,
 } = {}) {
   const fixtureContainer = await mkdtemp(path.join(tmpdir(), "lattice-project-check-"));
   const root = nestedGitWorktree
@@ -89,6 +90,11 @@ async function runFixture({
     await mkdir(ticketDirectory, { recursive: true });
     await mkdir(runtimeContractDirectory, { recursive: true });
     await mkdir(runtimeSourceDirectory, { recursive: true });
+    if (localFixture) {
+      const localTickets = path.join(root, ".lattice", "project-purge-fixture", "docs", "tickets");
+      await mkdir(localTickets, { recursive: true });
+      await writeFile(path.join(localTickets, "invalid.json"), "not source JSON; generated runtime fixture");
+    }
 
     await writeFile(path.join(root, "AGENTS.md"), agents, "utf8");
     await writeFile(path.join(root, "PLANS.md"), plans, "utf8");
@@ -135,6 +141,12 @@ async function runFixture({
 
 test("maintenance and product branches do not need a TASK", async () => {
   const result = await runFixture();
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /current_tasks=0/u);
+});
+
+test("local runtime and purge fixtures are excluded from repository structure checks", async () => {
+  const result = await runFixture({ localFixture: true });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /current_tasks=0/u);
 });

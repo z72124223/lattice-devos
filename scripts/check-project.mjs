@@ -6,6 +6,7 @@ import process from "node:process";
 const root = process.cwd();
 const ignoredDirectories = new Set([
   ".git",
+  ".lattice",
   "node_modules",
   "coverage",
   "target",
@@ -20,7 +21,7 @@ async function walk(directory) {
     }
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      files.push(...(await walk(absolute)));
+      for (const file of await walk(absolute)) files.push(file);
     } else if (entry.isFile()) {
       files.push(absolute);
     }

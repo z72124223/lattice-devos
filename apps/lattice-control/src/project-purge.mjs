@@ -69,7 +69,7 @@ export function nativeProjectPurge(binary, input) {
     child.stdout.on('data', data => { bytes += Buffer.byteLength(data); if (bytes > 1048576) { child.kill(); finish(new Error('PURGE_NATIVE_OUTPUT_LIMIT')); } else output += data; });
     child.stderr.on('data', data => { bytes += data.length; if (bytes > 1048576) { child.kill(); finish(new Error('PURGE_NATIVE_OUTPUT_LIMIT')); } else errorOutput += data.toString(); });
     child.on('close', code => {
-      if (code !== 0) return finish(new Error(/^(?:PROJECT_PURGE|REGISTRY|BOT_LIFECYCLE)_[A-Z_]{1,100}$/.test(errorOutput.trim()) ? errorOutput.trim() : 'PURGE_NATIVE_FAILED'));
+      if (code !== 0) return finish(new Error(/^(?:PROJECT_PURGE|REGISTRY|BOT_LIFECYCLE|CLAIM_RECONCILIATION|CONTROL_PRODUCT)_[A-Z_]{1,100}$/.test(errorOutput.trim()) ? errorOutput.trim() : 'PURGE_NATIVE_FAILED'));
       try { finish(null, JSON.parse(output)); } catch { finish(new Error('PURGE_NATIVE_RESPONSE_INVALID')); }
     });
     child.stdin.on('error', () => {});

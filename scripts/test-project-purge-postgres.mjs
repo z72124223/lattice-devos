@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history','claim-reconciliation'].includes(args.scenario));
 if (['upgrade','streaming','streaming-large'].includes(args.scenario)) assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -98,6 +98,64 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
+  if(args.scenario==='claim-reconciliation') {
+    const {env,seeded,root}=establish('claim-reconciliation');
+    const runtimeSql=query=>command(args.psql,['-X','-At','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],
+      {...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},`BEGIN ISOLATION LEVEL SERIALIZABLE; ${query}; COMMIT;`,'claim-runtime');
+    const setup=(task,claim,request)=>runtimeSql(`SELECT control_product.metadata_write_v1('${task}','${claim}-meta',repeat('1',64),0,'Synthetic','Native archive reconciliation',2,NULL,ARRAY[]::text[]); SELECT control_product.claim_v1('${task}','${claim}',repeat('2',64),'EXECUTION','synthetic','gpt-6-astra','synthetic-worktree'); SELECT control_product.observe_v1('${claim}','${request}',repeat('3',64),0,'THREAD_BOUND','fixture-thread',NULL,'synthetic binding',NULL,NULL,NULL,NULL,NULL)`);
+    setup(seeded.targetTaskRef,'fixture-claim','fixture-bound');
+    // Occupy the third request identity in another project to force failure
+    // after two successful calls inside the new atomic transaction.
+    setup(seeded.survivorTaskRef,'survivor-claim','fixture-reconcile:2');
+    const targetClaim=()=>JSON.parse(sql(env,"SELECT jsonb_agg(to_jsonb(o) ORDER BY sequence) FROM control_product.conversation_observations o WHERE claim_id='fixture-claim'"));
+    const before=rows(env), ledger=sql(env,'SELECT jsonb_agg(to_jsonb(s) ORDER BY stream_id) FROM control.task_ledger_streams s');
+    const archiveRoot=path.join(root,'codex-home','archived_sessions');mkdirSync(archiveRoot,{recursive:true});
+    env.CODEX_HOME=path.dirname(archiveRoot);
+    const parentFile=path.join(archiveRoot,'parent.jsonl'), threadFile=path.join(archiveRoot,'thread.jsonl');
+    const event=(server,tool,argumentsValue,result)=>({type:'event_msg',payload:{type:'item_completed',item:{server,tool,status:'completed',arguments:argumentsValue,result:{isError:false,structuredContent:result}}}});
+    const parent=[event('codex_app','create_thread',{prompt:`${seeded.targetProjectId} ${seeded.targetTaskRef} fixture-claim`},{threadId:'fixture-thread'}),
+      event('codex_app','wait_threads',{}, {polls:[{thread:{id:'fixture-thread'},latestTurn:{id:'fixture-turn',status:'inProgress',startedAt:100,completedAt:null}}]}),
+      event('lattice','lattice_control_update',{task_ref:seeded.targetTaskRef},{record:targetClaim()[0]}),
+      event('codex_app','wait_threads',{}, {polls:[{thread:{id:'fixture-thread'},latestTurn:{id:'fixture-turn',status:'completed',startedAt:100,completedAt:120}}]})];
+    const archive=[{type:'session_meta',payload:{id:'fixture-thread'}},{type:'event_msg',payload:{type:'task_started',turn_id:'fixture-turn',started_at:100}},
+      {type:'event_msg',payload:{type:'task_complete',turn_id:'fixture-turn',started_at:100,completed_at:120}}];
+    writeFileSync(parentFile,parent.map(JSON.stringify).join('\n'));writeFileSync(threadFile,archive.map(JSON.stringify).join('\n'));
+    const fileHash=file=>createHash('sha256').update(readFileSync(file)).digest('hex');
+    const input={action:'reconcile-archived-claim',authorization:'RECONCILE_ARCHIVED_CLAIM',projectId:seeded.targetProjectId,taskRef:seeded.targetTaskRef,
+      claimId:'fixture-claim',operationId:'fixture-reconcile',expectedSequence:1,parentArchive:parentFile,threadArchive:threadFile,parentSha256:fileHash(parentFile),threadSha256:fileHash(threadFile)};
+    assert.match(native(env,{...input,expectedSequence:2},false).stderr,/CLAIM_RECONCILIATION_INPUT_REJECTED/);
+    sql(env,"UPDATE control.runtime_admission SET admission_mode='ACTIVE',daemon_instance_id='task050-fresh-process',daemon_epoch=50,authority_revision=50,observation_digest=decode(repeat('a',64),'hex'),authority_head_digest=decode(repeat('b',64),'hex') WHERE singleton");
+    assert.match(native(env,input,false).stderr,/CLAIM_RECONCILIATION_MAINTENANCE_REQUIRED/);
+    sql(env,"UPDATE control.runtime_admission SET admission_mode='STOPPED',daemon_instance_id=NULL,daemon_epoch=NULL,authority_revision=0,observation_digest=NULL,authority_head_digest=NULL WHERE singleton");
+    check('reconciliation-rejects-active-admission-and-stale-cas');
+    sql(env,'GRANT SELECT ON control_product.conversation_observations TO PUBLIC');
+    assert.match(native(env,input,false).stderr,/CLAIM_RECONCILIATION_SCHEMA_REJECTED/);
+    sql(env,'REVOKE SELECT ON control_product.conversation_observations FROM PUBLIC');
+    assert.equal(hash(rows(env)),hash(before));
+    check('offline-reconciliation-keeps-exact-acl-verification');
+    assert.match(native(env,input,false).stderr,/CONTROL_PRODUCT_IDEMPOTENCY_CONFLICT/);
+    assert.equal(targetClaim().length,1);
+    assert.equal(hash(rows(env)),hash(before));
+    check('third-observation-conflict-rolls-back-first-two-writes');
+    const preview=native(env,{action:'preview',projectId:seeded.targetProjectId,operationId:'claim-preview'}).value;
+    assert.ok(preview.blockers.some(b=>b.code==='LIVE_OR_UNCERTAIN_CONVERSATION_CLAIM'));
+    const accepted={...input,operationId:'verified-reconcile'};
+    const result=native(env,accepted).value;
+    assert.equal(result.status,'RECONCILED');assert.equal(result.taskCompletionChanged,false);assert.equal(result.projectDeletionExecuted,false);
+    assert.deepEqual(targetClaim().map(o=>o.kind),['THREAD_BOUND','DISPATCH_STARTED','TURN_BOUND','TURN_COMPLETED','ARCHIVED']);
+    assert.equal(sql(env,'SELECT jsonb_agg(to_jsonb(s) ORDER BY stream_id) FROM control.task_ledger_streams s'),ledger);
+    assert.equal(hash(rows(env).filter(([name])=>name!=='control_product.conversation_observations')),hash(before.filter(([name])=>name!=='control_product.conversation_observations')));
+    const after=rows(env);assert.deepEqual(native(env,accepted).value,result);assert.equal(hash(rows(env)),hash(after));
+    const repaired=native(env,{action:'preview',projectId:seeded.targetProjectId,operationId:'claim-preview-after'}).value;
+    assert.ok(!repaired.blockers.some(b=>b.code==='LIVE_OR_UNCERTAIN_CONVERSATION_CLAIM'));
+    check('exact-archived-history-reconciles-without-ledger-catalog-or-survivor-changes-and-replays');
+    writeFileSync(parentFile,readFileSync(parentFile,'utf8')+'\n'+JSON.stringify({type:'event_msg',payload:{type:'token_count'}}));
+    assert.match(native(env,accepted,false).stderr,/CLAIM_RECONCILIATION_EVIDENCE_CHANGED/);
+    assert.match(native(env,{...accepted,parentSha256:fileHash(parentFile)},false).stderr,/CLAIM_RECONCILIATION_HISTORY_REJECTED/);
+    assert.equal(hash(rows(env)),hash(after));
+    check('changed-evidence-and-unrelated-existing-history-cannot-reuse-operation');
+    evidence.status='PASS';
+  } else
   if(args.scenario==='decisions') {
     const {env,seeded}=establish('decisions');
     const runtimeSql=(query,success=true)=>command(args.psql,['-X','-At','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],{...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},`BEGIN ISOLATION LEVEL SERIALIZABLE; ${query}; COMMIT;`,'decision-runtime',success);

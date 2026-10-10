@@ -482,6 +482,27 @@ test('standard CLI rejects unknown, duplicate and incomplete deletion arguments 
   ]) assert.equal((await runProjectPurgeCli(args, { preview: never, apply: never, status: never })).exitCode, 1);
 });
 
+test('archived claim CLI requires exact input digest and offline maintenance before native execution', async t => {
+  const f = await fixture(t), input = path.join(f.root, 'archive-proof.json');
+  const request = { schema: 'lattice.project-purge.request.v1', action: 'reconcile-archived-claim',
+    authorization: 'RECONCILE_ARCHIVED_CLAIM', projectId: f.project.id, claimId: 'archived-claim' };
+  const bytes = JSON.stringify({ nativeBinary: path.join(f.root, 'native.exe'), request });
+  await writeFile(input, bytes);
+  const digest = createHash('sha256').update(bytes).digest('hex');
+  let calls = 0;
+  const reconcile = async (binary, actual) => {
+    assert.equal(binary, path.join(f.root, 'native.exe')); assert.deepEqual(actual, request); calls++;
+    return { schema: 'lattice.claim-reconciliation.result.v1', status: 'RECONCILED',
+      projectId: request.projectId, claimId: request.claimId, taskCompletionChanged: false, projectDeletionExecuted: false };
+  };
+  const args = ['reconcile-claim', '--input', input, '--confirm', digest];
+  assert.equal((await runProjectPurgeCli(args, { reconcile })).exitCode, 1); assert.equal(calls, 0);
+  assert.equal((await runProjectPurgeCli([...args, '--maintenance-offline'], { reconcile })).exitCode, 0); assert.equal(calls, 1);
+  await writeFile(input, bytes + ' ');
+  const changed = await runProjectPurgeCli([...args, '--maintenance-offline'], { reconcile });
+  assert.equal(changed.exitCode, 1); assert.equal(JSON.parse(changed.output).code, 'PURGE_INPUT_DIGEST_CHANGED'); assert.equal(calls, 1);
+});
+
 test('standard CLI inventory saves one plan; resume delegates exact plan and verify rejects partial completion', async t => {
   const f = await fixture(t), input = path.join(f.root, 'input.json'), planPath = path.join(f.root, 'plan.json');
   await writeFile(input, JSON.stringify({ projectId: f.project.id, databasePath: f.databasePath,
