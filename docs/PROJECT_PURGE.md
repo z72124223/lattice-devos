@@ -11,6 +11,16 @@
 3. Codex 對話／附件、排程、遠端 repository／發布物、備份、獨立 Bot lifecycle DB 和外部 Graphify cache 另行逐項處理並讀回。封存對話不能填成永久刪除；沒有可用刪除介面時維持未完成。
 4. 使用者確認的清除範圍必須包含永久刪除。若某次執行被工具政策拒絕，停止該操作並保留錯誤；不得改用本入口或其他工具重試以繞過拒絕。
 
+## 已歸檔但遺漏回合紀錄
+
+`reconcile-claim` 處理「只有第一筆 THREAD_BOUND、原始回合實際已完成並歸檔」的缺漏。它不重新註冊專案、不恢復派工資格、不啟動 Codex，也不把工作標為正式驗收完成。一般 OBSERVE 的新派工檢查保持不變。
+
+輸入檔為 `{ "nativeBinary": "<目前安裝的絕對路徑>", "request": {...} }`；request 必須含 `schema: "lattice.project-purge.request.v1"`、`action: "reconcile-archived-claim"`、`authorization: "RECONCILE_ARCHIVED_CLAIM"`、精確 `projectId/taskRef/claimId/operationId`、`expectedSequence: 1`，以及 `parentArchive/threadArchive` 的絕對路徑和 `parentSha256/threadSha256`。`--confirm` 核對整份輸入檔的 SHA-256；使用目前受支援的維護連線及明確 `CODEX_HOME`。先讀取原生對話確認無執行中回合，再以 `project:purge reconcile-claim --input archive-proof.json --confirm INPUT_SHA256 --maintenance-offline` 執行。
+
+目前只支援 Windows：原生程式要求兩份檔案位於 CODEX_HOME 的 `archived_sessions`，拒絕 reparse point，以不允許寫入或重新命名的檔案分享模式持續鎖定至交易結束。程式逐項核對原主控的 create_thread、成功 THREAD_BOUND、原生進行中與完成回執，以及歸檔中的原始回合與所有後續回合終止事實；子代理尚無終止回報也拒絕。這是歸檔事實驗證，不是所有背景程序或其他主機的存活證明；專案維護仍須停止其寫入者。
+
+PostgreSQL 必須已 STOPPED。維護入口鎖住 admission，核對既有 Registry／task／claim 與原始綁定摘要，沿用原有 SQL 契約，在同一交易補登 DISPATCH_STARTED、TURN_BOUND、TURN_COMPLETED、ARCHIVED，全部明標為事後對帳。任何不同歷史、並行修改或 SQL 失敗均整筆回滾；同一操作與證據可精確重播。它不更動 SQL schema、purge guard、任務 ledger 或 SQLite 名單。完成後重新盤點；對帳成功不解除工具政策對實際刪除的限制。
+
 ## 支援範圍與拒絕條件
 
 - PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 4,096 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。

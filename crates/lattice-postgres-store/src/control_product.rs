@@ -357,6 +357,131 @@ impl PostgresControlProduct {
             .map_err(|_| "CONTROL_PRODUCT_RESPONSE_REJECTED")
     }
 
+    /// Reconcile one proven history atomically, or return its exact prior result.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn reconcile_archived_observations(
+        mut client: Client,
+        target: &MigrationTarget,
+        proof: &crate::ArchivedClaimProof,
+        commands: &[ControlProductCommand],
+    ) -> Result<Vec<Value>, &'static str> {
+        // Never produce a normal product object from an offline connection.
+        // The caller holds the admission lock until this bounded operation ends.
+        crate::verify_postgres_schema(&mut client, target, crate::DatabaseRole::Runtime)
+            .map_err(|_| "CLAIM_RECONCILIATION_RUNTIME_PROFILE_REJECTED")?;
+        let (project, task, claim, thread, bound_digest) = (
+            &proof.project_id,
+            &proof.task_ref,
+            &proof.claim_id,
+            &proof.thread_id,
+            &proof.bound_digest,
+        );
+        let mut tx = client
+            .build_transaction()
+            .isolation_level(IsolationLevel::Serializable)
+            .start()
+            .map_err(product_error)?;
+        tx.batch_execute("SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='30s'")
+            .map_err(product_error)?;
+        let facts: Value = tx
+            .query_one(
+                "SELECT control_product.snapshot_v1($1,$2)",
+                &[&project, &vec![task.as_str().to_owned()]],
+            )
+            .map_err(product_error)?
+            .get(0);
+        let claims = facts["claims"]
+            .as_array()
+            .ok_or("CLAIM_RECONCILIATION_SCOPE_REJECTED")?;
+        if claims.len() != 1
+            || claims[0]["claim_id"] != *claim
+            || claims[0]["task_ref"] != task.as_str()
+            || claims[0]["phase"] != "EXECUTION"
+            || claims[0]["thread_id"] != *thread
+        {
+            return Err("CLAIM_RECONCILIATION_SCOPE_REJECTED");
+        }
+        let observations = facts["observations"]
+            .as_array()
+            .ok_or("CLAIM_RECONCILIATION_HISTORY_REJECTED")?;
+        let initial = observations
+            .iter()
+            .find(|o| o["sequence"] == 1)
+            .ok_or("CLAIM_RECONCILIATION_HISTORY_REJECTED")?;
+        if initial["kind"] != "THREAD_BOUND"
+            || initial["thread_id"] != *thread
+            || initial["request_digest"] != *bound_digest
+            || !initial["turn_id"].is_null()
+            || !initial["input_id"].is_null()
+            || ![1, 5].contains(&observations.len())
+            || commands.len() != 4
+        {
+            return Err("CLAIM_RECONCILIATION_HISTORY_REJECTED");
+        }
+        // Exact retry only. Existing unrelated dispatches cannot be adopted.
+        if observations.len() == 5 {
+            for (offset, command) in commands.iter().enumerate() {
+                let expected =
+                    i64::try_from(offset).map_err(|_| "CLAIM_RECONCILIATION_HISTORY_REJECTED")? + 2;
+                let ControlProductCommand::Observe { request_id, .. } = command else {
+                    return Err("CLAIM_RECONCILIATION_INPUT_REJECTED");
+                };
+                if !observations.iter().any(|o| {
+                    o["sequence"] == expected
+                        && o["request_id"] == *request_id
+                        && o["request_digest"] == command.digest()
+                }) {
+                    return Err("CLAIM_RECONCILIATION_HISTORY_REJECTED");
+                }
+            }
+        }
+        let mut records = Vec::new();
+        for command in commands {
+            let ControlProductCommand::Observe {
+                claim_id,
+                request_id,
+                expected_sequence,
+                kind,
+                thread_id,
+                turn_id,
+                summary,
+                evidence_ref,
+                approval_id,
+                decision,
+                input_id,
+                payload,
+                ..
+            } = command
+            else {
+                return Err("CLAIM_RECONCILIATION_INPUT_REJECTED");
+            };
+            let record: Value = tx
+                .query_one(
+                    "SELECT control_product.observe_v1($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+                    &[
+                        claim_id,
+                        request_id,
+                        &command.digest(),
+                        expected_sequence,
+                        kind,
+                        thread_id,
+                        turn_id,
+                        summary,
+                        evidence_ref,
+                        approval_id,
+                        decision,
+                        input_id,
+                        payload,
+                    ],
+                )
+                .map_err(product_error)?
+                .get(0);
+            records.push(record);
+        }
+        tx.commit().map_err(|_| "CONTROL_PRODUCT_OUTCOME_UNKNOWN")?;
+        Ok(records)
+    }
+
     /// Saves one closed command atomically; a retry reads its original result.
     ///
     /// # Errors

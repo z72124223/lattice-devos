@@ -33,6 +33,12 @@ fn run() -> Result<serde_json::Value, &'static str> {
         .map_err(|_| "PROJECT_PURGE_CONFIGURATION_REJECTED")?;
     let password = std::env::var("LATTICE_TASK019_PASSWORD")
         .map_err(|_| "PROJECT_PURGE_CONFIGURATION_REJECTED")?;
+    if request["action"] == "reconcile-archived-claim" {
+        if bot_service.is_some() {
+            return Err("CLAIM_RECONCILIATION_INPUT_REJECTED");
+        }
+        return lattice_runtime::claim_reconciliation::execute(&request, port, &run_id, &password);
+    }
     let inspect_bot = |project_id: &str| -> Result<serde_json::Value, &'static str> {
         let service = bot_service
             .as_ref()
