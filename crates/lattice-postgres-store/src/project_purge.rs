@@ -1,6 +1,7 @@
 //! Bounded operator-only physical erasure for a complete Registry command suffix.
 //! A successful result is deliberately PG-only; the caller must separately erase
 //! its local catalog/files and cannot infer success from a project being absent.
+use crate::project_purge_decisions::{self, DecisionPurge};
 use crate::project_purge_snapshot::SnapshotHasher;
 use crate::project_registry::{load_registry_for_maintenance, load_registry_for_transition};
 use crate::registry_epoch::{self, EpochMigration};
@@ -18,8 +19,16 @@ use std::fmt::Write;
 use std::time::{Duration, Instant};
 
 pub const PROJECT_PURGE_SQL: &str = include_str!("../../../db/extensions/project-purge/v1.sql");
-type GraphSourceResolver<'a> = dyn Fn(&str) -> Result<Vec<String>> + 'a;
-type Result<T> = std::result::Result<T, &'static str>;
+/// Recomputed selectors and the actual repository identity used for uniqueness checks.
+pub struct GraphSourceOwnership {
+    /// Exact Runtime configuration hashes; never supplied by request JSON.
+    pub configurations: Vec<String>,
+    /// Canonical Git common directory, compared across registered projects.
+    pub repository_identity: Option<String>,
+}
+type GraphSourceResolver<'a> =
+    dyn Fn(&str, &[(String, String)]) -> Result<GraphSourceOwnership> + 'a;
+pub(super) type Result<T> = std::result::Result<T, &'static str>;
 const SCHEMA: &str = "lattice.project-purge.result.v1";
 const PARAMS: &str = " AND $1::text IS NOT NULL AND $2::text[] IS NOT NULL AND $3::text[] IS NOT NULL AND $4::text[] IS NOT NULL";
 
@@ -59,7 +68,7 @@ pub fn inspect_project_purge_graph(client: &mut Client) -> Result<Value> {
     )
 }
 
-fn digest(bytes: &[u8]) -> String {
+pub(super) fn digest(bytes: &[u8]) -> String {
     let mut value = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
         write!(&mut value, "{byte:02x}").expect("writing to String cannot fail");
@@ -79,7 +88,7 @@ fn identifier(value: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
 }
-fn db<T>(r: std::result::Result<T, postgres::Error>) -> Result<T> {
+pub(super) fn db<T>(r: std::result::Result<T, postgres::Error>) -> Result<T> {
     r.map_err(|_| "PROJECT_PURGE_DATABASE_REJECTED")
 }
 fn quoted(value: &str) -> String {
@@ -320,6 +329,8 @@ fn extension<C: GenericClient>(client: &mut C) -> Result<()> {
 }
 
 struct Plan {
+    graph_inventory: Value,
+    decision: Option<DecisionPurge>,
     public: Value,
     prefix: Option<VerifiedRegistryState>,
     epoch: Option<EpochMigration>,
@@ -345,6 +356,7 @@ fn selectors() -> Vec<(&'static str, &'static str)> {
         ),
         ("control_product.conversation_claims", "p.project_id=$1"),
         ("control_product.work_metadata", "p.project_id=$1"),
+        ("control_product.decisions", "p.project_id=$1"),
         (
             "control_product.local_result_bindings",
             "encode(p.stream_id,'hex')=ANY($2)",
@@ -402,7 +414,7 @@ fn known_table(schema: &str, name: &str) -> bool {
             "database_identity migration_history schema_compatibility runtime_admission physical_heads terminal_transactions project_registry_state project_registry_observations project_registry_projects project_registry_commands project_registry_identity_reservations task_ledger_streams task_ledger_commands task_ledger_events task_ledger_outbox task_ledger_foreman_snapshots task_ingress_claims task_ingress_historical_ambiguities task_submission_envelopes external_verified_result_evidence task_external_verified_result_adoptions task_ledger_autonomy_receipts"
         }
         "control_product" => {
-            "extension_identity work_metadata conversation_claims conversation_observations decisions decision_state local_verified_result_evidence local_result_bindings graph_usage_starts graph_usage_finishes"
+            "extension_identity work_metadata conversation_claims conversation_observations decisions decision_state decision_retired_keys local_verified_result_evidence local_result_bindings graph_usage_starts graph_usage_finishes"
         }
         "memory" => {
             "codebase_memory_extension_identity codebase_memory_extension_ledger codebase_memory_analyses codebase_memory_records codebase_memory_retrieval_audits codebase_memory_receipts codebase_memory_reflections openclaw_gateway_commands"
@@ -478,10 +490,12 @@ fn snapshots<C: GenericClient>(
 }
 
 struct SnapshotSelection<'a> {
+    decision: bool,
     predicates: &'a [(String, String)],
     params: &'a [&'a (dyn postgres::types::ToSql + Sync)],
 }
 struct StreamedSnapshot {
+    graph_digest: Option<String>,
     digest: String,
     scope_digest: Option<String>,
     survivor_digest: String,
@@ -535,7 +549,9 @@ fn stream_snapshot<C: GenericClient>(
         &[],
     ))?
     .get(0);
+    let timeout_statement = db(client.prepare("SELECT set_config('statement_timeout',$1,true)"))?;
     let mut physical = SnapshotHasher::new(scope)?;
+    let mut graph = scope.map(|_| SnapshotHasher::new(None)).transpose()?;
     let mut survivors = SnapshotHasher::new(None)?;
     let mut counts = BTreeMap::new();
     let mut selected_counts = BTreeMap::new();
@@ -545,9 +561,17 @@ fn stream_snapshot<C: GenericClient>(
             continue;
         }
         let table = format!("{schema}.{name}");
+        let graph_table = schema == "memory"
+            && ![
+                "codebase_memory_extension_identity",
+                "codebase_memory_extension_ledger",
+            ]
+            .contains(&name.as_str());
         let retained_table = selection.is_some()
             && !table.starts_with("control.project_registry_")
-            && schema != "registry_epoch";
+            && schema != "registry_epoch"
+            && !(selection.is_some_and(|s| s.decision)
+                && project_purge_decisions::shared_table(&table));
         let predicate =
             selection.and_then(|value| value.predicates.iter().find(|(key, _)| key == &table));
         let (condition, parameters) =
@@ -569,7 +593,13 @@ fn stream_snapshot<C: GenericClient>(
             &format!("DECLARE lattice_purge_rows NO SCROLL CURSOR FOR {query}"),
             params,
         ))?;
+        // FETCH's result columns are described from the live cursor. Preparing
+        // before DECLARE would cache an empty column description in the driver.
+        let fetch_statement = db(client.prepare("FETCH FORWARD 4096 FROM lattice_purge_rows"))?;
         physical.table(&table)?;
+        if graph_table && let Some(graph) = &mut graph {
+            graph.table(&table)?;
+        }
         if retained_table {
             survivors.table(&table)?;
         }
@@ -577,9 +607,10 @@ fn stream_snapshot<C: GenericClient>(
         let mut selected = 0u64;
         let mut references = 0u64;
         loop {
-            set_snapshot_budget(client, started, original_timeout)?;
+            let budget = snapshot_statement_budget(started, original_timeout)?;
+            db(client.query_one(&timeout_statement, &[&budget]))?;
             let mut rows = db(client.query_raw(
-                "FETCH FORWARD 512 FROM lattice_purge_rows",
+                &fetch_statement,
                 std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>(),
             ))?;
             let mut fetched = 0usize;
@@ -593,6 +624,9 @@ fn stream_snapshot<C: GenericClient>(
                     .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
                 let is_selected: bool = row.get(1);
                 physical.row(&raw)?;
+                if graph_table && let Some(graph) = &mut graph {
+                    graph.row(&raw)?;
+                }
                 count = count
                     .checked_add(1)
                     .ok_or("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
@@ -609,13 +643,16 @@ fn stream_snapshot<C: GenericClient>(
                     }
                 }
             }
-            if fetched < 512 {
+            if fetched < 4096 {
                 break;
             }
         }
         set_snapshot_budget(client, started, original_timeout)?;
         db(client.batch_execute("CLOSE lattice_purge_rows"))?;
         physical.end_table();
+        if graph_table && let Some(graph) = &mut graph {
+            graph.end_table();
+        }
         if retained_table {
             survivors.end_table();
         }
@@ -634,6 +671,7 @@ fn stream_snapshot<C: GenericClient>(
     ))?;
     let (digest, scope_digest) = physical.finish();
     Ok(StreamedSnapshot {
+        graph_digest: graph.map(|graph| graph.finish().0),
         digest,
         scope_digest,
         survivor_digest: survivors.finish().0,
@@ -694,16 +732,44 @@ fn prepare<C: GenericClient>(
         .iter()
         .map(|(schema, name)| format!("{schema}.{name}"))
         .collect();
+    let decision_installed = crate::postgres_setup::verify_decision_purge_extension(client)
+        .map_err(|_| "PROJECT_PURGE_DECISION_EXTENSION_REJECTED")?;
+    let decision = if table_names.contains("control_product.decisions") {
+        DecisionPurge::prepare(client, project, decision_installed)?
+    } else {
+        None
+    };
+    let mut decision_keys = Vec::<String>::new();
+    if decision.is_some() {
+        if !decision_installed {
+            blockers.push(json!({"code":"DECISION_PURGE_EXTENSION_REQUIRED"}));
+        }
+        if !epoch_policy {
+            blockers.push(json!({"code":"DECISION_PURGE_MINIMAL_ATTESTATION_REQUIRED"}));
+        }
+        decision_keys = db(client.query(
+            "SELECT decision_id FROM ONLY control_product.decisions WHERE project_id=$1",
+            &[&project],
+        ))?
+        .into_iter()
+        .map(|row| row.get(0))
+        .collect();
+        let cross: i64 = db(client.query_one("SELECT count(*) FROM ONLY control_product.decisions survivor JOIN ONLY control_product.decisions target ON survivor.supersedes_id=target.decision_id WHERE (survivor.project_id<>$1 AND target.project_id=$1) OR (survivor.project_id=$1 AND target.project_id<>$1)", &[&project]))?.get(0);
+        if cross > 0 {
+            blockers.push(json!({"code":"DECISION_CROSS_PROJECT_LINEAGE","count":cross}));
+        }
+    }
     let mut graph_groups = BTreeMap::<String, u64>::new();
+    let mut graph_analyses = Vec::<(String, String)>::new();
     if table_names.contains("memory.codebase_memory_analyses") {
-        let mut rows = db(client.query_raw("SELECT encode(configuration_digest,'hex'),count(*)::bigint FROM ONLY memory.codebase_memory_analyses GROUP BY configuration_digest", std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>()))?;
+        let mut rows = db(client.query_raw("SELECT encode(configuration_digest,'hex'),commit_id::text,count(*)::bigint FROM ONLY memory.codebase_memory_analyses GROUP BY configuration_digest,commit_id", std::iter::empty::<&(dyn postgres::types::ToSql + Sync)>()))?;
         while let Some(row) = db(rows.next())? {
-            graph_groups.insert(
-                row.get(0),
-                u64::try_from(row.get::<_, i64>(1))
-                    .map_err(|_| "PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?,
-            );
-            if graph_groups.len() > 100_000 {
+            let configuration: String = row.get(0);
+            let count = u64::try_from(row.get::<_, i64>(2))
+                .map_err(|_| "PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED")?;
+            *graph_groups.entry(configuration.clone()).or_default() += count;
+            graph_analyses.push((configuration, row.get(1)));
+            if graph_analyses.len() > 100_000 {
                 return Err("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED");
             }
         }
@@ -715,28 +781,41 @@ fn prepare<C: GenericClient>(
     let mut graph_configurations = Vec::new();
     let mut survivor_graph_configurations = Vec::new();
     let mut graph_proof = json!(null);
+    let mut repository_proofs = Vec::new();
     if graph_rows > 0 {
         if let Some(resolve) = graph_source {
-            match resolve(canonical) {
-                Ok(mut values)
-                    if !values.is_empty()
-                        && values.len() <= 16
-                        && values.iter().all(|value| {
-                            value.len() == 64
-                                && value
-                                    .bytes()
-                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-                        }) =>
+            match resolve(canonical, &graph_analyses) {
+                Ok(GraphSourceOwnership {
+                    configurations: mut values,
+                    repository_identity,
+                }) if !values.is_empty()
+                    && values.len() <= 36
+                    && values.iter().all(|value| {
+                        value.len() == 64
+                            && value
+                                .bytes()
+                                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    }) =>
                 {
                     values.sort();
                     values.dedup();
+                    if repository_identity.is_some() {
+                        repository_proofs.push(json!({"registryRootCommitment":digest(format!("lattice.graph.registry-root.v1\n{canonical}").as_bytes()),"repositoryCommitment":repository_identity.as_ref().map(|value|digest(format!("lattice.graph.repository.v1\n{value}").as_bytes()))}));
+                    }
                     // Recompute every surviving source too: two lexical paths
                     // can canonicalize to one directory on the actual platform.
                     for other in &protected_roots {
-                        match resolve(other) {
-                            Ok(other_values)
-                                if other_values.iter().all(|value| !values.contains(value)) =>
+                        match resolve(other, &graph_analyses) {
+                            Ok(GraphSourceOwnership {
+                                configurations: other_values,
+                                repository_identity: other_identity,
+                            }) if (repository_identity.is_none()
+                                || repository_identity != other_identity)
+                                && other_values.iter().all(|value| !values.contains(value)) =>
                             {
+                                if other_identity.is_some() {
+                                    repository_proofs.push(json!({"registryRootCommitment":digest(format!("lattice.graph.registry-root.v1\n{other}").as_bytes()),"repositoryCommitment":other_identity.as_ref().map(|value|digest(format!("lattice.graph.repository.v1\n{value}").as_bytes()))}));
+                                }
                                 survivor_graph_configurations.extend(other_values);
                             }
                             Ok(_) => {
@@ -775,6 +854,9 @@ fn prepare<C: GenericClient>(
             "unattributableAnalyses":graph_rows-target_count-survivor_count,
             "unclassifiedGatewayCommands":gateway_count,
             "unmatchedDisposition":"UNATTRIBUTABLE_NOT_PROVEN_UNRELATED"});
+        if !repository_proofs.is_empty() {
+            graph_proof["repositoryProofs"] = json!(repository_proofs);
+        }
         if graph_rows > target_count + survivor_count {
             blockers.push(json!({"code":"GRAPH_ANALYSIS_OWNERSHIP_UNATTRIBUTABLE","count":graph_rows-target_count-survivor_count}));
         }
@@ -814,6 +896,7 @@ fn prepare<C: GenericClient>(
         .iter()
         .chain(tasks.iter())
         .chain(claims.iter())
+        .chain(decision_keys.iter())
         .collect();
     if !epoch_policy {
         let registry_tables: Vec<_> = tables
@@ -832,6 +915,7 @@ fn prepare<C: GenericClient>(
     let mut deletes = Vec::new();
     let mut predicates: Vec<(String, String)> = selectors()
         .into_iter()
+        .filter(|(table, _)| *table != "control_product.decisions" || decision.is_some())
         .map(|(table, predicate)| (table.into(), predicate.into()))
         .collect();
     if !graph_configurations.is_empty() {
@@ -856,7 +940,7 @@ fn prepare<C: GenericClient>(
         if !table_names.contains(&table) {
             continue;
         }
-        if table.starts_with("memory.") {
+        if table.starts_with("memory.") && table != "memory.codebase_memory_records" {
             // Only parent identities are needed before scanning surviving rows.
             // DISTINCT avoids retaining the same analysis key for every record.
             let query = format!(
@@ -889,6 +973,10 @@ fn prepare<C: GenericClient>(
         scope_value["schema"] = json!("lattice.project-purge.scope.v4");
         scope_value["graphSourceProof"] = graph_proof.clone();
     }
+    if let Some(decision) = &decision {
+        scope_value["schema"] = json!("lattice.project-purge.scope.v5");
+        scope_value["decisionHistory"] = decision.history();
+    }
     let reference_keys = aho_corasick::AhoCorasick::new(
         std::iter::once(project).chain(keys.iter().map(|key| key.as_str())),
     )
@@ -899,6 +987,7 @@ fn prepare<C: GenericClient>(
         &tables,
         Some(&scope_value),
         Some(&SnapshotSelection {
+            decision: decision.is_some(),
             predicates: &deletes,
             params: &params,
         }),
@@ -911,6 +1000,24 @@ fn prepare<C: GenericClient>(
         },
     )?;
     blockers.extend(snapshot.blockers);
+    let graph_counts: BTreeMap<_, _> = snapshot
+        .counts
+        .iter()
+        .filter(|(table, _)| {
+            table.starts_with("memory.")
+                && ![
+                    "memory.codebase_memory_extension_identity",
+                    "memory.codebase_memory_extension_ledger",
+                ]
+                .contains(&table.as_str())
+        })
+        .map(|(table, count)| (table.clone(), *count))
+        .collect();
+    let graph_empty = graph_counts.values().all(|count| *count == 0);
+    let graph_inventory = json!({"schema":"lattice.project-purge.graph-inventory.v1","ownership":"LATTICE",
+        "scope":"VERIFIED_MAIN_STORE_MEMORY","discovery":if graph_empty{"VERIFIED_EMPTY"}else{"OBSERVED"},
+        "counts":graph_counts,"snapshotDigest":snapshot.graph_digest,
+        "identityBinding":if graph_empty{"NOT_APPLICABLE"}else{"LEGACY_SOURCE_BINDING_NOT_PROVEN"},"erasureImplemented":false});
     let scope_digest = snapshot.scope_digest.ok_or("PROJECT_PURGE_SERIALIZATION")?;
     let mut counts = snapshot.selected_counts;
     if let Some(prior) = &prefix {
@@ -995,8 +1102,14 @@ fn prepare<C: GenericClient>(
     if let Ok(root) = registry_epoch::anchor_root(database) {
         protected_roots.push(root.to_string_lossy().into_owned());
     }
+    let mut public = json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"graphSourceProof":graph_proof,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers});
+    if let Some(decision) = &decision {
+        public["decisionHistory"] = decision.history();
+    }
     Ok(Plan {
-        public: json!({"schema":SCHEMA,"status":if blockers.is_empty(){"READY"}else{"BLOCKED"},"project":{"id":project,"canonicalPath":canonical},"operationId":operation,"scopeDigest":scope_digest,"registryStrategy":if epoch_policy{"ATTESTED_EPOCH_V1"}else{"VERIFIED_SUFFIX_V1"},"history":history,"graphSourceProof":graph_proof,"filesystemRoots":roots,"protectedRoots":protected_roots,"counts":counts,"blockers":blockers}),
+        graph_inventory,
+        public,
+        decision,
         prefix,
         epoch,
         streams,
@@ -1020,6 +1133,9 @@ fn erase(
             &format!("DELETE FROM ONLY {table} p WHERE ({predicate}){PARAMS}"),
             &params,
         ))?;
+    }
+    if let Some(decision) = &plan.decision {
+        decision.apply(transaction)?;
     }
     let prefix = plan
         .epoch
@@ -1068,6 +1184,8 @@ fn erase(
         .filter(|(schema, name)| {
             !format!("{schema}.{name}").starts_with("control.project_registry_")
                 && schema != "registry_epoch"
+                && !(plan.decision.is_some()
+                    && project_purge_decisions::shared_table(&format!("{schema}.{name}")))
         })
         .collect();
     if snapshot_digest(transaction, &tables)? != plan.survivor_digest {
@@ -1159,7 +1277,16 @@ pub fn execute_project_purge_with_graph_source(
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }
     let action = text(request, "action")?;
-    if !["install", "install-epoch", "preview", "apply", "status"].contains(&action) {
+    if ![
+        "install",
+        "install-epoch",
+        "install-decisions",
+        "preview",
+        "apply",
+        "status",
+    ]
+    .contains(&action)
+    {
         return Err("PROJECT_PURGE_INPUT_REJECTED");
     }
     let epoch_policy = match request.get("registryPolicy").and_then(Value::as_str) {
@@ -1180,9 +1307,11 @@ pub fn execute_project_purge_with_graph_source(
         verify_postgres_schema(client, target, DatabaseRole::Migrator)
             .map_err(|_| "PROJECT_PURGE_MAINTENANCE_PROFILE_REQUIRED")?;
     }
-    if action == "install" || action == "install-epoch" {
+    if matches!(action, "install" | "install-epoch" | "install-decisions") {
         let authorization = if action == "install" {
             "INSTALL_PURGE_MAINTENANCE"
+        } else if action == "install-decisions" {
+            "INSTALL_DECISION_PURGE"
         } else {
             "INSTALL_REGISTRY_EPOCH_MAINTENANCE"
         };
@@ -1203,6 +1332,18 @@ pub fn execute_project_purge_with_graph_source(
             ))?;
         }
         extension(&mut tx)?;
+        if action == "install-decisions" {
+            if !crate::postgres_setup::verify_decision_purge_extension(&mut tx)
+                .map_err(|_| "PROJECT_PURGE_DECISION_EXTENSION_REJECTED")?
+            {
+                db(tx.batch_execute(crate::postgres_setup::DECISION_PURGE_SQL))?;
+            }
+            if !crate::postgres_setup::verify_decision_purge_extension(&mut tx)
+                .map_err(|_| "PROJECT_PURGE_DECISION_EXTENSION_REJECTED")?
+            {
+                return Err("PROJECT_PURGE_DECISION_EXTENSION_REJECTED");
+            }
+        }
         if action == "install-epoch" {
             let installed: bool =
                 db(tx.query_one("SELECT to_regnamespace('registry_epoch') IS NOT NULL", &[]))?
@@ -1268,6 +1409,7 @@ pub fn execute_project_purge_with_graph_source(
         plan.public["inventoryMode"] = json!("READ_ONLY_SNAPSHOT");
         plan.public["maintenanceExtensionInstalled"] = json!(installed);
         plan.public["maintenanceStopped"] = json!(stopped);
+        plan.public["runtimeGraphInventory"] = plan.graph_inventory;
         return Ok(plan.public);
     }
     if action == "apply" || action == "status" {
@@ -1356,6 +1498,9 @@ pub fn execute_project_purge_with_graph_source(
     let after_digest = snapshot_digest(&mut tx, &tables)?;
     let mut result = json!({"schema":SCHEMA,"status":"PURGED","phase":"POSTGRES_ONLY","operationId":operation,"scopeDigest":scope,"afterDigest":after_digest,"registryStrategy":plan.public["registryStrategy"],"counts":plan.public["counts"],"blockers":[]});
     result["graphSourceProof"] = plan.public["graphSourceProof"].clone();
+    if let Some(decision) = &plan.decision {
+        result["decisionHistory"] = decision.history();
+    }
     if let Some(epoch) = &plan.epoch {
         result["registrySealDigest"] = json!(epoch.next.seal_digest.as_str());
         result["history"] = plan.public["history"].clone();

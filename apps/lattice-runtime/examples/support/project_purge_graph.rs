@@ -50,8 +50,13 @@ pub fn run(
         if mode == "graph-verify-survivor" && label == "target" {
             continue;
         }
+        let source_root = if label == "target" && mode == "graph-seed-source" {
+            std::path::PathBuf::from(std::env::var("LATTICE_GRAPHIFY_SOURCE_ROOT").unwrap())
+        } else {
+            root.join(directory)
+        };
         let configs = lattice_runtime::composition::project_purge_graph_configuration_digests(
-            root.join(directory).to_str().unwrap(),
+            source_root.to_str().unwrap(),
         )
         .unwrap();
         let config = ContentDigest::from_sha256(configs[0].clone()).unwrap();
@@ -65,10 +70,22 @@ pub fn run(
         )
         .unwrap();
         // The actual legacy Runtime namespace is shared; only source config owns it.
+        let commit = if label == "target" && mode == "graph-seed-source" {
+            let output =
+                std::process::Command::new(std::env::var("LATTICE_DELIVERY_GIT_EXE").unwrap())
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&source_root)
+                    .output()
+                    .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        } else {
+            "1".repeat(40)
+        };
         let request = GraphMemoryRunRequest::new(
             invocation,
             ProjectId::new("task032-delivery").unwrap(),
-            GitObjectId::new("1".repeat(40)).unwrap(),
+            GitObjectId::new(commit).unwrap(),
             digest_query_text("synthetic graph").unwrap(),
             config,
             5,

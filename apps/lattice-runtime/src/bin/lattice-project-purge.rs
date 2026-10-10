@@ -119,7 +119,7 @@ fn run() -> Result<serde_json::Value, &'static str> {
         &mut client,
         &target,
         &request,
-        Some(&lattice_runtime::composition::project_purge_graph_configuration_digests),
+        Some(&lattice_runtime::composition::project_purge_graph_source),
     )?;
     if let Some(project_id) = request.get("projectId").and_then(serde_json::Value::as_str) {
         let observed = inspect_bot(project_id).unwrap_or_else(|code| {
@@ -128,8 +128,10 @@ fn run() -> Result<serde_json::Value, &'static str> {
                 "discovery":"NOT_VERIFIED", "reason":code, "erasureImplemented":false,
             })
         });
-        let graph=inspect_project_purge_graph(&mut client).unwrap_or_else(|code|
-            serde_json::json!({"schema":"lattice.project-purge.graph-inventory.v1","ownership":"LATTICE","discovery":"NOT_VERIFIED","reason":code}));
+        // Preview already committed the identical graph-only row stream inside
+        // its read-only snapshot. Reuse it instead of sorting every record twice.
+        let graph=result.as_object_mut().and_then(|value| value.remove("runtimeGraphInventory")).unwrap_or_else(||inspect_project_purge_graph(&mut client).unwrap_or_else(|code|
+            serde_json::json!({"schema":"lattice.project-purge.graph-inventory.v1","ownership":"LATTICE","discovery":"NOT_VERIFIED","reason":code})));
         result["relatedStores"] = serde_json::json!({"botLifecycle":observed,"runtimeGraph":graph});
         if let Some(canonical) = result["project"]["canonicalPath"].as_str() {
             result["runtimeGraphSource"] =

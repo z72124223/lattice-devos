@@ -14,12 +14,13 @@ mod live;
 mod migrations;
 mod postgres_setup;
 mod project_purge;
+mod project_purge_decisions;
 mod project_purge_snapshot;
 mod project_registry;
 mod registry_epoch;
 pub mod registry_epoch_anchor;
 pub use project_purge::{
-    PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge,
+    GraphSourceOwnership, PROJECT_PURGE_SQL, connect_project_purge, execute_project_purge,
     execute_project_purge_with_graph_source, inspect_project_purge_graph,
 };
 pub use registry_epoch::REGISTRY_EPOCH_SQL;
