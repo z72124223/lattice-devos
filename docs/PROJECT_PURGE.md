@@ -19,7 +19,9 @@
 - 新基準由資料庫外的主機憑證固定其摘要與 epoch，資料庫不能自我宣告受信任。預設 Windows 路徑是 `%LOCALAPPDATA%/LATTICE/registry-epochs/<database-identity>/registry-epoch.anchor.json`；主機設定 `LATTICE_REGISTRY_ANCHOR_ROOT` 可改共同根目錄，所有 reader 與維護工具必須一致，不能由 DB、計畫或刪除要求自行指定。憑證不得位於刪除根目錄，路徑別名與硬連結均拒絕。Unix 主機預設使用 XDG_STATE_HOME 或 HOME/.local/state，未宣稱已做 Unix 整合驗收。
 - 摘要不是匿名化，低熵 ID 可能被猜測。新 attested 維護收據只存操作 ID 的承諾摘要；回覆中的原 ID 只供同一呼叫者續作。旧維護收據不自動改寫，報告列出待檢閱筆數。主機憑證僅防資料庫單邊跨 epoch 回滾，不防同一 OS 使用者同時改檔案和 DB，也不防同 epoch 新命令尾端的回滾。
 - task streams／ingress／Control product 等已實作的固定資料閉包一起刪除。未知表、尚未支援的資料種類及跨範圍引用會列入 blockers；不可把 blocker 當成已清除。預覽的 counts 是實際範圍，並非所有未來擴充功能的涵蓋承諾。
-- SQLite：只接受既有精確 schema profile；工作、事件、內部關係、登記、觀察及其附表在交易中清除。名單已先被移除時，必須由當次 PostgreSQL 預覽提供相同 ID、路徑與 scope digest，才能接手殘留資料；名單不存在本身不能充當清除成功。永久保留的 installation receipt／decision 或其他保留資料引用目標時拒絕，保留既有不可刪除保護。其他專案及所有保留資料的完整內容摘要必須不變；同一路徑的其他專案登記仍會阻擋刪除。
+- SQLite：只接受既有精確 schema profile；工作、事件、內部關係、登記、觀察及其附表在交易中清除。名單已先被移除時，必須由當次 PostgreSQL 預覽提供相同 ID、路徑與 scope digest，才能接手殘留資料；名單不存在本身不能充當清除成功。其他專案及所有保留資料的完整內容摘要必須不變；同一路徑的其他專案登記仍會阻擋刪除。
+- 目標有 installation receipt 時，Windows 自動採 `REBUILD_SURVIVORS_V1`：不修改或停用原資料庫的 append-only trigger，以精確原 schema 重建保留資料。逐項核對原 row、rowid、事件序號高水位、完整性、FK、索引、trigger 與檔頭設定，再同目錄替換舊檔。重建前以系統 Windows PowerShell 唯讀檢查 owner/group/DACL，必須與新暫存檔完全相同；自訂 ACL、無法讀取或中途變動都拒絕，不能為通過清除而放寬權限。SACL 稽核設定未驗證；此版未提供權限複製或非 Windows 的重建轉接器。一般開啟會恢復 WAL 模式；SQLite schema 仍為相容的 v7。
+- decisions 的 scope 是自由字串，沒有專案 FK。偵測到目標引用時維持阻擋，所有 decision 與 decision_state 原文保留；沒有找到 ID／路徑也不能證明沒有相關決策。報告另列 `LEGACY_SCOPE_OWNERSHIP_NOT_PROVEN`，需要由正常決策模組提供結構性歸屬後才能處理。不能用字串猜測刪掉整條決策歷史，也不以新增 SQLite epoch 掩蓋歸屬未知。
 - 檔案：只接受權威清單中的絕對路徑；拒絕使用者家目錄、磁碟根、工具自身、其他專案、重疊根、祖先 junction、未支援的巢狀 repository 等。junction／symlink 僅移除連結，不追蹤目標。檔案預覽有數量、深度、manifest 大小上限。
 - 硬連結：目前在盤點及執行前驗證時拒絕 `nlink > 1` 的檔案或連結，即使所有名稱看似位於同一專案。移除其中一個名稱會改變共用檔案的連結數與時間戳；本版沒有完整的硬連結歸屬與續作轉接器，因此須在任何 PostgreSQL／檔案刪除前阻擋，不能先刪一半再卡住，也不能略過時間戳驗證或改動外部連結以強行通過。
 - Control 圖譜磁碟快取：從共用快取目錄盤點全部直接子目錄，以 graph.json 格式、project_id、source_root、目錄鍵及內容摘要建立歸屬，涵蓋同專案不同 checkout。只有確定屬於目標的快取才加入相同檔案清單；內容變更、新增目標快取、未知目錄、缺失標頭、連結及超出盤點上限均阻擋。共用快取目錄與專案刪除根重疊也阻擋，以保護其他專案快取。此項不涵蓋 Runtime 的共用 Graphify 記憶體／索引或仍運作的 Control 記憶體快取，執行仍需停止相關寫入者。
@@ -80,7 +82,7 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 
 ## 交易、部分失敗與續跑
 
-1. 以獨占 operation lock 防止同一進度檔同時執行；在 SQLite `BEGIN IMMEDIATE` 內核對原始摘要並保持鎖。
+1. 以獨占 operation lock 防止同一進度檔同時執行；一般清除在 SQLite `BEGIN IMMEDIATE` 內核對原始摘要並保持鎖。收據重建則先建立資料庫旁的 `.purge-swap` 維護標記、完成 WAL checkpoint 並切換 DELETE journal，再持有 `BEGIN EXCLUSIVE`；新 Control 在開啟資料庫前見到維護標記會拒絕。
 2. 先核對檔案 manifest、PostgreSQL scope digest／blockers，再執行 PostgreSQL 清除交易。
 3. 以 operation ID 與 scope digest 讀回 PostgreSQL receipt，接著逐項移除檔案；最後才提交 SQLite 清除。
 4. 三個儲存系統無法組成單一原子交易。中斷、鎖檔、權限錯誤或回覆遺失都記為 `INCOMPLETE`；不能宣稱已回復原狀。已提交的 PostgreSQL 清除不能由 SQLite rollback 撤銷。
@@ -91,6 +93,8 @@ npm.cmd run project:purge -- verify --plan purge-plan.json
 Attested Registry 在 PG 刪除前先寫外部 `Pending(previous, next, operationDigest)`，再用單一 PG 交易寫新基準、ID 防重表與清除收據。PG 提交後，必須比對同一新基準及已提交收據，才將主機憑證改為 Active。正常 Runtime 遇 Pending 一律拒絕。提交前中斷只能沿用同操作／摘要驗證 previous；提交後中斷只能以匹配的收據完成 next，不可用「舊狀態驗證失敗」猜測已提交。缺少主機憑證、兩邊不符或未知鎖都維持阻擋，不從 DB 自動重建。人工處理時先停住所有 reader/writer、保存原錯誤、核對原計畫與兩邊實際狀態；沒有独立可信證據時不能補造新憑證或重新開始刪除。
 
 這裡的中斷續作指程序崩潰或一般 I/O 失敗；不保證突然斷電後可自動續作。進度檔雖先做檔案同步再原子替換，但父目錄項與目標檔案刪除的斷電落盤順序尚未驗證，尤其 Windows 不能由目前 Node API 假定相同保證。重啟後若進度與檔案不符，維持阻擋並人工核對，不補造已移除紀錄。
+
+SQLite 重建在 PG 與檔案成功後才填入 `.purge-next` 保留資料檔；關閉來源與暫存資料庫後，兩側的 WAL／SHM／journal 必須不存在，才保存綁定原計畫的新舊檔摘要並替換。換檔前失敗可從原檔與暫存檔繼續；換檔後但移除標記前失敗，只有新檔摘要正確且暫存檔已消失才接受完成。未知檔案、缺失 DB、錯誤計畫、旁檔、連結或內容變動一律阻擋，不補造新資料庫。未完整落盤的 marker 暫存檔、尚未登記身分的 staging、或中斷重建留下的 journal 需要先依原計畫人工核對，不能任意刪除來解鎖。成功時不保留原 DB 副本；OS 區塊、備份及稽核設定仍不在抹除保證中。舊客戶端不識別此標記，維護前必須停止全部寫入者；沒有宣稱已排除所有 OS handle。
 
 計畫／進度檔本身保留路徑及清除證據；它們也是最終資料保留決策的一部分。不要將實際專案計畫、資料庫或含機密的測試輸出提交 Git。
 

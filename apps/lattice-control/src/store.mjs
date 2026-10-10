@@ -3,6 +3,7 @@ import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { controlStoreSchemaVersion } from "./database-path.mjs";
+import { assertNoSqlitePurgeSwap } from "./project-purge-sqlite-swap.mjs";
 
 const priorities = new Set(["low", "normal", "high", "urgent"]);
 const statuses = new Set([
@@ -2380,6 +2381,7 @@ export function projectControlWorkSnapshot({
 
 export class LatticeStore {
   constructor(databasePath = ":memory:") {
+    assertNoSqlitePurgeSwap(databasePath);
     if (databasePath !== ":memory:") {
       mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });
     }

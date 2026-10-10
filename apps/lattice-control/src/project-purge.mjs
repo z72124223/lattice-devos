@@ -69,6 +69,7 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
   }
   const roots = [...new Set([...projectRoots, ...codeGraph.roots])];
   const protectedRoots = [...new Set([...sqlite.protectedRoots, ...pg.protectedRoots.map(absolute), databasePath,
+    ...['-wal', '-shm', '-journal', '.purge-next', '.purge-next-journal', '.purge-swap', '.purge-swap.tmp'].map(suffix => databasePath + suffix),
     nativeBinary, statePath, `${statePath}.lock`, `${statePath}.tmp`, fileURLToPath(import.meta.url), ...(options.protectedRoots ?? []).map(absolute)])];
   let files;
   const fileBlockers = [];

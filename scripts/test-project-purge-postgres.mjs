@@ -473,6 +473,7 @@ try {
     for (const kind of ['target', 'survivor']) {
       const id = coordinated.seeded[`${kind}ProjectId`], root = coordinated.seeded[`${kind}CanonicalPath`];
       localStore.database.prepare('INSERT INTO projects(id,name,root_path,created_at,updated_at) VALUES(?,?,?,?,?)').run(id, `Synthetic ${kind}`, root, '2026-10-09T00:00:00Z', '2026-10-09T00:00:00Z');
+      localStore.createInstallationReceipt({ projectId: id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40), artifactPath: path.join(root, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
     }
   } finally { localStore.close(); }
   // These values exist only in this isolated harness process; the product native
@@ -485,6 +486,7 @@ try {
   const survivorPgBefore = hash(selectRows(coordinatorBefore, coordinatorSurvivors));
   const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator' });
   assert.equal(plan.status, 'READY', JSON.stringify(plan.blockers));
+  assert.equal(plan.sqlite.strategy, 'REBUILD_SURVIVORS_V1');
   writeFileSync(path.join(runRoot, 'coordinator-plan.json'), JSON.stringify(plan, null, 2) + '\n');
   const appliedCoordinator = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true });
   assert.equal(appliedCoordinator.status, 'SCOPED_PURGED');
@@ -494,12 +496,19 @@ try {
   const verifiedCoordinator = await statusProjectPurge(plan);
   assert.equal(verifiedCoordinator.status, 'SCOPED_PURGED');
   assert.equal(verifiedCoordinator.externalCleanup, 'NOT_VERIFIED');
+  const rebuiltStore = new LatticeStore(sqlitePath);
+  try {
+    assert.equal(rebuiltStore.countInstallationReceipts(), 1);
+    assert.equal(rebuiltStore.listInstallationReceipts()[0].project_id, coordinated.seeded.survivorProjectId);
+    assert.throws(() => rebuiltStore.database.exec('DELETE FROM installation_receipts'), /append-only/);
+  } finally { rebuiltStore.close(); }
+  check('real-postgres-coordinator-rebuilds-owned-installation-receipts-with-unchanged-protection');
   writeFileSync(path.join(runRoot, 'coordinator-result.json'), JSON.stringify(verifiedCoordinator, null, 2) + '\n');
   check('real-coordinator-pg-sqlite-files-readback-and-survivor-preserved', { survivorPgBefore, survivorFileBefore });
   }
 
   if (args.scenario === 'coordinator-absent') {
-  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'project-purge-code-graph.mjs', 'code-graph.mjs', 'code-graph-model.mjs', 'lattice-runtime-health.mjs', 'store.mjs'];
+  const sourceNames = ['project-client.mjs', 'project-purge-client.mjs', 'project-purge.mjs', 'project-purge-report.mjs', 'project-purge-files.mjs', 'project-purge-sqlite.mjs', 'project-purge-sqlite-swap.mjs', 'project-purge-code-graph.mjs', 'code-graph.mjs', 'code-graph-model.mjs', 'lattice-runtime-health.mjs', 'store.mjs'];
   const sourceHashes = () => Object.fromEntries(sourceNames.map(name => {
     const file = fileURLToPath(new URL(`../apps/lattice-control/src/${name}`, import.meta.url));
     return [name, createHash('sha256').update(readFileSync(file)).digest('hex')];

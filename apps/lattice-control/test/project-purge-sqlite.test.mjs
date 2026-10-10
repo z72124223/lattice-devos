@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile, writeFile, link } from 'node:fs/promises';
+import { renameSync, existsSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
@@ -10,6 +13,10 @@ import { previewProjectPurgeSqlite, beginProjectPurgeSqlite, readbackProjectPurg
 const here = path.dirname(fileURLToPath(import.meta.url));
 const timestamp = '2026-10-09T00:00:00.000Z';
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+function databaseRowsDigest(databasePath) {
+  const db = new DatabaseSync(databasePath, { readOnly: true });
+  try { return hash(rows(db)); } finally { db.close(); }
+}
 function rows(db) {
   const data = {};
   for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all()) {
@@ -23,8 +30,12 @@ async function fixture(t) {
   const directory = await mkdtemp(path.join(here, '.project-purge-sqlite-fixture-'));
   const databasePath = path.join(directory, 'synthetic-control.db');
   const store = new LatticeStore(databasePath);
+  const originalClose = store.close.bind(store);
+  let closed = false;
+  store.close = () => { if (!closed) { originalClose(); closed = true; } };
+  const stores = [store];
   t.after(async () => {
-    store.close();
+    for (const handle of stores) handle.close();
     assert.equal(path.dirname(path.resolve(directory)), here);
     assert.ok(path.basename(directory).startsWith('.project-purge-sqlite-fixture-'));
     await rm(directory, { recursive: true, force: true });
@@ -46,7 +57,7 @@ async function fixture(t) {
     store.database.prepare("INSERT INTO project_git_remotes(observation_id,name,direction,url_sanitized,credentials_redacted) VALUES (?,'origin','fetch','https://example.invalid/synthetic',0)").run(id);
     store.database.prepare("INSERT INTO project_rule_documents(observation_id,relative_path,sha256,purpose,observed_at) VALUES (?,'AGENTS.md',?,'synthetic',?)").run(id, 'a'.repeat(64), timestamp);
   }
-  return { store, own, other, workA, workB, otherWork, observations, options: { databasePath, projectId: own.id, canonicalPath: own.root_path } };
+  return { store, stores, own, other, workA, workB, otherWork, observations, options: { databasePath, projectId: own.id, canonicalPath: own.root_path } };
 }
 
 function otherSnapshot(f) {
@@ -141,15 +152,144 @@ test('incoming cross-project parent and dependency references block; outgoing ow
   assert.equal(otherSnapshot(outgoing), otherBefore);
 });
 
-test('immutable installation receipts block without changing triggers or data', async t => {
+test('offline rebuild removes only owned receipts and preserves original triggers, rowids, decisions and sequence', { skip: process.platform !== 'win32' }, async t => {
   const f = await fixture(t);
   f.store.createInstallationReceipt({ projectId: f.own.id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40), artifactPath: path.join(f.own.root_path, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
-  const before = hash(rows(f.store.database)), plan = previewProjectPurgeSqlite(f.options);
-  assert.ok(plan.blockers.includes('SQLITE_IMMUTABLE_INSTALLATION_RECEIPT'));
-  assert.throws(() => beginProjectPurgeSqlite(plan), /PURGE_SQLITE_BLOCKED/);
+  f.store.createInstallationReceipt({ projectId: f.other.id, component: 'synthetic', sourceCommitSha: 'c'.repeat(40), artifactPath: path.join(f.other.root_path, 'synthetic.exe'), artifactSha256: 'd'.repeat(64) });
+  f.store.appendEvent(f.workA.id, 'highest-id-removed', { synthetic: true });
+  const current = f.store.decisionStateIdentity();
+  f.store.recordDecision({
+    scope: 'shared', subject: 'unrelated-retained-decision', content: 'Preserve original bytes', rationale: 'Synthetic',
+    source: { kind: 'user_confirmation', reference: 'thread:synthetic-survivor/turn:1' },
+    clientRequestId: 'synthetic-survivor-decision', expectedRevision: current.revision, expectedDigest: current.digest,
+  });
+  const beforeOther = otherSnapshot(f);
+  const schemaBefore = f.store.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all();
+  const sequenceBefore = f.store.database.prepare('SELECT * FROM sqlite_sequence ORDER BY name').all();
+  const receiptsBefore = f.store.database.prepare('SELECT rowid,* FROM installation_receipts WHERE project_id=?').all(f.other.id);
+  const plan = previewProjectPurgeSqlite(f.options);
+  assert.equal(plan.strategy, 'REBUILD_SURVIVORS_V1');
+  assert.deepEqual(plan.blockers, []);
+  assert.equal(plan.counts.installation_receipts, 1);
   assert.throws(() => f.store.database.exec('DELETE FROM installation_receipts'), /append-only/);
+  f.store.close();
+  const transaction = beginProjectPurgeSqlite(plan);
+  assert.throws(() => new LatticeStore(f.options.databasePath), /PURGE_SQLITE_MAINTENANCE_PENDING/);
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, false);
+  transaction.commit();
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, true);
+  const after = new LatticeStore(f.options.databasePath); f.stores.push(after);
+  assert.equal(otherSnapshot({ ...f, store: after }), beforeOther);
+  assert.deepEqual(after.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all(), schemaBefore);
+  assert.deepEqual(after.database.prepare('SELECT * FROM sqlite_sequence ORDER BY name').all(), sequenceBefore);
+  assert.deepEqual(after.database.prepare('SELECT rowid,* FROM installation_receipts WHERE project_id=?').all(f.other.id), receiptsBefore);
+  assert.doesNotThrow(() => after.decisionStateIdentity());
+  assert.throws(() => after.database.exec('DELETE FROM installation_receipts'), /append-only/);
+  assert.throws(() => after.database.exec("UPDATE installation_receipts SET component='changed'"), /append-only/);
+  assert.throws(() => after.createInstallationReceipt({ projectId: f.own.id }), /project not found/);
+  assert.equal(beginProjectPurgeSqlite(plan).alreadyApplied, true);
+  assert.equal(existsSync(f.options.databasePath + '.purge-next'), false);
+  assert.equal(existsSync(f.options.databasePath + '.purge-swap'), false);
+});
+
+async function rebuildFixture(t) {
+  const f = await fixture(t);
+  f.store.createInstallationReceipt({ projectId: f.own.id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40), artifactPath: path.join(f.own.root_path, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
+  const plan = previewProjectPurgeSqlite(f.options);
+  f.store.close();
+  return { ...f, plan, marker: f.options.databasePath + '.purge-swap', next: f.options.databasePath + '.purge-next' };
+}
+
+test('rebuild resumes both sides of atomic replacement from the same bound plan', { skip: process.platform !== 'win32' }, async t => {
+  for (const afterReplace of [false, true]) {
+    const f = await rebuildFixture(t);
+    const before = databaseRowsDigest(f.options.databasePath);
+    const transaction = beginProjectPurgeSqlite(f.plan, { replace(source, destination) {
+      if (afterReplace) renameSync(source, destination);
+      throw new Error('SYNTHETIC_INTERRUPTION');
+    } });
+    assert.throws(() => transaction.commit(), /SYNTHETIC_INTERRUPTION/);
+    const pending = JSON.parse(await readFile(f.marker, 'utf8'));
+    assert.equal(pending.phase, 'READY');
+    assert.equal(readbackProjectPurgeSqlite(f.plan).complete, false);
+    assert.throws(() => new LatticeStore(f.options.databasePath), /MAINTENANCE_PENDING/);
+    assert.throws(() => beginProjectPurgeSqlite({ ...f.plan, rebuildMetadataDigest: 'f'.repeat(64) }), /SWAP_BINDING/);
+    if (!afterReplace) assert.equal(databaseRowsDigest(f.options.databasePath), before);
+    const resumed = beginProjectPurgeSqlite(f.plan);
+    assert.equal(resumed.alreadyApplied, afterReplace);
+    resumed.commit();
+    assert.equal(readbackProjectPurgeSqlite(f.plan).complete, true);
+    assert.equal(existsSync(f.marker), false);
+    assert.equal(existsSync(f.next), false);
+  }
+});
+
+test('rebuild rollback keeps maintenance binding and later resumes without changing source rows', { skip: process.platform !== 'win32' }, async t => {
+  const f = await rebuildFixture(t), before = databaseRowsDigest(f.options.databasePath);
+  beginProjectPurgeSqlite(f.plan).rollback();
+  assert.equal(databaseRowsDigest(f.options.databasePath), before);
+  assert.throws(() => previewProjectPurgeSqlite(f.options), /MAINTENANCE_PENDING/);
+  beginProjectPurgeSqlite(f.plan).commit();
+  assert.equal(readbackProjectPurgeSqlite(f.plan).complete, true);
+});
+
+test('changed staging bytes, sidecar journals and hard-linked sources fail closed', { skip: process.platform !== 'win32' }, async t => {
+  for (const corruption of ['bytes', 'journal', 'hardlink']) {
+    const f = await rebuildFixture(t);
+    if (corruption === 'hardlink') {
+      const alias = path.join(path.dirname(f.options.databasePath), 'synthetic-alias.db');
+      await link(f.options.databasePath, alias);
+      assert.throws(() => beginProjectPurgeSqlite(f.plan), /FILE_IDENTITY/);
+      assert.equal(existsSync(f.marker), false);
+      continue;
+    }
+    assert.throws(() => beginProjectPurgeSqlite(f.plan, { replace() { throw new Error('SYNTHETIC_INTERRUPTION'); } }).commit(), /SYNTHETIC_INTERRUPTION/);
+    const before = await readFile(f.options.databasePath);
+    if (corruption === 'bytes') await writeFile(f.next, 'changed synthetic staging');
+    else await writeFile(f.options.databasePath + '-wal', 'stale synthetic wal');
+    assert.throws(() => beginProjectPurgeSqlite(f.plan), /SWAP_CHANGED|JOURNAL_REMAINS/);
+    assert.deepEqual(await readFile(f.options.databasePath), before);
+    assert.equal(readbackProjectPurgeSqlite(f.plan).complete, false);
+  }
+});
+
+test('a live WAL reader prevents offline rebuilding before any replacement', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t);
+  f.store.createInstallationReceipt({ projectId: f.own.id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40), artifactPath: path.join(f.own.root_path, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
+  const plan = previewProjectPurgeSqlite(f.options), before = hash(rows(f.store.database));
+  f.store.database.exec('BEGIN;');
+  f.store.database.prepare('SELECT * FROM projects').all();
+  assert.throws(() => beginProjectPurgeSqlite(plan), /locked|busy|DATABASE_BUSY/iu);
   assert.equal(hash(rows(f.store.database)), before);
-  assert.doesNotThrow(() => validateControlSchemaProfile(f.store.database));
+  assert.equal(existsSync(f.options.databasePath + '.purge-next'), false);
+  f.store.database.exec('ROLLBACK;'); f.store.close();
+  beginProjectPurgeSqlite(plan).commit();
+  assert.equal(readbackProjectPurgeSqlite(plan).complete, true);
+});
+
+test('a custom source DACL blocks staging before copying any retained content', { skip: process.platform !== 'win32' }, async t => {
+  const f = await rebuildFixture(t);
+  // Preserve every existing ACE; only protect this disposable fixture from
+  // inheritance, making its descriptor differ from the sibling staging file.
+  const script = `$ErrorActionPreference='Stop'
+[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)
+Import-Module (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1') -ErrorAction Stop
+$file=ConvertFrom-Json ([Console]::In.ReadToEnd())
+$acl=Get-Acl -LiteralPath $file
+$acl.SetAccessRuleProtection($true,$true)
+Set-Acl -LiteralPath $file -AclObject $acl`;
+  const result = spawnSync(path.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    { input: JSON.stringify(f.options.databasePath), encoding: 'utf8', windowsHide: true, timeout: 15000 });
+  assert.equal(result.status, 0);
+  assert.equal(readbackProjectPurgeSqlite(f.plan).accessChanged, true);
+  assert.throws(() => beginProjectPurgeSqlite(f.plan), /ACCESS_CHANGED/);
+  assert.equal(existsSync(f.marker), false);
+  const changedPlan = previewProjectPurgeSqlite(f.options), before = databaseRowsDigest(f.options.databasePath);
+  assert.throws(() => beginProjectPurgeSqlite(changedPlan), /ACCESS_MISMATCH/);
+  assert.equal(databaseRowsDigest(f.options.databasePath), before);
+  assert.equal((await readFile(f.next)).length, 0);
+  assert.equal(readbackProjectPurgeSqlite(changedPlan).complete, false);
 });
 
 test('project references in immutable decisions block without modifying the decision ledger', async t => {

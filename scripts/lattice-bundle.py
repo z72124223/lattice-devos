@@ -32,6 +32,7 @@ PROJECT_PURGE_FILES = (
     "apps/lattice-control/src/project-purge.mjs",
     "apps/lattice-control/src/project-purge-files.mjs",
     "apps/lattice-control/src/project-purge-sqlite.mjs",
+    "apps/lattice-control/src/project-purge-sqlite-swap.mjs",
     "apps/lattice-control/src/project-purge-report.mjs",
     "apps/lattice-control/src/project-purge-code-graph.mjs",
     "apps/lattice-control/src/code-graph.mjs",

@@ -72,6 +72,30 @@ test('attestation policy and seal stay bound through preview, apply and readback
   assert.equal(readback.status,'INCOMPLETE');
 });
 
+test('coordinator resumes a lost PostgreSQL reply before rebuilding immutable Control receipts', { skip: process.platform !== 'win32' }, async t => {
+  const f = await fixture(t), store = new LatticeStore(f.databasePath);
+  const record = project => store.createInstallationReceipt({ projectId: project.id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40), artifactPath: path.join(project.root_path, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
+  record(f.project);
+  const retained = record(f.survivorProject).receipt;
+  store.close();
+  const plan = await f.preview();
+  assert.equal(plan.status, 'READY');
+  assert.equal(plan.sqlite.strategy, 'REBUILD_SURVIVORS_V1');
+  f.loseReply();
+  await assert.rejects(applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native }), /TIMEOUT_OUTCOME_UNKNOWN/);
+  assert.throws(() => new LatticeStore(f.databasePath), /MAINTENANCE_PENDING/);
+  const result = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true, native: f.native });
+  assert.equal(result.status, 'SCOPED_PURGED');
+  assert.equal(f.applied, 1);
+  const after = new LatticeStore(f.databasePath);
+  try {
+    assert.equal(after.getProject(f.project.id), null);
+    assert.deepEqual(after.getInstallationReceipt(retained.id), retained);
+    assert.throws(() => after.database.exec('DELETE FROM installation_receipts'), /append-only/);
+  } finally { after.close(); }
+  assert.equal((await statusProjectPurge(plan, { native: f.native })).status, 'SCOPED_PURGED');
+});
+
 test('coordinator purges all owned Control graph caches and preserves another project cache', async t => {
   const f = await fixture(t);
   const first = await cache(f, f.project.id, f.target);

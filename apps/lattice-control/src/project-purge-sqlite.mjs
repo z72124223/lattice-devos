@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { validateControlSchemaProfile } from './store.mjs';
 import { controlStoreSchemaVersion } from './database-path.mjs';
+import { beginSqliteSurvivorRebuild, sqliteRebuildMetadata, sqliteFileAccessDigests, assertNoSqlitePurgeSwap } from './project-purge-sqlite-swap.mjs';
 
 const hash = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw new Error(code); };
@@ -53,7 +54,7 @@ function snapshot(db) {
   return rows;
 }
 
-function inspect(db, options) {
+function inspect(db, options, { includeRetained = false } = {}) {
   const { databasePath, projectId, canonicalPath } = options;
   const authoritativeProject = authoritativeIdentity(options);
   const rows = snapshot(db);
@@ -67,7 +68,7 @@ function inspect(db, options) {
   const observationIds = new Set(rows.project_observations.filter(row => row.project_id === projectId).map(row => row.id));
   const owned = (table, row) => {
     if (table === 'projects') return row.id === projectId;
-    if (['work_items', 'project_registration_details', 'project_observations'].includes(table)) return row.project_id === projectId;
+    if (['work_items', 'project_registration_details', 'project_observations', 'installation_receipts'].includes(table)) return row.project_id === projectId;
     if (['work_events', 'work_item_relations', 'work_item_dependencies'].includes(table)) return workIds.has(row.work_item_id);
     if (table === 'conversation_writer_leases') return workIds.has(row.conversation_id);
     if (['project_git_remotes', 'project_rule_documents'].includes(table)) return observationIds.has(row.observation_id);
@@ -100,14 +101,28 @@ function inspect(db, options) {
     counts[table] = values.length - retained[table].length;
     if (retained[table].some(row => Object.values(row).some(references))) blockers.push(`SQLITE_RETAINED_REFERENCE:${table}`);
   }
-  if (rows.installation_receipts.some(row => row.project_id === projectId)) blockers.push('SQLITE_IMMUTABLE_INSTALLATION_RECEIPT');
   if (rows.work_items.some(row => workIds.has(row.id) && ['starting', 'running', 'waiting_approval'].includes(row.status))) blockers.push('SQLITE_ACTIVE_WORK');
   if (rows.conversation_writer_leases.some(row => workIds.has(row.conversation_id))) blockers.push('SQLITE_WRITER_LEASE_PRESENT');
+  if (includeRetained) return retained;
+  const strategy = counts.installation_receipts > 0 ? 'REBUILD_SURVIVORS_V1' : 'IN_PLACE_V1';
+  let rebuildAccessDigest = null;
+  if (strategy === 'REBUILD_SURVIVORS_V1') {
+    try { [rebuildAccessDigest] = sqliteFileAccessDigests([path.resolve(databasePath)]); }
+    catch (error) {
+      if (!/^PURGE_SQLITE_ACCESS_/u.test(error.message)) throw error;
+      blockers.push(error.message);
+    }
+  }
   return {
     schema: 'lattice.project-purge-sqlite.v1', databasePath: path.resolve(databasePath),
     projectId, canonicalPath: path.resolve(canonicalPath),
     catalogState, authoritativeProject,
-    beforeDigest: hash(rows), afterDigest: hash(retained), counts,
+    beforeDigest: hash(rows), afterDigest: hash(retained), counts, strategy,
+    retainedDecisionRows: rows.decisions.length,
+    ...(strategy === 'REBUILD_SURVIVORS_V1' ? {
+      rebuildMetadataDigest: sqliteRebuildMetadata(db).digest,
+      rebuildAccessDigest,
+    } : {}),
     claimPaths: rows.project_registration_claims.filter(row => samePath(row.canonical_path, canonicalPath)).map(row => row.canonical_path),
     protectedRoots: [...new Set(otherRoots.map(root => path.resolve(root)))],
     blockers: [...new Set(blockers)].sort(),
@@ -122,6 +137,7 @@ function open(databasePath, readOnly) {
 }
 
 export function previewProjectPurgeSqlite(options) {
+  assertNoSqlitePurgeSwap(options.databasePath);
   const db = open(options.databasePath, true);
   try { db.exec('BEGIN;'); return inspect(db, options); }
   finally { db.close(); }
@@ -129,8 +145,13 @@ export function previewProjectPurgeSqlite(options) {
 
 // The caller keeps this write lock through PostgreSQL/filesystem stages. A failed
 // later stage rolls back SQLite; it cannot undo the other stores' committed work.
-export function beginProjectPurgeSqlite(plan) {
+export function beginProjectPurgeSqlite(plan, rebuildOptions = {}) {
   const { catalogState, catalogWasAbsent } = planIdentity(plan);
+  if (plan.strategy === 'REBUILD_SURVIVORS_V1') return beginSqliteSurvivorRebuild(plan, {
+    ...rebuildOptions, snapshot, inspect, retainedRows: (db, options) => inspect(db, options, { includeRetained: true }),
+  });
+  if (plan.strategy !== undefined && plan.strategy !== 'IN_PLACE_V1') fail('PURGE_SQLITE_STRATEGY_INVALID');
+  assertNoSqlitePurgeSwap(plan.databasePath);
   const db = open(plan.databasePath, false);
   try {
     db.exec('BEGIN IMMEDIATE;');
@@ -165,6 +186,16 @@ export function beginProjectPurgeSqlite(plan) {
 
 export function readbackProjectPurgeSqlite(plan) {
   planIdentity(plan);
+  try { assertNoSqlitePurgeSwap(plan.databasePath); }
+  catch (error) { if (error.message === 'PURGE_SQLITE_MAINTENANCE_PENDING') return { complete: false, pending: true }; throw error; }
+  if (plan.strategy === 'REBUILD_SURVIVORS_V1') {
+    try {
+      if (sqliteFileAccessDigests([path.resolve(plan.databasePath)])[0] !== plan.rebuildAccessDigest) return { complete: false, accessChanged: true };
+    } catch (error) {
+      if (/^PURGE_SQLITE_ACCESS_/u.test(error.message)) return { complete: false, accessVerified: false };
+      throw error;
+    }
+  }
   const db = open(plan.databasePath, true);
   try {
     db.exec('BEGIN;');

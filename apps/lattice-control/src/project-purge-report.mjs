@@ -30,6 +30,7 @@ export function externalPurgeInventory(input = []) {
 
 function blockerCode(blocker) { return typeof blocker === 'string' ? blocker : blocker?.code ?? 'UNKNOWN_BLOCKER'; }
 function nextStep(code) {
+  if (code.startsWith('PURGE_SQLITE_ACCESS_')) return 'Windows source and staging owner/group/DACL must match exactly; unsupported or unreadable access descriptors remain blocked without changing permissions.';
   if (code === 'REGISTRY_EPOCH_EXTENSION_REQUIRED') return 'Install the compatible Registry epoch extension while stopped, then review a fresh preview with minimal historical attestation.';
   if (code === 'REGISTRY_CURRENT_SURVIVOR_REFERENCE') return 'Another project still uses this identity in its current state; reconcile that project through its normal commands before generating a new purge preview.';
   if (code === 'MAINTENANCE_EXTENSION_REQUIRED') return 'Use a compatible Runtime and install the purge maintenance schema while stopped, then create a fresh preview.';
@@ -58,7 +59,13 @@ export function projectPurgeReport(plan, result = null) {
     complete: false,
     stages: [
       { kind: 'postgres', counts: plan.postgres.counts, status: result?.postgres?.status === 'PURGED' ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
-      { kind: 'sqlite', counts: plan.sqlite.counts, initialCatalog: plan.sqlite.catalogState ?? 'PRESENT', status: result?.sqlite?.complete ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
+      { kind: 'sqlite', counts: plan.sqlite.counts, strategy: plan.sqlite.strategy ?? 'IN_PLACE_V1',
+        decisionOwnership: plan.sqlite.retainedDecisionRows === 0 ? 'NO_DECISIONS_PRESENT' : 'LEGACY_SCOPE_OWNERSHIP_NOT_PROVEN',
+        ...(plan.sqlite.strategy === 'REBUILD_SURVIVORS_V1' ? {
+          requiredAccessCheck: 'WINDOWS_OWNER_GROUP_DACL_EXACT_MATCH', saclAudit: 'NOT_VERIFIED',
+          handleExclusion: 'REQUIRES_OFFLINE_MAINTENANCE', powerLossRecoveryGuaranteed: false,
+        } : {}),
+        initialCatalog: plan.sqlite.catalogState ?? 'PRESENT', status: result?.sqlite?.complete ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
       { kind: 'files', roots: plan.files.roots, entries: plan.files.entries?.length ?? null,
         status: result?.files?.complete || result?.files?.readback?.complete ? 'VERIFIED_ABSENT' : 'NOT_VERIFIED' },
       ...(plan.codeGraph ? [{ kind: 'controlCodeGraph', cacheDirectory: plan.codeGraph.cacheDirectory,
@@ -67,7 +74,10 @@ export function projectPurgeReport(plan, result = null) {
     ],
     blockers, external,
     history: plan.postgres.history ?? null,
-    remaining: external.map(item => ({ kind: item.kind, reason: 'EXTERNAL_DISCOVERY_AND_ERASURE_NOT_VERIFIED' })),
+    remaining: [
+      ...(plan.sqlite.retainedDecisionRows > 0 ? [{ kind: 'controlDecisions', reason: 'FREEFORM_SCOPE_HAS_NO_STRUCTURAL_PROJECT_OWNERSHIP' }] : []),
+      ...external.map(item => ({ kind: item.kind, reason: 'EXTERNAL_DISCOVERY_AND_ERASURE_NOT_VERIFIED' })),
+    ],
     explanation: scopedComplete
       ? 'The verified local scope is erased. External resources remain unverified; this is not complete project erasure.'
       : 'Use this operation and its exact plan for continuation. Catalog absence, archive, and process exit are not proof of erasure.',
