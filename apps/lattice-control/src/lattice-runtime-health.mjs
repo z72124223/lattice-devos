@@ -166,6 +166,24 @@ async function verifyExecutableFile(executablePath) {
   }
 }
 
+// Match registry_epoch::anchor_root without granting the child general access
+// to HOME / LOCALAPPDATA configuration. Only trusted host configuration enters.
+export function resolveRegistryAnchorRoot(configuredEnvironment, {
+  hostEnvironment = process.env, platform = process.platform,
+} = {}) {
+  const paths = platform === "win32" ? path.win32 : path.posix;
+  const explicit = configuredEnvironment.LATTICE_REGISTRY_ANCHOR_ROOT
+    ?? hostEnvironment.LATTICE_REGISTRY_ANCHOR_ROOT;
+  const state = platform === "win32" ? hostEnvironment.LOCALAPPDATA
+    : hostEnvironment.XDG_STATE_HOME
+      ?? (hostEnvironment.HOME === undefined ? undefined : paths.join(hostEnvironment.HOME, ".local/state"));
+  const root = explicit ?? (state === undefined ? undefined : paths.join(state, "LATTICE", "registry-epochs"));
+  if (typeof root !== "string" || !paths.isAbsolute(root)) {
+    throw configurationError("REGISTRY_ANCHOR_HOST_CONFIGURATION_REQUIRED");
+  }
+  return root;
+}
+
 export async function loadLatticeRuntimeConfiguration({
   configPath = process.env.LATTICE_RUNTIME_CONFIG_PATH ?? path.join(homedir(), ".codex", "config.toml"),
   readText = (target) => readFile(target, "utf8"),
@@ -184,6 +202,7 @@ export async function loadLatticeRuntimeConfiguration({
   }
   await verifyExecutable(parsed.command);
   const environment = { ...parsed.environment };
+  environment.LATTICE_REGISTRY_ANCHOR_ROOT = resolveRegistryAnchorRoot(environment);
   if (!path.isAbsolute(environment.LATTICE_DELIVERY_LAUNCHER ?? "")) {
     throw configurationError("LATTICE_RUNTIME_CONFIGURATION_INCOMPATIBLE");
   }
