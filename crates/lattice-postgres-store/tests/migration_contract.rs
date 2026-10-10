@@ -81,7 +81,7 @@ fn store_v8_verifier_retains_v7_ingress_integrity_before_admission() {
 
 #[test]
 fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
-    let setup = include_str!("../src/postgres_setup.rs");
+    let setup = include_str!("../src/postgres_setup.rs").replace("\r\n", "\n");
     let fresh = setup
         .split_once("InstalledManifestState::Fresh => {")
         .expect("fresh migration arm")
@@ -116,7 +116,14 @@ fn fresh_install_stops_at_v5_until_product_bootstrap_installs_writer() {
         );
     }
 
-    let post_apply = setup
+    let apply = setup
+        .split_once("pub fn apply_migrations")
+        .unwrap()
+        .1
+        .split_once("pub fn verify_postgres_schema")
+        .unwrap()
+        .0;
+    let post_apply = apply
         .rsplit_once("match installed {")
         .expect("post-apply verification match")
         .1;
@@ -971,7 +978,7 @@ fn migration_runner_classifies_future_history_atomically_after_serial_lock_befor
         .expect("retained history snapshot parser");
     let query = &classifier[..parser_start];
     let parser = &classifier[parser_start..];
-    assert_eq!(query.matches(".query_one(").count(), 1);
+    assert_eq!(query.matches(".query_typed_one(").count(), 1);
     let history_columns = [
         ("ordinal", "h.ordinal", "ordinals", "i16"),
         (
@@ -1274,7 +1281,7 @@ fn schema_v5_memory_identity_and_ledger_require_migrator_authority() {
         .find("pub(crate) fn verify_runtime_store_schema")
         .expect("runtime verifier exists");
     let runtime_end = setup[runtime_start..]
-        .find("\nfn preflight_connection")
+        .find("\npub(crate) fn verify_project_purge_inventory_schema")
         .map(|offset| runtime_start + offset)
         .expect("runtime verifier boundary exists");
     let runtime = &setup[runtime_start..runtime_end];
@@ -3207,10 +3214,10 @@ fn review_regression_harness_cleanup_is_fail_closed_and_preflighted() {
 fn schema_v3_runtime_uses_the_frozen_prefix_catalog_contract() {
     let source = include_str!("../src/postgres_setup.rs");
     let runtime_verifier = source
-        .split_once("pub(crate) fn verify_runtime_store_schema")
+        .split_once("fn verify_store_schema_for_reading")
         .expect("runtime Store verifier")
         .1
-        .split_once("fn preflight_connection")
+        .split_once("enum SchemaV6WriterProfile")
         .expect("runtime verifier boundary")
         .0;
 
@@ -3249,7 +3256,7 @@ fn memory_v3_identity_rows_are_verified_only_with_migrator_authority() {
         .split_once("pub(crate) fn verify_runtime_store_schema")
         .expect("runtime Store verifier")
         .1
-        .split_once("fn preflight_connection")
+        .split_once("pub(crate) fn verify_project_purge_inventory_schema")
         .expect("runtime verifier boundary")
         .0;
     let catalog_verifier = source
@@ -3261,6 +3268,22 @@ fn memory_v3_identity_rows_are_verified_only_with_migrator_authority() {
         .0;
 
     assert!(!runtime_verifier.contains("verify_codebase_memory_v3_identity"));
+    assert!(
+        runtime_verifier
+            .contains("verify_store_schema_for_reading(client, target, DatabaseRole::Runtime)")
+    );
+    let shared = source
+        .split_once("fn verify_store_schema_for_reading")
+        .unwrap()
+        .1
+        .split_once("enum SchemaV6WriterProfile")
+        .unwrap()
+        .0;
+    let gate = shared.find("if role == DatabaseRole::Migrator {").unwrap();
+    let identity = shared
+        .find("verify_codebase_memory_v3_identity_for_role")
+        .unwrap();
+    assert!(gate < identity);
     assert!(
         catalog_verifier.contains(
             "verify_codebase_memory_v3_identity_for_role(client, target, manifest, role)?;"
