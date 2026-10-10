@@ -8,13 +8,13 @@
 下列絕對路徑由執行端依已核對的安裝與資料位置填入；不要把範例資料庫當作正式庫。
 
 ```powershell
-pwsh -NoProfile -File scripts/Start-LatticeSharedControl.ps1 -NodePath <node.exe絕對路徑> -DatabasePath <Control資料庫絕對路徑> -StatePath <新control.json絕對路徑>
+pwsh -NoProfile -File scripts/Start-LatticeSharedControl.ps1 -NodePath <node.exe絕對路徑> -DatabasePath <Control資料庫絕對路徑> -StatePath <新control.json絕對路徑> -RuntimeConfigPath <已核對的runtime設定絕對路徑>
 node apps/lattice-control/src/shared-control.mjs status --state <control.json絕對路徑>
 node apps/lattice-control/src/shared-control.mjs stop --state <control.json絕對路徑>
 
 pwsh -NoProfile -File scripts/LatticeSharedPostgres.ps1 -Action Start -ClusterPath <既有cluster絕對路徑> -StatePath <新postgres.json絕對路徑>
-pwsh -NoProfile -File scripts/LatticeSharedPostgres.ps1 -Action Status -StatePath <postgres.json絕對路徑>
-pwsh -NoProfile -File scripts/LatticeSharedPostgres.ps1 -Action Stop -StatePath <postgres.json絕對路徑>
+pwsh -NoProfile -File scripts/LatticeSharedPostgres.ps1 -Action Status -StatePath <postgres.json絕對路徑> -ClusterPath <同一cluster絕對路徑>
+pwsh -NoProfile -File scripts/LatticeSharedPostgres.ps1 -Action Stop -StatePath <postgres.json絕對路徑> -ClusterPath <同一cluster絕對路徑>
 ```
 
 Control 停止前重核 PID、建立時間、完整執行檔路徑與目前 Windows 帳戶。
@@ -24,12 +24,19 @@ Control 停止前重核 PID、建立時間、完整執行檔路徑與目前 Wind
 正常停止呼叫既有 `shutdownOwned`；`SHUTDOWN_INCOMPLETE` 不代表已停止，
 再次請求也不保證能修復應用程式已保存的失敗。簽署的 STOPPED 收據須搭配 OS
 程序退出讀回，才構成完整停止驗收。
+`STOPPED_RECEIPT_UNWRITTEN` 表示應用程式已正常關閉，但收據未能寫入；管理
+通道仍會關閉，命令回傳非零，保留失敗寫入供診斷，不反覆關閉應用程式。
+啟動器要求明示 runtime 設定，清除繼承的 `LATTICE_*`，只傳入本次控制參數；
+既有 STOPPED 或失敗狀態不會被當成啟動成功。
 
 PostgreSQL 額外重核 cluster 的 system identifier、`postmaster.pid` 與命令列的
-精確 `-D` 路徑。`pg_ctl` 啟動器最多等待 35 秒；逾時記為
+精確 `-D` 路徑。操作目標與執行檔必須符合明示的 ClusterPath／PostgresBin，
+不能由狀態檔改寫。`pg_ctl` 啟動器最多等待 35 秒；逾時記為
 `START_OUTCOME_UNKNOWN`，不得自動再啟動或宣稱資料庫未啟動。
 停止僅使用 `pg_ctl -m smart -w -t 30 stop`，有未結束連線時可逾時，
-不升級成 fast、immediate 或按程序名稱終止。先查原啟動紀錄及該 cluster 狀態。
+不升級成 fast、immediate 或按程序名稱終止。等待期間保留 STOP_PENDING，
+此時 PostgreSQL 不接受新連線；下次 Status 只有在該 cluster、pid 檔及原程序
+均讀回已停止後才寫成 STOPPED。先查原啟動紀錄及該 cluster 狀態。
 
 ## 驗收
 

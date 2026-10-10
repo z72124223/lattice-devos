@@ -53,7 +53,7 @@ if ($Action -eq 'Start') {
 } else {
     $fixture=Get-Content -LiteralPath $marker -Raw|ConvertFrom-Json -AsHashtable -DateKind String
     if($fixture.schema -cne 'lattice.shared-services-fixture.v1' -or $fixture.runId -cne $RunId -or $fixture.cluster -ine (Join-Path $root 'cluster')){throw 'FIXTURE_SCOPE_INVALID'}
-    $pg=& $pgScript -Action Status -StatePath $postgresState | ConvertFrom-Json -AsHashtable -DateKind String
+    $pg=& $pgScript -Action Status -StatePath $postgresState -ClusterPath (Join-Path $root 'cluster') -PostgresBin $PostgresBin | ConvertFrom-Json -AsHashtable -DateKind String
     $control=& $NodePath $entry status --state $controlState | ConvertFrom-Json -AsHashtable -DateKind String
     if($LASTEXITCODE -ne 0 -or $pg.status -ne 'RUNNING' -or $control.status -ne 'RUNNING'){throw 'FIXTURE_NOT_RUNNING'}
     foreach($field in @('pid','createdAt','executable','ownerSid')){
@@ -63,10 +63,35 @@ if ($Action -eq 'Start') {
     $http=Invoke-RestMethod ('http://127.0.0.1:'+$control.port+'/api/state')
     if(@($http.projects).Count -ne 0){throw 'FIXTURE_UNEXPECTED_PROJECTS'}
     $result=[ordered]@{schema='lattice.shared-services-verification.v1';runId=$RunId;checkedAt=[DateTime]::UtcNow.ToString('o');sameProcessInstances=$true;postgresReadback=$true;controlHttpReadback=$true;nativeArchive='NOT_ASSERTED';control=$control.identity;postgres=$pg.identity}
+    if($Action -eq 'Verify'){
+        $sentinel=Join-Path $root 'unexpected-execution.txt'
+        $fakeCtl=Join-Path $root 'untrusted-pg-ctl.ps1'
+        'Set-Content -LiteralPath (Join-Path $PSScriptRoot ''unexpected-execution.txt'') -Value ''unexpected''' | Set-Content -LiteralPath $fakeCtl -Encoding utf8NoBOM
+        $original=Get-Content -LiteralPath $postgresState -Raw
+        foreach($case in @('pgCtl','postgres','cluster','systemId','identity')){
+            $bad=$original|ConvertFrom-Json -AsHashtable -DateKind String
+            switch($case){
+                'pgCtl' {$bad.pgCtl=$fakeCtl}
+                'postgres' {$bad.postgres=$psql}
+                'cluster' {$bad.cluster=$root}
+                'systemId' {$bad.systemId='0'}
+                'identity' {$bad.identity.createdAt='fixture-reused-pid'}
+            }
+            $badPath=Join-Path $root ('negative-'+$case+'.json')
+            $bad|ConvertTo-Json -Depth 8|Set-Content -LiteralPath $badPath -Encoding utf8NoBOM
+            $rejected=$false
+            try { & $pgScript -Action Stop -StatePath $badPath -ClusterPath (Join-Path $root 'cluster') -PostgresBin $PostgresBin | Out-Null }
+            catch { if($_.Exception.Message -notin @('SHARED_POSTGRES_STATE_SCOPE_CHANGED','SHARED_POSTGRES_CLUSTER_CHANGED','SHARED_POSTGRES_IDENTITY_CHANGED')){throw};$rejected=$true }
+            if(-not $rejected -or (Test-Path -LiteralPath $sentinel)){throw 'FIXTURE_NEGATIVE_STOP_ACCEPTED'}
+        }
+        if((Query 'SELECT run_id FROM lifecycle_probe') -cne $RunId){throw 'FIXTURE_NEGATIVE_DAMAGED_CLUSTER'}
+        $result.negativeStopGuards=5
+        $result.untrustedProgramExecuted=$false
+    }
     if($Action -eq 'Stop'){
         $stopped=& $NodePath $entry stop --state $controlState | ConvertFrom-Json
         if($LASTEXITCODE -ne 0 -or $stopped.status -ne 'STOPPED'){throw 'FIXTURE_CONTROL_STOP_INCOMPLETE'}
-        $pgStopped=& $pgScript -Action Stop -StatePath $postgresState | ConvertFrom-Json
+        $pgStopped=& $pgScript -Action Stop -StatePath $postgresState -ClusterPath (Join-Path $root 'cluster') -PostgresBin $PostgresBin | ConvertFrom-Json
         if($pgStopped.status -ne 'STOPPED'){throw 'FIXTURE_POSTGRES_STOP_INCOMPLETE'}
         foreach($prior in @($fixture.control,$fixture.postgres)){
             $process=Get-CimInstance Win32_Process -Filter ('ProcessId='+$prior.pid)

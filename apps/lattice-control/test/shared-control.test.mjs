@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import test from 'node:test';
-import { validRequest, runSharedControl, sharedControlRequest, windowsProtect } from '../src/shared-control.mjs';
+import { validRequest, runSharedControl, sharedControlRequest, windowsProtect, publishSharedControlState } from '../src/shared-control.mjs';
 
 const identity = { pid: process.pid, createdAt: 'fixture-created-at', executable: process.execPath, ownerSid: 'fixture-owner' };
 const inspect = async () => identity;
@@ -29,13 +29,13 @@ test('authenticated shutdown binds operation, nonce, owner and exact process ins
   }
 });
 
-async function fixture(t, shutdown) {
+async function fixture(t, shutdown, writeState = publishSharedControlState) {
   const parent = path.resolve('.lattice/shared-control-tests'); await mkdir(parent, { recursive: true });
   const root = await mkdtemp(path.join(parent, 'case-'));
   const file = path.join(root, 'control.json');
   const previous = process.env.LATTICE_CONTROL_DATABASE_PATH;
   process.env.LATTICE_CONTROL_DATABASE_PATH = path.join(root, 'control.sqlite');
-  const host = runSharedControl(file, { inspect, protect, start: async options => {
+  const host = runSharedControl(file, { inspect, protect, writeState, start: async options => {
     assert.equal(options.autoRestore, false);
     return { server: { address: () => ({ port: 23456 }) }, shutdownOwned: shutdown };
   } });
@@ -67,7 +67,7 @@ test('client disconnect does not stop Control; metadata mismatch and duplicate l
   const rawRequest = build => new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: '127.0.0.1', port: record.channelPort });
     let data = '', sent = false;
-    socket.on('error', reject);
+    socket.on('error', () => resolve({ status: 'CLOSED' }));
     socket.on('data', chunk => {
       data += chunk;
       if (!sent && data.includes('\n')) {
@@ -76,7 +76,7 @@ test('client disconnect does not stop Control; metadata mismatch and duplicate l
         socket.write(JSON.stringify(build(greeting.challenge)) + '\n');
       }
     });
-    socket.on('end', () => resolve(JSON.parse(data)));
+    socket.on('end', () => { try { resolve(data ? JSON.parse(data) : { status: 'CLOSED' }); } catch(error) { reject(error); } });
   });
   let captured;
   await rawRequest(nonce => {
@@ -86,7 +86,9 @@ test('client disconnect does not stop Control; metadata mismatch and duplicate l
     return captured;
   });
   assert.equal((await rawRequest(nonce => { assert.notEqual(nonce, captured.nonce); return captured; })).status, 'REJECTED');
-  assert.equal((await rawRequest(() => null)).status, 'REJECTED');
+  for (const malformed of [null, [], 'x', 1]) assert.equal((await rawRequest(() => malformed)).status, 'REJECTED');
+  assert.equal((await rawRequest(() => 'x'.repeat(3000))).status, 'CLOSED');
+  assert.equal((await sharedControlRequest(file, 'status', { inspect, protect })).status, 'RUNNING');
   await assert.rejects(sharedControlRequest(file, 'stop', { protect, inspect: async () => ({ ...identity, createdAt: 'reused-pid' }) }), /IDENTITY_CHANGED/);
   await writeFile(file, JSON.stringify({ ...record, channelPort: record.channelPort === 65535 ? 65534 : record.channelPort + 1 }));
   await assert.rejects(sharedControlRequest(file, 'stop', { inspect, protect }), /protected metadata changed/);
@@ -112,10 +114,39 @@ test('shutdown responses reflect the application outcome, including a failed att
   await host; assert.equal(calls, 2);
 });
 
+test('successful shutdown with failed terminal receipt exits honestly without shutting down twice', async t => {
+  let calls = 0;
+  const { file, host } = await fixture(t, async () => { calls++; }, async (file, value, first) => {
+    if (value.status === 'STOPPED') throw new Error('fixture receipt write failure');
+    return publishSharedControlState(file, value, first);
+  });
+  assert.equal((await sharedControlRequest(file, 'stop', { inspect, protect })).status, 'STOPPED_RECEIPT_UNWRITTEN');
+  await host;
+  assert.equal(calls, 1);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).status, 'RUNNING');
+});
+
 test('real Windows DPAPI roundtrip rejects changed binding', { skip: process.platform !== 'win32' }, async () => {
   const key = 'e'.repeat(64);
   const encrypted = await windowsProtect('protect', key, 'fixture-process-binding');
   assert.equal(encrypted.includes(key), false);
   assert.equal(await windowsProtect('unprotect', encrypted, 'fixture-process-binding'), key);
   await assert.rejects(windowsProtect('unprotect', encrypted, 'changed-process-binding'), /KEY_PROTECTION_FAILED/);
+});
+
+test('failed atomic replacement preserves the prior receipt and does not block a later write', async t => {
+  const parent = path.resolve('.lattice/shared-control-tests'); await mkdir(parent, { recursive: true });
+  const root = await mkdtemp(path.join(parent, 'case-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'control.json');
+  await publishSharedControlState(file, { status: 'RUNNING' }, true);
+  let attempts = 0;
+  await assert.rejects(publishSharedControlState(file, { status: 'STOPPED' }, false, async () => {
+    attempts++; throw Object.assign(new Error('fixture sharing lock'), { code: 'EPERM' });
+  }), /fixture sharing lock/);
+  assert.equal(attempts, process.platform === 'win32' ? 10 : 1);
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).status, 'RUNNING');
+  assert.equal((await readdir(root)).filter(name => name.includes('.next.')).length, 1);
+  await publishSharedControlState(file, { status: 'STOPPED' });
+  assert.equal(JSON.parse(await readFile(file, 'utf8')).status, 'STOPPED');
 });

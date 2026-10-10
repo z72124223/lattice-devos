@@ -87,13 +87,14 @@ async function safeStatePath(file) {
   return file;
 }
 
-async function publish(file, value, first = false) {
-  const temporary = first ? file : `${file}.next`;
+export async function publishSharedControlState(file, value, first = false, replace = rename) {
+  // Preserve failed writes for diagnosis without blocking the next explicit attempt.
+  const temporary = first ? file : `${file}.next.${randomBytes(12).toString('hex')}`;
   const handle = await open(temporary, 'wx', 0o600);
   try { await handle.writeFile(JSON.stringify(value)); await handle.sync(); } finally { await handle.close(); }
   if (!first) {
     for (let attempt = 0; ; attempt++) {
-      try { await rename(temporary, file); break; }
+      try { await replace(temporary, file); break; }
       catch (error) {
         // A simultaneous Windows reader can briefly hold a sharing lock.
         // Keep replacement atomic; never unlink the destination or change ACLs.
@@ -103,6 +104,7 @@ async function publish(file, value, first = false) {
     }
   }
 }
+const publish = publishSharedControlState;
 
 export function validRequest(frame, record) {
   if (!frame || Object.keys(frame).sort().join(',') !== 'identity,nonce,operation,schema,signature'
@@ -112,7 +114,7 @@ export function validRequest(frame, record) {
   return authentic(frame.signature, mac(record.token, requestBody(frame)));
 }
 
-export async function runSharedControl(statePath, { start = startDefaultServer, inspect = windowsIdentity, protect = windowsProtect } = {}) {
+export async function runSharedControl(statePath, { start = startDefaultServer, inspect = windowsIdentity, protect = windowsProtect, writeState = publish } = {}) {
   const file = await safeStatePath(statePath);
   const identity = await inspect(process.pid, path.dirname(file));
   const databasePath = absolute(process.env.LATTICE_CONTROL_DATABASE_PATH);
@@ -124,7 +126,7 @@ export async function runSharedControl(statePath, { start = startDefaultServer, 
   try {
     // New state paths are explicit. Existing receipts are never overwritten by a
     // duplicate launch, even when the recorded process is no longer available.
-    await publish(file, persisted(record), true); published = true;
+    await writeState(file, persisted(record), true); published = true;
     application = await start({ autoRestore: false });
     record.port = application.server.address().port;
     channel = net.createServer(socket => {
@@ -152,12 +154,13 @@ export async function runSharedControl(statePath, { start = startDefaultServer, 
         void application.shutdownOwned({ timeoutMs: 10000 }).then(async () => {
           record.status = 'STOPPED'; record.stoppedAt = new Date().toISOString();
           record.terminalSignature = mac(record.token, terminalBody(record));
-          await publish(file, persisted(record));
-          reply({ status: 'STOPPED', identity });
+          try { await writeState(file, persisted(record)); }
+          catch { record.status = 'STOPPED_RECEIPT_UNWRITTEN'; }
+          reply({ status: record.status, identity });
           channel.close();
         }).catch(async () => {
           record.status = 'SHUTDOWN_INCOMPLETE';
-          await publish(file, persisted(record)).catch(() => {});
+          await writeState(file, persisted(record)).catch(() => {});
           reply({ status: 'SHUTDOWN_INCOMPLETE', identity });
           stopping = false;
           // Keep the control channel and process available for inspection. Never kill.
@@ -170,12 +173,12 @@ export async function runSharedControl(statePath, { start = startDefaultServer, 
     await new Promise((resolve, reject) => { channel.once('error', reject); channel.listen(0, '127.0.0.1', resolve); });
     record.channelPort = channel.address().port;
     record.protectedToken = await protect('protect', record.token, binding(file, record));
-    record.status = 'RUNNING'; await publish(file, persisted(record));
+    record.status = 'RUNNING'; await writeState(file, persisted(record));
     await new Promise(resolve => channel.once('close', resolve));
   } catch (error) {
     if (channel?.listening) channel.close();
     if (application) await application.shutdownOwned({ timeoutMs: 10000 }).catch(() => {});
-    if (published) { record.status = 'START_FAILED'; await publish(file, persisted(record)).catch(() => {}); }
+    if (published) { record.status = 'START_FAILED'; await writeState(file, persisted(record)).catch(() => {}); }
     throw error;
   } finally { await lock.close(); await unlink(`${file}.lock`); }
 }
@@ -217,7 +220,7 @@ export async function sharedControlRequest(statePath, operation, { inspect = win
       try {
         const { signature, ...result } = JSON.parse(output);
         if (!body || !authentic(signature, mac(token, { nonce: body.nonce, result }))) fail('SHARED_CONTROL_RESPONSE_REJECTED');
-        if (!sameIdentity(result.identity, observed) || !['RUNNING','STOPPING','STOPPED','SHUTDOWN_INCOMPLETE'].includes(result.status)) fail('SHARED_CONTROL_RESPONSE_REJECTED');
+        if (!sameIdentity(result.identity, observed) || !['RUNNING','STOPPING','STOPPED','STOPPED_RECEIPT_UNWRITTEN','SHUTDOWN_INCOMPLETE'].includes(result.status)) fail('SHARED_CONTROL_RESPONSE_REJECTED');
         resolve(result);
       } catch { reject(new Error('SHARED_CONTROL_RESPONSE_REJECTED')); }
     });
@@ -229,5 +232,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const [operation, flag, state, ...extra] = process.argv.slice(2);
   if (!['host', 'status', 'stop'].includes(operation) || flag !== '--state' || !state || extra.length) fail('SHARED_CONTROL_ARGUMENTS_INVALID');
   if (operation === 'host') await runSharedControl(state);
-  else process.stdout.write(JSON.stringify(await sharedControlRequest(state, operation)) + '\n');
+  else {
+    const result = await sharedControlRequest(state, operation);
+    process.stdout.write(JSON.stringify(result) + '\n');
+    if (!['RUNNING','STOPPED'].includes(result.status)) process.exitCode = 1;
+  }
 }

@@ -3,7 +3,7 @@
 param(
     [Parameter(Mandatory)][ValidateSet('Start','Status','Stop')][string]$Action,
     [Parameter(Mandatory)][string]$StatePath,
-    [string]$ClusterPath,
+    [Parameter(Mandatory)][string]$ClusterPath,
     [string]$PostgresBin = 'C:\Program Files\PostgreSQL\17\bin'
 )
 Set-StrictMode -Version Latest
@@ -36,18 +36,18 @@ function Process-Identity([int]$Number, [string]$Executable, [string]$Root) {
     return [ordered]@{pid=$Number;createdAt=$p.CreationDate.ToUniversalTime().ToString('o');executable=$p.ExecutablePath;ownerSid=$sid}
 }
 function Save-State($Value, [switch]$First) {
-    $destination = if ($First) { $StatePath } else { $StatePath+'.next' }
+    $destination = if ($First) { $StatePath } else { $StatePath+'.next.'+[guid]::NewGuid().ToString('N') }
     $stream=[IO.File]::Open($destination,'CreateNew','Write','None')
     try {$bytes=[Text.Encoding]::UTF8.GetBytes(($Value|ConvertTo-Json -Depth 5));$stream.Write($bytes);$stream.Flush($true)} finally {$stream.Dispose()}
     if(-not $First){[IO.File]::Move($destination,$StatePath,$true)}
 }
 $StatePath = Safe-Path $StatePath -MissingLeaf
+$ClusterPath = Safe-Path $ClusterPath
+$PostgresBin = Safe-Path $PostgresBin
+$postgres = Safe-Path (Join-Path $PostgresBin 'postgres.exe')
+$ctl = Safe-Path (Join-Path $PostgresBin 'pg_ctl.exe')
 if ($Action -eq 'Start') {
     if (Test-Path -LiteralPath $StatePath) { throw 'SHARED_POSTGRES_STATE_EXISTS' }
-    $ClusterPath = Safe-Path $ClusterPath
-    $PostgresBin = Safe-Path $PostgresBin
-    $postgres = Safe-Path (Join-Path $PostgresBin 'postgres.exe')
-    $ctl = Safe-Path (Join-Path $PostgresBin 'pg_ctl.exe')
     $systemId = Cluster-Identity $ClusterPath
     $listen = & $postgres -D $ClusterPath -C listen_addresses
     if ($LASTEXITCODE -ne 0 -or $listen.Trim() -notin @('127.0.0.1','localhost')) { throw 'SHARED_POSTGRES_LOOPBACK_REQUIRED' }
@@ -74,23 +74,33 @@ if ($Action -eq 'Start') {
     $null = Safe-Path $StatePath
     $state = Get-Content -LiteralPath $StatePath -Raw | ConvertFrom-Json -AsHashtable -DateKind String
     if ($state.schema -cne 'lattice.shared-postgres.v1') { throw 'SHARED_POSTGRES_STATE_INVALID' }
-    $null = Safe-Path $state.cluster
-    $null = Safe-Path $state.pgCtl
+    # Scope and binaries come from explicit arguments, never from a mutable receipt.
+    if($state.cluster -ine $ClusterPath -or $state.pgCtl -ine $ctl -or $state.postgres -ine $postgres){throw 'SHARED_POSTGRES_STATE_SCOPE_CHANGED'}
     if ((Cluster-Identity $state.cluster) -cne $state.systemId) { throw 'SHARED_POSTGRES_CLUSTER_CHANGED' }
     if ($state.status -eq 'STOPPED') {
-        & $state.pgCtl -D $state.cluster status *> $null
+        & $ctl -D $ClusterPath status *> $null
         if($LASTEXITCODE -ne 3){throw 'SHARED_POSTGRES_STOP_READBACK_FAILED'}
         $state|ConvertTo-Json -Depth 5; return
     }
-    if ($state.status -ne 'RUNNING' -or -not $state.identity) { throw 'SHARED_POSTGRES_STATE_UNVERIFIED' }
+    if ($state.status -eq 'STOP_PENDING') {
+        & $ctl -D $ClusterPath status *> $null
+        if($LASTEXITCODE -eq 3 -and -not (Test-Path -LiteralPath (Join-Path $ClusterPath 'postmaster.pid'))){
+            $priorProcess=Get-CimInstance Win32_Process -Filter ('ProcessId='+$state.identity.pid)
+            if($priorProcess -and $priorProcess.CreationDate.ToUniversalTime().ToString('o') -ceq $state.identity.createdAt){throw 'SHARED_POSTGRES_STOP_READBACK_FAILED'}
+            $state.status='STOPPED';$state.stoppedAt=[DateTime]::UtcNow.ToString('o');Save-State $state
+            $state|ConvertTo-Json -Depth 5;return
+        }
+    }
+    if ($state.status -notin @('RUNNING','STOP_PENDING') -or -not $state.identity) { throw 'SHARED_POSTGRES_STATE_UNVERIFIED' }
     $observed = Process-Identity ([int]$state.identity.pid) $state.postgres $state.cluster
     foreach ($key in @('pid','createdAt','executable','ownerSid')) { if ($observed[$key] -cne $state.identity[$key]) { throw 'SHARED_POSTGRES_IDENTITY_CHANGED' } }
     if ([int](Get-Content -LiteralPath (Safe-Path (Join-Path $state.cluster 'postmaster.pid')) -TotalCount 1) -ne $state.identity.pid) { throw 'SHARED_POSTGRES_IDENTITY_CHANGED' }
     if ($Action -eq 'Stop') {
         # Explicit stop only; smart mode waits for clients instead of killing them.
-        & $state.pgCtl -D $state.cluster -m smart -w -t 30 stop *> ($StatePath+'.stop.log')
+        $state.status='STOP_PENDING';Save-State $state
+        & $ctl -D $ClusterPath -m smart -w -t 30 stop *> ($StatePath+'.stop.log')
         if ($LASTEXITCODE -ne 0) { throw 'SHARED_POSTGRES_STOP_INCOMPLETE' }
-        & $state.pgCtl -D $state.cluster status *> $null
+        & $ctl -D $ClusterPath status *> $null
         if ($LASTEXITCODE -ne 3) { throw 'SHARED_POSTGRES_STOP_READBACK_FAILED' }
         $state.status='STOPPED'; $state.stoppedAt=[DateTime]::UtcNow.ToString('o'); Save-State $state
     }
