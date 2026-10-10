@@ -21,6 +21,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use lattice_codex_adapter::CODEX_HOME_OWNERSHIP_MARKER_NAME;
 use lattice_contracts::ContentDigest;
+use lattice_postgres_store::registry_epoch_anchor::AnchorFileIdentity;
 use sha2::{Digest, Sha256};
 
 const MAX_CONTROL_PATH_BYTES: usize = 4_096;
@@ -682,12 +683,48 @@ fn is_reparse_point(_metadata: &Metadata) -> bool {
 
 #[cfg(windows)]
 #[allow(unsafe_code)]
-fn physical_identity(file: &File) -> Result<PhysicalFileIdentity, ()> {
+fn native_file_information(file: &File) -> std::io::Result<BY_HANDLE_FILE_INFORMATION> {
     let mut information = BY_HANDLE_FILE_INFORMATION::default();
     if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &raw mut information) } == 0
     {
-        return Err(());
+        return Err(std::io::Error::last_os_error());
     }
+    Ok(information)
+}
+
+/// Inspect the actual open anchor handle; never infer identity from its path.
+#[cfg(windows)]
+pub(crate) fn registry_anchor_file_audit(file: &File) -> std::io::Result<AnchorFileIdentity> {
+    let information = native_file_information(file)?;
+    Ok(AnchorFileIdentity {
+        device: u64::from(information.dwVolumeSerialNumber),
+        inode: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
+        links: u64::from(information.nNumberOfLinks),
+    })
+}
+
+#[cfg(unix)]
+pub(crate) fn registry_anchor_file_audit(file: &File) -> std::io::Result<AnchorFileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok(AnchorFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        links: metadata.nlink(),
+    })
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn registry_anchor_file_audit(_file: &File) -> std::io::Result<AnchorFileIdentity> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native anchor audit unavailable",
+    ))
+}
+
+#[cfg(windows)]
+fn physical_identity(file: &File) -> Result<PhysicalFileIdentity, ()> {
+    let information = native_file_information(file).map_err(|_| ())?;
     Ok(PhysicalFileIdentity {
         device: u64::from(information.dwVolumeSerialNumber),
         file: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
@@ -777,6 +814,100 @@ mod tests {
         let path = root.join("runner.bin");
         fs::write(&path, b"trusted-runner-v1\n").expect("identity fixture file");
         (root, path)
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn registry_epoch_anchor_native_audit_reads_same_handle_hardlink_count() {
+        let (root, path) = fixture();
+        let file = File::open(&path).expect("open native identity fixture");
+        let first = registry_anchor_file_audit(&file).expect("first native audit");
+        assert_eq!(first.links, 1);
+        fs::hard_link(&path, root.join("another-name.bin")).expect("create real hardlink");
+        let second = registry_anchor_file_audit(&file).expect("same held handle audit");
+        assert_eq!(second.links, 2);
+        assert_eq!((first.device, first.inode), (second.device, second.inode));
+        drop(file);
+        fs::remove_dir_all(root).expect("remove native identity fixture");
+    }
+
+    #[test]
+    #[cfg(any(windows, unix))]
+    fn registry_epoch_anchor_roundtrip_and_real_hardlink_rejection() {
+        use lattice_postgres_store::registry_epoch_anchor::{
+            ANCHOR_FILE, ANCHOR_LOCK, ActiveAnchor, AnchorDigest, AnchorError, AnchorState,
+            RegistryEpochAnchor,
+        };
+        crate::initialize_registry_anchor_file_audit().expect("install native audit");
+        crate::initialize_registry_anchor_file_audit().expect("same initializer is repeatable");
+        let (root, _) = fixture();
+        let anchor_root = root.join("epoch-anchor");
+        let anchor = RegistryEpochAnchor::new(anchor_root.clone(), &"a".repeat(64)).unwrap();
+        let first = ActiveAnchor::new(1, AnchorDigest::new(&"b".repeat(64)).unwrap()).unwrap();
+        let operation = AnchorDigest::new(&"d".repeat(64)).unwrap();
+        let pending = anchor
+            .prepare(None, &first, &operation)
+            .expect("prepare first epoch");
+        assert_eq!(anchor.activate(&pending).unwrap(), first);
+        let second = ActiveAnchor::new(2, AnchorDigest::new(&"c".repeat(64)).unwrap()).unwrap();
+        let pending = anchor
+            .prepare(Some(&first), &second, &operation)
+            .expect("prepare next epoch");
+        assert_eq!(
+            anchor.read().unwrap(),
+            AnchorState::Pending(pending.clone())
+        );
+        anchor
+            .activate(&pending)
+            .expect("activate exact native-audited pending");
+        assert_eq!(anchor.read().unwrap(), AnchorState::Active(second.clone()));
+        assert!(!anchor_root.join(ANCHOR_LOCK).exists());
+        fs::hard_link(
+            anchor_root.join(ANCHOR_FILE),
+            root.join("anchor-hardlink.json"),
+        )
+        .expect("create actual anchor hardlink");
+        assert!(matches!(anchor.read(), Err(AnchorError::HardLink)));
+        let third = ActiveAnchor::new(3, AnchorDigest::new(&"e".repeat(64)).unwrap()).unwrap();
+        assert!(matches!(
+            anchor.prepare(Some(&second), &third, &operation),
+            Err(AnchorError::HardLink)
+        ));
+        assert!(!anchor_root.join(ANCHOR_LOCK).exists());
+        fs::remove_dir_all(root).expect("remove native anchor fixture");
+    }
+
+    #[test]
+    fn registry_epoch_anchor_foreign_callback_fails_closed() {
+        const CHILD: &str = "LATTICE_ANCHOR_FOREIGN_AUDIT_UNIT_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "managed_file_identity::tests::registry_epoch_anchor_foreign_callback_fails_closed"])
+                .env(CHILD, "1")
+                .output()
+                .expect("isolated callback registration test");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+            return;
+        }
+        fn foreign_audit(_file: &File) -> std::io::Result<AnchorFileIdentity> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "foreign test audit",
+            ))
+        }
+        lattice_postgres_store::registry_epoch_anchor::install_anchor_file_audit(foreign_audit)
+            .expect("explicit foreign callback fixture");
+        for _ in 0..2 {
+            assert_eq!(
+                crate::initialize_registry_anchor_file_audit(),
+                Err("REGISTRY_ANCHOR_FILE_AUDIT_REGISTRATION_REJECTED")
+            );
+        }
     }
 
     #[test]

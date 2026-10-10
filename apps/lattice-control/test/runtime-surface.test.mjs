@@ -185,6 +185,7 @@ test("runtime data presence covers the whole SQLite scope when project context i
       limit: 1,
     });
     application.store.recordDecision({
+      owner: { kind: "PROJECT", projectId: first.id },
       scope: first.id,
       subject: "runtime.data-presence",
       content: "Use the complete Control SQLite scope for existence checks.",

@@ -128,9 +128,8 @@ fn replay<'a>(
 ) -> ProjectBridgeResult<Option<&'a lattice_project_registry::RegistryCommandReceipt>> {
     let id = request.command_id()?;
     let retained = state
-        .commands()
-        .values()
-        .find(|record| record.command().command_id() == &id);
+        .retained_command(&id)
+        .map_err(|_| bridge_error(ProjectBridgeErrorKind::ProjectRegistryRejected))?;
     let Some(record) = retained else {
         return Ok(None);
     };
@@ -238,7 +237,7 @@ pub(crate) fn run_with_proof(
         return Ok(
             json!({"schema_version":"lattice.project-registry.recovery.v1", "status":"INSPECTED",
                 "registry_checkpoint_digest": loaded.state().checkpoint().checkpoint_digest().as_str(),
-                "registry_command_count": loaded.state().commands().len(), "current":projection(current, &fresh)}),
+                "registry_command_count": loaded.state().commands().len(), "registry_epoch":loaded.state().epoch(),"history_assurance":loaded.state().history_assurance(), "current":projection(current, &fresh)}),
         );
     };
     if &request.project_id != project_id {
@@ -254,7 +253,7 @@ pub(crate) fn run_with_proof(
         return Ok(
             json!({"schema_version":"lattice.project-registry.recovery.v1", "status":"REPLAYED",
             "registry_checkpoint_digest": loaded.state().checkpoint().checkpoint_digest().as_str(),
-            "registry_command_count": loaded.state().commands().len(),
+            "registry_command_count": loaded.state().commands().len(),"registry_epoch":loaded.state().epoch(),"history_assurance":loaded.state().history_assurance(),
             "command_id":request.command_id()?.as_str(), "historical_receipt_digest":receipt.result_digest().as_str(),
             "historical_outcome":format!("{:?}",receipt.outcome()), "current":projection(current, &fresh)}),
         );
@@ -301,7 +300,7 @@ pub(crate) fn run_with_proof(
     Ok(
         json!({"schema_version":"lattice.project-registry.recovery.v1", "status":if execution.is_exact_retry(){"REPLAYED"}else{"APPLIED"},
         "registry_checkpoint_digest": reloaded.state().checkpoint().checkpoint_digest().as_str(),
-        "registry_command_count": reloaded.state().commands().len(),
+        "registry_command_count": reloaded.state().commands().len(),"registry_epoch":reloaded.state().epoch(),"history_assurance":reloaded.state().history_assurance(),
         "command_id":request.command_id()?.as_str(), "historical_receipt_digest":execution.semantic_receipt().result_digest().as_str(),
         "historical_outcome":"Applied", "current":projection(current, &fresh)}),
     )

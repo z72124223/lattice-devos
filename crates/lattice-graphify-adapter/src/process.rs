@@ -23,7 +23,7 @@ use crate::identity::{
     GRAPHIFY_WSL_INSTALL_REPORT_SHA256, GRAPHIFY_WSL_PYTHON_PATH, GRAPHIFY_WSL_PYTHON_SHA256,
     GRAPHIFY_WSL_PYTHON_VERSION_SHA256, GRAPHIFY_WSL_RUNTIME_BYTE_COUNT,
     GRAPHIFY_WSL_RUNTIME_FILE_COUNT, GRAPHIFY_WSL_RUNTIME_MANIFEST_SHA256, WslProfile,
-    verify_reviewed_runtime, verify_runtime_profile,
+    verify_native_linux_runtime, verify_reviewed_runtime, verify_runtime_profile,
 };
 use crate::snapshot::{
     MaterializedSnapshot, SnapshotBridge, file_sha256, framed_digest, verify_snapshot_binding,
@@ -112,6 +112,7 @@ impl Default for GraphOutputLimits {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GraphifyRuntimeConfig {
     profile: WslProfile,
+    native_linux: bool,
     wsl_executable: PathBuf,
     runtime_root: PathBuf,
     expected_launcher_sha256: String,
@@ -183,6 +184,53 @@ impl GraphifyRuntimeConfig {
         };
         Ok(Self {
             profile,
+            native_linux: false,
+            wsl_executable: reviewed.wsl_executable().to_path_buf(),
+            runtime_root: reviewed.runtime_root().to_path_buf(),
+            expected_launcher_sha256: reviewed.launcher_sha256().to_owned(),
+            expected_execution_identity_sha256: reviewed.execution_identity_sha256().to_owned(),
+            expected_help_sha256: GRAPHIFY_WSL_GRAPHIFY_HELP_SHA256.to_owned(),
+            expected_payload_manifest_sha256: Some(reviewed.manifest_sha256().to_owned()),
+            staging_root,
+            timeout,
+            limits,
+        })
+    }
+
+    /// Uses the reviewed Linux system and payload directly through bubblewrap.
+    ///
+    /// # Errors
+    ///
+    /// Rejects non-Linux hosts, invalid bounds, or any unreviewed system/payload
+    /// bytes. This constructor verifies identity; execution still checks user
+    /// namespaces, the private-copy sandbox, and Landlock without a fallback.
+    pub fn new_native_linux(
+        runtime_root: impl Into<PathBuf>,
+        staging_root: impl Into<PathBuf>,
+        timeout: Duration,
+        limits: GraphOutputLimits,
+    ) -> GraphifyAdapterResult<Self> {
+        let runtime_root = runtime_root.into();
+        let staging_root = staging_root.into();
+        if !runtime_root.is_absolute()
+            || !staging_root.is_absolute()
+            || timeout.is_zero()
+            || timeout > Duration::from_hours(1)
+            || limits.max_graph_bytes == 0
+            || limits.max_nodes == 0
+            || limits.max_edges == 0
+            || limits.max_text_bytes == 0
+            || limits.max_diagnostic_bytes == 0
+        {
+            return Err(error(
+                GraphifyAdapterErrorKind::Configuration,
+                "GRAPHIFY_RUNTIME_CONFIG_REJECTED",
+            ));
+        }
+        let reviewed = verify_native_linux_runtime(&runtime_root)?;
+        Ok(Self {
+            profile: WslProfile::legacy(),
+            native_linux: true,
             wsl_executable: reviewed.wsl_executable().to_path_buf(),
             runtime_root: reviewed.runtime_root().to_path_buf(),
             expected_launcher_sha256: reviewed.launcher_sha256().to_owned(),
@@ -228,6 +276,7 @@ impl GraphifyRuntimeConfig {
         }
         Ok(Self {
             profile: WslProfile::legacy(),
+            native_linux: false,
             wsl_executable,
             runtime_root,
             expected_launcher_sha256,
@@ -240,6 +289,12 @@ impl GraphifyRuntimeConfig {
         })
     }
 
+    #[must_use]
+    pub const fn is_native_linux(&self) -> bool {
+        self.native_linux
+    }
+
+    /// Returns the owned launcher (bubblewrap for the native Linux profile).
     #[must_use]
     pub fn wsl_executable(&self) -> &Path {
         &self.wsl_executable
@@ -294,8 +349,16 @@ impl GraphifyRuntimeConfig {
         let timeout_millis = self.timeout.as_millis().to_string();
         let legacy = framed_digest(&[
             b"lattice-graphify-adapter-private-copy-1.0",
-            b"Ubuntu",
-            b"--exec",
+            if self.native_linux {
+                b"linux-native"
+            } else {
+                b"Ubuntu"
+            },
+            if self.native_linux {
+                b"direct-exec"
+            } else {
+                b"--exec"
+            },
             b"/usr/bin/bwrap",
             b"--die-with-parent",
             b"--unshare-all",
@@ -807,16 +870,7 @@ impl GraphifyExecutor for OwnedChildExecutor {
         let outcome = execute_owned_windows(plan, deadline, &stdout_path, &stderr_path);
 
         #[cfg(not(windows))]
-        let outcome = {
-            let exit_code = execute_owned_portable(plan, deadline, &stdout_path, &stderr_path)?;
-            let stdout = read_bounded(&stdout_path, plan.stdout_limit)?;
-            let stderr = read_bounded(&stderr_path, plan.diagnostic_limit)?;
-            Ok(ProcessOutcome {
-                exit_code,
-                stdout,
-                stderr,
-            })
-        };
+        let outcome = execute_owned_portable(plan, deadline, &stdout_path, &stderr_path);
         outcome
     }
 }
@@ -856,35 +910,44 @@ fn execute_owned_portable(
     deadline: Instant,
     stdout_path: &Path,
     stderr_path: &Path,
-) -> GraphifyAdapterResult<Option<i32>> {
-    let stdout_file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(stdout_path)
-        .map_err(|_| {
-            error(
-                GraphifyAdapterErrorKind::Spawn,
-                "GRAPHIFY_STDOUT_CAPTURE_CREATE_FAILED",
-            )
-        })?;
-    let stderr_file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(stderr_path)
-        .map_err(|_| {
-            error(
-                GraphifyAdapterErrorKind::Spawn,
-                "GRAPHIFY_STDERR_CAPTURE_CREATE_FAILED",
-            )
-        })?;
+) -> GraphifyAdapterResult<ProcessOutcome> {
+    let mut capture_options = OpenOptions::new();
+    capture_options.create_new(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        capture_options.mode(0o600);
+    }
+    let mut stdout_file = capture_options.open(stdout_path).map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::Spawn,
+            "GRAPHIFY_STDOUT_CAPTURE_CREATE_FAILED",
+        )
+    })?;
+    let mut stderr_file = capture_options.open(stderr_path).map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::Spawn,
+            "GRAPHIFY_STDERR_CAPTURE_CREATE_FAILED",
+        )
+    })?;
     let mut command = Command::new(&plan.executable);
     command.args(&plan.arguments);
     command.current_dir(&plan.current_dir);
     command.env_clear();
     command.envs(&plan.environment);
     command.stdin(Stdio::null());
-    command.stdout(Stdio::from(stdout_file));
-    command.stderr(Stdio::from(stderr_file));
+    command.stdout(Stdio::from(stdout_file.try_clone().map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::Spawn,
+            "GRAPHIFY_CAPTURE_HANDLE_CLONE_FAILED",
+        )
+    })?));
+    command.stderr(Stdio::from(stderr_file.try_clone().map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::Spawn,
+            "GRAPHIFY_CAPTURE_HANDLE_CLONE_FAILED",
+        )
+    })?));
     let mut child = command.spawn().map_err(|_| {
         error(
             GraphifyAdapterErrorKind::Spawn,
@@ -892,6 +955,12 @@ fn execute_owned_portable(
         )
     })?;
     let status = loop {
+        let capture_check = check_capture_limit(&stdout_file, plan.stdout_limit)
+            .and_then(|()| check_capture_limit(&stderr_file, plan.diagnostic_limit));
+        if let Err(rejected) = capture_check {
+            terminate_portable_child(&mut child)?;
+            return Err(rejected);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
@@ -913,7 +982,73 @@ fn execute_owned_portable(
             }
         }
     };
-    Ok(status.code())
+    Ok(ProcessOutcome {
+        exit_code: status.code(),
+        stdout: read_owned_capture(&mut stdout_file, plan.stdout_limit)?,
+        stderr: read_owned_capture(&mut stderr_file, plan.diagnostic_limit)?,
+    })
+}
+
+#[cfg(not(windows))]
+fn check_capture_limit(file: &File, limit: u64) -> GraphifyAdapterResult<()> {
+    let length = file
+        .metadata()
+        .map_err(|_| {
+            error(
+                GraphifyAdapterErrorKind::MissingOutput,
+                "GRAPHIFY_CAPTURE_METADATA_FAILED",
+            )
+        })?
+        .len();
+    if length > limit {
+        return Err(error(
+            GraphifyAdapterErrorKind::OutputLimit,
+            "GRAPHIFY_CAPTURE_LIMIT",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn read_owned_capture(file: &mut File, limit: u64) -> GraphifyAdapterResult<Vec<u8>> {
+    check_capture_limit(file, limit)?;
+    let expected = file
+        .metadata()
+        .map_err(|_| {
+            error(
+                GraphifyAdapterErrorKind::MissingOutput,
+                "GRAPHIFY_CAPTURE_METADATA_FAILED",
+            )
+        })?
+        .len();
+    std::io::Seek::rewind(file).map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::MissingOutput,
+            "GRAPHIFY_CAPTURE_REWIND_FAILED",
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| {
+            error(
+                GraphifyAdapterErrorKind::MissingOutput,
+                "GRAPHIFY_CAPTURE_READ_FAILED",
+            )
+        })?;
+    if bytes.len() as u64 > limit {
+        return Err(error(
+            GraphifyAdapterErrorKind::OutputLimit,
+            "GRAPHIFY_CAPTURE_LIMIT",
+        ));
+    }
+    if bytes.len() as u64 != expected {
+        return Err(error(
+            GraphifyAdapterErrorKind::PartialOutput,
+            "GRAPHIFY_CAPTURE_CHANGED",
+        ));
+    }
+    Ok(bytes)
 }
 
 #[cfg(not(windows))]
@@ -1086,12 +1221,21 @@ fn build_plan(
             ],
         )?,
     };
+    let executable = if config.native_linux {
+        PathBuf::from(match kind {
+            CommandKind::SystemHashes => WSL_SHA256SUM_PATH,
+            CommandKind::PythonVersion => GRAPHIFY_WSL_PYTHON_PATH,
+            _ => GRAPHIFY_WSL_BWRAP_PATH,
+        })
+    } else {
+        config.wsl_executable.clone()
+    };
     Ok(CommandPlan {
         kind,
-        executable: config.wsl_executable.clone(),
+        environment: minimal_launcher_environment(&executable)?,
+        executable,
         arguments,
         current_dir: output_root.to_path_buf(),
-        environment: minimal_launcher_environment(&config.wsl_executable)?,
         capture_dir: capture_dir.to_path_buf(),
         stdout_limit: config.limits.max_diagnostic_bytes,
         diagnostic_limit: config.limits.max_diagnostic_bytes,
@@ -1155,9 +1299,11 @@ fn private_graphify_arguments(
     snapshot: &MaterializedSnapshot,
     source_bytes: u64,
 ) -> GraphifyAdapterResult<Vec<OsString>> {
-    let runtime_site_packages = windows_path_to_wsl(&config.runtime_root.join("site-packages"))?;
-    let install_report = windows_path_to_wsl(&config.runtime_root.join("install-report.json"))?;
-    let snapshot_root = windows_path_to_wsl(snapshot.root())?;
+    let runtime_site_packages =
+        sandbox_input_path(config, &config.runtime_root.join("site-packages"))?;
+    let install_report =
+        sandbox_input_path(config, &config.runtime_root.join("install-report.json"))?;
+    let snapshot_root = sandbox_input_path(config, snapshot.root())?;
     let expected_runtime_manifest = config
         .expected_payload_manifest_sha256
         .as_deref()
@@ -1254,6 +1400,9 @@ fn fixed_wsl_exec(
     executable: &str,
     arguments: impl IntoIterator<Item = &'static str>,
 ) -> Vec<OsString> {
+    if config.native_linux {
+        return arguments.into_iter().map(OsString::from).collect();
+    }
     let mut command = vec![
         OsString::from("-d"),
         OsString::from(config.profile.distribution()),
@@ -1272,10 +1421,12 @@ fn sandboxed_graphify_arguments(
     artifact_root: &Path,
     graphify_arguments: impl IntoIterator<Item = &'static str>,
 ) -> GraphifyAdapterResult<Vec<OsString>> {
-    let runtime_site_packages = windows_path_to_wsl(&config.runtime_root.join("site-packages"))?;
-    let install_report = windows_path_to_wsl(&config.runtime_root.join("install-report.json"))?;
-    let snapshot = windows_path_to_wsl(snapshot_root)?;
-    let output = windows_path_to_wsl(artifact_root)?;
+    let runtime_site_packages =
+        sandbox_input_path(config, &config.runtime_root.join("site-packages"))?;
+    let install_report =
+        sandbox_input_path(config, &config.runtime_root.join("install-report.json"))?;
+    let snapshot = sandbox_input_path(config, snapshot_root)?;
+    let output = sandbox_input_path(config, artifact_root)?;
     let mut command = fixed_wsl_exec(config, GRAPHIFY_WSL_BWRAP_PATH, std::iter::empty());
     for argument in [
         "--die-with-parent",
@@ -1363,6 +1514,7 @@ pub(crate) fn minimal_launcher_environment(
     executable: &Path,
 ) -> GraphifyAdapterResult<BTreeMap<OsString, OsString>> {
     let mut environment = BTreeMap::new();
+    #[cfg(windows)]
     for name in ["SystemRoot", "WINDIR", "ComSpec", "PATHEXT"] {
         if let Some(value) = std::env::var_os(name) {
             environment.insert(OsString::from(name), value);
@@ -1393,6 +1545,40 @@ pub(crate) fn minimal_launcher_environment(
         })?,
     );
     Ok(environment)
+}
+
+fn sandbox_input_path(
+    config: &GraphifyRuntimeConfig,
+    path: &Path,
+) -> GraphifyAdapterResult<OsString> {
+    if !config.native_linux {
+        return windows_path_to_wsl(path);
+    }
+    if !cfg!(target_os = "linux") || !path.is_absolute() {
+        return Err(error(
+            GraphifyAdapterErrorKind::Configuration,
+            "GRAPHIFY_NATIVE_LINUX_BIND_SOURCE_REJECTED",
+        ));
+    }
+    let canonical = fs::canonicalize(path).map_err(|_| {
+        error(
+            GraphifyAdapterErrorKind::Configuration,
+            "GRAPHIFY_NATIVE_LINUX_BIND_SOURCE_RESOLVE_FAILED",
+        )
+    })?;
+    let text = canonical.to_str().ok_or_else(|| {
+        error(
+            GraphifyAdapterErrorKind::Configuration,
+            "GRAPHIFY_NATIVE_LINUX_BIND_SOURCE_NON_UNICODE",
+        )
+    })?;
+    if text.contains(['\0', '\r', '\n']) {
+        return Err(error(
+            GraphifyAdapterErrorKind::Configuration,
+            "GRAPHIFY_NATIVE_LINUX_BIND_SOURCE_REJECTED",
+        ));
+    }
+    Ok(canonical.into_os_string())
 }
 
 fn windows_path_to_wsl(path: &Path) -> GraphifyAdapterResult<OsString> {
@@ -1487,16 +1673,21 @@ fn verify_runtime(config: &GraphifyRuntimeConfig) -> GraphifyAdapterResult<()> {
             "GRAPHIFY_TEST_LAUNCHER_DIGEST_MISMATCH",
         ));
     }
-    let reviewed = verify_runtime_profile(
-        &config.wsl_executable,
-        &config.runtime_root,
-        &config.profile,
-    )?;
+    let reviewed = if config.native_linux {
+        verify_native_linux_runtime(&config.runtime_root)?
+    } else {
+        verify_runtime_profile(
+            &config.wsl_executable,
+            &config.runtime_root,
+            &config.profile,
+        )?
+    };
     if reviewed.wsl_executable() != config.wsl_executable
         || reviewed.runtime_root() != config.runtime_root
         || reviewed.launcher_sha256() != config.expected_launcher_sha256
         || reviewed.execution_identity_sha256() != config.expected_execution_identity_sha256
-        || (!config.profile.is_portable()
+        || (!config.native_linux
+            && !config.profile.is_portable()
             && config.expected_execution_identity_sha256 != GRAPHIFY_WSL_EXECUTION_IDENTITY_SHA256)
     {
         return Err(error(
@@ -1929,6 +2120,11 @@ mod tests {
             GraphOutputLimits::default(),
         )
         .expect("config");
+        #[cfg(target_os = "linux")]
+        let config = GraphifyRuntimeConfig {
+            native_linux: true,
+            ..config
+        };
         let plans = Arc::new(Mutex::new(Vec::new()));
         let adapter = PinnedGraphifyAdapter::with_executor(
             config,
@@ -2038,15 +2234,20 @@ mod tests {
         fs::create_dir_all(&capture).expect("private plan roots");
         let extract = build_private_extract_plan(&adapter.config, &snapshot, &shape_root, &capture)
             .expect("private extract plan");
-        assert_eq!(
-            &extract.arguments[..4],
-            [
-                OsString::from("-d"),
-                OsString::from("Ubuntu"),
-                OsString::from("--exec"),
-                OsString::from("/usr/bin/bwrap"),
-            ]
-        );
+        if cfg!(target_os = "linux") {
+            assert_eq!(extract.arguments[0], "--die-with-parent");
+            assert!(
+                !extract
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--exec")
+            );
+        } else {
+            assert_eq!(
+                &extract.arguments[..4],
+                ["-d", "Ubuntu", "--exec", "/usr/bin/bwrap"].map(OsString::from)
+            );
+        }
         for fixed in [
             "--die-with-parent",
             "--unshare-all",
@@ -2117,6 +2318,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(windows)]
     fn portable_profile_changes_identity_and_routes_every_command_without_fallback() {
         let (mut adapter, snapshot, _) = fixture(FakeMode::Valid);
         let legacy = adapter.config.capability_sha256();
@@ -2165,6 +2367,140 @@ mod tests {
             assert!(WslProfile::portable(invalid, &"a".repeat(64)).is_err());
         }
         assert!(WslProfile::portable(name, "unverified").is_err());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_linux_plans_use_direct_fixed_executables_and_native_mounts() {
+        let (mut adapter, snapshot, _) = fixture(FakeMode::Valid);
+        adapter.config.wsl_executable = PathBuf::from(GRAPHIFY_WSL_BWRAP_PATH);
+        let native_capability = adapter.config.capability_sha256();
+        adapter.config.native_linux = false;
+        assert_ne!(native_capability, adapter.config.capability_sha256());
+        adapter.config.native_linux = true;
+        let root = adapter.config.staging_root().join("native-plans");
+        let capture = root.join("capture");
+        fs::create_dir_all(&capture).expect("capture");
+        for (kind, executable) in [
+            (CommandKind::SystemHashes, WSL_SHA256SUM_PATH),
+            (CommandKind::BwrapVersion, GRAPHIFY_WSL_BWRAP_PATH),
+            (CommandKind::BwrapHelp, GRAPHIFY_WSL_BWRAP_PATH),
+            (CommandKind::PythonVersion, GRAPHIFY_WSL_PYTHON_PATH),
+            (CommandKind::GraphifyVersion, GRAPHIFY_WSL_BWRAP_PATH),
+            (CommandKind::GraphifyHelp, GRAPHIFY_WSL_BWRAP_PATH),
+            (CommandKind::Extract, GRAPHIFY_WSL_BWRAP_PATH),
+        ] {
+            let plan = build_plan(
+                &adapter.config,
+                kind,
+                snapshot.root(),
+                &root,
+                &root,
+                &capture,
+            )
+            .expect("native plan");
+            assert_eq!(plan.executable, Path::new(executable));
+            assert!(
+                !plan
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "--exec" || argument == "-d")
+            );
+            assert!(!plan.environment.contains_key(OsStr::new("WSLENV")));
+        }
+        let private = build_private_extract_plan(&adapter.config, &snapshot, &root, &capture)
+            .expect("native private plan");
+        assert_eq!(private.executable, Path::new(GRAPHIFY_WSL_BWRAP_PATH));
+        assert_eq!(private.arguments[0], "--die-with-parent");
+        let source = fs::canonicalize(snapshot.root()).expect("native source");
+        assert!(private.arguments.windows(3).any(|window| {
+            window[0] == "--ro-bind"
+                && window[1] == source.as_os_str()
+                && window[2] == "/source-input"
+        }));
+        assert!(
+            !private
+                .arguments
+                .iter()
+                .any(|argument| argument == "--bind")
+        );
+        assert!(sandbox_input_path(&adapter.config, Path::new("relative/source")).is_err());
+    }
+
+    #[test]
+    fn native_linux_constructor_rejects_invalid_bounds_before_identity() {
+        let root = std::env::temp_dir();
+        let rejected = GraphifyRuntimeConfig::new_native_linux(
+            &root,
+            root.join("staging"),
+            Duration::ZERO,
+            GraphOutputLimits::default(),
+        )
+        .expect_err("zero deadline is not executable");
+        assert_eq!(rejected.code(), "GRAPHIFY_RUNTIME_CONFIG_REJECTED");
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn native_capture_keeps_original_handle_and_enforces_both_output_bounds() {
+        use std::io::Write;
+        let (adapter, _, _) = fixture(FakeMode::Valid);
+        let root = adapter.config.staging_root();
+        fs::create_dir_all(root).expect("capture root");
+        let path = root.join("owned.capture");
+        let mut original = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .expect("owned capture");
+        original.write_all(b"original").expect("write capture");
+        fs::rename(&path, root.join("moved.capture")).expect("rename path");
+        fs::write(&path, b"replacement").expect("replacement");
+        assert_eq!(
+            read_owned_capture(&mut original, 8).expect("original handle"),
+            b"original"
+        );
+        assert_eq!(
+            read_owned_capture(&mut original, 7)
+                .expect_err("bound")
+                .kind(),
+            GraphifyAdapterErrorKind::OutputLimit
+        );
+
+        let base = CommandPlan {
+            kind: CommandKind::BwrapHelp,
+            executable: PathBuf::from("/usr/bin/printf"),
+            arguments: vec![OsString::from("0123456789abcdef")],
+            current_dir: root.to_path_buf(),
+            environment: BTreeMap::new(),
+            capture_dir: root.join("process-capture"),
+            stdout_limit: 8,
+            diagnostic_limit: 8,
+            output_root: root.to_path_buf(),
+            artifact_root: root.to_path_buf(),
+        };
+        let rejected = OwnedChildExecutor
+            .execute(&base, Instant::now() + Duration::from_secs(2))
+            .expect_err("stdout limit closes the child");
+        assert_eq!(rejected.kind(), GraphifyAdapterErrorKind::OutputLimit);
+        let stderr = CommandPlan {
+            arguments: Vec::new(),
+            ..base.clone()
+        };
+        let rejected = OwnedChildExecutor
+            .execute(&stderr, Instant::now() + Duration::from_secs(2))
+            .expect_err("printf missing-operand stderr also exceeds its bound");
+        assert_eq!(rejected.kind(), GraphifyAdapterErrorKind::OutputLimit);
+        let sleeping = CommandPlan {
+            executable: PathBuf::from("/usr/bin/sleep"),
+            arguments: vec![OsString::from("30")],
+            ..base
+        };
+        let rejected = OwnedChildExecutor
+            .execute(&sleeping, Instant::now() + Duration::from_millis(20))
+            .expect_err("deadline terminates and reaps direct child");
+        assert_eq!(rejected.code(), "GRAPHIFY_TIMEOUT_REAP_CONFIRMED");
     }
 
     #[test]

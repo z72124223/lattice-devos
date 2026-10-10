@@ -10,6 +10,7 @@ apps/lattice-control-desktop-lifecycle-tests/obj/
 apps/lattice-control-desktop-policy-tests/bin/
 apps/lattice-control-desktop-policy-tests/obj/
 .lattice/
+/apps/lattice-control/test/.project-purge-files-fixture-*/
 *.log
 *.tmp
 .DS_Store

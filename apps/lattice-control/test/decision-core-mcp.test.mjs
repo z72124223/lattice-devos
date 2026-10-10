@@ -53,6 +53,7 @@ function startMcp(databasePath) {
 
 function decisionArguments(overrides = {}) {
   return {
+    owner: { kind: "GLOBAL" },
     scope: "product:lattice",
     subject: "execution.adapter",
     content: "Ordinary work uses disposable execution workers.",

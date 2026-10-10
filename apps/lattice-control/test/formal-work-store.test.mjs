@@ -4,6 +4,18 @@ import { FormalWorkStore, projectFormalWork } from "../src/formal-work-store.mjs
 import { openCircuitSummary } from "../src/execution-recovery.mjs";
 
 const taskA = "a".repeat(64), taskB = "b".repeat(64);
+test('formal detail retains the freshly read Runtime source and revision', async () => {
+  const snapshot = page(); let reads = 0;
+  const store = new FormalWorkStore({ runtime: { call: async (name, args) => {
+    assert.equal(name, 'lattice_control_snapshot');
+    assert.deepEqual(args, { project_id: 'project-a', task_ref: taskA });
+    reads += 1; return structuredClone(snapshot);
+  } } });
+  assert.deepEqual((await store.detail('project-a', taskA)).source, snapshot.source);
+  snapshot.revision = '3'.repeat(64);
+  assert.equal((await store.detail('project-a', taskA)).snapshot_revision, snapshot.revision);
+  assert.equal(reads, 2);
+});
 test("a response for another project cannot populate the selected project's graph or details", async () => {
   const store = new FormalWorkStore({ runtime: { call: async () => page() } });
   await assert.rejects(store.readProject('project-b'), { code: 'CONTROL_WORK_PROJECT_MISMATCH' });
@@ -97,4 +109,22 @@ test("project pages must have one authority and no duplicate task identities", (
   assert.throws(() => projectFormalWork([first, first]), { code: "CONTROL_WORK_NODE_LIMIT_EXCEEDED" });
   const foreign = page(); foreign.project.id = "project-b";
   assert.throws(() => projectFormalWork([first, foreign]), { code: "CONTROL_WORK_AUTHORITY_REJECTED" });
+});
+
+test("formal decision owners must match the structural PostgreSQL project scope", async () => {
+  const calls = [], store = new FormalWorkStore({ runtime: { call: async (name, command) => {
+    calls.push({ name, command });
+    return { schema_version: "lattice.control.decision-mutation.v1", source: { authority: "POSTGRESQL_TASK_LEDGER" } };
+  } } });
+  const request = { scope:"project-a",subject:"synthetic",content:"Synthetic",rationale:"Verification",
+    source:{kind:"user_confirmation",reference:"thread:fixture/turn:1"},clientRequestId:"fixture-request",
+    expectedRevision:0,expectedDigest:"0".repeat(64) };
+  for (const owner of [{kind:"GLOBAL"},{kind:"PROJECT",projectId:"project-b"},{kind:"PROJECT",projectId:"project-a",extra:true}]) {
+    await assert.rejects(store.recordDecision({...request,owner}), {code:"CONTROL_DECISION_SCOPE_REJECTED"});
+  }
+  assert.equal(calls.length,0);
+  await store.recordDecision({...request,owner:{kind:"PROJECT",projectId:"project-a"}});
+  await store.recordDecision(request);
+  assert.equal(calls.length,2);
+  assert.deepEqual(calls[0],calls[1]);
 });

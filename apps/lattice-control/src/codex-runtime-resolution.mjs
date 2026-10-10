@@ -23,6 +23,34 @@ async function ordinaryPath(file, kind) {
   }
 }
 
+function parseCodexVersion(value) {
+  if (typeof value !== "string") return null;
+  const match = /^codex-cli (0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/u.exec(value);
+  if (!match || match[0] !== value) return null;
+  const prerelease = match[4]?.split(".") ?? [];
+  if (prerelease.some(identifier => /^0[0-9]+$/u.test(identifier))) return null;
+  // SemVer integers have no precision bound; build metadata has no precedence.
+  return { core: match.slice(1, 4).map(BigInt), prerelease };
+}
+
+const compare = (left, right) => left === right ? 0 : left < right ? -1 : 1;
+function compareVersions(left, right) {
+  for (let index = 0; index < 3; index += 1) {
+    const order = compare(left.core[index], right.core[index]);
+    if (order) return order;
+  }
+  const a = left.prerelease, b = right.prerelease;
+  if (!a.length || !b.length) return compare(!a.length, !b.length);
+  for (let index = 0; index < Math.min(a.length, b.length); index += 1) {
+    if (a[index] === b[index]) continue;
+    const numericA = /^[0-9]+$/u.test(a[index]), numericB = /^[0-9]+$/u.test(b[index]);
+    if (numericA && numericB) return compare(BigInt(a[index]), BigInt(b[index]));
+    if (numericA !== numericB) return numericA ? -1 : 1;
+    return compare(a[index], b[index]); // ASCII identifier order, not locale order.
+  }
+  return compare(a.length, b.length);
+}
+
 // Explicit codexBin/launchSpec overrides are resolved by the caller first.
 // The desktop application bundles its own CLI; an older npm installation can
 // otherwise hide models already supported by the installed desktop application.
@@ -41,21 +69,16 @@ export async function resolveWindowsCodexRuntime({
         const command = path.join(root, entry.name, "codex.exe");
         if (!await ordinaryPath(command, "file")) continue;
         try {
-          const version = /^codex-cli (\d+)\.(\d+)\.(\d+)$/u.exec(await probeVersion(command));
-          if (version) candidates.push({ command, version: version.slice(1).map(Number) });
+          const version = parseCodexVersion(await probeVersion(command));
+          if (version) candidates.push({ command, version });
         } catch {
           // An incomplete desktop update is not an executable installation.
         }
       }
     }
   }
-  candidates.sort((left, right) => {
-    for (let index = 0; index < 3; index += 1) {
-      const order = right.version[index] - left.version[index];
-      if (order) return order;
-    }
-    return left.command.localeCompare(right.command);
-  });
+  candidates.sort((left, right) => compareVersions(right.version, left.version)
+    || left.command.localeCompare(right.command));
   if (candidates.length) return { command: candidates[0].command, args: ["app-server", "--stdio"] };
 
   if (env.APPDATA && path.isAbsolute(env.APPDATA)) {

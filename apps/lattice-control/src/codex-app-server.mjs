@@ -200,6 +200,7 @@ export class CodexAppServer extends EventEmitter {
     this.nextId = 1;
     this.pending = new Map();
     this.serverRequests = new Map();
+    this.serverRequestSequence = 0;
     this.notificationSequence = 0;
     this.notificationHistory = [];
     this.notificationWaiters = new Set();
@@ -924,17 +925,21 @@ export class CodexAppServer extends EventEmitter {
     });
   }
 
-  respond(id, result) {
-    this.#settleServerRequest(id, { id, result });
+  serverRequestIdentity(id) {
+    return this.serverRequests.get(id)?.identity ?? null;
+  }
+
+  respond(id, result, { requestIdentity = null } = {}) {
+    this.#settleServerRequest(id, { id, result }, requestIdentity);
   }
 
   rejectServerRequest(
     id,
-    { code = -32601, message = "Unsupported Codex App Server request", data } = {},
+    { code = -32601, message = "Unsupported Codex App Server request", data, requestIdentity = null } = {},
   ) {
     const error = { code, message };
     if (data !== undefined) error.data = data;
-    this.#settleServerRequest(id, { id, error });
+    this.#settleServerRequest(id, { id, error }, requestIdentity);
   }
 
   deferServerRequest(id, { timeoutMs = this.requestTimeoutMs } = {}) {
@@ -947,14 +952,15 @@ export class CodexAppServer extends EventEmitter {
     }
     request.state = "deferred";
     request.timer = setTimeout(() => {
-      if (!this.serverRequests.has(id)) return;
+      if (this.serverRequests.get(id) !== request) return;
       try {
         this.rejectServerRequest(id, {
           code: -32001,
           message: `Codex App Server ${request.method} request timed out after ${timeoutMs}ms`,
+          requestIdentity: request.identity,
         });
       } catch (error) {
-        this.#clearServerRequest(id);
+        if (this.serverRequests.get(id) === request) this.#clearServerRequest(id);
         this.emit("diagnostic", `Unable to reject timed out App Server request: ${error.message}`);
       }
     }, timeoutMs);
@@ -1392,12 +1398,20 @@ export class CodexAppServer extends EventEmitter {
     this.serverRequests.clear();
   }
 
-  #settleServerRequest(id, message) {
+  #settleServerRequest(id, message, identity = null) {
+    if (identity && (this.serverRequests.get(id)?.identity !== identity
+      || identity.generation !== this.connectionGeneration || identity.sessionId !== this.appServerSessionId)) {
+      const error = new Error("Codex App Server request identity changed");
+      error.code = "CODEX_APP_SERVER_REQUEST_IDENTITY_CHANGED";
+      throw error;
+    }
     const request = this.#clearServerRequest(id);
     if (!request) {
       throw new Error(`Codex App Server request ${id} is not pending`);
     }
-    this.#send(message, { allowUnready: true });
+    this.#send(message, { allowUnready: true, ...(identity ? {
+      expectedGeneration: identity.generation, expectedSessionId: identity.sessionId,
+    } : {}) });
     this.emit("serverRequestSettled", {
       id,
       method: request.method,
@@ -1445,7 +1459,14 @@ export class CodexAppServer extends EventEmitter {
     }
 
     if (Object.hasOwn(message, "id") && message.method) {
-      const request = { id: message.id, method: message.method, state: "received", timer: null };
+      if (this.serverRequests.has(message.id)) {
+        this.rejectServerRequest(message.id, { code: -32600, message: "Duplicate pending server request id" });
+        return;
+      }
+      const identity = Object.freeze({ id: message.id, generation, sessionId: this.appServerSessionId,
+        sequence: this.serverRequestSequence += 1 });
+      const request = { id: message.id, method: message.method, threadId: message.params?.threadId,
+        identity, state: "received", timer: null };
       this.serverRequests.set(message.id, request);
       try {
         this.emit("serverRequest", message);
@@ -1469,6 +1490,10 @@ export class CodexAppServer extends EventEmitter {
     }
 
     if (message.method) {
+      if (message.method === "serverRequest/resolved") {
+        const request = this.serverRequests.get(message.params?.requestId);
+        if (request && request.threadId === message.params?.threadId) this.#clearServerRequest(request.id);
+      }
       const threadId = message.params?.threadId ?? null;
       const turnId = message.params?.turn?.id ?? null;
       const turnStatus = message.params?.turn?.status ?? null;

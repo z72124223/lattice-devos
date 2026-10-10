@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { promisify, isDeepStrictEqual } from "node:util";
 import { mkdir, realpath, readFile, writeFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { CodexAppServer } from "./codex-app-server.mjs";
@@ -8,6 +8,10 @@ import { formalWorkError } from "./formal-work-store.mjs";
 import { closedChildEnvironment, loadLatticeRuntimeConfiguration } from "./lattice-runtime-health.mjs";
 import { startResultPreview, closeResultPreview, isOwnedResultPreview } from "./result-preview.mjs";
 import { recoveryPrompt, recoverySummary, openCircuitSummary, isExecutionDenied, deniedItemIds } from "./execution-recovery.mjs";
+import { rejectDiagnostic, verifyDiagnosticReceipt as defaultVerifyDiagnosticReceipt } from './relative-module-receipt.mjs';
+import { elicitationMethod, taskStatusElicitation, elicitationResponse, elicitationError, elicitationDenied } from './mcp-tool-elicitation.mjs';
+import { readOwnedDiagnosticSource } from './relative-module-source.mjs';
+import { LifeHarnessCandidates, failedCommand } from './life-harness-candidates.mjs';
 
 const execute = promisify(execFile);
 const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -54,7 +58,13 @@ async function existingFile(workspace, relative) {
 // Native Codex remains the execution harness. This service only records its exact
 // identities/events and invokes the fixed, evidence-producing result importer.
 export class FormalTaskService {
-  constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration }) {
+  #verifyDiagnosticReceipt;
+  constructor({ store, codex = new CodexAppServer(), configurationLoader = loadLatticeRuntimeConfiguration,
+    verifyDiagnosticReceipt = defaultVerifyDiagnosticReceipt, lifeHarness = {} }) {
+    // Trusted startup composition may retain a verified helper's source identity.
+    // Request selectors and receipt data never choose or replace this dependency.
+    if (typeof verifyDiagnosticReceipt !== 'function') throw new TypeError('verifyDiagnosticReceipt must be a trusted startup function');
+    this.#verifyDiagnosticReceipt = verifyDiagnosticReceipt;
     Object.assign(this, { store, codex, configurationLoader });
     this.operations = new Map();
     this.owners = new Map();
@@ -63,6 +73,7 @@ export class FormalTaskService {
     this.previews = new Map();
     this.deniedTurns = new Map();
     this.closed = false;
+    this.lifeHarnessCandidates = new LifeHarnessCandidates(this, lifeHarness);
     this.onNotification = (message) => {
       const threadId = message.params?.threadId;
       const owner = this.owners.get(threadId);
@@ -70,6 +81,8 @@ export class FormalTaskService {
       if (message.method === "item/completed" && isExecutionDenied(message.params?.item)) {
         void this.serial(owner.taskRef, () => this.redirectDeniedTurn(owner, message.params))
           .catch((error) => this.recordFailure(owner, error));
+      } else if (message.method === 'item/completed' && failedCommand(message.params?.item)) {
+        this.lifeHarnessCandidates.handle(owner, message.params);
       } else if (message.method === "turn/completed") {
         void this.serial(owner.taskRef, () => this.reconcile(owner.projectId, owner.taskRef, { advance: true }))
           .catch((error) => this.recordFailure(owner, error));
@@ -88,10 +101,16 @@ export class FormalTaskService {
     };
     this.onRequest = (message) => {
       const owner = this.owners.get(message.params?.threadId);
-      if (!owner || this.closed) return this.codex.rejectServerRequest(message.id);
+      const identity = this.codex.serverRequestIdentity?.(message.id);
+      if (!owner || this.closed) return this.codex.rejectServerRequest(message.id, { requestIdentity: identity });
       this.codex.deferServerRequest(message.id, { timeoutMs: 3600000 });
-      void this.serial(owner.taskRef, () => this.recordQuestion(owner, message)).catch(() => {
-        try { this.codex.rejectServerRequest(message.id); } catch { /* connection already ended */ }
+      void this.serial(owner.taskRef, () => this.recordQuestion(owner, message, identity)).catch((error) => {
+        const elicitation = message.method === elicitationMethod;
+        const code = elicitation && /^CONTROL_(?:ELICITATION|QUESTION)_[A-Z_]+$/u.test(error.code ?? '')
+          ? error.code : 'CONTROL_REQUEST_UNSUPPORTED';
+        if (elicitation) void this.recordFailure(owner, elicitationError(code));
+        try { this.codex.rejectServerRequest(message.id, { requestIdentity: identity,
+          ...(elicitation ? { code: -32602, message: code } : {}) }); } catch { /* original connection already ended */ }
       });
     };
     codex.on("notification", this.onNotification);
@@ -474,7 +493,8 @@ export class FormalTaskService {
       });
     });
   }
-  async recordQuestion(owner, message) {
+  async recordQuestion(owner, message, identity = this.codex.serverRequestIdentity?.(message.id)) {
+    if (message.method === elicitationMethod) return this.recordElicitation(owner, message, identity);
     const detail = await this.store.detail(owner.projectId, owner.taskRef);
     const claim = detail.claims.find((row) => row.claim_id === owner.claimId);
     if (!claim || message.params?.threadId !== claim.thread_id || message.params?.turnId !== claim.turn_id) {
@@ -499,11 +519,13 @@ export class FormalTaskService {
       payload: { method: message.method, params: message.params },
     });
   }
-  async answer(projectId, taskRef, { questionId, decision, answers }) {
+  async answer(projectId, taskRef, input) {
+    const { questionId, decision, answers } = input;
     const retained = this.questions.get(questionId);
     if (!retained || retained.owner.projectId !== projectId || retained.owner.taskRef !== taskRef) {
       throw formalWorkError("CONTROL_QUESTION_RECONNECT_REQUIRED", "原生提問連線已結束，請先核對原工作回合。");
     }
+    if (retained.method === elicitationMethod) return this.answerElicitation(retained, questionId, input);
     const detail = await this.store.detail(projectId, taskRef);
     const claim = detail.claims.find((row) => row.claim_id === retained.owner.claimId);
     const approval = retained.method !== "item/tool/requestUserInput";
@@ -515,6 +537,73 @@ export class FormalTaskService {
     this.codex.respond(retained.nativeId, response);
     this.questions.delete(questionId);
     return this.store.detail(projectId, taskRef);
+  }
+  elicitationClaim(retained, detail) {
+    const { owner, binding, identity } = retained;
+    const claim = detail.claims.find(row => row.claim_id === owner.claimId);
+    const currentOwner = this.owners.get(binding.threadId);
+    if (this.closed || !this.codex.connected || !identity
+      || this.codex.serverRequestIdentity?.(identity.id) !== identity
+      || this.codex.connectionGeneration !== identity.generation || this.codex.appServerSessionId !== identity.sessionId
+      || !this.codex.isTurnActive(binding.threadId, binding.turnId)
+      || detail.id !== owner.taskRef || detail.project_id !== owner.projectId || detail.completion_verified
+      || currentOwner?.projectId !== owner.projectId || currentOwner.taskRef !== owner.taskRef || currentOwner.claimId !== owner.claimId
+      || !claim || claim.archived || claim.turn_status !== 'TURN_BOUND'
+      || claim.task_ref !== owner.taskRef || claim.thread_id !== binding.threadId || claim.turn_id !== binding.turnId
+      || !claim.input_id || claim.input_id !== binding.inputId) throw elicitationError('CONTROL_ELICITATION_STALE');
+    return claim;
+  }
+  async recordElicitation(owner, message, identity) {
+    const request = taskStatusElicitation(message, owner.taskRef);
+    if (!identity || identity.id !== message.id || !Number.isSafeInteger(identity.id) || identity.id < 0
+      || !Number.isSafeInteger(identity.generation) || identity.generation < 1
+      || !Number.isSafeInteger(identity.sequence) || identity.sequence < 1
+      || !/^app-server-session:sha256:[a-f0-9]{64}$/u.test(identity.sessionId ?? '')) throw elicitationError('CONTROL_ELICITATION_STALE');
+    const detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const claim = detail.claims.find(row => row.claim_id === owner.claimId);
+    const binding = { projectId: owner.projectId, taskRef: owner.taskRef, claimId: owner.claimId,
+      threadId: message.params.threadId, turnId: message.params.turnId, inputId: claim?.input_id, native: identity };
+    const retained = { owner: { ...owner }, binding, identity, method: elicitationMethod };
+    this.elicitationClaim(retained, detail);
+    if (elicitationDenied(detail, claim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    const id = `q:${sha(JSON.stringify([elicitationMethod, binding, request]))}`;
+    const payload = { method: elicitationMethod, binding, request };
+    // Resolved questions are evidence, never a reusable native authorization.
+    if (await this.store.questionResolution?.(owner.projectId, owner.taskRef, id)) throw elicitationError('CONTROL_ELICITATION_ALREADY_RESOLVED');
+    this.elicitationClaim(retained, detail);
+    const pending = claim.pending_questions?.find(row => row.approval_id === id);
+    if (pending && !isDeepStrictEqual(pending.payload, payload)) throw elicitationError('CONTROL_ELICITATION_STALE');
+    if (!pending) await this.observe(claim, 'QUESTION_REQUESTED', { approval_id: id, payload,
+      summary: 'Codex 請求一次性執行 lattice_task_status；等待使用者明示接受、拒絕或取消。' });
+    this.elicitationClaim(retained, await this.store.detail(owner.projectId, owner.taskRef));
+    this.questions.set(id, { ...retained, payload });
+  }
+  async answerElicitation(retained, questionId, input) {
+    const response = elicitationResponse(input), { owner } = retained;
+    if (input.projectId !== undefined && input.projectId !== owner.projectId) throw elicitationError('CONTROL_ELICITATION_STALE');
+    let detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const claim = this.elicitationClaim(retained, detail);
+    if (response.action === 'accept' && elicitationDenied(detail, claim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    const resolved = await this.store.questionResolution?.(owner.projectId, owner.taskRef, questionId);
+    this.elicitationClaim(retained, detail);
+    // An uncertain durable write can be read back, but it cannot change a
+    // saved answer. Once native sending is attempted, remove the callback first.
+    const payload = { method: elicitationMethod, binding: retained.binding, response };
+    if (resolved) {
+      if (resolved.claim_id !== claim.claim_id || resolved.turn_id !== claim.turn_id || resolved.input_id !== claim.input_id
+        || !isDeepStrictEqual(resolved.payload, payload)) throw elicitationError('CONTROL_ELICITATION_ALREADY_RESOLVED');
+    } else {
+      const pending = claim.pending_questions?.find(row => row.approval_id === questionId);
+      if (!pending || !isDeepStrictEqual(pending.payload, retained.payload)) throw elicitationError('CONTROL_ELICITATION_STALE');
+      await this.observe(claim, 'QUESTION_RESOLVED', { request_id: `resolve:${questionId}`, approval_id: questionId,
+        payload, summary: '已保存使用者的 MCP 一次性許可決定；原生接收結果尚未確認。' });
+    }
+    detail = await this.store.detail(owner.projectId, owner.taskRef);
+    const freshClaim = this.elicitationClaim(retained, detail);
+    if (response.action === 'accept' && elicitationDenied(detail, freshClaim)) throw elicitationError('CONTROL_ELICITATION_DENIED');
+    this.questions.delete(questionId);
+    this.codex.respond(retained.identity.id, response, { requestIdentity: retained.identity });
+    return detail;
   }
   async recordFailure(owner, error) {
     // Keep the native identity and failure visible. A read/reconcile can recover
@@ -535,6 +624,101 @@ export class FormalTaskService {
       }));
     return { task_ref: taskRef, thread_id: claim.thread_id, messages,
       latest_turn_id: thread.turns.at(-1)?.id ?? null, latest_turn_status: thread.turns.at(-1)?.status ?? null };
+  }
+  diagnosticSource(projectId, taskRef, selectors) {
+    return readOwnedDiagnosticSource(this, projectId, taskRef, selectors);
+  }
+  relativeModuleDiagnostic(projectId, taskRef, selectors) {
+    // This route reads only Runtime facts and the already owned native thread.
+    // It never calls the filesystem diagnostic, starts a turn or saves progress.
+    return this.serial(taskRef, async () => {
+      const names = ['claimId', 'threadId', 'turnId', 'failureItemId'];
+      if (selectors && Object.hasOwn(selectors, 'diagnosticItemId')) names.push('diagnosticItemId');
+      if (typeof projectId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(projectId)
+          || !/^[a-f0-9]{64}$/u.test(taskRef ?? '') || !selectors
+          || Object.keys(selectors).sort().join(',') !== names.sort().join(',')
+          || !names.every(key => typeof selectors[key] === 'string' && /^[A-Za-z0-9._:-]{1,256}$/u.test(selectors[key]))
+          || selectors.failureItemId === selectors.diagnosticItemId) rejectDiagnostic('SELECTOR_REJECTED');
+      const { claimId, threadId, turnId, failureItemId, diagnosticItemId } = selectors;
+      const started = Date.now(), generation = this.codex.connectionGeneration, session = this.codex.appServerSessionId;
+      const current = () => {
+        const owner = this.owners.get(threadId);
+        if (this.closed || !this.codex.connected || !Number.isSafeInteger(generation) || generation < 1
+            || !/^app-server-session:sha256:[a-f0-9]{64}$/u.test(session ?? '')
+            || this.codex.connectionGeneration !== generation || this.codex.appServerSessionId !== session
+            || !this.codex.isTurnActive(threadId, turnId) || Date.now() - started > 5000
+            || owner?.projectId !== projectId || owner.taskRef !== taskRef || owner.claimId !== claimId) rejectDiagnostic('CURRENTNESS_REJECTED');
+      };
+      const claimFrom = detail => {
+        const claims = detail.claims?.filter(row => row.claim_id === claimId);
+        const claim = claims?.length === 1 ? claims[0] : null;
+        if (detail.source?.kind !== 'POSTGRESQL_CONTROL_PRODUCT' || detail.source?.authority !== 'POSTGRESQL_TASK_LEDGER'
+            || detail.id !== taskRef || detail.project_id !== projectId || detail.project?.id !== projectId
+            || detail.project.active !== true || typeof detail.project.project_snapshot_id !== 'string'
+            || !detail.project.project_snapshot_id || detail.completion_verified !== false || detail.status !== 'running'
+            || !['SUBMITTED', 'RUNNING'].includes(detail.task?.ledger?.status)
+            || detail.task.ledger.task_ref !== taskRef || detail.task.ledger.project_id !== projectId
+            || detail.task.ledger.project_snapshot_id !== detail.project.project_snapshot_id
+            || detail.task.ledger.blocker != null || detail.task.ledger.failure_code != null
+            || !claim || claim.task_ref !== taskRef || claim.project_id !== projectId || claim.phase !== 'EXECUTION'
+            || claim.thread_id !== threadId || claim.turn_id !== turnId || !claim.input_id
+            || claim.archived !== false || claim.dispatch_started !== true || claim.turn_status !== 'TURN_BOUND'
+            || !Number.isSafeInteger(claim.last_sequence) || !Number.isSafeInteger(claim.dispatch_sequence)
+            || !Array.isArray(claim.pending_inputs) || claim.pending_inputs.length
+            || !Array.isArray(claim.pending_questions) || claim.pending_questions.length
+            || elicitationDenied(detail, claim)
+            || detail.product?.observations?.some(row => row.claim_id === claimId && row.turn_id === turnId
+              && row.summary === openCircuitSummary)) rejectDiagnostic('CLAIM_REJECTED');
+        return claim;
+      };
+      const native = (thread, claim) => {
+        const turns = thread.turns?.filter(turn => turn.id === turnId);
+        const turn = turns?.length === 1 ? turns[0] : null;
+        if (thread.id !== threadId || thread.archived === true || !turn || thread.turns.at(-1) !== turn
+            || turn.status !== 'inProgress' || !Array.isArray(turn.items)
+            || thread.turns.filter(row => hasMarker(row, marker(claim, claim.input_id))).length !== 1
+            || !hasMarker(turn, marker(claim, claim.input_id))
+            || turn.items.filter(item => hasMarker({ items: [item] }, marker(claim, claim.input_id))).length !== 1
+            || turn.items.some(isExecutionDenied) || (this.deniedTurns.get(`${threadId}:${turnId}`)?.size ?? 0) > 0) rejectDiagnostic('TURN_REJECTED');
+        const failures = turn.items.filter(item => item.id === failureItemId);
+        if (failures.length !== 1) rejectDiagnostic('ITEM_REJECTED');
+        const binding = { projectId, taskRef, claimId, threadId, turnId, inputId: claim.input_id, failureItemId };
+        let results;
+        if (diagnosticItemId) results = turn.items.filter(item => item.id === diagnosticItemId);
+        else {
+          // Selection does not relax receipt verification or search other turns.
+          // Invalid/unrelated completed commands do not count as receipts.
+          results = turn.items.slice(turn.items.indexOf(failures[0]) + 1).filter(item => {
+            if (item.type !== 'commandExecution' || item.status !== 'completed' || item.exitCode !== 0
+                || typeof item.id !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/u.test(item.id)) return false;
+            try { this.#verifyDiagnosticReceipt(item, failures[0], binding, claim.worktree_path); return true; }
+            catch (error) { if (error?.status === 409 && /^CONTROL_DIAGNOSTIC_/u.test(error.code ?? '')) return false; throw error; }
+          });
+          if (results.length > 1) rejectDiagnostic('AMBIGUOUS_RECEIPT');
+        }
+        if (results.length !== 1 || turn.items.indexOf(failures[0]) >= turn.items.indexOf(results[0])
+            || turn.items.filter(item => item.id === results[0].id).length !== 1) rejectDiagnostic('ITEM_REJECTED');
+        const receipt = this.#verifyDiagnosticReceipt(results[0], failures[0], binding, claim.worktree_path);
+        return { receipt, binding, bytes: JSON.stringify([failures[0], results[0]]) };
+      };
+      const identity = (detail, claim) => JSON.stringify([detail.project, detail.ledger_head_digest, claim]);
+      current();
+      const first = await this.store.detail(projectId, taskRef); current();
+      const claim = claimFrom(first);
+      const options = { effectIdentity: { expectedGeneration: generation, expectedSessionId: session } };
+      const thread = await this.codex.readThread(threadId, options); current();
+      const before = native(thread, claim);
+      const last = await this.store.detail(projectId, taskRef); current();
+      const latestClaim = claimFrom(last);
+      if (identity(first, claim) !== identity(last, latestClaim)) rejectDiagnostic('SOURCE_CHANGED');
+      const latestThread = await this.codex.readThread(threadId, options); current();
+      const after = native(latestThread, latestClaim);
+      if (before.bytes !== after.bytes) rejectDiagnostic('SOURCE_CHANGED');
+      current();
+      return { schema: 'lattice.control.relative-module-diagnostic.v1', binding: after.binding, receipt: after.receipt,
+        nativeClaimBindingVerified: true, producerVerified: false, inputFileBytesVerified: false,
+        diagnosticSemanticsVerified: false };
+    });
   }
   async openResult(projectId, taskRef) {
     const detail = await this.store.detail(projectId, taskRef);

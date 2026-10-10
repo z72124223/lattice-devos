@@ -14,12 +14,15 @@ use std::{
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().skip(1).collect();
-    if args.len() != 6 {
+    let expected_arguments = if cfg!(target_os = "linux") { 5 } else { 6 };
+    if args.len() != expected_arguments {
         return Err("CODE_GRAPH_ARGUMENTS_REJECTED".into());
     }
-    let [repository, commit, git, runtime, wsl, work]: [std::ffi::OsString; 6] = args
-        .try_into()
-        .map_err(|_| "CODE_GRAPH_ARGUMENTS_REJECTED")?;
+    let repository = &args[0];
+    let commit = &args[1];
+    let git = &args[2];
+    let runtime = &args[3];
+    let work = &args[expected_arguments - 1];
     let commit = commit.to_str().ok_or("CODE_GRAPH_COMMIT_REJECTED")?;
     let work = PathBuf::from(work);
     let git = PathBuf::from(git);
@@ -35,16 +38,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         SnapshotLimits::default(),
     )?)
     .materialize(commit)?;
-    let mut adapter = PinnedGraphifyAdapter::new(
-        GraphifyRuntimeConfig::new(
-            PathBuf::from(wsl),
-            PathBuf::from(runtime),
-            work.join("staging"),
-            Duration::from_secs(300),
-            GraphOutputLimits::default(),
-        )?,
-        SnapshotBridge::new(),
-    );
+    #[cfg(target_os = "linux")]
+    let config = GraphifyRuntimeConfig::new_native_linux(
+        PathBuf::from(runtime),
+        work.join("staging"),
+        Duration::from_secs(300),
+        GraphOutputLimits::default(),
+    )?;
+    #[cfg(not(target_os = "linux"))]
+    let config = GraphifyRuntimeConfig::new(
+        PathBuf::from(&args[4]),
+        PathBuf::from(runtime),
+        work.join("staging"),
+        Duration::from_secs(300),
+        GraphOutputLimits::default(),
+    )?;
+    let mut adapter = PinnedGraphifyAdapter::new(config, SnapshotBridge::new());
     let analysis = adapter.analyze_for_display(&snapshot)?;
     let graph = analysis.graph();
     let packet = json!({

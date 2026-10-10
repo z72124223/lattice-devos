@@ -1859,7 +1859,7 @@ fn classify_current_catalog_profile<C: GenericClient>(
     schema_version: u16,
 ) -> Result<CatalogProfile, PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              count(*) FILTER (WHERE c.relname IN ( \
                  'codebase_memory_analyses', \
@@ -1881,7 +1881,7 @@ fn classify_current_catalog_profile<C: GenericClient>(
         row_value::<i64>(&row, 0, PostgresStoreSetupErrorKind::CorruptCatalog)?;
     let all_relations = row_value::<i64>(&row, 1, PostgresStoreSetupErrorKind::CorruptCatalog)?;
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              count(*) FILTER (WHERE p.proname IN ( \
                  'codebase_memory_load_reflection_v2', \
@@ -1927,7 +1927,7 @@ fn writer_lease_catalog_counts<C: GenericClient>(
     client: &mut C,
 ) -> Result<WriterLeaseCatalogCounts, PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*)::bigint FROM pg_namespace \
                WHERE nspname = 'writer_lease'), \
@@ -2283,10 +2283,37 @@ pub fn verify_postgres_schema(
     Ok(evidence)
 }
 
-#[allow(clippy::too_many_lines)]
+// Zero-parameter verification reads use the typed extended protocol to send parse,
+// bind, and execute together. Every SQL statement still runs on each fresh
+// verification transaction; no catalog, identity, or authority result is cached.
 pub(crate) fn verify_runtime_store_schema(
     client: &mut Client,
     target: &MigrationTarget,
+) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
+    verify_store_schema_for_reading(client, target, DatabaseRole::Runtime)
+}
+
+/// The maintenance principal may inventory an active Store without asserting
+/// STOPPED bootstrap evidence or changing its grants. Mutation entry points
+/// continue to use `verify_postgres_schema` and its STOPPED requirement.
+pub(crate) fn verify_project_purge_inventory_schema(
+    client: &mut Client,
+    target: &MigrationTarget,
+) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
+    let evidence = verify_store_schema_for_reading(client, target, DatabaseRole::Migrator)?;
+    if evidence.global_schema_version < 5 {
+        return Err(PostgresStoreSetupError::new(
+            PostgresStoreSetupErrorKind::CompatibilityMismatch,
+        ));
+    }
+    Ok(evidence)
+}
+
+#[allow(clippy::too_many_lines)]
+fn verify_store_schema_for_reading(
+    client: &mut Client,
+    target: &MigrationTarget,
+    role: DatabaseRole,
 ) -> Result<RuntimeStoreSchemaEvidence, PostgresStoreSetupError> {
     let store_v2_manifest = verify_v2_manifest_prefix()?;
     let mut transaction = client
@@ -2298,17 +2325,12 @@ pub(crate) fn verify_runtime_store_schema(
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
         })?;
     harden_transaction(&mut transaction)?;
-    preflight_connection(
-        &mut transaction,
-        target,
-        DatabaseRole::Runtime,
-        SetupOperation::Verification,
-    )?;
+    preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
     if owned_schema_presence(&mut transaction)? != [true, true, true] {
         return Err(history_error());
     }
     let compatibility = transaction
-        .query(
+        .query_typed(
             "SELECT current_schema_version FROM ONLY control.schema_compatibility \
              WHERE singleton = true",
             &[],
@@ -2362,12 +2384,7 @@ pub(crate) fn verify_runtime_store_schema(
         } else {
             verify_runtime_external_adoption_schema_v8(&mut transaction, target, &manifest, true)?
         };
-        preflight_connection(
-            &mut transaction,
-            target,
-            DatabaseRole::Runtime,
-            SetupOperation::Verification,
-        )?;
+        preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
         transaction.commit().map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
         })?;
@@ -2394,6 +2411,16 @@ pub(crate) fn verify_runtime_store_schema(
     }
     let v3_prefix = installed_schema_version == 3;
     verify_schema_objects_with_contract(&mut transaction, current_profile, v3_prefix)?;
+    if role == DatabaseRole::Migrator {
+        verify_autonomy_receipt_profile(&mut transaction)?;
+        if matches!(
+            current_profile,
+            CatalogProfile::V5CodebaseMemoryV3Current
+                | CatalogProfile::V5CodebaseMemoryV3WriterLeaseV2Current
+        ) {
+            verify_codebase_memory_v3_identity_for_role(&mut transaction, target, &manifest, role)?;
+        }
+    }
     let rows = read_history_rows(&mut transaction)?;
     let expected_history = match installed_schema_version {
         3 => &migration_manifest()[..4],
@@ -2405,12 +2432,7 @@ pub(crate) fn verify_runtime_store_schema(
     let database_uuid = read_database_identity(&mut transaction, target)?;
     verify_runtime_admission_present(&mut transaction)?;
     verify_roles_and_grants_with_contract(&mut transaction, current_profile, v3_prefix)?;
-    preflight_connection(
-        &mut transaction,
-        target,
-        DatabaseRole::Runtime,
-        SetupOperation::Verification,
-    )?;
+    preflight_connection(&mut transaction, target, role, SetupOperation::Verification)?;
     transaction.commit().map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
     })?;
@@ -2524,38 +2546,102 @@ fn verify_owned_catalog_signature_profile<C: GenericClient>(
     client: &mut C,
     expected: &[&str; 9],
 ) -> Result<(), PostgresStoreSetupError> {
-    for (query, expected_signature) in [
-        RELATION_SIGNATURE_SQL,
-        COLUMN_SIGNATURE_SQL,
-        CONSTRAINT_SIGNATURE_SQL,
-        INDEX_SIGNATURE_SQL,
-        FUNCTION_SIGNATURE_SQL,
-        TYPE_CATALOG_SIGNATURE_SQL,
-    ]
-    .into_iter()
-    .zip(&expected[..6])
-    {
-        if catalog_signature(client, query, PostgresStoreSetupErrorKind::CorruptCatalog)?
-            != *expected_signature
-        {
-            return Err(catalog_error());
+    verify_catalog_signature_batch(
+        client,
+        &[
+            RELATION_SIGNATURE_SQL,
+            COLUMN_SIGNATURE_SQL,
+            CONSTRAINT_SIGNATURE_SQL,
+            INDEX_SIGNATURE_SQL,
+            FUNCTION_SIGNATURE_SQL,
+            TYPE_CATALOG_SIGNATURE_SQL,
+        ],
+        &expected[..6],
+        PostgresStoreSetupErrorKind::CorruptCatalog,
+    )?;
+    verify_catalog_signature_batch(
+        client,
+        &[
+            TABLE_ACL_SIGNATURE_SQL,
+            FUNCTION_ACL_SIGNATURE_SQL,
+            SCHEMA_ACL_SIGNATURE_SQL,
+        ],
+        &expected[6..],
+        PostgresStoreSetupErrorKind::PermissionDenied,
+    )
+}
+
+// Each ARRAY subquery retains the exact SELECT and its ORDER BY, including empty
+// results and NULL elements. Only fixed private catalog queries enter this path.
+fn catalog_signature_batch_sql(queries: &[&str]) -> String {
+    format!(
+        "SELECT {}",
+        queries
+            .iter()
+            .map(|sql| format!("ARRAY({sql})"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
+}
+
+fn catalog_batch_may_replay(error: &postgres::Error) -> bool {
+    error.as_db_error().is_some_and(|database_error| {
+        let code = database_error.code().code();
+        database_error.parsed_severity() == Some(postgres::error::Severity::Error)
+            && !code.starts_with("08")
+            && !code.starts_with("25")
+            && !code.starts_with("40")
+            && !code.starts_with("57")
+            && !matches!(code, "55P03" | "72000")
+    })
+}
+
+fn verify_catalog_signature_batch<C: GenericClient>(
+    client: &mut C,
+    queries: &[&str],
+    expected: &[&str],
+    error_kind: PostgresStoreSetupErrorKind,
+) -> Result<(), PostgresStoreSetupError> {
+    if queries.is_empty() || queries.len() != expected.len() {
+        return Err(PostgresStoreSetupError::new(error_kind));
+    }
+    // Require the caller's existing transaction; never create a new BEGIN or
+    // refresh a snapshot/deadline. The private savepoint is released before reuse.
+    client
+        .batch_execute("SAVEPOINT lattice_catalog_signature_batch")
+        .map_err(|error| map_postgres_error(&error, error_kind))?;
+    match client.query_typed_one(&catalog_signature_batch_sql(queries), &[]) {
+        Ok(row) => {
+            // Decode and compare in the original guard order, not SQL evaluation order.
+            for (index, expected_signature) in expected.iter().enumerate() {
+                let values = row_value::<Vec<String>>(&row, index, error_kind)?;
+                if catalog_signature_values(values.into_iter().map(Ok), error_kind)?
+                    != *expected_signature
+                {
+                    return Err(PostgresStoreSetupError::new(error_kind));
+                }
+            }
+            client
+                .batch_execute("RELEASE SAVEPOINT lattice_catalog_signature_batch")
+                .map_err(|error| map_postgres_error(&error, error_kind))
+        }
+        Err(error) => {
+            if !catalog_batch_may_replay(&error) {
+                return Err(map_postgres_error(&error, error_kind));
+            }
+            // A later SQL error must not hide an earlier mismatch. Recover only
+            // this savepoint, then evaluate the original sequence exactly once.
+            client
+                .batch_execute("ROLLBACK TO SAVEPOINT lattice_catalog_signature_batch; RELEASE SAVEPOINT lattice_catalog_signature_batch")
+                .map_err(|error| map_postgres_error(&error, error_kind))?;
+            for (query, expected_signature) in queries.iter().zip(expected) {
+                if catalog_signature(client, query, error_kind)? != *expected_signature {
+                    return Err(PostgresStoreSetupError::new(error_kind));
+                }
+            }
+            Ok(())
         }
     }
-    for (query, expected_signature) in [
-        TABLE_ACL_SIGNATURE_SQL,
-        FUNCTION_ACL_SIGNATURE_SQL,
-        SCHEMA_ACL_SIGNATURE_SQL,
-    ]
-    .into_iter()
-    .zip(&expected[6..])
-    {
-        if catalog_signature(client, query, PostgresStoreSetupErrorKind::PermissionDenied)?
-            != *expected_signature
-        {
-            return Err(permission_error());
-        }
-    }
-    Ok(())
 }
 
 fn verify_schema_v6_v7_forbidden_object_profile<C: GenericClient>(
@@ -2631,7 +2717,7 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     verify_forbidden_namespace_objects(client)?;
     verify_effective_default_privileges(client)?;
     let catalog = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='control' AND c.relkind='r'), \
@@ -2676,7 +2762,7 @@ fn verify_runtime_foreman_schema_v6<C: GenericClient>(
     }
 
     let writer = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='writer_lease' AND c.relkind='r'), \
@@ -2812,7 +2898,7 @@ fn verify_v7_ingress_ambiguity_profile<C: GenericClient>(
     } else {
         "SELECT control.task_ingress_historical_closure_v1()"
     };
-    let closure = client.query_one(closure_sql, &[]).map_err(|error| {
+    let closure = client.query_typed_one(closure_sql, &[]).map_err(|error| {
         map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
     })?;
     if !row_value::<bool>(&closure, 0, PostgresStoreSetupErrorKind::HistoryMismatch)? {
@@ -2995,7 +3081,7 @@ fn managed_foreman_catalog_digest<C: GenericClient>(
     domain: &[u8],
 ) -> Result<String, PostgresStoreSetupError> {
     let rows = client
-        .query(query, &[])
+        .query_typed(query, &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     let mut hasher = Sha256::new();
     hasher.update(domain);
@@ -3022,7 +3108,7 @@ fn verify_managed_foreman_identity_and_history<C: GenericClient>(
         ManagedForemanStoreBinding::StoreV8Rebound => (8_i16, CURRENT_V8_MANIFEST_SHA256, 2_usize),
     };
     let identities = client
-        .query(
+        .query_typed(
             "SELECT extension_id::text,extension_schema_version,extension_path::text, \
                     extension_sql_bytes,pg_catalog.btrim(extension_sql_sha256)::text, \
                     pg_catalog.btrim(extension_manifest_sha256)::text,database_name::text, \
@@ -3063,7 +3149,7 @@ fn verify_managed_foreman_identity_and_history<C: GenericClient>(
     }
 
     let ledger = client
-        .query(
+        .query_typed(
             "SELECT ledger_ordinal,extension_id::text,extension_schema_version, \
                     pg_catalog.btrim(extension_sql_sha256)::text, \
                     pg_catalog.btrim(extension_manifest_sha256)::text,database_uuid::text, \
@@ -3120,7 +3206,7 @@ fn verify_managed_foreman_reader_identity<C: GenericClient>(
         ManagedForemanStoreBinding::StoreV8Rebound => (8_i16, CURRENT_V8_MANIFEST_SHA256),
     };
     let identities = client
-        .query(
+        .query_typed(
             "SELECT extension_id,extension_schema_version,extension_path,extension_sql_bytes, \
                     extension_sql_sha256,extension_manifest_sha256,database_name,database_uuid, \
                     database_identity_sha256,global_schema_version,global_manifest_sha256 \
@@ -3166,7 +3252,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
     target: &MigrationTarget,
 ) -> Result<Option<ManagedForemanPrincipalProfile>, PostgresStoreSetupError> {
     let presence = client
-        .query_one(
+        .query_typed_one(
             "SELECT pg_catalog.to_regnamespace('foreman_execution') IS NOT NULL, \
                     (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
                       JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -3218,7 +3304,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
     };
 
     let current_role = client
-        .query_one("SELECT current_user::text", &[])
+        .query_typed_one("SELECT current_user::text", &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
@@ -3244,7 +3330,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
     }
 
     let shape = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT pg_catalog.count(*) FROM pg_catalog.pg_class c \
                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -3362,7 +3448,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
     }
 
     let unmodeled = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              ((SELECT pg_catalog.count(*) FROM pg_catalog.pg_collation x \
                 JOIN pg_catalog.pg_namespace n ON n.oid=x.collnamespace WHERE n.nspname='foreman_execution') + \
@@ -3438,7 +3524,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
     }
 
     let relation_oids = client
-        .query(
+        .query_typed(
             "SELECT c.oid::bigint FROM pg_catalog.pg_class c \
               JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
              WHERE n.nspname='foreman_execution' ORDER BY c.oid",
@@ -3449,7 +3535,7 @@ fn verify_optional_managed_foreman_extension<C: GenericClient>(
         .map(|row| row_value::<i64>(row, 0, PostgresStoreSetupErrorKind::CorruptCatalog))
         .collect::<Result<Vec<_>, _>>()?;
     let function_oids = client
-        .query(
+        .query_typed(
             "SELECT p.oid::bigint FROM pg_catalog.pg_proc p \
               JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
              WHERE n.nspname='foreman_execution' ORDER BY p.oid",
@@ -3512,7 +3598,7 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     verify_v7_ingress_ambiguity_profile(client)?;
 
     let catalog = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='control' AND c.relkind='r'), \
@@ -3604,7 +3690,7 @@ fn verify_runtime_submission_schema_v7<C: GenericClient>(
     }
 
     let writer = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT count(*)::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
                   WHERE n.nspname='writer_lease' AND c.relkind='r'), \
@@ -3706,7 +3792,7 @@ fn verify_external_adoption_relations(
     client: &mut impl GenericClient,
 ) -> Result<(), PostgresStoreSetupError> {
     let profile = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                 (SELECT count(*)::bigint FROM pg_catalog.pg_class c \
                   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
@@ -3827,7 +3913,7 @@ fn verify_store_v8_runtime_successor_functions<C: GenericClient>(
     let successor = migration_manifest().get(9).ok_or_else(history_error)?;
     let sql = std::str::from_utf8(successor.bytes()).map_err(|_| history_error())?;
     let rows = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
                     p.provolatile::text,p.proparallel::text, \
                     COALESCE(pg_catalog.array_to_string(p.proconfig,','),'<NULL>'), \
@@ -3985,7 +4071,7 @@ fn preflight_connection<C: GenericClient>(
     operation: SetupOperation,
 ) -> Result<ConnectionEvidence, PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT current_database()::text, \
              (SELECT shobj_description(oid, 'pg_database') FROM pg_database \
               WHERE datname = current_database()), \
@@ -4112,7 +4198,7 @@ fn owned_schema_presence<C: GenericClient>(
     client: &mut C,
 ) -> Result<[bool; 3], PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT to_regnamespace('control') IS NOT NULL, \
              to_regnamespace('memory') IS NOT NULL, \
              to_regnamespace('readmodel') IS NOT NULL",
@@ -4636,7 +4722,7 @@ fn verify_autonomy_receipt_profile<C: GenericClient>(
 ) -> Result<(), PostgresStoreSetupError> {
     verify_autonomy_receipt_catalog_signature(client)?;
     let table = client
-        .query_one(
+        .query_typed_one(
             "SELECT owner.rolname, c.relkind::text, c.relpersistence::text, \
                     c.relhassubclass, c.relispartition, \
                     (SELECT count(*) FROM pg_attribute a \
@@ -4668,7 +4754,7 @@ fn verify_autonomy_receipt_profile<C: GenericClient>(
         return Err(catalog_error());
     }
     let rows = client
-        .query(
+        .query_typed(
             "SELECT n.nspname || '.' || p.proname || '(' || \
                     replace(pg_catalog.oidvectortypes(p.proargtypes), ' ', '') || ')', \
                     pg_get_userbyid(p.proowner), p.prosecdef, p.proleakproof, \
@@ -5355,7 +5441,7 @@ fn verify_compatibility<C: GenericClient>(
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
     let compatibility = client
-        .query(
+        .query_typed(
             "SELECT manifest_sha256, current_schema_version, min_reader, \
              max_reader, min_writer, max_writer \
              FROM ONLY control.schema_compatibility WHERE singleton = true",
@@ -5408,7 +5494,7 @@ fn read_database_identity<C: GenericClient>(
     target: &MigrationTarget,
 ) -> Result<String, PostgresStoreSetupError> {
     let identities = client
-        .query(
+        .query_typed(
             "SELECT database_uuid::text FROM ONLY control.database_identity WHERE singleton = true",
             &[],
         )
@@ -5427,11 +5513,11 @@ fn read_database_identity<C: GenericClient>(
     Ok(database_uuid)
 }
 
-fn verify_stopped_admission<C: GenericClient>(
+pub(crate) fn verify_stopped_admission<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let admission = client
-        .query(
+        .query_typed(
             "SELECT admission_mode, daemon_instance_id, daemon_epoch, \
              authority_revision, observation_digest, authority_head_digest \
              FROM ONLY control.runtime_admission WHERE singleton = true",
@@ -5490,7 +5576,7 @@ fn verify_runtime_admission_present<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let rows = client
-        .query(
+        .query_typed(
             "SELECT admission_mode, daemon_instance_id, daemon_epoch, \
              authority_revision, observation_digest, authority_head_digest \
              FROM ONLY control.runtime_admission WHERE singleton = true",
@@ -5540,7 +5626,7 @@ fn read_history_rows<C: GenericClient>(
     client: &mut C,
 ) -> Result<Vec<Row>, PostgresStoreSetupError> {
     client
-        .query(
+        .query_typed(
             "SELECT ordinal, migration_id, migration_path, byte_length, \
              checksum_sha256, migration_status, transaction_mode, schema_version, \
              min_reader, max_reader, min_writer, max_writer \
@@ -5577,7 +5663,7 @@ fn read_retained_schema_compatibility<C: GenericClient>(
     client: &mut C,
 ) -> Result<RetainedSchemaCompatibility, PostgresStoreSetupError> {
     let rows = client
-        .query(
+        .query_typed(
             "SELECT manifest_sha256,current_schema_version,min_reader,max_reader,min_writer,max_writer \
                FROM ONLY control.schema_compatibility WHERE singleton = true",
             &[],
@@ -5603,7 +5689,7 @@ fn classify_retained_history<C: GenericClient>(
     client: &mut C,
 ) -> Result<RetainedHistoryClassification, PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
                COALESCE(array_agg(h.ordinal ORDER BY h.ordinal),ARRAY[]::smallint[]), \
                COALESCE(array_agg(h.migration_id::text ORDER BY h.ordinal),ARRAY[]::text[]), \
@@ -5982,7 +6068,7 @@ fn verify_writer_lease_v1_profile<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let header = client
-        .query_one(
+        .query_typed_one(
             "SELECT owner.rolname, pg_catalog.obj_description(n.oid, 'pg_namespace') \
                FROM pg_catalog.pg_namespace n \
                JOIN pg_catalog.pg_roles owner ON owner.oid = n.nspowner \
@@ -6006,7 +6092,7 @@ fn verify_writer_lease_v1_profile<C: GenericClient>(
     }
 
     let closure = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger tr \
                JOIN pg_catalog.pg_class c ON c.oid=tr.tgrelid \
@@ -6158,7 +6244,7 @@ fn verify_writer_lease_v2_catalog<C: GenericClient>(
     };
     let expected_runtime_usage = runtime == WriterLeaseV2RuntimeProfile::Current;
     let header = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_namespace n \
                JOIN pg_catalog.pg_roles owner ON owner.oid=n.nspowner \
@@ -6216,7 +6302,7 @@ fn verify_writer_lease_v2_catalog<C: GenericClient>(
     }
 
     let relations = client
-        .query(
+        .query_typed(
             "SELECT c.relname::text || '|' || c.relkind::text || '|' || owner.rolname || '|' \
                     || c.relpersistence::text || '|' || c.relrowsecurity::text || '|' \
                     || c.relforcerowsecurity::text || '|' || c.relhassubclass::text || '|' \
@@ -6246,7 +6332,7 @@ fn verify_writer_lease_v2_catalog<C: GenericClient>(
     }
 
     let constraints = client
-        .query(
+        .query_typed(
             "SELECT c.relname::text || '.' || con.conname || '|' || con.contype::text \
                FROM pg_catalog.pg_constraint con \
                JOIN pg_catalog.pg_namespace n ON n.oid=con.connamespace \
@@ -6297,7 +6383,7 @@ fn verify_writer_lease_v2_catalog<C: GenericClient>(
     }
 
     let indexes = client
-        .query(
+        .query_typed(
             "SELECT ix.relname::text FROM pg_catalog.pg_index i \
                JOIN pg_catalog.pg_class ix ON ix.oid=i.indexrelid \
                JOIN pg_catalog.pg_class tbl ON tbl.oid=i.indrelid \
@@ -6456,7 +6542,7 @@ fn verify_writer_lease_v2_function_catalog<C: GenericClient>(
     runtime: WriterLeaseV2RuntimeProfile,
 ) -> Result<(), PostgresStoreSetupError> {
     let observed = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text || '(' || pg_catalog.oidvectortypes(p.proargtypes) \
                     || ')|' || p.provolatile::text || '|' || p.proparallel::text || '|' \
                     || pg_catalog.has_function_privilege('lattice_runtime',p.oid,'EXECUTE')::text \
@@ -6555,7 +6641,7 @@ fn verify_writer_lease_v2_function_sources<C: GenericClient>(
         ),
     ];
     let rows = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text,p.prosrc::text FROM pg_catalog.pg_proc p \
                JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace \
               WHERE n.nspname='writer_lease' ORDER BY p.proname",
@@ -6594,7 +6680,7 @@ fn verify_writer_lease_v3_functions<C: GenericClient>(
     current: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let rows = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
                     p.provolatile::text,p.proparallel::text, \
                     pg_catalog.oidvectortypes(p.proargtypes), \
@@ -6779,7 +6865,7 @@ fn verify_writer_lease_v3_functions<C: GenericClient>(
         }
     }
     let closure = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
                WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
@@ -6814,7 +6900,7 @@ fn verify_writer_lease_v4_functions<C: GenericClient>(
         return Err(catalog_error());
     }
     let rows = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
                     p.provolatile::text,p.proparallel::text, \
                     pg_catalog.oidvectortypes(p.proargtypes), \
@@ -7034,7 +7120,7 @@ fn verify_writer_lease_v4_functions<C: GenericClient>(
         }
     }
     let closure = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
                WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
@@ -7073,7 +7159,7 @@ fn verify_writer_lease_v5_functions<C: GenericClient>(
     }
     verify_writer_lease_v5_transition_constraint(client)?;
     let rows = client
-        .query(
+        .query_typed(
             "SELECT p.proname::text,p.prokind::text,l.lanname,r.rolname,p.prosecdef, \
                     p.provolatile::text,p.proparallel::text, \
                     pg_catalog.oidvectortypes(p.proargtypes), \
@@ -7322,7 +7408,7 @@ fn verify_writer_lease_v5_functions<C: GenericClient>(
         }
     }
     let closure = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
                WHERE n.nspname='writer_lease' AND pg_catalog.has_table_privilege(
@@ -7348,7 +7434,7 @@ fn verify_writer_lease_v5_transition_constraint<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT pg_catalog.count(*), \
                     pg_catalog.max(pg_catalog.pg_get_constraintdef(c.oid,false)) \
                FROM pg_catalog.pg_constraint c \
@@ -7501,13 +7587,13 @@ fn verify_writer_lease_acl_closure<C: GenericClient>(
     expected_usage: bool,
 ) -> Result<(), PostgresStoreSetupError> {
     let closure = client
-        .query_one(WRITER_LEASE_ACL_CLOSURE_SQL, &[])
+        .query_typed_one(WRITER_LEASE_ACL_CLOSURE_SQL, &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
     verify_writer_lease_acl_closure_counts(&closure, expected_missing)?;
     let usage = client
-        .query_one(
+        .query_typed_one(
             "SELECT pg_catalog.has_schema_privilege('lattice_runtime','writer_lease','USAGE')",
             &[],
         )
@@ -7749,7 +7835,7 @@ fn verify_schema_header_comments<C: GenericClient>(
     suffix: &str,
 ) -> Result<(), PostgresStoreSetupError> {
     let schema_rows = client
-        .query(
+        .query_typed(
             "SELECT n.nspname, r.rolname, obj_description(n.oid, 'pg_namespace') \
              FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner \
              WHERE n.nspname IN ('control', 'memory', 'readmodel') ORDER BY n.nspname",
@@ -7787,7 +7873,7 @@ fn verify_owned_type_closure<C: GenericClient>(
     profile: CatalogProfile,
 ) -> Result<(), PostgresStoreSetupError> {
     let rows = client
-        .query(TYPE_SIGNATURE_SQL, &[])
+        .query_typed(TYPE_SIGNATURE_SQL, &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     let mut actual = BTreeSet::new();
     for row in &rows {
@@ -7925,11 +8011,19 @@ fn read_forbidden_schema_object_counts<C: GenericClient>(
     client: &mut C,
 ) -> Result<[i64; 10], PostgresStoreSetupError> {
     let row = client
-        .query_one(FORBIDDEN_SCHEMA_OBJECTS_SQL, &[])
+        .query_typed_one(FORBIDDEN_SCHEMA_OBJECTS_SQL, &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     let mut counts = [0_i64; 10];
     for (index, count) in counts.iter_mut().enumerate() {
         *count = row_value::<i64>(&row, index, PostgresStoreSetupErrorKind::CorruptCatalog)?;
+    }
+    // A new optional maintenance guard is accepted only after its entire
+    // independently versioned catalog and privileges pass exact verification.
+    if crate::registry_epoch::optional_catalog(client)
+        .map_err(|_| catalog_error())?
+        .is_some()
+    {
+        counts[1] = counts[1].checked_sub(1).ok_or_else(catalog_error)?;
     }
     Ok(counts)
 }
@@ -8154,7 +8248,7 @@ fn verify_owned_function_boundary<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(catalog_error()),
     };
     let rows = client
-        .query(
+        .query_typed(
             "SELECT n.nspname || '.' || p.proname || '(' || \
                     replace(pg_catalog.oidvectortypes(p.proargtypes), ' ', '') || ')', \
                     pg_get_userbyid(p.proowner), p.prosecdef, p.proleakproof, \
@@ -8217,7 +8311,7 @@ fn verify_forbidden_namespace_objects<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let row = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_collation c JOIN pg_namespace n ON n.oid = c.collnamespace \
               WHERE n.nspname IN ('control', 'memory', 'readmodel')), \
@@ -8467,7 +8561,7 @@ fn verify_owned_function_acl<C: GenericClient>(
         CatalogProfile::V1 | CatalogProfile::PreSchema => return Err(permission_error()),
     };
     let rows = client
-        .query(
+        .query_typed(
             "SELECT n.nspname || '.' || p.proname || '(' || \
                     replace(pg_catalog.oidvectortypes(p.proargtypes), ' ', '') || ')', \
                     has_function_privilege('public', p.oid, 'EXECUTE'), \
@@ -8561,7 +8655,7 @@ fn verify_exact_principal_database_core<C: GenericClient>(
     }
 
     let boundary = client
-        .query_one(ROLE_DATABASE_BOUNDARY_SQL, &[])
+        .query_typed_one(ROLE_DATABASE_BOUNDARY_SQL, &[])
         .map_err(|error| {
             map_postgres_error(&error, PostgresStoreSetupErrorKind::PermissionDenied)
         })?;
@@ -8600,7 +8694,16 @@ fn verify_exact_principal_database_core<C: GenericClient>(
         return Err(permission_error());
     }
     verify_login_principal_closure(client)?;
-    Ok(dangerous_functions)
+    // The new read-only SECURITY DEFINER entry is permitted only with the exact
+    // complete epoch catalog. All existing profile counts stay frozen.
+    let epoch_functions = i64::from(
+        crate::registry_epoch::optional_catalog(client)
+            .map_err(|_| permission_error())?
+            .is_some(),
+    );
+    dangerous_functions
+        .checked_sub(epoch_functions)
+        .ok_or_else(permission_error)
 }
 
 /// SQL for the independently versioned, same-database Control product facts.
@@ -8620,12 +8723,17 @@ const GRAPH_USAGE_FUNCTION_CATALOG_SHA256: &str =
     "7ff5ba64246f77d49594fae480f13d20acb287bd975d721eccd2caca5392ab2f";
 const GRAPH_USAGE_TABLE_CATALOG_SHA256: &str =
     "515bdcc8a70a59549184d566b7c3c9390169ef5599024661e56549e408b37a8b";
+const MCP_PERMISSION_SQL: &str =
+    include_str!("../../../db/extensions/control-product/mcp-permission-v1.sql");
+const MCP_PERMISSION_FUNCTION_CATALOG_SHA256: &str =
+    "0888683bacf531cf2d64ff1ce6c83bdcbd3e4ebbe823a1ee9f596af474263c9e";
 
 struct ControlProductPrincipalProfile {
     relation_oids: Vec<i64>,
     function_oids: Vec<i64>,
     code_relations: bool,
     graph_usage: bool,
+    mcp_permission: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -8633,7 +8741,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
     client: &mut C,
 ) -> Result<Option<ControlProductPrincipalProfile>, PostgresStoreSetupError> {
     let present = client
-        .query_one("SELECT to_regnamespace('control_product') IS NOT NULL", &[])
+        .query_typed_one("SELECT to_regnamespace('control_product') IS NOT NULL", &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
         .get::<_, bool>(0);
     if !present {
@@ -8651,7 +8759,8 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         &MANAGED_FOREMAN_TABLE_CATALOG_SQL.replace("foreman_execution", "control_product"),
         b"LATTICE_CONTROL_PRODUCT_TABLE_CATALOG_V1\0",
     )?;
-    let graph_usage = functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
+    let mcp_permission = functions == MCP_PERMISSION_FUNCTION_CATALOG_SHA256;
+    let graph_usage = mcp_permission || functions == GRAPH_USAGE_FUNCTION_CATALOG_SHA256;
     let code_relations = graph_usage || functions == CONTROL_RELATIONS_FUNCTION_CATALOG_SHA256;
     if (!code_relations && functions != CONTROL_PRODUCT_FUNCTION_CATALOG_SHA256)
         || tables
@@ -8663,7 +8772,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
     {
         return Err(catalog_error());
     }
-    let shape = client.query_one(
+    let shape = client.query_typed_one(
         "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product'), \
           (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='control_product'), \
           (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='control_product'), \
@@ -8694,7 +8803,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         }
     }
     let identity = client
-        .query("SELECT * FROM control_product.identity_read_v1()", &[])
+        .query_typed("SELECT * FROM control_product.identity_read_v1()", &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     if identity.len() != 1 {
         return Err(catalog_error());
@@ -8711,10 +8820,10 @@ fn verify_optional_control_product_extension<C: GenericClient>(
     {
         return Err(catalog_error());
     }
-    let relation_oids = client.query("SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product' ORDER BY c.oid", &[])
+    let relation_oids = client.query_typed("SELECT c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='control_product' ORDER BY c.oid", &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
         .iter().map(|row| row.get(0)).collect();
-    let function_oids = client.query("SELECT p.oid::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='control_product' ORDER BY p.oid", &[])
+    let function_oids = client.query_typed("SELECT p.oid::bigint FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='control_product' ORDER BY p.oid", &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?
         .iter().map(|row| row.get(0)).collect();
     Ok(Some(ControlProductPrincipalProfile {
@@ -8722,6 +8831,7 @@ fn verify_optional_control_product_extension<C: GenericClient>(
         function_oids,
         code_relations,
         graph_usage,
+        mcp_permission,
     }))
 }
 
@@ -8730,6 +8840,17 @@ pub(crate) fn verify_graph_usage_extension<C: GenericClient>(
 ) -> Result<bool, PostgresStoreSetupError> {
     Ok(verify_optional_control_product_extension(client)?
         .is_some_and(|profile| profile.graph_usage))
+}
+
+/// Whether the exact Control Product catalog includes durable MCP permissions.
+///
+/// # Errors
+/// Rejects unknown function/table/ACL catalogs or mismatched database identity.
+pub fn verify_mcp_permission_extension(
+    client: &mut Client,
+) -> Result<bool, PostgresStoreSetupError> {
+    Ok(verify_optional_control_product_extension(client)?
+        .is_some_and(|profile| profile.mcp_permission))
 }
 
 /// Installs Control facts only through an explicitly invoked, verified migrator.
@@ -8790,6 +8911,24 @@ pub fn apply_control_product_extension(
                 map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
             })?;
         if !verify_graph_usage_extension(&mut transaction)? {
+            return Err(catalog_error());
+        }
+    }
+    // v1.sql remains byte-identical. Like the other append-only extensions,
+    // compatibility is pinned by the full function/table/ACL catalog and the
+    // original database identity. Never overwrite an unknown partial catalog.
+    let product =
+        verify_optional_control_product_extension(&mut transaction)?.ok_or_else(catalog_error)?;
+    if !product.mcp_permission {
+        transaction
+            .batch_execute(MCP_PERMISSION_SQL)
+            .map_err(|error| {
+                map_postgres_error(&error, PostgresStoreSetupErrorKind::TransactionFailed)
+            })?;
+        if !verify_optional_control_product_extension(&mut transaction)?
+            .ok_or_else(catalog_error)?
+            .mcp_permission
+        {
             return Err(catalog_error());
         }
     }
@@ -8887,7 +9026,7 @@ fn verify_cluster_wide_acl_closure_for_owned_extensions<C: GenericClient>(
     product: Option<&ControlProductPrincipalProfile>,
 ) -> Result<(), PostgresStoreSetupError> {
     let parameter_grants = client
-        .query_one(
+        .query_typed_one(
             "SELECT count(*) FROM pg_parameter_acl p \
              CROSS JOIN LATERAL aclexplode(CASE \
                  WHEN cardinality(p.paracl)=0 THEN NULL::aclitem[] \
@@ -8913,7 +9052,7 @@ fn verify_cluster_wide_acl_closure_for_owned_extensions<C: GenericClient>(
     }
 
     let public_database_grants = client
-        .query_one(
+        .query_typed_one(
             "SELECT count(*) FROM pg_database d \
              CROSS JOIN LATERAL aclexplode(CASE \
                  WHEN cardinality(COALESCE(d.datacl, acldefault('d', d.datdba)))=0 \
@@ -9061,6 +9200,15 @@ fn verify_external_relation_principal_closure<C: GenericClient>(
     if let Some(product) = product {
         foreman_relation_oids.extend_from_slice(&product.relation_oids);
     }
+    foreman_relation_oids.extend(
+        crate::project_purge::optional_maintenance_relations(client)
+            .map_err(|_| permission_error())?,
+    );
+    if let Some(epoch) =
+        crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())?
+    {
+        foreman_relation_oids.extend(epoch.relation_oids);
+    }
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -9125,6 +9273,11 @@ fn verify_external_function_principal_closure<C: GenericClient>(
     if let Some(product) = product {
         foreman_function_oids.extend_from_slice(&product.function_oids);
     }
+    if let Some(epoch) =
+        crate::registry_epoch::optional_catalog(client).map_err(|_| permission_error())?
+    {
+        foreman_function_oids.extend(epoch.function_oids);
+    }
     let forbidden = client
         .query_one(
             "WITH fixed_principals AS ( \
@@ -9166,7 +9319,7 @@ fn verify_pre_role_system_function_boundary<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let boundary = client
-        .query_one(
+        .query_typed_one(
             "WITH expected(signature, allowed_role) AS (VALUES \
                  ('pg_catalog.lo_creat(integer)', NULL::text), \
                  ('pg_catalog.lo_create(oid)', NULL::text), \
@@ -9263,7 +9416,7 @@ fn verify_large_object_boundary<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
-        .query_one(
+        .query_typed_one(
             "WITH fixed_principals AS ( \
                  SELECT oid FROM pg_roles \
                  WHERE rolname IN ('lattice_migrator', 'lattice_runtime', \
@@ -9302,7 +9455,7 @@ fn verify_login_principal_closure<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let rows = client
-        .query(
+        .query_typed(
             "SELECT capability.rolname, login.rolname, m.admin_option, \
              m.inherit_option, m.set_option \
              FROM pg_auth_members m \
@@ -9350,7 +9503,7 @@ fn verify_login_object_closure<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let forbidden = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) FROM pg_class c \
               WHERE c.relowner IN (SELECT oid FROM pg_roles WHERE rolname LIKE 'lattice\\_%\\_login' ESCAPE '\\')), \
@@ -9444,7 +9597,7 @@ fn verify_login_database_acl<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let direct_database_acl = client
-        .query(
+        .query_typed(
             "SELECT d.datname, d.datname = current_database(), grantee.rolname, \
              acl.privilege_type, acl.is_grantable, grantor.rolname \
              FROM pg_database d \
@@ -9670,7 +9823,7 @@ fn verify_effective_default_privileges<C: GenericClient>(
     client: &mut C,
 ) -> Result<(), PostgresStoreSetupError> {
     let defaults = client
-        .query_one(
+        .query_typed_one(
             "SELECT \
              (SELECT count(*) \
              FROM (VALUES \
@@ -9737,7 +9890,7 @@ fn string_set<C: GenericClient>(
     query: &str,
 ) -> Result<BTreeSet<String>, PostgresStoreSetupError> {
     let rows = client
-        .query(query, &[])
+        .query_typed(query, &[])
         .map_err(|error| map_postgres_error(&error, PostgresStoreSetupErrorKind::CorruptCatalog))?;
     let mut values = BTreeSet::new();
     for row in &rows {
@@ -9756,17 +9909,28 @@ fn catalog_signature<C: GenericClient>(
     error_kind: PostgresStoreSetupErrorKind,
 ) -> Result<String, PostgresStoreSetupError> {
     let rows = client
-        .query(query, &[])
+        .query_typed(query, &[])
         .map_err(|error| map_postgres_error(&error, error_kind))?;
+    catalog_signature_values(
+        rows.iter()
+            .map(|row| row_value::<String>(row, 0, error_kind)),
+        error_kind,
+    )
+}
+
+fn catalog_signature_values(
+    values: impl ExactSizeIterator<Item = Result<String, PostgresStoreSetupError>>,
+    error_kind: PostgresStoreSetupErrorKind,
+) -> Result<String, PostgresStoreSetupError> {
     let mut hasher = Sha256::new();
     hasher.update(CATALOG_SIGNATURE_DOMAIN);
     hasher.update(
-        u64::try_from(rows.len())
+        u64::try_from(values.len())
             .map_err(|_| PostgresStoreSetupError::new(error_kind))?
             .to_be_bytes(),
     );
-    for row in &rows {
-        let value = row_value::<String>(row, 0, error_kind)?;
+    for value in values {
+        let value = value?;
         hasher.update(
             u64::try_from(value.len())
                 .map_err(|_| PostgresStoreSetupError::new(error_kind))?
@@ -9837,6 +10001,10 @@ fn catalog_error() -> PostgresStoreSetupError {
 fn permission_error() -> PostgresStoreSetupError {
     PostgresStoreSetupError::new(PostgresStoreSetupErrorKind::PermissionDenied)
 }
+
+#[cfg(test)]
+#[path = "mcp_permission_tests.rs"]
+mod mcp_permission_tests;
 
 #[cfg(test)]
 mod tests {

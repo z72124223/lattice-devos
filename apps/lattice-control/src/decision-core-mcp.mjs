@@ -17,7 +17,7 @@ const sourceKinds = ["user_confirmation", "approved_document"];
 const recordTool = Object.freeze({
   name: "lattice_control_decision_record",
   title: "Record or supersede one confirmed Control decision",
-  description: "Record one explicit decision in the LATTICE Control store, optionally superseding the exact current decision for the same scope and subject.",
+  description: "Record one explicit decision, optionally superseding the exact current decision in its scope. New local SQLite writes require an explicit PROJECT or GLOBAL owner; PostgreSQL scopes are already project IDs.",
   inputSchema: {
     type: "object",
     additionalProperties: false,
@@ -33,6 +33,11 @@ const recordTool = Object.freeze({
     ],
     properties: {
       scope: { type: "string", minLength: 1, maxLength: 128 },
+      owner: { oneOf: [
+        { type: "object", additionalProperties: false, required: ["kind", "projectId"],
+          properties: { kind: { const: "PROJECT" }, projectId: { type: "string", pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" } } },
+        { type: "object", additionalProperties: false, required: ["kind"], properties: { kind: { const: "GLOBAL" } } },
+      ] },
       subject: { type: "string", minLength: 1, maxLength: 256 },
       content: { type: "string", minLength: 1, maxLength: 4_096 },
       rationale: { type: "string", minLength: 1, maxLength: 4_096 },
@@ -247,13 +252,17 @@ function validateRecordArguments(value) {
       "revision",
       "digest",
     ],
-    ["supersedes_decision_id"],
+    ["supersedes_decision_id", "owner"],
   )) return false;
   return safeIdentifier(value.scope, 128)
     && safeIdentifier(value.subject, 256)
     && decisionText(value.content, 4_096)
     && decisionText(value.rationale, 4_096)
     && decisionSource(value.source)
+    && (value.owner === undefined
+      || (exactObject(value.owner, ["kind"]) && value.owner.kind === "GLOBAL")
+      || (exactObject(value.owner, ["kind", "projectId"]) && value.owner.kind === "PROJECT"
+        && typeof value.owner.projectId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value.owner.projectId)))
     && safeRequestId(value.client_request_id)
     && boundedInteger(value.revision, 0)
     && safeDigest(value.digest)
@@ -523,6 +532,7 @@ export function runControlDecisionMcp({
       if (name === recordTool.name) {
         structuredContent = service.record({
           scope: args.scope,
+          ...(args.owner === undefined ? {} : { owner: args.owner }),
           subject: args.subject,
           content: args.content,
           rationale: args.rationale,

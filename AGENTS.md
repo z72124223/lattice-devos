@@ -9,11 +9,15 @@ smallest workflow and verification that can prove the requested result.
   do not restore the retired browser dashboard, visual work tree/code graph,
   separate conversation UI, or Windows desktop shell. Keep their durable data
   and the backend task, relationship, decision, and evidence APIs.
-- LATTICE is one local Runtime with three core functions: LATTICE control,
+- LATTICE is one Runtime on the selected local or cloud execution host, with three core functions: LATTICE control,
   PostgreSQL durable facts, and Graphify derived relationship memory. Use the
   `GRAPHIFY` integration mode for the main product. Hermes reflection is retired:
   do not restore an activation path, login, configuration, or reflection workflow.
   Codex owns reasoning and review.
+- Cloud delivery includes LATTICE and Life-Harness. JEV is excluded from the
+  delivered Control service; its retained experiments are historical research.
+  Cloud task snapshots do not prove continuous service or shared durable storage.
+  PostgreSQL and Graphify host compatibility must be verified on that host.
 - PostgreSQL is the only authoritative durable truth. Graphify is rebuilt from
   that truth when necessary.
 - PostgreSQL failure makes durable Runtime work unavailable. Graphify failure is
@@ -77,6 +81,25 @@ tests prove only the tested behavior.
   current user authorization.
 
 ## Verification and delivery
+
+- All future LATTICE project deletion requests use the shared `project:purge`
+  workflow in `docs/PROJECT_PURGE.md` (also exposed as `control:project delete`
+  or `purge`). Inventory the exact project, preserve the confirmed plan, resume
+  the same operation after interruption, and verify each affected resource.
+  Do not replace it with ad hoc SQL, directory deletion, or catalog removal.
+  `SCOPED_PURGED` only proves the reported local scope; unknown external records
+  or blockers must remain visibly incomplete. A previous tool-policy denial
+  cannot be retried through this entry point or a different tool.
+  For owned Bot roles collect fresh native owner readbacks at the preview-bound
+  evidence path. Finish known maintenance artifacts with `finalize`; resume its
+  exact finalization manifest after interruption. `LOGICAL_SCOPE_COMPLETE`
+  covers configured LATTICE logical stores and retained minimal attestations,
+  not permanent Codex erasure, historical backups or physical media wiping.
+
+- Important purge decisions about data retention, historical verification or
+  irreversible scope changes require a cross-check with Claude before choosing
+  the approach or asking the user to decide. Collaboration is Codex + Claude;
+  do not involve DOT or ChatGPT web. Prefer browser text over screenshots.
 
 - Keep each Runtime module independently testable and repairable. Reserve a
   complete three-core run for an explicit release-level integration check, never

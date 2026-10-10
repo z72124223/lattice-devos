@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-09-23T11:35:11.6859202Z",
+  "scope": "read-only inventory; not load or compatibility proof",
+  "os": "Microsoft Windows 10 家用版",
+  "cpu": "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz",
+  "cores": 6,
+  "logical_processors": 12,
+  "ram_total_kib": 33487212,
+  "ram_free_kib": 22104172,
+  "disk_free_bytes": 20857790464,
+  "gpu_csv": "NVIDIA GeForce GTX 1080 Ti, 11264 MiB, 9848 MiB, 576.88",
+  "python": "Python 3.14.7",
+  "python_packages": {
+    "torch": null,
+    "transformers": null,
+    "sentence-transformers": null,
+    "laya": null
+  },
+  "planned_sdk_revision": "010bacef009c855ccba814b51f7c8e1d38ab5e3f",
+  "planned_weights_revision": "b4a904d1a2a54c822b829e24291d4b8f280fe43e",
+  "version_source": "user-provided v2 plan; not installed or reverified remotely",
+  "encoder_revision": null,
+  "tokenizer_revision": null,
+  "minimal_choice_dependency_compatibility": "UNVERIFIED",
+  "peak_memory_and_disk_requirement": "UNVERIFIED",
+  "load_test": "NOT_RUN",
+  "external_inference": "NOT_CALLED",
+  "downloads": "NONE",
+  "compile_cache": "PRESERVED"
+}

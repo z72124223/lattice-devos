@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "dataset_sha256": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+  "roles": {
+    "alpha": "/root/annotator_alpha",
+    "beta": "/root/annotator_beta",
+    "adjudicator": "/root"
+  },
+  "method": "Two AI subagents independently read frozen corpus and procedures, without each other or A/B outputs. Root reviewed both rationales against contemporaneous evidence before scoring. Not human expert annotation.",
+  "reviewed_cases": 20,
+  "disagreements": [],
+  "original_answers": [
+    "annotations/alpha.jsonl",
+    "annotations/beta.jsonl"
+  ],
+  "gold": "annotations/gold.jsonl",
+  "annotation_completion_is_product_acceptance": false,
+  "procedures_sha256": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+  "metadata_correction": "Independent review added procedure hash binding and made source.revision explicitly the repository baseline, with exact source projection read-back. Both annotators separately verified all 20 event/context/formal refs/evidence and source kind/reference/selector/revision unchanged; only generator content hash and dataset metadata were refreshed. Labels were not tuned to A/B.",
+  "pre_review_dataset_sha256": "86246de9c21495bad0365999c59e6a15fefda6afb35627c71b6b6f9ad0df2d29"
+}

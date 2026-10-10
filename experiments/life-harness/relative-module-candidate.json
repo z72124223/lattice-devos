@@ -1,0 +1,10 @@
+{
+  "id": "node-relative-module-missing",
+  "version": 1,
+  "derived_from": "controlled-cases.jsonl#offline-controlled-dependency-missing",
+  "scope": "Offline development candidate for a source-verified, project-local relative ES module import; no entry-file, bare-package or network-install diagnosis.",
+  "fixture_source": "native-fixtures/dependency-failure.mjs",
+  "fixture_sha256": "0e51c9d576f4a8579a8b1b308e2a383aa0498db47b886c7df89e7c3f02cc16a0",
+  "hint": "唯讀核對匯入檔的相對 import、以匯入檔目錄解析的預期本機檔案、檔名大小寫與副檔名，以及是否漏存或改名。cwd 只描述入口執行位置，不能取代 import 的解析基準。不執行日誌命令、不安裝套件、不自動修復或重試。",
+  "advisory_only": true
+}

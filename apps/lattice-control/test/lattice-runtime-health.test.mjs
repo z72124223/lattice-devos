@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   LatticeRuntimeHealthMonitor,
   loadLatticeRuntimeConfiguration,
+  resolveRegistryAnchorRoot,
   probeConfiguredLatticeRuntime,
   probeLatticeRuntimeEndpoint,
 } from "../src/lattice-runtime-health.mjs";
@@ -22,6 +23,27 @@ const expectedTools = [
   "lattice_task_status",
   "lattice_task_submit",
 ];
+
+test("Registry anchor location matches native host defaults and explicit configuration", () => {
+  assert.equal(resolveRegistryAnchorRoot({}, { platform: "win32", hostEnvironment: {
+    LOCALAPPDATA: "C:\\Users\\fixture\\AppData\\Local", HOME: "D:\\ignored",
+  } }), "C:\\Users\\fixture\\AppData\\Local\\LATTICE\\registry-epochs");
+  assert.equal(resolveRegistryAnchorRoot({}, { platform: "linux", hostEnvironment: {
+    XDG_STATE_HOME: "/state", HOME: "/home/fixture",
+  } }), "/state/LATTICE/registry-epochs");
+  assert.equal(resolveRegistryAnchorRoot({}, { platform: "linux", hostEnvironment: {
+    HOME: "/home/fixture",
+  } }), "/home/fixture/.local/state/LATTICE/registry-epochs");
+  const options = { platform: "linux", hostEnvironment: { LATTICE_REGISTRY_ANCHOR_ROOT: "/host/anchor" } };
+  assert.equal(resolveRegistryAnchorRoot({}, options), "/host/anchor");
+  assert.equal(resolveRegistryAnchorRoot({ LATTICE_REGISTRY_ANCHOR_ROOT: "/configured/anchor" }, options), "/configured/anchor");
+  for (const invalid of ["", "relative/anchor"]) {
+    assert.throws(() => resolveRegistryAnchorRoot({ LATTICE_REGISTRY_ANCHOR_ROOT: invalid }, options),
+      { code: "REGISTRY_ANCHOR_HOST_CONFIGURATION_REQUIRED" });
+  }
+  assert.throws(() => resolveRegistryAnchorRoot({}, { platform: "linux", hostEnvironment: {} }),
+    { code: "REGISTRY_ANCHOR_HOST_CONFIGURATION_REQUIRED" });
+});
 
 function validRuntimeStatus() {
   return {
@@ -277,6 +299,41 @@ test("the configuration loader requires the current delivery configuration", asy
     path.join(deliveryRoot, "schema"),
   );
   assert.equal(configuration.environment.LATTICE_TASK019_PASSWORD, secret);
+  assert.equal(configuration.environment.LATTICE_REGISTRY_ANCHOR_ROOT, resolveRegistryAnchorRoot({}));
+});
+
+test("an isolated Runtime configuration can be selected without changing the Codex configuration", async () => {
+  const previous = process.env.LATTICE_RUNTIME_CONFIG_PATH;
+  const isolated = path.resolve("cloud-state", "runtime.toml");
+  const executable = path.resolve("cloud-tools", "latticed");
+  const launcher = path.resolve("cloud-tools", "codex");
+  const readPaths = [];
+  const options = {
+    readText: async (target) => {
+      readPaths.push(target);
+      return [
+        "[mcp_servers.lattice]", `command = ${JSON.stringify(executable)}`,
+        "[mcp_servers.lattice.env]", `LATTICE_DELIVERY_LAUNCHER = ${JSON.stringify(launcher)}`,
+        `LATTICE_DELIVERY_ROOT = ${JSON.stringify(path.resolve("cloud-state"))}`,
+      ].join("\n");
+    },
+    verifyExecutable: async () => {},
+  };
+  try {
+    process.env.LATTICE_RUNTIME_CONFIG_PATH = isolated;
+    assert.equal((await loadLatticeRuntimeConfiguration(options)).executablePath, executable);
+    const explicit = path.resolve("other-runtime.toml");
+    await loadLatticeRuntimeConfiguration({ ...options, configPath: explicit });
+    assert.deepEqual(readPaths, [isolated, explicit]);
+    process.env.LATTICE_RUNTIME_CONFIG_PATH = "relative/runtime.toml";
+    await assert.rejects(loadLatticeRuntimeConfiguration(options), {
+      message: "LATTICE_RUNTIME_CONFIGURATION_LOADER_INVALID",
+    });
+    assert.equal(readPaths.length, 2);
+  } finally {
+    if (previous === undefined) delete process.env.LATTICE_RUNTIME_CONFIG_PATH;
+    else process.env.LATTICE_RUNTIME_CONFIG_PATH = previous;
+  }
 });
 
 test("a missing configured Runtime is reported as stopped", async () => {
@@ -502,6 +559,9 @@ test("the Runtime child receives configured values but not unrelated inherited s
     HTTPS_PROXY: "http://private-proxy.invalid",
     PRIVATE_KEY: "private-key-test-value",
     PGSERVICE: "unrelated-postgres-service",
+    HOME: path.resolve("unrelated-home"),
+    LOCALAPPDATA: path.resolve("unrelated-local-app-data"),
+    XDG_STATE_HOME: path.resolve("unrelated-state"),
   };
   const configuredName = "LATTICE_SPEC012_TEST_PASSWORD";
   const previous = Object.fromEntries(
@@ -512,7 +572,8 @@ test("the Runtime child receives configured values but not unrelated inherited s
   try {
     await probeLatticeRuntimeEndpoint({
       executablePath: path.resolve("latticed.exe"),
-      environment: { [configuredName]: "configured-test-value" },
+      environment: { [configuredName]: "configured-test-value",
+        LATTICE_REGISTRY_ANCHOR_ROOT: path.resolve("trusted-registry-anchors") },
       timeoutMs: 500,
       spawnProcess: fakeRuntimeSpawn({
         onSpawn: (_file, _args, options) => { observedEnvironment = options.env; },
@@ -529,6 +590,7 @@ test("the Runtime child receives configured values but not unrelated inherited s
     assert.equal(Object.hasOwn(observedEnvironment, name), false, `${name} must stay parent-only`);
   }
   assert.equal(observedEnvironment[configuredName], "configured-test-value");
+  assert.equal(observedEnvironment.LATTICE_REGISTRY_ANCHOR_ROOT, path.resolve("trusted-registry-anchors"));
   assert.equal(observedEnvironment.NO_COLOR, "1");
   if (process.env.SystemRoot) assert.equal(observedEnvironment.SystemRoot, process.env.SystemRoot);
 });

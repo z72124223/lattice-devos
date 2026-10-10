@@ -1,0 +1,120 @@
+{
+  "schema_version": 1,
+  "failure_checkpoint": "7f918783dc6bbe981a26ebf4b17bfaf2edb65004",
+  "status": "source_load_and_offline_choices_completed_not_adopted",
+  "source_files_sha256": {
+    "laya_source.py": "3f0ad94a3e1e894832fb804e7632f0e4be843bb3bee50db7d9ff9ee470a32073",
+    "laya_choice.py": "3eb164b489a80fdd342acb9caa3c35e6681ac12cd72c1079625aab01f91d3550",
+    "laya-run.mjs": "f3ae761428cb84e4f92373d0c3375a2ce017c04425d7b9760068a8bae3c07373",
+    "laya-inputs.mjs": "53d4085392fca9da8ddd9cc1eaff9e67ee0be21977e20d17c046c6ef76a23157",
+    "laya-summarize.mjs": "3062f1a3b63c8d852607d9c8d8634e30df8400fd5c9a9a7f8e4937b0ac3aa7c8",
+    "laya_limits.py": "300f5d87bb23da534917270a5c0e5b03ae7d66221b372964ecdb8b72b1861892",
+    "laya-environment.json": "6747284fa8bb6423a3a0f751b34298a077b92c753c953c708bcc6dac2b7f7d0b",
+    "laya-requirements.lock.txt": "b66fa548207238947055aa4a7533925ff7b43342e41e13339766094443c6c0c5",
+    "laya_setup.py": "0a7593c106872fdf9d099546bc49b474ddf35254d4a2af14be278b5f347c3fc2"
+  },
+  "runtime": {
+    "smoke": {
+      "attempt": 1,
+      "exit_code": 0,
+      "wall_seconds": 49.245151899999996,
+      "resources_after": {
+        "project_bytes": 2996073085,
+        "disk_free_bytes": 17485393920
+      },
+      "sdk_load_mode": "verified_source_tree",
+      "sdk_distribution_installed": false,
+      "load_seconds": 4.970075399847701,
+      "peak_rss_bytes": 2344157184,
+      "memory_limits": {
+        "process_commit_limit_bytes": 8589934592,
+        "job_commit_limit_bytes": 8589934592,
+        "kill_on_job_close": true
+      },
+      "inference_seconds_sum": 0.27925579994916916
+    },
+    "advisories": {
+      "attempt": 1,
+      "exit_code": 0,
+      "wall_seconds": 21.1160144,
+      "resources_after": {
+        "project_bytes": 2996152942,
+        "disk_free_bytes": 17485250560
+      },
+      "sdk_load_mode": "verified_source_tree",
+      "sdk_distribution_installed": false,
+      "load_seconds": 4.12757040001452,
+      "peak_rss_bytes": 2343641088,
+      "memory_limits": {
+        "process_commit_limit_bytes": 8589934592,
+        "job_commit_limit_bytes": 8589934592,
+        "kill_on_job_close": true
+      },
+      "inference_seconds_sum": 2.8902865999843925
+    }
+  },
+  "raw_log_directory": ".lattice/life-harness/laya-local",
+  "raw_files": {
+    "smoke-1-input.json": {
+      "bytes": 1786,
+      "sha256": "c43505567c37cd0871a2bb4564df349366ec35070f6f09ef2df1489a060851a7"
+    },
+    "smoke-1-stdout.txt": {
+      "bytes": 3190,
+      "sha256": "7204d47170704328cadb739cfe3b17f458cbcd9d8e4199b5680b26b8c0786512"
+    },
+    "smoke-1-stderr.txt": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "advisories-1-input.json": {
+      "bytes": 39061,
+      "sha256": "30630c9e846238b45437d408436f983421c81e7bdbe0bf3d38149dbacbe36c7d"
+    },
+    "advisories-1-stdout.txt": {
+      "bytes": 40796,
+      "sha256": "22dda53f5d911414e48ebd6516f6b4615c07eebadc2cb684565e1fc03eff37e5"
+    },
+    "advisories-1-stderr.txt": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    }
+  },
+  "snapshot_remains_original": true,
+  "old_baseline_files_and_raws_unchanged": true,
+  "working_tokenizer_config_sha256": "2c0c4d82d4b4bc6b4ac40b2375e067a1645f78b381a9774248d47915f33d751f",
+  "new_source_tests": {
+    "command": "C:/Users/f7212/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe -I -S -B -m unittest discover -s experiments/life-harness -p test_laya_source.py -v",
+    "passed": 4,
+    "exit_code": 0,
+    "seconds": 1.291,
+    "executed_by": "annotator_beta"
+  },
+  "prior_checks": "The 33 Node + 4 guard tests were independently accepted at 7f91878; not rerun for unchanged behavior.",
+  "tokens": {
+    "model_calls": 8,
+    "maximum_total": 493,
+    "maximum_option": 27,
+    "refused_truncation": 0,
+    "sdk_usage_matches_precheck": true
+  },
+  "limitations": [
+    "One synthetic smoke plus one pass over development datasets; zero real production cases.",
+    "C and D share one identical-input observation because A equals B; not independent arms or causal evidence.",
+    "SDK probabilities/confidence/action scores are uncalibrated here; no adoption, threshold tuning, or recovery execution.",
+    "Python socket/Hub/loader/subprocess guards and reviewed source; not an OS firewall or hostile-code sandbox.",
+    "Wheel SDK installation remains failed; source tree load success does not change historical installation outcomes."
+  ],
+  "independent_result_review": {
+    "reviewer": "annotator_alpha",
+    "raw_outputs_match_summary": true,
+    "source_kind_denominators_separate": true,
+    "gates": {
+      "excluded": 16,
+      "empty_candidates": 3,
+      "model_calls": 8
+    },
+    "sdk_token_usage_matches_precheck": true,
+    "no_model_rerun": true
+  }
+}

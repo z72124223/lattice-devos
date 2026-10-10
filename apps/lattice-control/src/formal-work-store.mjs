@@ -165,7 +165,8 @@ export class FormalWorkStore {
     }
     const task = page.tasks.find((row) => row.task_ref === taskRef);
     if (!task) throw formalWorkError("CONTROL_WORK_ITEM_NOT_FOUND", "找不到這項正式工作。", 404);
-    return { ...taskProjection(task, page.product), task, product: page.product, project: page.project };
+    return { ...taskProjection(task, page.product), task, product: page.product, project: page.project,
+      source: page.source, snapshot_revision: page.revision };
   }
   async getWorkSnapshot({ projectId, maxNodes = 256, maxEdges = 1024 }) {
     const { snapshot } = await this.readProject(projectId);
@@ -217,7 +218,11 @@ export class FormalWorkStore {
       revision: expectedRevision, digest: expectedDigest }, "decision-search", 196608);
   }
   async recordDecision({ scope, subject, content, rationale, source: decisionSource,
-    clientRequestId, expectedRevision, expectedDigest, supersedesDecisionId }) {
+    clientRequestId, expectedRevision, expectedDigest, supersedesDecisionId, owner }) {
+    if (owner !== undefined && (!owner || Object.keys(owner).sort().join(",") !== "kind,projectId"
+      || owner.kind !== "PROJECT" || owner.projectId !== scope)) {
+      throw formalWorkError("CONTROL_DECISION_SCOPE_REJECTED", "正式決策的歸屬必須與專案範圍一致。");
+    }
     // Identity derives from the caller's retained key; a lost response cannot
     // create another decision. Runtime verifies exact semantics before replay.
     const packet = await this.update({ action: "DECISION", project_id: scope,

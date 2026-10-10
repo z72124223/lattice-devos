@@ -13,6 +13,14 @@ use lattice_contracts::{
     ProjectClass, ProjectId, ProjectLifecycle, ProjectSnapshotId, RuntimeKind,
 };
 
+mod epoch;
+pub use epoch::{
+    RegistryCommandLookup, RegistryEpochBaseline, RegistryEpochPlan, RegistryHistoricalCommand,
+    RegistryRedactionAuthorization, lookup_registry_command, plan_registry_epoch,
+    preview_required_redactions, registry_command_id_commitment, verify_registry_epoch_baseline,
+    verify_untrusted_registry_snapshot_from_baseline,
+};
+
 /// Maximum current project projections retained by Registry 1.2.
 pub const MAX_REGISTRY_PROJECTS: usize = 4_096;
 /// Maximum first-seen terminal command records retained by Registry 1.2.
@@ -36,6 +44,22 @@ pub enum RegistryError {
     },
     /// A previously used command ID was replayed with another request digest.
     CommandIdReuse,
+    /// The command ID belongs to explicitly erased history and cannot execute again.
+    CommandRedacted,
+    /// An epoch retention payload is malformed or internally inconsistent.
+    EpochBaselineInvalid,
+    /// The epoch payload differs from its independently trusted seal commitment.
+    EpochTrustMismatch,
+    /// The requested epoch is not the exact successor of the verified state.
+    EpochSequenceInvalid,
+    /// Epoch erasure requires a currently registered target project.
+    EpochProjectNotFound,
+    /// A surviving current projection or reservation still depends on the target.
+    EpochSurvivorReference,
+    /// A survivor history record needs explicit whole-record redaction permission.
+    EpochRedactionRequired,
+    /// A redaction permission is duplicated, stale, or outside the required scope.
+    EpochRedactionInvalid,
     /// An untrusted Registry snapshot failed internal replay verification.
     CorruptSnapshot,
     /// A verified snapshot disagrees with an independently retained checkpoint.
@@ -59,6 +83,14 @@ impl RegistryError {
             Self::InvalidCanonicalRoot => "REGISTRY_INVALID_CANONICAL_ROOT",
             Self::NonCanonicalText { .. } => "REGISTRY_NON_CANONICAL_TEXT",
             Self::CommandIdReuse => "REGISTRY_COMMAND_ID_REUSE",
+            Self::CommandRedacted => "REGISTRY_COMMAND_REDACTED",
+            Self::EpochBaselineInvalid => "REGISTRY_EPOCH_BASELINE_INVALID",
+            Self::EpochTrustMismatch => "REGISTRY_EPOCH_TRUST_MISMATCH",
+            Self::EpochSequenceInvalid => "REGISTRY_EPOCH_SEQUENCE_INVALID",
+            Self::EpochProjectNotFound => "REGISTRY_EPOCH_PROJECT_NOT_FOUND",
+            Self::EpochSurvivorReference => "REGISTRY_EPOCH_SURVIVOR_REFERENCE",
+            Self::EpochRedactionRequired => "REGISTRY_EPOCH_REDACTION_REQUIRED",
+            Self::EpochRedactionInvalid => "REGISTRY_EPOCH_REDACTION_INVALID",
             Self::CorruptSnapshot => "REGISTRY_CORRUPT_SNAPSHOT",
             Self::CheckpointMismatch => "REGISTRY_CHECKPOINT_MISMATCH",
             Self::CapacityExceeded => "REGISTRY_CAPACITY_EXCEEDED",
@@ -81,6 +113,20 @@ impl fmt::Display for RegistryError {
             }
             Self::CommandIdReuse => {
                 formatter.write_str("command_id was already used for another request")
+            }
+            Self::CommandRedacted => formatter.write_str("command_id belongs to redacted history"),
+            Self::EpochBaselineInvalid => formatter.write_str("invalid Registry epoch baseline"),
+            Self::EpochTrustMismatch => formatter.write_str("Registry epoch seal mismatch"),
+            Self::EpochSequenceInvalid => formatter.write_str("invalid Registry epoch successor"),
+            Self::EpochProjectNotFound => formatter.write_str("epoch target project is absent"),
+            Self::EpochSurvivorReference => {
+                formatter.write_str("survivor still references erased project")
+            }
+            Self::EpochRedactionRequired => {
+                formatter.write_str("survivor command redaction requires exact permission")
+            }
+            Self::EpochRedactionInvalid => {
+                formatter.write_str("invalid Registry command redaction permission")
             }
             Self::CorruptSnapshot => {
                 formatter.write_str("untrusted Registry snapshot failed replay verification")
@@ -898,6 +944,48 @@ pub struct VerifiedRegistryState {
     commands: BTreeMap<u64, RegistryCommandRecord>,
     record_sets: BTreeMap<u64, RegistryRecordSet>,
     reservations: Vec<RegistryIdentityReservation>,
+    epoch: Option<epoch::VerifiedRegistryEpoch>,
+}
+
+/// The only erasure supported by the v1 Registry format: remove a project's
+/// entire command suffix and restore the *already verified* preceding state.
+/// No survivor command, receipt or digest is rewritten. Interleaved histories
+/// require a separately reviewed format migration and are rejected here.
+///
+/// # Errors
+///
+/// Rejects an absent project, interleaved history, or a prefix that cannot be
+/// replayed into the exact previously verified state.
+pub fn project_purge_prefix(
+    state: &VerifiedRegistryState,
+    project_id: &ProjectId,
+) -> Result<VerifiedRegistryState, RegistryError> {
+    if state.epoch.is_some() {
+        return Err(RegistryError::CorruptSnapshot);
+    }
+    if state.project(project_id).is_none() {
+        return Err(RegistryError::CorruptSnapshot);
+    }
+    let mut prefix = VerifiedRegistryState::vacant(state.checkpoint.runtime())?;
+    let mut found = false;
+    for record in state.commands.values() {
+        if command_project_id(record.command()) == project_id {
+            found = true;
+        } else {
+            if found {
+                return Err(RegistryError::CorruptSnapshot);
+            }
+            let plan = plan_command(&prefix, record.command().clone())?;
+            if plan.record != *record {
+                return Err(RegistryError::CorruptSnapshot);
+            }
+            prefix = apply_command_plan(&prefix, &plan)?.state;
+        }
+    }
+    if !found || prefix.project(project_id).is_some() {
+        return Err(RegistryError::CorruptSnapshot);
+    }
+    Ok(prefix)
 }
 
 impl VerifiedRegistryState {
@@ -934,6 +1022,7 @@ impl VerifiedRegistryState {
             commands: BTreeMap::new(),
             record_sets: BTreeMap::new(),
             reservations: Vec::new(),
+            epoch: None,
         })
     }
 
@@ -962,7 +1051,8 @@ impl VerifiedRegistryState {
         self.projects.get(project_id)
     }
 
-    /// Returns the complete retained first-seen command history.
+    /// Returns the fully replayed current epoch tail (all commands in epoch 0).
+    /// Use `retained_command` for exact lookup across attested historical epochs.
     #[must_use]
     pub const fn commands(&self) -> &BTreeMap<u64, RegistryCommandRecord> {
         &self.commands
@@ -972,6 +1062,47 @@ impl VerifiedRegistryState {
     #[must_use]
     pub fn reservations(&self) -> &[RegistryIdentityReservation] {
         &self.reservations
+    }
+
+    /// Zero denotes the original fully replayed Registry format.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.as_ref().map_or(0, |epoch| epoch.epoch)
+    }
+
+    /// Looks up an unchanged command from the current tail or attested history.
+    ///
+    /// # Errors
+    /// A redacted command ID fails closed, independently of its former payload.
+    pub fn retained_command(
+        &self,
+        id: &CommandId,
+    ) -> Result<Option<&RegistryCommandRecord>, RegistryError> {
+        if let Some(epoch) = &self.epoch {
+            if epoch
+                .redacted
+                .contains(epoch::registry_command_id_commitment(id)?.as_str())
+            {
+                return Err(RegistryError::CommandRedacted);
+            }
+            if let Some(record) = epoch.history.get(id) {
+                return Ok(Some(record.record()));
+            }
+        }
+        Ok(self
+            .commands
+            .values()
+            .find(|record| record.command.command_id() == id))
+    }
+
+    /// Reports the actual proof boundary rather than implying a full genesis replay.
+    #[must_use]
+    pub fn history_assurance(&self) -> &'static str {
+        if self.epoch.is_some() {
+            "ATTESTED_BASELINE_AND_REPLAYED_TAIL"
+        } else {
+            "FULL_GENESIS_REPLAY"
+        }
     }
 }
 
@@ -1408,26 +1539,17 @@ fn plan_exact_replay(
     command: &RegistryCommand,
     request_digest: &ContentDigest,
 ) -> Result<Option<RegistryCommandPlan>, RegistryError> {
-    let Some(record) = base
-        .commands
-        .values()
-        .find(|record| record.command.command_id() == command.command_id())
-    else {
-        return Ok(None);
+    let historical = match lookup_registry_command(base, command.command_id(), request_digest)? {
+        RegistryCommandLookup::New => return Ok(None),
+        RegistryCommandLookup::ExactHistorical(value) | RegistryCommandLookup::ExactTail(value) => {
+            value
+        }
     };
-    if record.receipt.request_digest() != request_digest {
-        return Err(RegistryError::CommandIdReuse);
-    }
-    let record_set = base
-        .record_sets
-        .get(&record.ordinal)
-        .ok_or(RegistryError::CorruptSnapshot)?
-        .clone();
     Ok(Some(RegistryCommandPlan {
         expected_current_checkpoint: base.checkpoint.clone(),
         result_state: base.clone(),
-        record: record.clone(),
-        record_set,
+        record: historical.record().clone(),
+        record_set: historical.record_set().clone(),
         replay: true,
     }))
 }
@@ -1436,7 +1558,7 @@ fn plan_first_seen_command(
     base: &VerifiedRegistryState,
     command: RegistryCommand,
 ) -> Result<RegistryCommandPlan, RegistryError> {
-    if base.commands.len() >= MAX_REGISTRY_COMMANDS {
+    if epoch::retained_command_count(base) >= MAX_REGISTRY_COMMANDS {
         return Err(RegistryError::CapacityExceeded);
     }
     let ordinal = next_registry_ordinal(base.checkpoint.command_ordinal)?;
@@ -1540,12 +1662,15 @@ fn build_planned_result_checkpoint(
         .map(|record| (record.ordinal, &record.command, &record.receipt))
         .collect::<Vec<_>>();
     command_cores.push((ordinal, command, receipt));
-    let logical_state = registry_logical_state_value(
-        base.checkpoint.runtime,
-        &delta.observations,
-        projects,
-        &command_cores,
-        &delta.reservations,
+    let logical_state = epoch::bind_logical_state(
+        base.epoch.as_ref(),
+        registry_logical_state_value(
+            base.checkpoint.runtime,
+            &delta.observations,
+            projects,
+            &command_cores,
+            &delta.reservations,
+        ),
     );
     let retained_bytes = u64::try_from(canonicalize(&logical_state)?.as_slice().len())
         .map_err(|_| RegistryError::CapacityExceeded)?;
@@ -1616,6 +1741,7 @@ fn assemble_first_seen_plan(
         commands,
         record_sets,
         reservations: delta.reservations,
+        epoch: base.epoch.clone(),
     };
     Ok(RegistryCommandPlan {
         expected_current_checkpoint: base.checkpoint.clone(),

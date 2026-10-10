@@ -1,0 +1,130 @@
+{
+  "schema_version": 1,
+  "base_commit": "792e0104f84d0132d84f23a506ad1ae176c1812b",
+  "old_files_byte_identical_to_commit": {
+    "experiments/life-harness/annotations/adjudication.json": "5f4644da195a290189cedc93018426460fd9e5d87af7f079dbd362166961b304",
+    "experiments/life-harness/annotations/alpha.jsonl": "84fdb80c23a67056ad901a4e9e22b2b5665bf2be854a4bed734b3e25d1a84b61",
+    "experiments/life-harness/annotations/beta.jsonl": "fd9cd6f60abff2abb4e606144e01a8a314ad5c4d72fa9604f0bd774806b7130c",
+    "experiments/life-harness/annotations/controlled-adjudication.json": "f71252ab561395a7cfccd9259868e20fadde91be3938ed66db0922b29566540b",
+    "experiments/life-harness/annotations/controlled-alpha.jsonl": "a61fbde4017514acda8ee2728cc34fd3f1443276c0346bb8b1467ae11a48662d",
+    "experiments/life-harness/annotations/controlled-beta.jsonl": "50173b5374e900aae8fc05b4284da37e34837db6a8c6cd097a6689ee38275332",
+    "experiments/life-harness/annotations/controlled-gold.jsonl": "807bb4bbb6a8c95768a256555741bd6d116bab28d03d50125b4924d3adc1169a",
+    "experiments/life-harness/annotations/gold.jsonl": "434158adef150d9d072d1c2336be9ee00cee21d315c818c734324aa89ec00c66",
+    "experiments/life-harness/annotations/resolver-adjudication.json": "70be32be1501b6d10f46828f5b17d316e6fe3910ab764b02a2079fb4f9c9a17c",
+    "experiments/life-harness/annotations/resolver-alpha.jsonl": "99ee18cc26072b8c7eeca9e3e857b7f4aa2e507dc16b8f96815520d7acadace6",
+    "experiments/life-harness/annotations/resolver-beta.jsonl": "22680393cd7dba811654b6f3cc529ee201ad3d107b7eb3fcbcdf676df7b38049",
+    "experiments/life-harness/annotations/resolver-gold.jsonl": "66965f564f120df84068dda33fe0f25529c363c851a9db3f6fc8bc0a1311146e",
+    "experiments/life-harness/capture.mjs": "c38c9c81468b2f96eac9fea80e3d237a2ee67d759ba705ca631bce0a8202fda5",
+    "experiments/life-harness/capture.test.mjs": "0f1387ff2f2256242144ac95c36d87a8fbdae396e0a579ef7e79dd2e70e8dbe0",
+    "experiments/life-harness/cases.jsonl": "9bcf2eed5c1a131f6d4d72b8a3e5f766d6de79ff1adaf2af2ba3956b3bc1b696",
+    "experiments/life-harness/controlled-cases.jsonl": "4dcf66fe11a26f25f1d578442b99bd1d1df565ab6be1666863016da4eb1f3761",
+    "experiments/life-harness/harness.mjs": "7ee6ee68b125b0599934165bb34d1f54ed29af283562dcd3a5817580ff6f1000",
+    "experiments/life-harness/harness.test.mjs": "dbad32ef33bd427caff5030cc6c1c91ddaaf5d468d9ccc35d0f69f022b4b9367",
+    "experiments/life-harness/native-fixtures/available-dependency.mjs": "5da3c80c224e6c48584d7f386d14c2d2e0156f9c12668195ce5485f6fb5e567c",
+    "experiments/life-harness/native-fixtures/captured-events.jsonl": "6fa9f76741d45983f7df534eedfcf150cac7f194ba427a098c4ad373d41c1a3a",
+    "experiments/life-harness/native-fixtures/dependency-failure.mjs": "0e51c9d576f4a8579a8b1b308e2a383aa0498db47b886c7df89e7c3f02cc16a0",
+    "experiments/life-harness/native-fixtures/success.mjs": "96e592a188f375e96ec77b1d0ec409de8cd0f25c80b314fc9096cb14b63ad661",
+    "experiments/life-harness/prepare.mjs": "a99c6fef374539954746b768d919d2784a57f4e751eb4321a1d5d6dcf771fd25",
+    "experiments/life-harness/procedures.json": "f3ce19e68f06dd1f9fc5738c46d110316ab9b96544ee5cc20d360e136c34e8c9",
+    "experiments/life-harness/resolver-capture.test.mjs": "f4dbd4f509598374fbf1888ebbb727c6514be63348978e5340bf4f3983458ccb",
+    "experiments/life-harness/resolver-cases.jsonl": "1f1b8b54b623a9916d819315fdcb8963be42fef2e1f2484efd4f5accfdbd4ee2",
+    "experiments/life-harness/resolver-fixtures/captured-events.jsonl": "b33f147c7e3eef1b484b215c2bab14cec8c7fd89f48108f88894537e1642471f",
+    "experiments/life-harness/resolver-fixtures/resolve.mjs": "845492920b5901a69339c1e49c63bc0095e8c5af8aeeadc6180b90573debe34a",
+    "experiments/life-harness/results/advisories.jsonl": "3214ca671c3587e21f0d6e86a74bdc95c52c13bec0449d748fac7b6285e0c7de",
+    "experiments/life-harness/results/controlled-advisories.jsonl": "6701b510e2d6ae9e74e9205383bcf359cfb878aef435b5bf2af73c0f1c9d879b",
+    "experiments/life-harness/results/controlled-summary.json": "b089283be05463dfb4bffa200277ca0e742058cdd28197b9967a54957a1d2387",
+    "experiments/life-harness/results/replay-verification.txt": "d4a48974ebc745013309435638b2ad511c0d26890ef25c954beaec8438403446",
+    "experiments/life-harness/results/resolver-advisories.jsonl": "9b39aef23e9271c732f8828c97d0ff1f95e9cb6f0631cf10ceaec9a8d3f26a03",
+    "experiments/life-harness/results/resolver-summary.json": "3916b86c97ec1cbd64cdb77f640a4058e8b421199d5c69bf018cab61e4c4d447",
+    "experiments/life-harness/results/summary.json": "6c13f0a7bc9c8d94127f955fad2af9fe3602a795451fdeaa206bdc0386d81810",
+    "experiments/life-harness/results/verification.txt": "57cff2ee1c16b443285cdc630148eb2ae532e47bed57f5637e9f95fe4bdfb3bd"
+  },
+  "existing_line_ending_difference": {
+    "experiments/life-harness/results/laya-readiness.json": {
+      "base": "LF",
+      "existing_worktree": "CRLF",
+      "content_equal": true,
+      "file_rewritten": false
+    }
+  },
+  "old_raw_capture_sha256": {
+    ".lattice/life-harness/native-node-20260923/raw-capture.jsonl": "1b72d50ad483a6824c1c6df56a635655b4e0476e6ae432d52f55bb7e9db60fd7",
+    ".lattice/life-harness/native-node-20260923/source-index.json": "a09c0d860d9d89cb1a6fc84cce47f5f128ef126ac44361dbdd2d40f7e9c627a8",
+    ".lattice/life-harness/native-resolvers-20260923/raw-capture.jsonl": "64a1d4fbe4d016926e8f543c7a141ea7279edac6e3643c21282f87db1b9db7a0",
+    ".lattice/life-harness/native-resolvers-20260923/source-index.json": "c11c786c82644182dbadba06868e3eecc70f148e76029a98bc0d7b160645f971"
+  },
+  "snapshot_verified": {
+    "README.md": {
+      "bytes": 8137,
+      "sha256": "bdd91cc3aa78225d30964ef3cb8a1cdbe98acf4ab4b8a02207a678c276e987ae"
+    },
+    "encoder/config.json": {
+      "bytes": 1938,
+      "sha256": "83f6916d13ef0f556ac461f28308dc2bffa7ebeadee8ec9e2db5812020ea5bb4"
+    },
+    "model.safetensors": {
+      "bytes": 643835514,
+      "sha256": "9d628fd971b700382ac6f65920a86f149777b2e748e0c955fb3b19695aa8f204"
+    },
+    "rl_agent_config.json": {
+      "bytes": 472,
+      "sha256": "25061739243b617ad88d1219ba6f8a9c86c5881ca28df024fa2d9b3b2fcc30c6"
+    },
+    "tokenizer/tokenizer.json": {
+      "bytes": 34363188,
+      "sha256": "609d8f4c067cd3950f88594c5a802616cea245823836ef5848ee4fc40aab5b6f"
+    },
+    "tokenizer/tokenizer_config.json": {
+      "bytes": 502,
+      "sha256": "424b69444bf7b5809dc2cd2e36d0bd71b8055124dd24274d6db3c655d38205e7"
+    }
+  },
+  "node_syntax_exit_codes": {
+    "laya-run.mjs": 0,
+    "laya-summarize.mjs": 0,
+    "laya-inputs.mjs": 0
+  },
+  "python_ast_parse": "passed",
+  "tests": [
+    {
+      "command": "node --test experiments/life-harness/harness.test.mjs experiments/life-harness/capture.test.mjs experiments/life-harness/resolver-capture.test.mjs experiments/life-harness/laya-inputs.test.mjs",
+      "passed": 28,
+      "exit_code": 0,
+      "executed_by": "annotator_alpha"
+    },
+    {
+      "command": "node --test apps/lattice-control/test/execution-recovery.test.mjs apps/lattice-control/test/codex-runtime-resolution.test.mjs",
+      "passed": 5,
+      "exit_code": 0,
+      "executed_by": "annotator_alpha"
+    },
+    {
+      "command": "C:/Users/f7212/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe -I -B -m unittest discover -s experiments/life-harness -p test_laya_limits.py -v",
+      "passed": 4,
+      "exit_code": 0,
+      "executed_by": "annotator_beta",
+      "seconds": 1.519
+    }
+  ],
+  "independent_review": {
+    "reviewer": "source_inventory",
+    "scope": "fixed SDK source, CPU/token-budget preparation, guard ordering, failure logs, snapshot hashes, frozen A/B",
+    "resolved_findings": [
+      "verify SDK bytes before import",
+      "deny child processes before third-party import",
+      "preserve report after disk stop",
+      "preserve report after spawn failure",
+      "use -I -S -B before guard then append precise site-packages"
+    ]
+  },
+  "unverified": [
+    "SDK build success",
+    "import compatibility",
+    "real model load",
+    "smoke choice",
+    "actual tokenizer lengths",
+    "offline advisory over frozen datasets",
+    "C/D outcomes"
+  ],
+  "runtime_identity": "LATTICE MCP unavailable; no formal task identity supplied"
+}
