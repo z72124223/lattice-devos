@@ -8,7 +8,7 @@ param(
     [string]$LegacyPurgeBinary,
     [string]$LifecycleBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','graph-ownership','upgrade','streaming','streaming-large','decisions','graph-history','claim-reconciliation')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','retained-roots','graph-ownership','upgrade','streaming','streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-references','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest
@@ -30,7 +30,7 @@ $result = [ordered]@{ schema = 'lattice.project-purge-live-fixture.v1'; runId = 
 
 if ($Scenario -in @('upgrade','streaming','streaming-large') -and [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { throw 'FIXTURE_LEGACY_BINARY_REQUIRED' }
 if ($Scenario -in @('bot-purge','all') -and [string]::IsNullOrWhiteSpace($LifecycleBinary)) { $LifecycleBinary = Join-Path (Split-Path -Parent $RuntimeBinary) 'lattice-runtime.exe' }
-if ($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','streaming','streaming-large','all') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
+if (($Scenario -in @('epoch','epoch-reference','bot-inventory','graph-ownership','graph-capacity','streaming','streaming-large','all') -or $Scenario -like 'graph-record-*') -and [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $EpochFixtureBinary = Join-Path (Split-Path -Parent $SeedBinary) 'project_purge_epoch_fixture.exe' }
 $inputBinaries = @($PurgeBinary, $SeedBinary, $RuntimeBinary, $NodeBinary, $pgCtl, $postgresBinary, $psql, (Join-Path $pgBin 'initdb.exe'))
 if (-not [string]::IsNullOrWhiteSpace($LegacyPurgeBinary)) { $inputBinaries += $LegacyPurgeBinary }
 if (-not [string]::IsNullOrWhiteSpace($EpochFixtureBinary)) { $inputBinaries += $EpochFixtureBinary }
@@ -62,11 +62,11 @@ if ($copies.ContainsKey('legacy')) { $LegacyPurgeBinary = $copies.legacy.path }
 if ($copies.ContainsKey('epoch')) { $EpochFixtureBinary = $copies.epoch.path }
 if ($copies.ContainsKey('lifecycle')) { $LifecycleBinary = $copies.lifecycle.path }
 $result.binaryCopies = $copies
-if ($Scenario -eq 'all') {
+if ($Scenario -in @('all','graph-record-references')) {
     $result.children = @()
     try {
-        $stages = @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','graph-ownership','bot-purge')
-        if ($copies.ContainsKey('legacy')) { $stages += 'upgrade' }
+        $stages = if ($Scenario -eq 'graph-record-references') { @('graph-record-node','graph-record-edge','graph-record-shared') } else { @('main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','graph-ownership','bot-purge','claim-pending','graph-record-references') }
+        if ($Scenario -eq 'all' -and $copies.ContainsKey('legacy')) { $stages += 'upgrade' }
         foreach ($stage in $stages) {
             $childOutput = @(& $PSCommandPath -PurgeBinary $PurgeBinary -SeedBinary $SeedBinary -RuntimeBinary $RuntimeBinary -EpochFixtureBinary $EpochFixtureBinary -LegacyPurgeBinary $LegacyPurgeBinary -LifecycleBinary $LifecycleBinary -NodeBinary $NodeBinary -Scenario $stage)
             $child = $childOutput[-1] | ConvertFrom-Json

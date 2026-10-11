@@ -7,6 +7,7 @@ import {
 } from "./project-inspector.mjs";
 import { normalizeProjectDisplayName } from "./store.mjs";
 import { DEFAULT_CODEX_MODEL } from "./codex-app-server.mjs";
+import { assertControlDatabaseNotQuarantined } from './restore-quarantine.mjs';
 
 const approvalMethods = new Set([
   "item/commandExecution/requestApproval",
@@ -301,6 +302,7 @@ export class LatticeControlService {
     autoRestore = true,
   }) {
     if (typeof autoRestore !== 'boolean') throw new TypeError('autoRestore must be boolean');
+    assertControlDatabaseNotQuarantined(store.databasePath);
     this.store = store;
     this.codex = codex;
     this.formalWorkStore = formalWorkStore;
@@ -2597,6 +2599,7 @@ export class LatticeControlService {
   }
 
   async #fencedConversationEffect(fence, operation) {
+    assertControlDatabaseNotQuarantined(this.store.databasePath);
     this.#assertPrimaryConversationFence(fence);
     try {
       const result = await operation();
@@ -2625,6 +2628,7 @@ export class LatticeControlService {
   }
 
   #runExclusive(id, kind, operation) {
+    assertControlDatabaseNotQuarantined(this.store.databasePath);
     if (!this.acceptingEffects) {
       const error = new Error("Control is shutting down and is not accepting new effects");
       error.code = "CONTROL_SHUTTING_DOWN";

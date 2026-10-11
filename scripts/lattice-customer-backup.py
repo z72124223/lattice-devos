@@ -3,6 +3,7 @@
 Only an owned stopped cluster and explicitly registered standalone Git projects
 are captured. Dependencies, Windows credentials, Codex settings and WSL images
 are supplied afresh at the destination. Source data is always retained.
+Restored copies remain quarantined: a backup cannot authorize reactivation.
 """
 from __future__ import annotations
 import argparse
@@ -306,6 +307,11 @@ def restore(backup_root, expected, key, state, bundle, bundle_sha, platform, run
 
 
 def finalize_restore(state):
+    """Verify recovery artifacts without reactivating a historical catalog.
+
+    Current retention/disable decisions belong to the live owner, not the backup.
+    This entry has no release action: both existing restore gates stay in place.
+    """
     config, password = M.load(state, allow_restore=True)
     with M.runtime_lease(state, exclusive=True), M.CONFIG.manager_lock(state / ".operations"):
         # Revalidate the sealed installation after acquiring both restore locks.
@@ -316,36 +322,19 @@ def finalize_restore(state):
             raise M.Rejected("RESTORE_JOURNAL_IDENTITY_REJECTED")
         if not (state / "restore.in-progress").exists():
             M.CONFIG.atomic_write(state / "restore.in-progress", b"lattice.customer-restore.v1\n")
-        M.start(config, password)
-        # A backup may predate the new Runtime's additive product extensions.
-        # Bootstrap only this verified restored cluster, before probe or READY.
-        M.runtime_action(config, password, "--postgres-bootstrap")
-        spec = importlib.util.spec_from_file_location("update_probe", Path(__file__).with_name("lattice-runtime-update.py"))
-        update = importlib.util.module_from_spec(spec); spec.loader.exec_module(update)
-        update.probe(config, password)
         for project, expected in journal["proofs"].items():
             proof = state / "restore-proofs" / (project + ".json")
             if M.file_digest(proof) != expected: raise M.Rejected("RESTORE_PROOF_CHANGED")
-            if project not in journal["requests"]:
-                # Native project admission records the physical observation; a
-                # reconciliation-required response is expected, never suppressed as success.
-                current = registry(config, password, project, "restore-observe", ["--restore-proof", str(proof), "--restore-proof-sha256", expected])["current"]
-                if current["active"] or not current["fresh_matches_pending"]: raise M.Rejected("RESTORE_PENDING_IDENTITY_REQUIRED")
-                journal["requests"][project] = ["--expected-revision", str(current["registry_revision"]), "--expected-receipt-digest", current["receipt_digest"],
-                                                  "--pending-observation-digest", current["pending_observation_digest"], "--restore-proof", str(proof), "--restore-proof-sha256", expected]
-                M.CONFIG.atomic_write(path, M.dpapi(M.CONFIG.json_bytes(journal)))
-            outcome = registry(config, password, project, "restore", journal["requests"][project])
-            if outcome["status"] not in ("APPLIED", "REPLAYED") or not outcome["current"]["active"] or not outcome["current"]["fresh_matches_accepted"]:
-                raise M.Rejected("RESTORE_REGISTRY_NOT_VERIFIED")
-            journal["results"][project] = outcome
-            M.CONFIG.atomic_write(path, M.dpapi(M.CONFIG.json_bytes(journal)))
-        report = {"schema": "lattice.customer-restore.v1", "status": "CUSTOMER_RESTORE_IDENTITY_VERIFIED", "run_id": config["run_id"],
-                  "system_id": config["system_id"], "backup_sha256": journal["backup_sha256"], "projects": journal["results"],
-                  "workflow": "READBACK_REQUIRED", "cross_user_os_acceptance": "NOT_VERIFIED"}
+        # Do not start PostgreSQL, bootstrap schemas, run Registry restore, or
+        # write READY. Even legacy journal requests/results confer no authority.
+        # This gate blocks the customer manager/MCP entry, not direct OS access
+        # to the copied cluster or a separately launched native executable.
+        report = {"schema": "lattice.customer-restore.v1", "status": "CUSTOMER_RESTORE_QUARANTINED", "run_id": config["run_id"],
+                  "system_id": config["system_id"], "backup_sha256": journal["backup_sha256"],
+                  "projects": sorted(journal["proofs"]), "project_activation": "NOT_PERFORMED",
+                  "database_state": "NOT_CHECKED", "quarantine_scope": "CUSTOMER_MANAGER_ENTRYPOINTS",
+                  "workflow": "CURRENT_OWNER_REVIEW_REQUIRED", "cross_user_os_acceptance": "NOT_VERIFIED"}
         M.CONFIG.atomic_write(state / "restore-receipt.json", M.CONFIG.json_bytes(report))
-        M.CONFIG.atomic_write(state / "ready.json", M.CONFIG.json_bytes({"schema": M.SCHEMA, "run_id": config["run_id"], "system_id": config["system_id"]}))
-        (state / "restore.in-progress").unlink(missing_ok=True)
-        path.unlink()
         return report
 
 

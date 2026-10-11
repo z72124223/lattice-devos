@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { mkdir, mkdtemp, writeFile, readFile, link, rm } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
@@ -104,6 +106,93 @@ async function cache(f, projectId, sourceRoot) {
   await writeFile(path.join(root, 'runs', 'analysis.txt'), `Derived cache for ${projectId}`);
   return root;
 }
+
+test('progress I/O failures preserve the original error and resume the exact operation once', async t => {
+  for (const stage of ['rename-before-commit','rename-after-commit','rename-after-success','rename-twice','rename-after-unlink-persistence-failures','write','sync']) {
+    await t.test(stage, async child => {
+      const f=await fixture(child), plan=await f.preview();
+      const options={confirmDigest:plan.digest,maintenanceOffline:true,native:f.native};
+      const originalRename=fs.promises.rename, originalOpen=fs.promises.open;
+      const first=Object.assign(new Error('synthetic first I/O failure'),{code:'EPERM'});
+      const second=Object.assign(new Error('synthetic secondary I/O failure'),{code:'EIO'});
+      let injected=0;
+      const twice=stage.endsWith('twice'), afterUnlink=stage==='rename-after-unlink-persistence-failures';
+      const restore=()=>{fs.promises.rename=originalRename;fs.promises.open=originalOpen;syncBuiltinESMExports();};
+      child.after(restore);
+      fs.promises.rename=async(from,to)=>{
+        if(from===`${f.statePath}.tmp`&&to===f.statePath&&stage.startsWith('rename')
+          && f.applied===(stage==='rename-before-commit'?0:1)
+          && (!afterUnlink||!fs.existsSync(path.join(f.target,'target.txt')))
+          && injected<(afterUnlink?3:twice?2:1)) {
+          injected++;
+          if(stage==='rename-after-success') await originalRename(from,to);
+          // File-stage failures are returned as structured receipts. Also fail
+          // both later saves so the last durable removal intent must recover.
+          throw afterUnlink||injected===1?first:second;
+        }
+        return originalRename(from,to);
+      };
+      fs.promises.open=async(...args)=>{
+        const file=await originalOpen(...args);
+        if(args[0]===`${f.statePath}.tmp`&&f.applied===1&&!injected&&['write','sync'].includes(stage)) {
+          const method=stage==='write'?'writeFile':'sync';
+          file[method]=async()=>{injected++;throw first;};
+        }
+        return file;
+      };
+      syncBuiltinESMExports();
+      await assert.rejects(applyProjectPurge(plan,options),error=>error===first);
+      assert.equal(injected,afterUnlink?3:twice?2:1);
+      assert.equal(f.applied,stage==='rename-before-commit'?0:1);
+      await assert.rejects(readFile(`${f.statePath}.tmp`),{code:'ENOENT'});
+      await assert.rejects(readFile(`${f.statePath}.lock`),{code:'ENOENT'});
+      if(afterUnlink) {
+        await assert.rejects(readFile(path.join(f.target,'target.txt')),{code:'ENOENT'});
+        const persisted=JSON.parse(await readFile(f.statePath,'utf8'));
+        assert.equal(persisted.files.pendingRemoval,path.join(f.target,'target.txt'));
+      } else assert.equal(await readFile(path.join(f.target,'target.txt'),'utf8'),'target content');
+      restore();
+      assert.equal((await applyProjectPurge(plan,options)).status,'SCOPED_PURGED');
+      assert.equal(f.applied,1);
+      assert.equal(await readFile(path.join(f.survivor,'keep.txt'),'utf8'),'retained content');
+      await assert.rejects(readFile(`${f.statePath}.tmp`),{code:'ENOENT'});
+    });
+  }
+});
+
+test('an existing unknown progress temporary file is preserved and blocks before native work', async t => {
+  const f=await fixture(t), plan=await f.preview(), unknown='unknown recovery bytes';
+  await writeFile(`${f.statePath}.tmp`,unknown);
+  let calls=0;
+  await assert.rejects(applyProjectPurge(plan,{confirmDigest:plan.digest,maintenanceOffline:true,
+    native:async(...args)=>{calls++;return f.native(...args);}}),{code:'EEXIST'});
+  assert.equal(calls,0); assert.equal(f.applied,0);
+  assert.equal(await readFile(`${f.statePath}.tmp`,'utf8'),unknown);
+  assert.equal(await readFile(path.join(f.target,'target.txt'),'utf8'),'target content');
+});
+
+test('failed progress rename preserves a replacement file instead of treating it as owned', async t => {
+  const f=await fixture(t),plan=await f.preview(), originalRename=fs.promises.rename;
+  const failure=Object.assign(new Error('synthetic replacement'),{code:'EPERM'});
+  let replaced=false;
+  t.after(()=>{fs.promises.rename=originalRename;syncBuiltinESMExports();});
+  fs.promises.rename=async(from,to)=>{
+    if(from===`${f.statePath}.tmp`&&to===f.statePath&&f.applied===1&&!replaced) {
+      replaced=true;
+      await originalRename(from,`${from}.retained-fixture`);
+      await writeFile(from,'unknown replacement');
+      throw failure;
+    }
+    return originalRename(from,to);
+  };
+  syncBuiltinESMExports();
+  await assert.rejects(applyProjectPurge(plan,{confirmDigest:plan.digest,maintenanceOffline:true,native:f.native}),error=>error===failure);
+  assert.equal(replaced,true);assert.equal(f.applied,1);
+  assert.equal(await readFile(`${f.statePath}.tmp`,'utf8'),'unknown replacement');
+  const readback=await statusProjectPurge(plan,{native:f.native});
+  assert.equal(readback.status,'INCOMPLETE');assert.equal(readback.postgres.status,'PURGED');
+  assert.equal(await readFile(`${f.statePath}.tmp`,'utf8'),'unknown replacement');
+});
 
 test('attestation policy and seal stay bound through preview, apply and readback', async t => {
   const f=await fixture(t), calls=[];

@@ -6,6 +6,10 @@
 
 ## 先確認範圍
 
+若使用者選擇「清除 active 資料、保留可恢復歷史」，保留項目必須明列於驗收範圍。預設只移除登記的 junction 本身，不追蹤其實體目標；保留共享 Git、環境、其他專案知識及混合備份，不等於永久抹除完成。`directoryTargets` 是另外的明確選擇，此保留模式不填入實體目標。
+
+舊備份沒有目前的啟用權限。customer 還原一律保留隔離閘門，見 [備份恢復的隔離界線](CUSTOMER_RESTORE_QUARANTINE.md)。Control 的已關閉 SQLite 備份以 `node scripts/control-quarantine-import.mjs --source <絕對路徑> --destination <全新目錄> --sha256 <來源摘要>` 匯入；目的地先寫 DB 外隔離標記，再複製及唯讀驗證。普通 Store、server、MCP 與派工入口拒絕該副本，包括 junction 別名。候選沒有解除入口，也不把備份中的舊 catalog、approval 或 tombstone 當成目前退役決策。最新決策由現用環境及使用者當前確認持有；重新啟用需要另行核對。這是受支援還原入口的保護，不宣稱能辨識使用者手工搬走 DB 並丟棄標記的 OS 操作。
+
 1. 以 PostgreSQL Registry 的專案 ID 與 canonical path 核對 Control SQLite；名稱相同不代表同一專案。
 2. 盤點任務、執行中工作、租約、其他專案引用、登記路徑、worktree、junction、共用 Git 目錄，以及備份與外部資源。
 3. Codex 對話／附件、排程、遠端 repository／發布物、備份、獨立 Bot lifecycle DB 和外部 Graphify cache 另行逐項處理並讀回。封存對話不能填成永久刪除；沒有可用刪除介面時維持未完成。
@@ -23,6 +27,12 @@ PostgreSQL 必須已 STOPPED。維護入口鎖住 admission，核對既有 Regis
 
 ## 支援範圍與拒絕條件
 
+- 檔案 scope 先在 SQLite survivor rebuild 建立維護標記之前檢查，再於 SQLite 鎖內複驗。已存在的檔案漂移不會留下阻擋新 preview 的 swap marker；提交後續作仍使用同一 manifest、pending-removal intent 及 PG receipt。
+
+- 封存與重開不取消待送輸入。清除會比對同一 claim／input ID 是否已有 `DISPATCH_STARTED`，與正式 `snapshot_v1.pending_inputs` 一致；還有待送輸入就阻擋 preview／apply。必須由正常 Runtime 處理這些輸入，清除工具不會自行取消或吞掉它們。
+- Graphify 節點與邊的 `record_id` 只有在所有出現位置都屬於本次刪除範圍時，才加入存活資料的引用阻擋檢查；存活 analysis 仍持有相同 ID 時保留其引用。引用索引的 100,000 個不同識別值上限包含這些專屬 record ID 與 analysis／receipt 等父鍵；超過會回報 `PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED`，不能截斷後宣稱 READY。大量資料可串流讀取不等於引用索引沒有容量上限。
+- 進度檔的 write／sync／rename 暫時失敗，只清理本次成功建立、普通檔且身分仍吻合的 `.tmp`，保留原錯誤並允許同計畫續作。既存、被替換、清理失敗或程序強制終止留下的未知 `.tmp` 不會被採用或移除，仍阻擋 resume／finalize；`status` 可唯讀核對 PostgreSQL 收據。這些殘留需先人工核對操作、檔案身分與既有收據，不能盲目刪鎖或暫存檔，也不宣稱任意程序崩潰皆可自動復原。
+
 - PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 4,096 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。
 - 2026-10-10 初次在含 584,134 筆 Graphify records 的既有資料庫上完成唯讀預覽，耗時約 64 秒。後續核對發現，當時 4 筆 decision 引用其實屬於目標專案，是 selector 漏表造成誤判；9 份舊 analysis 的兩組配置也已由實際 Git hash、工作目錄與執行環境路徑精確重算吻合。這些修正不代表已刪除正式專案。
 - PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。舊版 `VERIFIED_SUFFIX_V1` 只接受目標命令構成全域歷史最後一段，清除後回到原始保留前綴，完整重播仍從起點開始。沒有選擇資料保留政策的舊計畫維持此限制。
@@ -38,6 +48,10 @@ PostgreSQL 必須已 STOPPED。維護入口鎖住 admission，核對既有 Regis
 - SQLite 重建保留其他決策及 sidecar 的原始 row、rowid、request digest；共享 `decision_state` 依原演算法重算，revision 是**存活列數**，清除後可下降。保留不含專案內容的 before/after revision、digest、operation digest 與驗證時間。舊全域 read/search packet 因身分不符而拒絕，必須重新讀取；B 的 exact mutation replay 回原決策和新的全域 revision/digest，沒有重新證明刪除前的全域封包。
 - 移除決策的 client_request_id 僅保留 domain SHA-256 tombstone，且檢查先於 exact replay。相同請求 ID 即使換 owner 或內容也拒絕；新 ID 配有效 owner 與新 state 可寫入新決策，這不是對相同內容的永久禁令。此行為列在 preview 的 `decisionRetirement`。未驗證的 legacy 資料仍標未知，不增加 SQLite epoch 來掩蓋歸屬問題。
 - 檔案：只接受權威清單中的絕對路徑；拒絕使用者家目錄、磁碟根、工具自身、其他專案、重疊根、祖先 junction、未支援的巢狀 repository 等。junction／symlink 僅移除連結，不追蹤目標。檔案預覽有數量、深度、manifest 大小上限。
+- 需要把已登記連結的實體目錄列入計畫時，可設定 `directoryTargets: [{"sourceRoot":"<Registry 或 claim 的精確連結根>","targetPath":"<該連結直接指向的實體目錄>"}]`，至多 64 項。這是明確選取，不是自行宣告所有權：工具重新讀取原生 PostgreSQL 預覽，只接受 `POSTGRES_REGISTRY_OBSERVATION`／`POSTGRES_CONVERSATION_CLAIM` 的來源，逐項核對直接指向、實體目錄、祖先身分與保護範圍。連結仍列為 `EXCLUDED_NOT_FOLLOWED`；通過核對的目標作為獨立根完整盤點，未選取的目標不自動納入。
+- `directoryTargets` 的所有請求、核對證據與阻擋都寫入預覽及報告；未知目錄不能被默默省略後回報 READY。呼叫者自填路徑、相同名稱、對話工作目錄、共同 Git 儲存區或 Graphify hash 都不能代替上述來源。未登記的獨立目錄仍回報 `PURGE_FILE_DIRECTORY_OWNERSHIP_NOT_PROVEN`，此版沒有替它補造 claim 或任意根的入口。
+- 明確納入不解除共享 Git、外部 Git 指標、父子重疊、硬連結、祖先連結與保護路徑的阻擋；即使兩個選取目錄共用同一 Git 儲存區，本版仍不支援整組共同刪除。根內的 `.venv` 連結僅移除連結，外部環境不追隨；普通子目錄則正常盤點，不以名稱忽略內容。備份與 Codex 對話範圍不因這項設定擴張。
+- 首次 Bot／PostgreSQL 清除前，重新取得權威根與保護清單，核對與原預覽完全相同的目錄證據；來源、指向、實體身分或範圍漂移即拒絕。PostgreSQL 已提交後續作沿原收據、檔案清單及逐項 intent，不重新發現範圍，也不要求已按計畫移除的來源連結仍存在。仍須離線、所有寫入者靜止；不宣稱能防惡意並行路徑替換。這項正常產品功能不能作為重試先前工具政策拒絕的替代路徑。
 - 硬連結：目前在盤點及執行前驗證時拒絕 `nlink > 1` 的檔案或連結，即使所有名稱看似位於同一專案。移除其中一個名稱會改變共用檔案的連結數與時間戳；本版沒有完整的硬連結歸屬與續作轉接器，因此須在任何 PostgreSQL／檔案刪除前阻擋，不能先刪一半再卡住，也不能略過時間戳驗證或改動外部連結以強行通過。
 - Control 圖譜磁碟快取：從共用快取目錄盤點全部直接子目錄，以 graph.json 格式、project_id、source_root、目錄鍵及內容摘要建立歸屬，涵蓋同專案不同 checkout。只有確定屬於目標的快取才加入相同檔案清單；內容變更、新增目標快取、未知目錄、缺失標頭、連結及超出盤點上限均阻擋。共用快取目錄與專案刪除根重疊也阻擋，以保護其他專案快取。此項不涵蓋 Runtime 的共用 Graphify 記憶體／索引或仍運作的 Control 記憶體快取，執行仍需停止相關寫入者。
 - 這不是磁碟安全抹除：SQLite／PostgreSQL 的備份、WAL、儲存媒體殘留及外部副本不由本入口保證消失。它驗證的是支援範圍的邏輯資料與路徑不再存在。
@@ -154,6 +168,10 @@ pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <latt
 ```
 
 PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.lattice` 下的證據，不連正式資料庫。Windows 檔案測試包含實際鎖檔及部分失敗續跑。協調層測試使用真 SQLite／檔案與受控 native adapter；真 PG fixture 的結果須另外報告，不能把 mock 當成完整部署驗收。
+
+`-Scenario claim-pending` 以正式 observation API 驗證封存／重開後待送輸入仍阻擋，送完同一 input 才解除；另一專案的待送輸入不阻擋目標。`-Scenario graph-record-references` 分別在三個新 cluster 驗證專屬節點、專屬邊與共用 ID 的跨專案引用。
+
+`-Scenario graph-capacity` 驗證 110,000 筆原生圖譜資料、尾列引用、清除與保留側重播，不需要舊版 binary。大型效能驗收應在上述三條 Cargo 建置指令加入 `--release`，並傳入 `target/release` 中成組的 binary；除錯建置的耗時不代表交付版效能，兩者都維持相同的 60 秒快照期限。這項大型驗收須明確選擇，不由一般 `all` 推定通過。
 
 `-Scenario inventory` 可單獨驗證運作中／未安裝維護元件的盤點不改動資料、離線要求仍生效，以及狀態改變後的舊摘要被拒絕。
 

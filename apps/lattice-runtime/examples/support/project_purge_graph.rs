@@ -46,8 +46,10 @@ pub fn run(
     )
     .unwrap();
     let mut result = Vec::new();
+    let shared_records = mode.contains("shared-records");
+    let verify_survivor = mode.starts_with("graph-verify-");
     for (label, directory, byte) in [("target", "project-a", '1'), ("survivor", "project-b", '2')] {
-        if mode == "graph-verify-survivor" && label == "target" {
+        if verify_survivor && label == "target" {
             continue;
         }
         let source_root = if label == "target" && mode == "graph-seed-source" {
@@ -65,7 +67,12 @@ pub fn run(
             RequestId::new(format!("graph-{label}")).unwrap(),
             TaskId::new("purge-graph").unwrap(),
             AttemptId::new(format!("attempt-{label}")).unwrap(),
-            ProjectSnapshotId::new(format!("snapshot-{label}")).unwrap(),
+            ProjectSnapshotId::new(if shared_records {
+                "snapshot-shared".into()
+            } else {
+                format!("snapshot-{label}")
+            })
+            .unwrap(),
             digest(byte),
         )
         .unwrap();
@@ -91,7 +98,7 @@ pub fn run(
             5,
         )
         .unwrap();
-        if mode == "graph-verify-survivor" {
+        if verify_survivor {
             let receipt = memory.load_receipt(&request).unwrap();
             let reflection = memory.load_reflection(&request).unwrap();
             result.push(json!({"source":label,"receipt":receipt.receipt_digest().as_str(),"reflection":reflection.receipt_digest().as_str()}));
@@ -113,12 +120,19 @@ pub fn run(
             (0..match mode {
                 "graph-seed-large" => 55_000,
                 "graph-seed-compat" => 8,
+                "graph-seed-shared-records" => 2,
                 _ => 1,
             })
                 .map(|index| {
                     GraphifyRawNode::new(
                         format!("synthetic-node-{index}"),
-                        if mode == "graph-seed-compat" {
+                        if shared_records {
+                            if index == 0 {
+                                "synthetic shared graph".into()
+                            } else {
+                                format!("synthetic {label} graph")
+                            }
+                        } else if mode == "graph-seed-compat" {
                             format!(
                                 "synthetic graph {}",
                                 [
@@ -142,7 +156,21 @@ pub fn run(
                     .unwrap()
                 })
                 .collect(),
-            vec![],
+            if shared_records {
+                vec![
+                    GraphifyRawEdge::new(
+                        "synthetic-edge",
+                        "synthetic-node-0",
+                        "synthetic-node-1",
+                        "uses",
+                        GraphSourceProvenance::new(&source, Some(1), Some(2)).unwrap(),
+                        GraphConfidence::Extracted,
+                    )
+                    .unwrap(),
+                ]
+            } else {
+                vec![]
+            },
             digest('4'),
             digest('5'),
             digest('6'),
