@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { open, readFile, writeFile, rename, unlink } from 'node:fs/promises';
+import { lstat, open, readFile, writeFile, rename, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -186,9 +186,24 @@ async function saveState(plan, state) {
   // power-loss ordering guarantee for directory entries (especially on Windows).
   const temporary = `${plan.statePath}.tmp`;
   const file = await open(temporary, 'wx', 0o600);
-  try { await file.writeFile(JSON.stringify(state, null, 2)); await file.sync(); }
-  finally { await file.close(); }
-  await rename(temporary, plan.statePath);
+  let identity;
+  try {
+    identity = await file.stat({ bigint: true });
+    await file.writeFile(JSON.stringify(state, null, 2)); await file.sync();
+    await file.close();
+    await rename(temporary, plan.statePath);
+  } catch (error) {
+    // Remove only the file this call created, never an existing recovery file
+    // or a replacement. Keep the original failure if close/cleanup also fails.
+    await file.close().catch(() => {});
+    if (identity) try {
+      const current = await lstat(temporary, { bigint: true });
+      if (current.isFile() && !current.isSymbolicLink() && current.nlink === 1n
+        && current.dev === identity.dev && current.ino === identity.ino
+        && current.birthtimeNs === identity.birthtimeNs) await unlink(temporary);
+    } catch { /* Unknown or unremovable recovery files remain blocking. */ }
+    throw error;
+  }
 }
 function matchingReceipt(plan, receipt) {
   if (plan.postgres.registryStrategy === 'ATTESTED_EPOCH_V1'
@@ -256,7 +271,7 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     if (state) {
       state.status = 'INCOMPLETE'; state.error = /^[A-Z_]+$/.test(error.message) ? error.message : 'PURGE_STAGE_FAILED';
       // A timeout may have committed PostgreSQL. Never label this as untouched.
-      await saveState(plan, state);
+      await saveState(plan, state).catch(() => {});
     }
     throw error;
   } finally { await lock.close(); await unlink(`${plan.statePath}.lock`); }

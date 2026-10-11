@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history','claim-reconciliation'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity'].includes(args.scenario));
 if (['upgrade','streaming','streaming-large'].includes(args.scenario)) assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -98,7 +98,60 @@ function establish(order, { install = true } = {}) {
 }
 
 try {
-  if(args.scenario==='claim-reconciliation') {
+  if(args.scenario==='claim-pending') {
+    const {env,seeded}=establish('claim-pending');
+    const runtimeSql=query=>command(args.psql,['-X','-qAt','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],
+      {...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},`BEGIN ISOLATION LEVEL SERIALIZABLE; ${query}; COMMIT;`,'pending-runtime').stdout.trim();
+    const quote=value=>value===null?'NULL':`'${String(value).replaceAll("'","''")}'`;
+    runtimeSql(`SELECT control_product.metadata_write_v1('${seeded.targetTaskRef}','pending-meta',repeat('1',64),0,'Synthetic','Pending input guard',2,NULL,ARRAY[]::text[]); SELECT control_product.claim_v1('${seeded.targetTaskRef}','pending-claim',repeat('2',64),'EXECUTION','synthetic','gpt-6-astra',${quote(seeded.targetCanonicalPath)})`);
+    let seq=0;
+    const observe=(kind,turn=null,input=null,approval=null,payload=null)=>{
+      const result=JSON.parse(runtimeSql(`SELECT control_product.observe_v1('pending-claim','pending-event-${seq}',repeat('3',64),${seq},'${kind}','pending-thread',${quote(turn)},'synthetic event',NULL,${quote(approval)},NULL,${quote(input)},${payload===null?'NULL':`${quote(JSON.stringify(payload))}::jsonb`})`));
+      assert.equal(result.sequence,++seq);
+    };
+    const claim=()=>JSON.parse(runtimeSql(`SELECT control_product.snapshot_v1('${seeded.targetProjectId}',ARRAY['${seeded.targetTaskRef}'])`)).claims[0];
+    const pending=()=>claim().pending_inputs;
+    const request={projectId:seeded.targetProjectId,operationId:'pending-input-guard'};
+    const preview=()=>native(env,{...request,action:'preview'}).value;
+    const blocked=label=>{
+      const before=hash(rows(env,{includeMaintenance:true})), plan=preview();
+      assert.equal(plan.status,'BLOCKED',label);
+      assert.ok(plan.blockers.some(b=>b.code==='LIVE_OR_UNCERTAIN_CONVERSATION_CLAIM'),label);
+      const result=native(env,{...request,action:'apply',authorization:'ERASE_PROJECT_DATA',expectedScopeDigest:plan.scopeDigest},false);
+      assert.ok(result.exitCode!==0||result.value?.status==='BLOCKED',label);
+      assert.equal(hash(rows(env,{includeMaintenance:true})),before);
+      check(label);
+    };
+    observe('THREAD_BOUND'); observe('DISPATCH_STARTED',null,'pending-claim');
+    observe('TURN_BOUND','initial-turn','pending-claim');
+    observe('QUESTION_REQUESTED','initial-turn','pending-claim','fixture-question',{prompt:'synthetic'});
+    assert.equal(claim().pending_questions.length,1);
+    blocked('unresolved-question-blocks-before-terminal-event');
+    observe('TURN_COMPLETED','initial-turn','pending-claim');
+    observe('ARCHIVED','initial-turn'); observe('REOPENED','initial-turn');
+    assert.equal(claim().pending_questions.length,0);
+    assert.equal(preview().status,'READY');
+    check('terminal-question-and-reopened-idle-claim-match-runtime-projection');
+    runtimeSql(`SELECT control_product.metadata_write_v1('${seeded.survivorTaskRef}','other-meta',repeat('4',64),0,'Synthetic','Other pending input',2,NULL,ARRAY[]::text[]); SELECT control_product.claim_v1('${seeded.survivorTaskRef}','other-claim',repeat('5',64),'EXECUTION','synthetic','gpt-6-astra',${quote(seeded.survivorCanonicalPath)}); SELECT control_product.observe_v1('other-claim','other-bound',repeat('6',64),0,'THREAD_BOUND','other-thread',NULL,'synthetic',NULL,NULL,NULL,NULL,NULL); SELECT control_product.observe_v1('other-claim','other-queued',repeat('7',64),1,'INPUT_QUEUED','other-thread',NULL,'synthetic queued',NULL,NULL,NULL,'other-input',NULL)`);
+    assert.equal(preview().status,'READY');
+    check('another-project-pending-input-does-not-block-target');
+    observe('INPUT_QUEUED',null,'queued-a'); observe('INPUT_QUEUED',null,'queued-b');
+    observe('ARCHIVED','initial-turn');
+    assert.equal(pending().length,2); blocked('archived-pending-inputs-block-preview-and-apply-without-writes');
+    observe('REOPENED','initial-turn');
+    assert.equal(pending().length,2); blocked('reopened-pending-inputs-remain-blocking');
+    observe('DISPATCH_STARTED',null,'queued-a'); observe('TURN_BOUND','second-turn','queued-a');
+    observe('TURN_COMPLETED','second-turn','queued-a'); observe('ARCHIVED','second-turn');
+    assert.deepEqual(pending().map(x=>x.input_id),['queued-b']);
+    blocked('another-completed-input-does-not-clear-the-unsent-input');
+    observe('REOPENED','second-turn'); observe('DISPATCH_STARTED',null,'queued-b');
+    observe('TURN_BOUND','third-turn','queued-b'); observe('TURN_COMPLETED','third-turn','queued-b'); observe('ARCHIVED','third-turn');
+    assert.equal(pending().length,0);
+    const plan=preview(); assert.equal(plan.status,'READY');
+    assert.equal(native(env,{...request,action:'apply',authorization:'ERASE_PROJECT_DATA',expectedScopeDigest:plan.scopeDigest}).value.status,'PURGED');
+    assert.equal(JSON.parse(command(args['seed-binary'],['verify-survivor'],env,undefined,'pending-survivor-replay').stdout).status,'VERIFIED');
+    check('fully-dispatched-terminal-claim-can-purge-and-survivor-replays');
+  } else if(args.scenario==='claim-reconciliation') {
     const {env,seeded,root}=establish('claim-reconciliation');
     const runtimeSql=query=>command(args.psql,['-X','-At','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],
       {...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},`BEGIN ISOLATION LEVEL SERIALIZABLE; ${query}; COMMIT;`,'claim-runtime');
@@ -241,17 +294,17 @@ try {
     assert.equal(native(env,{action:'preview',projectId:seeded.survivorProjectId,operationId:'restored',registryPolicy:'MINIMAL_ATTESTATION'}).value.status,'READY');
     check('exact-catalog-rejects-retirement-table-permission-drift');
   }
-  if(['streaming','streaming-large'].includes(args.scenario)) {
-    for(const large of [args.scenario==='streaming-large']) {
+  if(['streaming','streaming-large','graph-capacity'].includes(args.scenario)) {
+    for(const large of [args.scenario!=='streaming']) {
       const {env,seeded}=establish(large?'streaming-large':'streaming-small');
       env.LATTICE_DELIVERY_GIT_EXE=command('where.exe',['git.exe'],baseEnv,undefined,'fixture-git-path').stdout.trim().split(/\r?\n/)[0];
       command(args['epoch-binary'],['graph-install'],env,undefined,'graph-install');
       const graph=JSON.parse(command(args['epoch-binary'],[large?'graph-seed-large':'graph-seed-compat'],env,undefined,'graph-seed-streaming').stdout).records;
       const survivor=graph.find(row=>row.source==='survivor');
       const request={projectId:seeded.targetProjectId,operationId:large?'stream-large':'stream-small'};
-      const old=native(env,{action:'preview',...request},!large,args['legacy-binary']);
+      const old=args.scenario==='graph-capacity'?null:native(env,{action:'preview',...request},!large,args['legacy-binary']);
       if(large) {
-        assert.equal(old.exitCode,2); assert.match(old.stderr,/PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED/);
+        if(old) { assert.equal(old.exitCode,2); assert.match(old.stderr,/PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED/); }
         const size=JSON.parse(sql(env,"SELECT json_build_object('count',count(*),'bytes',sum(octet_length(to_jsonb(p)::text))) FROM memory.codebase_memory_records p"));
         assert.equal(size.count,110000); assert.ok(size.bytes>64*1024*1024);
         check('valid-native-graph-fixture-exceeds-both-old-total-bounds',size);
@@ -350,6 +403,50 @@ try {
     assert.deepEqual(selectRows(rows(env),[survivorGraph.receipt,survivorGraph.configuration]),selectRows(before,[survivorGraph.receipt,survivorGraph.configuration]));
     assert.equal(native(env,{action:'status',...request}).value.status,'PURGED');
     check('historical-graph-purge-preserves-all-survivor-rows-and-status-verifies');
+  }
+  if(args.scenario.startsWith('graph-record-')) {
+      // Each mode owns a fresh cluster: Runtime bootstrap identities are
+      // cluster-scoped and cannot be replaced by another fixture run ID.
+      const kind=args.scenario.slice('graph-record-'.length).toUpperCase();
+      const {env,seeded}=establish(`graph-record-${kind.toLowerCase()}`);
+      env.LATTICE_DELIVERY_GIT_EXE=command('where.exe',['git.exe'],baseEnv,undefined,'reference-git').stdout.trim().split(/\r?\n/)[0];
+      command(args['epoch-binary'],['graph-install'],env,undefined,'reference-graph-install');
+      const records=JSON.parse(command(args['epoch-binary'],['graph-seed-shared-records'],env,undefined,'reference-graph-seed').stdout).records;
+      const target=records.find(r=>r.source==='target'),survivor=records.find(r=>r.source==='survivor');
+      const graphRecords=config=>JSON.parse(sql(env,`SELECT json_agg(json_build_object('id',encode(r.record_id,'hex'),'kind',r.graph_kind) ORDER BY r.record_id) FROM memory.codebase_memory_records r JOIN memory.codebase_memory_analyses a USING(analysis_digest) WHERE encode(a.configuration_digest,'hex')='${config}'`));
+      const a=graphRecords(target.configuration),b=graphRecords(survivor.configuration);
+      assert.equal(a.length,3);assert.equal(b.length,3);
+      assert.equal(a.filter(r=>r.kind==='EDGE').length,1);
+      const shared=a.filter(r=>b.some(s=>s.id===r.id));assert.equal(shared.length,1);
+      const selected=kind==='SHARED'?shared[0]:a.find(r=>r.kind===kind&&!b.some(s=>s.id===r.id));
+      assert.match(selected.id,/^[a-f0-9]{64}$/);
+      const head=JSON.parse(sql(env,'SELECT row_to_json(s) FROM control_product.decision_state s'));
+      const content=`Graph evidence ${selected.id}`;
+      command(args.psql,['-X','-qAt','-h','127.0.0.1','-p',String(port),'-U','lattice_runtime_login','-d',`lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0,8)}_base`,'-v','ON_ERROR_STOP=1','-f','-'],
+        {...env,PGPASSWORD:password,PGCLIENTENCODING:'UTF8',PGOPTIONS:'-c role=lattice_runtime -c search_path=pg_catalog'},
+        `BEGIN ISOLATION LEVEL SERIALIZABLE; SELECT control_product.decision_write_v1('record-reference','${seeded.survivorProjectId}',NULL,'graph evidence','${content}','synthetic fixture','approved_document','file:fixture#graph',NULL,'record-reference-request',${head.revision},'${head.digest}','${hash(content)}'); COMMIT;`,'reference-decision');
+      const before=rows(env,{includeMaintenance:true}),request={projectId:seeded.targetProjectId,operationId:'record-reference'};
+      const plan=native(env,{...request,action:'preview'}).value;
+      assert.equal(plan.counts['memory.codebase_memory_records'],3);
+      assert.deepEqual(rows(env,{includeMaintenance:true}),before);
+      const applied=native(env,{...request,action:'apply',authorization:'ERASE_PROJECT_DATA',expectedScopeDigest:plan.scopeDigest}).value;
+      if(kind!=='SHARED') {
+        assert.equal(plan.status,'BLOCKED');assert.equal(applied.status,'BLOCKED');
+        assert.ok(plan.blockers.some(x=>x.code==='CROSS_SCOPE_OR_UNSUPPORTED_REFERENCE'&&x.table==='control_product.decisions'));
+        assert.deepEqual(rows(env,{includeMaintenance:true}),before);
+        check(`exclusive-${kind.toLowerCase()}-reference-blocks-preview-and-apply-without-writes`);
+      } else {
+        assert.equal(plan.status,'READY',JSON.stringify(plan.blockers));assert.equal(applied.status,'PURGED');
+        const after=rows(env,{includeMaintenance:true});
+        const survivorKeys=[survivor.configuration,survivor.receipt,survivor.reflection,seeded.survivorProjectId];
+        assert.deepEqual(selectRows(after,survivorKeys),selectRows(before,survivorKeys));
+        assert.deepEqual(graphRecords(survivor.configuration),b);
+        assert.equal(sql(env,`SELECT count(*) FROM memory.codebase_memory_records WHERE record_id=decode('${selected.id}','hex')`),'1');
+        const replay=JSON.parse(command(args['epoch-binary'],['graph-verify-shared-records-survivor'],env,undefined,'reference-survivor-readback').stdout);
+        assert.equal(replay.records[0].receipt,survivor.receipt);
+        assert.equal(replay.records[0].reflection,survivor.reflection);
+        check('shared-record-reference-remains-valid-and-survivor-nodes-edges-replay-unchanged');
+      }
   }
   if(args.scenario==='graph-ownership') {
     const {env,seeded,root}=establish('graph-ownership');

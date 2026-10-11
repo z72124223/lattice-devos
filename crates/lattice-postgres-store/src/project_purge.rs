@@ -871,7 +871,31 @@ fn prepare<C: GenericClient>(
             let path: String = row.get(1);
             if !path.is_empty() { roots.push(json!({"path":path,"source":"POSTGRES_CONVERSATION_CLAIM"})); }
         }
-        let active: i64 = db(client.query_one("SELECT count(*)::bigint FROM control_product.conversation_claims c CROSS JOIN LATERAL (SELECT COALESCE(max(sequence) FILTER(WHERE kind IN ('THREAD_BOUND','DISPATCH_STARTED','TURN_BOUND')),0) dispatch,COALESCE(max(sequence) FILTER(WHERE kind IN ('TURN_COMPLETED','TURN_FAILED','INTERRUPTED','VERIFICATION_FAILED','VERIFICATION_PASSED','CLAIM_FAILED')),-1) terminal,(array_agg(kind ORDER BY sequence DESC))[1] latest FROM control_product.conversation_observations o WHERE o.claim_id=c.claim_id) s WHERE c.project_id=$1 AND (s.terminal<s.dispatch OR s.latest IS NULL OR s.latest IN ('QUESTION_REQUESTED','APPROVAL_REQUESTED','INPUT_QUEUED'))", &[&project]))?.get(0);
+        // Archival/reopening does not cancel durable input intent. Match the
+        // pending_inputs projection in control_product.snapshot_v1: only a
+        // dispatch of that same input in that same claim consumes it.
+        let active: i64 = db(client.query_one(
+            "SELECT count(*)::bigint FROM control_product.conversation_claims c
+             CROSS JOIN LATERAL (
+               SELECT COALESCE(max(sequence) FILTER(WHERE kind IN ('THREAD_BOUND','DISPATCH_STARTED','TURN_BOUND')),0) dispatch,
+                 COALESCE(max(sequence) FILTER(WHERE kind IN ('TURN_COMPLETED','TURN_FAILED','INTERRUPTED','VERIFICATION_FAILED','VERIFICATION_PASSED','CLAIM_FAILED')),-1) terminal,
+                 (array_agg(kind ORDER BY sequence DESC))[1] latest
+               FROM control_product.conversation_observations o WHERE o.claim_id=c.claim_id
+             ) s WHERE c.project_id=$1 AND (
+               s.terminal<s.dispatch OR s.latest IS NULL
+               OR s.latest IN ('QUESTION_REQUESTED','APPROVAL_REQUESTED','INPUT_QUEUED')
+               OR EXISTS (
+                 SELECT 1 FROM control_product.conversation_observations queued
+                 WHERE queued.claim_id=c.claim_id AND queued.kind='INPUT_QUEUED'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM control_product.conversation_observations sent
+                     WHERE sent.claim_id=c.claim_id AND sent.kind='DISPATCH_STARTED'
+                       AND sent.input_id=queued.input_id
+                   )
+               )
+             )",
+            &[&project],
+        ))?.get(0);
         if active > 0 {
             blockers.push(json!({"code":"LIVE_OR_UNCERTAIN_CONVERSATION_CLAIM","count":active}));
         }
@@ -941,7 +965,21 @@ fn prepare<C: GenericClient>(
         if !table_names.contains(&table) {
             continue;
         }
-        if table.starts_with("memory.") && table != "memory.codebase_memory_records" {
+        if table == "memory.codebase_memory_records" {
+            // A record ID can occur in multiple analyses. References become
+            // dangling only when every occurrence is selected for erasure.
+            let query = format!(
+                "SELECT encode(p.record_id,'hex') FROM ONLY {table} p WHERE true{PARAMS}
+                 GROUP BY p.record_id HAVING bool_or({predicate}) AND bool_and({predicate}) LIMIT 100001"
+            );
+            let mut rows = db(client.query_raw(&query, params.iter().copied()))?;
+            while let Some(row) = db(rows.next())? {
+                graph_reference_keys.insert(row.get(0));
+                if graph_reference_keys.len() > 100_000 {
+                    return Err("PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED");
+                }
+            }
+        } else if table.starts_with("memory.") {
             // Only parent identities are needed before scanning surviving rows.
             // DISTINCT avoids retaining the same analysis key for every record.
             let query = format!(

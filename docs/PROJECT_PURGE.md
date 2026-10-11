@@ -23,6 +23,10 @@ PostgreSQL 必須已 STOPPED。維護入口鎖住 admission，核對既有 Regis
 
 ## 支援範圍與拒絕條件
 
+- 封存與重開不取消待送輸入。清除會比對同一 claim／input ID 是否已有 `DISPATCH_STARTED`，與正式 `snapshot_v1.pending_inputs` 一致；還有待送輸入就阻擋 preview／apply。必須由正常 Runtime 處理這些輸入，清除工具不會自行取消或吞掉它們。
+- Graphify 節點與邊的 `record_id` 只有在所有出現位置都屬於本次刪除範圍時，才加入存活資料的引用阻擋檢查；存活 analysis 仍持有相同 ID 時保留其引用。引用索引的 100,000 個不同識別值上限包含這些專屬 record ID 與 analysis／receipt 等父鍵；超過會回報 `PROJECT_PURGE_SCOPE_CAPACITY_EXCEEDED`，不能截斷後宣稱 READY。大量資料可串流讀取不等於引用索引沒有容量上限。
+- 進度檔的 write／sync／rename 暫時失敗，只清理本次成功建立、普通檔且身分仍吻合的 `.tmp`，保留原錯誤並允許同計畫續作。既存、被替換、清理失敗或程序強制終止留下的未知 `.tmp` 不會被採用或移除，仍阻擋 resume／finalize；`status` 可唯讀核對 PostgreSQL 收據。這些殘留需先人工核對操作、檔案身分與既有收據，不能盲目刪鎖或暫存檔，也不宣稱任意程序崩潰皆可自動復原。
+
 - PostgreSQL 保留資料驗證在同一交易內以唯讀 cursor 每批 4,096 列串流；全量列數與總 JSON 不再受舊版 100,000 列／64 MiB 上限限制。資料表使用舊 `BTreeMap` 字節順序，列仍使用 PostgreSQL `COLLATE "C"` 排序；scope v2/v3/v4、afterDigest 及保留資料摘要維持原序列化，舊計畫與收據可雙向核對。每列仍最多 64 MiB、每次完整快照最多 60 秒，單條 SQL 取原期限與剩餘快照期限的較小值（一般清除 30 秒、圖譜盤點 15 秒），零或負剩餘時間直接拒絕，不能變成無期限。超時不回傳部分摘要；整體 CLI 期限仍在。舊 Registry 尾段參照盤點與歸屬索引另保留原有容量限制，不代表任何大小、任何資料種類皆可清除。
 - 2026-10-10 初次在含 584,134 筆 Graphify records 的既有資料庫上完成唯讀預覽，耗時約 64 秒。後續核對發現，當時 4 筆 decision 引用其實屬於目標專案，是 selector 漏表造成誤判；9 份舊 analysis 的兩組配置也已由實際 Git hash、工作目錄與執行環境路徑精確重算吻合。這些修正不代表已刪除正式專案。
 - PostgreSQL：在既有 Store `STOPPED` 維護狀態，以專用 migrator 連線執行。舊版 `VERIFIED_SUFFIX_V1` 只接受目標命令構成全域歷史最後一段，清除後回到原始保留前綴，完整重播仍從起點開始。沒有選擇資料保留政策的舊計畫維持此限制。
@@ -154,6 +158,10 @@ pwsh -NoProfile -File scripts/test-project-purge-postgres.ps1 -PurgeBinary <latt
 ```
 
 PG harness 使用新的 loopback cluster、合成專案與任務，保留 `.lattice` 下的證據，不連正式資料庫。Windows 檔案測試包含實際鎖檔及部分失敗續跑。協調層測試使用真 SQLite／檔案與受控 native adapter；真 PG fixture 的結果須另外報告，不能把 mock 當成完整部署驗收。
+
+`-Scenario claim-pending` 以正式 observation API 驗證封存／重開後待送輸入仍阻擋，送完同一 input 才解除；另一專案的待送輸入不阻擋目標。`-Scenario graph-record-references` 分別在三個新 cluster 驗證專屬節點、專屬邊與共用 ID 的跨專案引用。
+
+`-Scenario graph-capacity` 驗證 110,000 筆原生圖譜資料、尾列引用、清除與保留側重播，不需要舊版 binary。大型效能驗收應在上述三條 Cargo 建置指令加入 `--release`，並傳入 `target/release` 中成組的 binary；除錯建置的耗時不代表交付版效能，兩者都維持相同的 60 秒快照期限。這項大型驗收須明確選擇，不由一般 `all` 推定通過。
 
 `-Scenario inventory` 可單獨驗證運作中／未安裝維護元件的盤點不改動資料、離線要求仍生效，以及狀態改變後的舊摘要被拒絕。
 
