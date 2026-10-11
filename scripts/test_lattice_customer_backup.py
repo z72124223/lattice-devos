@@ -3,7 +3,6 @@ from contextlib import contextmanager
 import json
 from pathlib import Path
 import tempfile
-from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -12,21 +11,28 @@ M = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(M)
 
 
 class BackupTests(unittest.TestCase):
-    def test_finalize_restored_catalog_bootstraps_before_probe_and_ready(self):
-        for failure in (None, "bootstrap", "probe", "journal"):
+    def test_finalize_quarantines_legacy_catalog_without_processes_or_activation(self):
+        for failure in (None, "journal", "proof", "report"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
                 state = Path(directory).resolve()
                 (state / "installation.json").write_bytes(b"sealed fixture installation")
-                (state / "projects.json").write_bytes(b'{"projects":[]}')
-                (state / "restore.in-progress").write_bytes(b"pending restore")
+                (state / "projects.json").write_bytes(b'{"projects":[{"id":"old-project"}]}')
+                (state / "restore-proofs").mkdir()
+                proof = state / "restore-proofs/old-project.json"
+                proof.write_bytes(b"original project identity proof")
                 config = {"root": str(state), "run_id": "a" * 32, "system_id": "fixture-system"}
                 journal = {"schema": "lattice.customer-restore.v1", "root": str(state),
                            "installation_sha256": M.M.file_digest(state / "installation.json"),
                            "catalog_sha256": M.M.file_digest(state / "projects.json"),
-                           "proofs": {}, "requests": {}, "results": {}, "backup_sha256": "b" * 64}
+                           "proofs": {"old-project": M.M.file_digest(proof)},
+                           "requests": {"old-project": ["old approval from backup"]},
+                           "results": {"old-project": {"status": "APPLIED", "current": {"active": True}}},
+                           "backup_sha256": "b" * 64}
                 if failure == "journal": journal["installation_sha256"] = "0" * 64
+                if failure == "proof": proof.write_bytes(b"changed proof")
                 pending = state / "restore.pending.dpapi"
                 pending.write_bytes(M.M.CONFIG.json_bytes(journal))
+                pending_bytes = pending.read_bytes()
                 events = []; active = set()
 
                 @contextmanager
@@ -36,45 +42,100 @@ class BackupTests(unittest.TestCase):
                     finally:
                         active.remove(name); events.append(name + "-exit")
 
-                def step(name, *arguments):
+                real_write = M.M.CONFIG.atomic_write
+                def write(target, data):
                     self.assertEqual(active, {"lease", "manager"})
                     self.assertFalse((state / "ready.json").exists())
-                    self.assertFalse((state / "restore-receipt.json").exists())
-                    self.assertEqual(arguments[:2], (config, "fixture-secret"))
-                    if name == "bootstrap": self.assertEqual(arguments[2:], ("--postgres-bootstrap",))
-                    events.append(name)
-                    if failure == name: raise M.M.Rejected("FIXTURE_" + name.upper() + "_FAILED")
+                    self.assertIn(target.name, ("restore.in-progress", "restore-receipt.json"))
+                    if target.name == "restore-receipt.json" and failure == "report":
+                        raise OSError("synthetic report interruption")
+                    real_write(target, data)
 
-                fake_update = SimpleNamespace(probe=lambda *args: step("probe", *args))
-                fake_spec = SimpleNamespace(loader=SimpleNamespace(exec_module=lambda module: None))
                 with (patch.object(M.M, "load", return_value=(config, "fixture-secret")) as load,
                       patch.object(M.M, "dpapi", side_effect=lambda data, **kwargs: data),
                       patch.object(M.M, "runtime_lease", side_effect=lambda root, **kwargs: lock("lease")) as lease,
                       patch.object(M.M.CONFIG, "manager_lock", side_effect=lambda path: lock("manager")),
-                      patch.object(M.M, "start", side_effect=lambda *args: step("start", *args)),
-                      patch.object(M.M, "runtime_action", side_effect=lambda *args: step("bootstrap", *args)),
-                      patch.object(M.importlib.util, "spec_from_file_location", return_value=fake_spec),
-                      patch.object(M.importlib.util, "module_from_spec", return_value=fake_update)):
+                      patch.object(M.M, "start", side_effect=AssertionError("No database startup")),
+                      patch.object(M.M, "runtime_action", side_effect=AssertionError("No bootstrap or native invocation")),
+                      patch.object(M, "registry", side_effect=AssertionError("No observation or activation")),
+                      patch.object(M.importlib.util, "spec_from_file_location", side_effect=AssertionError("No update probe")),
+                      patch.object(M.M.CONFIG, "atomic_write", side_effect=write)):
                     if failure:
-                        code = "RESTORE_JOURNAL_IDENTITY_REJECTED" if failure == "journal" else "FIXTURE_" + failure.upper() + "_FAILED"
-                        with self.assertRaisesRegex(M.M.Rejected, code): M.finalize_restore(state)
+                        exception, code = {"journal": (M.M.Rejected, "RESTORE_JOURNAL_IDENTITY_REJECTED"),
+                                           "proof": (M.M.Rejected, "RESTORE_PROOF_CHANGED"),
+                                           "report": (OSError, "synthetic report interruption")}[failure]
+                        with self.assertRaisesRegex(exception, code): M.finalize_restore(state)
                     else:
                         result = M.finalize_restore(state)
-                        self.assertEqual(result["status"], "CUSTOMER_RESTORE_IDENTITY_VERIFIED")
-                        self.assertEqual(result["workflow"], "READBACK_REQUIRED")
+                        self.assertEqual(result["status"], "CUSTOMER_RESTORE_QUARANTINED")
+                        self.assertEqual(result["workflow"], "CURRENT_OWNER_REVIEW_REQUIRED")
+                        self.assertEqual(result["projects"], ["old-project"])
+                        self.assertEqual(result["project_activation"], "NOT_PERFORMED")
+                        self.assertEqual(result["database_state"], "NOT_CHECKED")
                     lease.assert_called_once_with(state, exclusive=True)
                     self.assertEqual(load.call_count, 2)
                     load.assert_called_with(state, allow_restore=True)
-                steps = {None: ["start", "bootstrap", "probe"], "bootstrap": ["start", "bootstrap"],
-                         "probe": ["start", "bootstrap", "probe"], "journal": []}[failure]
-                self.assertEqual(events, ["lease-enter", "manager-enter", *steps, "manager-exit", "lease-exit"])
+                self.assertEqual(events, ["lease-enter", "manager-enter", "manager-exit", "lease-exit"])
+                self.assertEqual(pending.read_bytes(), pending_bytes)
+                self.assertFalse((state / "ready.json").exists())
+                if failure != "journal": self.assertTrue((state / "restore.in-progress").is_file())
                 if failure:
-                    self.assertTrue(pending.exists()); self.assertTrue((state / "restore.in-progress").exists())
-                    self.assertFalse((state / "ready.json").exists())
                     self.assertFalse((state / "restore-receipt.json").exists())
-                else:
-                    self.assertFalse(pending.exists()); self.assertFalse((state / "restore.in-progress").exists())
-                    self.assertTrue((state / "ready.json").is_file())
+                with self.assertRaisesRegex(M.M.Rejected, "CUSTOMER_RESTORE_FINALIZATION_REQUIRED"):
+                    M.M.load(state)
+
+    def test_quarantine_retry_after_report_interruption_preserves_both_gates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory).resolve()
+            (state / "installation.json").write_bytes(b"fixture installation")
+            (state / "projects.json").write_bytes(b'{"projects":[]}')
+            config = {"root": str(state), "run_id": "a" * 32, "system_id": "fixture-system"}
+            journal = {"schema": "lattice.customer-restore.v1", "root": str(state),
+                       "installation_sha256": M.M.file_digest(state / "installation.json"),
+                       "catalog_sha256": M.M.file_digest(state / "projects.json"),
+                       "proofs": {}, "backup_sha256": "b" * 64}
+            pending = state / "restore.pending.dpapi"
+            pending.write_bytes(M.M.CONFIG.json_bytes(journal))
+            # A legacy ready marker cannot override either restore gate.
+            ready = state / "ready.json"; ready.write_bytes(b"legacy ready marker")
+            real_write = M.M.CONFIG.atomic_write
+            def interrupted(target, data):
+                if target.name == "restore-receipt.json": raise OSError("synthetic interruption")
+                real_write(target, data)
+            with (patch.object(M.M, "load", return_value=(config, "fixture-secret")),
+                  patch.object(M.M, "dpapi", side_effect=lambda data, **kwargs: data),
+                  patch.object(M.M, "start", side_effect=AssertionError("No process")),
+                  patch.object(M.M, "runtime_action", side_effect=AssertionError("No process")),
+                  patch.object(M, "registry", side_effect=AssertionError("No activation"))):
+                with patch.object(M.M.CONFIG, "atomic_write", side_effect=interrupted):
+                    with self.assertRaises(OSError): M.finalize_restore(state)
+                first = M.finalize_restore(state)
+                receipt = (state / "restore-receipt.json").read_bytes()
+                self.assertEqual(M.finalize_restore(state), first)
+                self.assertEqual((state / "restore-receipt.json").read_bytes(), receipt)
+            self.assertEqual(pending.read_bytes(), M.M.CONFIG.json_bytes(journal))
+            self.assertTrue((state / "restore.in-progress").is_file())
+            self.assertEqual(ready.read_bytes(), b"legacy ready marker")
+            with self.assertRaisesRegex(M.M.Rejected, "CUSTOMER_RESTORE_FINALIZATION_REQUIRED"):
+                M.M.operate(state, "serve")
+
+    def test_restore_gates_block_manager_mcp_and_work_entry_before_credentials_or_processes(self):
+        for marker in ("restore.pending.dpapi", "restore.in-progress"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                (root / marker).write_bytes(b"retained recovery state")
+                (root / "ready.json").write_bytes(b"legacy marker does not authorize")
+                operations = [(action, lambda action=action: M.M.operate(root, action))
+                              for action in ("serve", "start", "recover", "connect", "reconnect", "graphify-refresh")]
+                operations += [("register-project", lambda: M.M.register_project(root, root, "fixture")),
+                               ("import-result", lambda: M.M.import_result(root, root / "request.json"))]
+                with (patch.object(M.M, "dpapi", side_effect=AssertionError("No credential read")),
+                      patch.object(M.M, "start", side_effect=AssertionError("No startup")),
+                      patch.object(M.M, "invoke", side_effect=AssertionError("No native process")),
+                      patch.object(M.M.subprocess, "call", side_effect=AssertionError("No MCP or worker process"))):
+                    for name, operation in operations:
+                        with self.subTest(action=name), self.assertRaisesRegex(M.M.Rejected, "CUSTOMER_RESTORE_FINALIZATION_REQUIRED"):
+                            operation()
 
     def test_restore_copies_verified_crt_and_seals_destination_hashes(self):
         with tempfile.TemporaryDirectory() as directory:

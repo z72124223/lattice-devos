@@ -8,7 +8,7 @@ param(
     [string]$LegacyPurgeBinary,
     [string]$LifecycleBinary,
     [string]$NodeBinary = (Get-Command node.exe -ErrorAction Stop).Source,
-    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','graph-ownership','upgrade','streaming','streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-references','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity')][string]$Scenario = 'all'
+    [ValidateSet('all','main','interleaved','survivor-reference','epoch','epoch-reference','coordinator','coordinator-absent','inventory','bot-inventory','bot-purge','retained-roots','graph-ownership','upgrade','streaming','streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-references','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity')][string]$Scenario = 'all'
 )
 
 Set-StrictMode -Version Latest

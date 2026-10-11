@@ -5,7 +5,8 @@ import path from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { previewProjectPurgeSqlite, beginProjectPurgeSqlite, readbackProjectPurgeSqlite } from './project-purge-sqlite.mjs';
-import { previewProjectPurgeFiles, validateProjectPurgeFiles, applyProjectPurgeFiles, readbackProjectPurgeFiles } from './project-purge-files.mjs';
+import { previewProjectPurgeFiles, validateProjectPurgeFiles, applyProjectPurgeFiles, readbackProjectPurgeFiles,
+  previewProjectPurgeDirectoryTargets, validateProjectPurgeDirectoryTargets } from './project-purge-files.mjs';
 import { externalPurgeInventory, projectPurgeReport } from './project-purge-report.mjs';
 import { previewControlCodeGraphPurge, validateControlCodeGraphPurge, readbackControlCodeGraphPurge,
   previewRuntimeGraphPurge, validateRuntimeGraphPurge, readbackRuntimeGraphPurge } from './project-purge-code-graph.mjs';
@@ -118,7 +119,14 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     cacheDirectory: absolute(options.codeGraphCacheDirectory ?? path.join(process.env.LOCALAPPDATA || process.cwd(), 'LATTICE/control/code-graphs')) });
   const runtimeGraph=await previewRuntimeGraphPurge({projectId:base.projectId,source:pg.runtimeGraphSource,
     workDirectory:options.runtimeGraphWorkDirectory??process.env.LATTICE_GRAPHIFY_WORK_ROOT??null});
-  const projectRoots = [...new Set([sqlite.canonicalPath, ...pg.filesystemRoots.map(entry => absolute(entry.path))])];
+  const directoryAuthority = {
+    projectId: base.projectId,
+    filesystemRoots: pg.filesystemRoots.map(entry => ({ ...entry, path: absolute(entry.path) })),
+    protectedRoots: [...sqlite.protectedRoots, ...pg.protectedRoots.map(absolute), ...(options.protectedRoots ?? []).map(absolute)],
+  };
+  const directoryTargets = options.directoryTargets === undefined ? null
+    : await previewProjectPurgeDirectoryTargets({ ...directoryAuthority, directoryTargets: options.directoryTargets });
+  const projectRoots = [...new Set([sqlite.canonicalPath, ...pg.filesystemRoots.map(entry => absolute(entry.path)), ...(directoryTargets?.roots ?? [])])];
   // The cache directory is shared by all projects. Even an empty or currently
   // target-only cache cannot authorize recursive deletion of that shared root.
   if (projectRoots.some(root => containsPath(root, codeGraph.cacheDirectory) || containsPath(codeGraph.cacheDirectory, root))) {
@@ -143,8 +151,9 @@ export async function previewProjectPurge(options, { native = nativeProjectPurge
     fileBlockers.push(error.message);
     files = { projectId: base.projectId, roots, protectedRoots, status: 'BLOCKED', blockers: fileBlockers };
   }
-  const blockers = [...pg.blockers, ...(bot?.blockers ?? []), ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...fileBlockers];
+  const blockers = [...pg.blockers, ...(bot?.blockers ?? []), ...sqlite.blockers, ...codeGraph.blockers, ...runtimeGraph.blockers, ...(directoryTargets?.blockers ?? []), ...fileBlockers];
   const plan = { schema, ...base, nativeBinary, statePath, sqlite, files, codeGraph, runtimeGraph, bot, maintenance,
+    ...(directoryTargets ? { directoryTargets, directoryProtectedRoots: (options.protectedRoots ?? []).map(absolute) } : {}),
     postgres: { scopeDigest: pg.scopeDigest, counts: pg.counts, registryStrategy: pg.registryStrategy, history: pg.history ?? null,
       graphSourceProof:pg.graphSourceProof??null,
       relatedStores: pg.relatedStores ?? null,
@@ -167,6 +176,8 @@ function validatePlan(plan) {
   if (plan.codeGraph && (plan.codeGraph.projectId !== plan.projectId
     || plan.codeGraph.roots.some(root => !plan.files.roots.includes(root)))) fail('PURGE_PLAN_INVALID');
   if(plan.runtimeGraph&&(plan.runtimeGraph.projectId!==plan.projectId||plan.runtimeGraph.roots.some(root=>!plan.files.roots.includes(root)))) fail('PURGE_PLAN_INVALID');
+  if (plan.directoryTargets && (plan.directoryTargets.projectId !== plan.projectId
+    || plan.directoryTargets.roots.some(root => !plan.files.roots.includes(root)))) fail('PURGE_PLAN_INVALID');
   if (plan.sqlite.catalogState === 'ABSENT') {
     const authority = plan.sqlite.authoritativeProject;
     if (authority?.source !== 'POSTGRES_PREVIEW' || authority.projectId !== plan.projectId
@@ -224,6 +235,9 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
     state = await loadState(plan) ?? { schema: 'lattice.project-purge.progress.v1', operationId: plan.operationId, planDigest: plan.digest,
       status: 'PREPARED', postgres: null, files: null, sqlite: null, externalCleanup: 'NOT_VERIFIED' };
     await saveState(plan, state);
+    // Reject an already changed file scope before survivor-rebuild can create
+    // a durable SQLite swap marker. Validate again under its lock below.
+    await validateProjectPurgeFiles(plan.files, { ...fileOptions(plan), previousResult: state.files });
     transaction = beginProjectPurgeSqlite(plan.sqlite);
     await validateProjectPurgeFiles(plan.files, { ...fileOptions(plan), previousResult: state.files });
     if (plan.codeGraph) await validateControlCodeGraphPurge(plan.codeGraph, { allowPlannedPartial: Boolean(state.files) });
@@ -234,6 +248,14 @@ export async function applyProjectPurge(plan, { confirmDigest, maintenanceOfflin
       if (transaction.alreadyApplied && plan.sqlite.catalogState !== 'ABSENT') fail('PURGE_SQLITE_ABSENT_WITHOUT_NATIVE_RECEIPT');
       const current = await native(plan.nativeBinary, request(plan, 'preview'));
       if (current.scopeDigest !== plan.postgres.scopeDigest || current.status !== 'READY' || current.blockers?.length) fail('PURGE_NATIVE_STALE_SCOPE');
+      // Re-read the native ownership and physical binding before any Bot or PG
+      // mutation. After PG commits, resume uses only the original receipt and
+      // exact file manifest/intent; a removed link never triggers rediscovery.
+      if (plan.directoryTargets) await validateProjectPurgeDirectoryTargets(plan.directoryTargets, {
+        projectId: plan.projectId,
+        filesystemRoots: current.filesystemRoots.map(entry => ({ ...entry, path: absolute(entry.path) })),
+        protectedRoots: [...plan.sqlite.protectedRoots, ...current.protectedRoots.map(absolute), ...plan.directoryProtectedRoots],
+      });
       if (plan.bot) {
         let bot = await native(plan.nativeBinary, botRequest(plan, 'status-bot'));
         if (!botComplete(plan, bot)) {

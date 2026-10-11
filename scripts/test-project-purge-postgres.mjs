@@ -10,7 +10,7 @@ const args = Object.fromEntries(process.argv.slice(2).reduce((pairs, token, i, a
   return pairs;
 }, []));
 const port = Number(args.port), runRoot = path.resolve(args['run-root']);
-assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity'].includes(args.scenario));
+assert.ok(['main', 'interleaved', 'survivor-reference', 'epoch', 'epoch-reference', 'coordinator', 'coordinator-absent', 'inventory', 'bot-inventory', 'bot-purge', 'retained-roots', 'graph-ownership', 'upgrade', 'streaming', 'streaming-large','decisions','graph-history','claim-reconciliation','claim-pending','graph-record-node','graph-record-edge','graph-record-shared','graph-capacity'].includes(args.scenario));
 if (['upgrade','streaming','streaming-large'].includes(args.scenario)) assert.equal(typeof args['legacy-binary'], 'string');
 const marker = JSON.parse(readFileSync(path.join(runRoot, 'fixture-owner.json'), 'utf8'));
 assert.equal(marker.kind, 'LATTICE_PROJECT_PURGE_SYNTHETIC_FIXTURE');
@@ -43,6 +43,12 @@ function check(name, detail = {}) { evidence.checks.push({ name, passed: true, .
 function sql(env, statement, expectedSuccess = true) {
   const result=command(args.psql, ['-X', '-A', '-t', '-h', '127.0.0.1', '-p', String(port), '-U', 'runtime_bootstrap', '-d', `lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0, 8)}_base`, '-v', 'ON_ERROR_STOP=1', '-f', '-'], { ...env, PGCLIENTENCODING: 'UTF8' }, statement, 'sql', expectedSuccess);
   return expectedSuccess?result.stdout.trim():result;
+}
+function retainedRuntimeSql(env, statement) {
+  return command(args.psql, ['-X', '-qAt', '-h', '127.0.0.1', '-p', String(port), '-U', 'lattice_runtime_login',
+    '-d', `lattice_task019_${env.LATTICE_TASK019_RUN_ID.slice(0, 8)}_base`, '-v', 'ON_ERROR_STOP=1', '-f', '-'],
+    { ...env, PGPASSWORD: password, PGCLIENTENCODING: 'UTF8', PGOPTIONS: '-c role=lattice_runtime -c search_path=pg_catalog' },
+    statement, 'retained-runtime').stdout;
 }
 function native(env, request, expectedSuccess = true, binary = args.binary) {
   const label = binary === args.binary ? 'native' : 'legacy-native';
@@ -1039,8 +1045,11 @@ try {
   check('fresh-process-registry-replay-preserves-the-original-cross-project-denial');
   }
 
-  if (args.scenario === 'coordinator') {
+  if (['coordinator', 'retained-roots'].includes(args.scenario)) {
   const coordinated = establish('coordinator');
+  const retained = args.scenario === 'retained-roots' ? await (await import('./test-project-purge-retained-roots.mjs')).prepareRetainedRoots({
+    ...coordinated, sql, runtimeSql: retainedRuntimeSql, rows, hash, check,
+    git: (cwd, argv) => command('git.exe', ['-C', cwd, ...argv], baseEnv, undefined, 'retained-git') }) : null;
   const { LatticeStore } = await import('../apps/lattice-control/src/store.mjs');
   const { previewProjectPurge, applyProjectPurge, statusProjectPurge } = await import('../apps/lattice-control/src/project-purge.mjs');
   const sqlitePath = path.join(coordinated.root, 'control-fixture.sqlite');
@@ -1060,11 +1069,14 @@ try {
   const coordinatorBefore = rows(coordinated.env);
   const coordinatorSurvivors = [coordinated.seeded.survivorProjectId, coordinated.seeded.survivorStreamId, coordinated.seeded.survivorTaskRef];
   const survivorPgBefore = hash(selectRows(coordinatorBefore, coordinatorSurvivors));
-  const plan = await previewProjectPurge({ projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator', botService:null });
+  const options = { projectId: coordinated.seeded.targetProjectId, nativeBinary: path.resolve(args.binary), databasePath: sqlitePath, statePath: path.join(coordinated.root, 'purge-state.json'), codeGraphCacheDirectory: path.join(coordinated.root, 'code-graphs'), operationId: 'fixture-coordinator', botService:null };
+  const plan = await previewProjectPurge(options);
   assert.equal(plan.status, 'READY', JSON.stringify(plan.blockers));
   assert.equal(plan.sqlite.strategy, 'REBUILD_SURVIVORS_V1');
   writeFileSync(path.join(runRoot, 'coordinator-plan.json'), JSON.stringify(plan, null, 2) + '\n');
-  const appliedCoordinator = await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true });
+  const appliedCoordinator = retained ? await retained.apply({ plan, sqlitePath, boundaries: [], botRows: () => [], native,
+    repreview: async () => { options.statePath += '.retry'; return previewProjectPurge(options); } })
+    : await applyProjectPurge(plan, { confirmDigest: plan.digest, maintenanceOffline: true });
   assert.equal(appliedCoordinator.status, 'SCOPED_PURGED');
   assert.equal(existsSync(coordinated.seeded.targetCanonicalPath), false);
   assert.equal(hash(readFileSync(survivorFile)), survivorFileBefore);

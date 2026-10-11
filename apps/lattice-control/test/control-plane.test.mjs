@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -10,6 +11,7 @@ import test from "node:test";
 import { createLatticeServer } from "../src/server.mjs";
 import { LatticeControlService } from "../src/service.mjs";
 import { LatticeStore } from "../src/store.mjs";
+import { importControlSqliteQuarantine } from '../src/restore-quarantine.mjs';
 
 class FakeCodex extends EventEmitter {
   connected = false;
@@ -2991,7 +2993,7 @@ test("a late completed predecessor cannot overwrite a queued successor released 
   }
 });
 
-for (const autoRestore of [true, false]) test(`Control startup ${autoRestore ? 'restores by default' : 'retains without restoring'} a durable queued follow-up after its predecessor terminal was committed`, async () => {
+for (const autoRestore of [true, false, 'quarantine']) test(`Control startup ${autoRestore === 'quarantine' ? 'quarantines a mixed backup instead of dispatching' : autoRestore ? 'restores by default' : 'retains without restoring'} a durable queued follow-up after its predecessor terminal was committed`, async () => {
   const directory = await mkdtemp(path.join(tmpdir(), "lattice-queued-terminal-restart-"));
   const databasePath = path.join(directory, "control.db");
   let firstStore;
@@ -3040,6 +3042,29 @@ for (const autoRestore of [true, false]) test(`Control startup ${autoRestore ? '
     firstStore.releasePrimaryConversationLease(terminalFence);
     firstStore.close();
     firstStore = null;
+
+    if (autoRestore === 'quarantine') {
+      const seed = new LatticeStore(databasePath);
+      const survivor = seed.createProject({ name: 'Retained survivor', rootPath: path.join(directory, 'survivor') });
+      seed.createWorkItem({ projectId: survivor.id, title: 'Survivor work', objective: 'Retain original work without dispatch' });
+      const queue = seed.primaryConversationUnresolvedMessage();
+      seed.close();
+      const before = readFileSync(databasePath), sha256 = createHash('sha256').update(before).digest('hex');
+      const imported = importControlSqliteQuarantine({ source: databasePath, destination: path.join(directory, 'restore'), expectedSha256: sha256 });
+      const blockedCodex = new FakeCodex();
+      for (const mode of [true, false]) assert.throws(() => createLatticeServer({ databasePath: imported.databasePath, codex: blockedCodex, autoRestore: mode }), /CONTROL_RESTORE_QUARANTINED/u);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.deepEqual(blockedCodex.threadStarts, []); assert.deepEqual(blockedCodex.turnStarts, []);
+      assert.equal(blockedCodex.readinessCalls, 0);
+      assert.deepEqual(readFileSync(imported.databasePath), before);
+      assert.deepEqual(readFileSync(databasePath), before);
+      const read = new DatabaseSync(imported.databasePath, { readOnly: true });
+      try {
+        assert.equal(read.prepare('SELECT count(*) n FROM projects').get().n, 2);
+        assert.ok(queue?.payload?.clientMessageId);
+      } finally { read.close(); }
+      return;
+    }
 
     const restartedCodex = new FakeCodex();
     restartedCodex.turns = 1;

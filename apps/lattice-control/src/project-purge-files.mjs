@@ -14,6 +14,63 @@ const overlap = (a, b) => within(a, b) || within(b, a);
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const fail = code => { throw Object.assign(new Error(code), { code }); };
 
+// Selection is not ownership: only an exact, explicitly selected direct target
+// of a native Registry/claim root can be admitted. Git identity, a nearby path,
+// or a caller's assertion cannot authorize another directory.
+export async function previewProjectPurgeDirectoryTargets({ projectId, directoryTargets = [], filesystemRoots, protectedRoots }) {
+  if (!Array.isArray(directoryTargets) || directoryTargets.length > 64) fail('PURGE_FILE_DIRECTORY_TARGETS_INVALID');
+  if (!Array.isArray(filesystemRoots) || !Array.isArray(protectedRoots)) fail('PURGE_FILE_DIRECTORY_AUTHORITY_INVALID');
+  const authority = filesystemRoots.map(entry => {
+    if (!entry || typeof entry.source !== 'string') fail('PURGE_FILE_DIRECTORY_AUTHORITY_INVALID');
+    return { path: absolute(entry.path), source: entry.source };
+  }).sort((a, b) => compare(a.path, b.path) || compare(a.source, b.source));
+  const requested = directoryTargets.map(entry => {
+    if (!entry || Array.isArray(entry) || Object.keys(entry).length !== 2
+      || Object.keys(entry).some(name => !['sourceRoot', 'targetPath'].includes(name))) fail('PURGE_FILE_DIRECTORY_TARGETS_INVALID');
+    return { sourceRoot: absolute(entry.sourceRoot), targetPath: absolute(entry.targetPath) };
+  }).sort((a, b) => compare(a.sourceRoot, b.sourceRoot) || compare(a.targetPath, b.targetPath));
+  if (new Set(requested.map(entry => `${key(entry.sourceRoot)}\n${key(entry.targetPath)}`)).size !== requested.length) fail('PURGE_FILE_DIRECTORY_TARGETS_INVALID');
+  const protectedPaths = [...new Set(protectedRoots.map(absolute))].sort(compare);
+  const roots = [], proofs = [], blockers = [];
+  for (const selection of requested) {
+    try {
+      const sources = authority.filter(entry => key(entry.path) === key(selection.sourceRoot)
+        && ['POSTGRES_REGISTRY_OBSERVATION', 'POSTGRES_CONVERSATION_CLAIM'].includes(entry.source));
+      if (!sources.length) fail('PURGE_FILE_DIRECTORY_OWNERSHIP_NOT_PROVEN');
+      const before = await inspect(selection.sourceRoot);
+      if (!before?.isSymbolicLink()) fail('PURGE_FILE_DIRECTORY_SOURCE_NOT_LINK');
+      const linkTarget = await readlink(selection.sourceRoot);
+      const directTarget = path.resolve(path.dirname(selection.sourceRoot), linkTarget);
+      if (key(directTarget) !== key(selection.targetPath)) fail('PURGE_FILE_DIRECTORY_TARGET_MISMATCH');
+      const target = await inspect(selection.targetPath);
+      if (!target?.isDirectory() || target.isSymbolicLink()) fail('PURGE_FILE_DIRECTORY_TARGET_NOT_PHYSICAL');
+      if (key(await realpath(selection.targetPath)) !== key(selection.targetPath)) fail('PURGE_FILE_PATH_ALIAS');
+      // Both paths and their ancestors must be ordinary, stable paths. Resolving
+      // the link establishes evidence only; walking/deleting it still never follows it.
+      const ancestors = await ancestry([selection.sourceRoot, selection.targetPath]);
+      const candidate = scope({ projectId, roots: [selection.sourceRoot, selection.targetPath], protectedRoots: protectedPaths });
+      await checkProtectedAliases(candidate);
+      const after = await inspect(selection.sourceRoot), targetAfter = await inspect(selection.targetPath);
+      if (!after || !targetAfter || digest(details(before)) !== digest(details(after))
+        || digest(details(target)) !== digest(details(targetAfter))
+        || await readlink(selection.sourceRoot) !== linkTarget) fail('PURGE_FILE_SCOPE_CHANGED');
+      roots.push(selection.targetPath);
+      proofs.push({ ...selection, sources, linkTarget, link: details(before), target: details(target), ancestors });
+    } catch (error) {
+      if (!/^PURGE_FILE_[A-Z_]+$/.test(error.message)) throw error;
+      blockers.push({ code: error.message, ...selection });
+    }
+  }
+  const payload = { schema: 'lattice.project-purge-directory-targets.v1', projectId, requested,
+    authority, protectedRoots: protectedPaths, roots: [...new Set(roots)].sort(compare), proofs, blockers };
+  return { ...payload, digest: digest(payload) };
+}
+
+export async function validateProjectPurgeDirectoryTargets(proof, options) {
+  const current = await previewProjectPurgeDirectoryTargets({ ...options, directoryTargets: proof.requested });
+  if (current.blockers.length || current.digest !== proof.digest) fail('PURGE_FILE_DIRECTORY_SCOPE_CHANGED');
+}
+
 function absolute(value) {
   if (typeof value !== 'string' || !value || Buffer.byteLength(value) > 4096 || value.trim() !== value || /[\x00-\x1f\x7f]/u.test(value) || !path.isAbsolute(value)) fail('PURGE_FILE_PATH_INVALID');
   if (value.split(/[\\/]/u).some(part => part === '.' || part === '..')) fail('PURGE_FILE_PATH_TRAVERSAL');

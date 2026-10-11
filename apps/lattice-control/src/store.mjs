@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { controlStoreSchemaVersion } from "./database-path.mjs";
 import { assertNoSqlitePurgeSwap } from "./project-purge-sqlite-swap.mjs";
+import { assertControlDatabaseNotQuarantined } from './restore-quarantine.mjs';
 import { decisionOwnershipNames, decisionOwnershipManifest, normalizedDecisionOwner, prepareDecisionOwnership, assertDecisionRequestNotRetired } from "./decision-project-ownership.mjs";
 
 const priorities = new Set(["low", "normal", "high", "urgent"]);
@@ -2401,6 +2402,8 @@ export function projectControlWorkSnapshot({
 
 export class LatticeStore {
   constructor(databasePath = ":memory:") {
+    assertControlDatabaseNotQuarantined(databasePath);
+    this.databasePath = databasePath === ':memory:' ? databasePath : path.resolve(databasePath);
     assertNoSqlitePurgeSwap(databasePath);
     if (databasePath !== ":memory:") {
       mkdirSync(path.dirname(path.resolve(databasePath)), { recursive: true });

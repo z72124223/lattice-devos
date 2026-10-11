@@ -254,14 +254,20 @@ Git alternates／路徑重新導向的來源。超過 100,000 個檔案、10 GiB
 
 還原只寫全新私有目錄，先解密與逐檔核驗，再使用目標端可信封裝的相同
 PostgreSQL binary、新 loopback port、新 DPAPI 憑證及新 WSL 平台設定。
-原 run ID、cluster system ID、工作與證據摘要保留；原生 Runtime 透過
-正式 Registry observe／reconcile 紀錄新實體身分，不改寫歷史資料列。
-原生入口另驗 DPAPI 還原紀錄、安裝與 catalog 摘要、專案 proof、精確版本
-及 pending observation。普通啟動、recover 與 MCP 在還原中會被擋住。
+原 run ID、cluster system ID、工作與證據摘要保留；候選恢復流程核對
+DPAPI 還原紀錄、安裝與 catalog 摘要及專案 proof 後，僅回報
+`CUSTOMER_RESTORE_QUARANTINED`。不啟動 PostgreSQL／Runtime、不自動執行
+Registry observe／restore、不 bootstrap schema，也不寫入 `ready.json`。
+備份內的歷史 active 狀態沒有被查驗或改寫，不能稱為已重新啟用或已全部停用。
 
-`finalize-restore` 只重播原已封存請求。若在首次憑證與還原 journal 建立前
-中斷，保留失敗目錄並從原備份還原到另一個全新目錄；它不接管未知目錄。
-成功後仍須讀回正式工作、決策、成果與 Graphify 關聯，再核對重啟一致性。
+`finalize-restore` 可重試核對同一恢復副本，始終保留 `restore.in-progress`
+及 `restore.pending.dpapi`。舊 journal 的成功結果、請求或既有 READY 標記
+不能解除隔離；正常啟動、recover 與 MCP 入口仍被阻擋。本候選沒有解除
+隔離入口。最新停用決策由現用環境及使用者當前決策保管，必須由目前 owner
+先核對明確再啟用範圍，不能以舊備份自行授權。若在首次憑證與 journal
+建立前中斷，保留失敗目錄並從原備份還原到另一個全新目錄；不接管未知目錄。
+完整界線見 [備份恢復的隔離界線](CUSTOMER_RESTORE_QUARANTINE.md)。這不是
+OS 隔離，也不涵蓋直接另啟動原生執行檔或獨立 Control SQLite 的恢復入口。
 歷史 Graphify selector 會沿後續備份保留，最多 16 個；僅用於原資料庫的
 唯讀歷史查詢，重新抽取仍使用新平台。兩份安裝後續的新變更不會自動同步。
 
@@ -270,9 +276,10 @@ PostgreSQL binary、新 loopback port、新 DPAPI 憑證及新 WSL 平台設定�
 
 ## 可重複執行的客戶環境驗收
 
-`scripts/verify-lattice-customer-environment.py` 是獨立驗收入口，配合已核驗的
-bundle-v5 或相同介面的後續封裝，不需要更動封裝內容。先以備份還原到全新
-本工作專屬目錄，再執行：
+`scripts/verify-lattice-customer-environment.py` 是先前可啟用恢復版本的獨立
+驗收入口，配合已核驗的 bundle-v5 或相同介面的封裝。下列完整服務驗收
+不能直接對本候選仍在 quarantine 的副本執行，也不能移除恢復閘來強行通過。
+未來須先有經目前 owner 核對的再啟用流程，才可在本工作專屬環境執行：
 
 ```text
 <封裝>/python/python.exe -I -B -S <驗收工具>/verify-lattice-customer-environment.py --bundle <封裝> --bundle-sha256 <可信摘要> --state <已還原安裝> --output <全新證據目錄> --reference <來源工作讀回JSON> --project-id <原專案ID> --completed-task <已完成task_ref> --commit <原Graphify commit> --query <原有關聯查詢>

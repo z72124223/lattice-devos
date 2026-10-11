@@ -61,6 +61,7 @@ function nativeBotInventory(value) {
   return { ...value, source: 'NATIVE_PURGE_READER' };
 }
 function nextStep(code) {
+  if (code.startsWith('PURGE_FILE_DIRECTORY_')) return 'An explicit directory selection needs a native Registry/claim root and its exact direct physical link target. Unknown ownership, changed bindings, shared roots or unsupported directories remain blocked; do not fabricate ownership or retry a policy-denied operation.';
   if (code === 'DECISION_PURGE_EXTENSION_REQUIRED') return 'Install the exact decision-purge catalog with install-decisions / INSTALL_DECISION_PURGE while stopped, then create a fresh preview. All readers must support the successor catalog.';
   if (code === 'DECISION_PURGE_MINIMAL_ATTESTATION_REQUIRED') return 'Use the approved MINIMAL_ATTESTATION policy so retired decision and request identifiers remain blocked without retaining project content.';
   if (code === 'DECISION_CROSS_PROJECT_LINEAGE') return 'A decision lineage connects the target and a surviving project. Resolve the actual dependency through the owning module before erasing either history.';
@@ -140,6 +141,7 @@ export function projectPurgeReport(plan, result = null) {
         } : {}),
         initialCatalog: plan.sqlite.catalogState ?? 'PRESENT', status: result?.sqlite?.complete ? 'VERIFIED_ERASED' : 'NOT_VERIFIED' },
       { kind: 'files', roots: plan.files.roots, entries: plan.files.entries?.length ?? null,
+        ...(plan.directoryTargets ? { directoryTargets: plan.directoryTargets } : {}),
         status: result?.files?.complete || result?.files?.readback?.complete ? 'VERIFIED_ABSENT' : 'NOT_VERIFIED' },
       ...(plan.codeGraph ? [{ kind: 'controlCodeGraph', cacheDirectory: plan.codeGraph.cacheDirectory,
         roots: plan.codeGraph.roots, discovery: plan.codeGraph.discovery,

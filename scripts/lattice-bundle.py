@@ -41,6 +41,8 @@ PROJECT_PURGE_FILES = (
     "apps/lattice-control/src/code-graph-model.mjs",
     "apps/lattice-control/src/lattice-runtime-health.mjs",
     "apps/lattice-control/src/store.mjs",
+    "apps/lattice-control/src/restore-quarantine.mjs",
+    "scripts/control-quarantine-import.mjs",
     "apps/lattice-control/src/decision-project-ownership.mjs",
     "apps/lattice-control/src/database-path.mjs",
     "apps/lattice-control/data-scope-contract.json",
