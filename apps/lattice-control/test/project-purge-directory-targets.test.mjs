@@ -166,13 +166,14 @@ test('resume after committed PG and removed source link follows the exact saved 
   assert.equal(await readFile(path.join(f.survivor, 'keep.txt'), 'utf8'), 'synthetic survivor');
 });
 
-test('file drift rejects before survivor rebuild changes SQLite or leaves a maintenance marker', async t => {
+test('file drift rejects before survivor rebuild changes SQLite or leaves a maintenance marker', { skip: process.platform !== 'win32' }, async t => {
   const f = await fixture(t), store = new LatticeStore(f.databasePath);
   try {
     store.createInstallationReceipt({ projectId: f.project.id, component: 'synthetic', sourceCommitSha: 'a'.repeat(40),
       artifactPath: path.join(f.source, 'synthetic.exe'), artifactSha256: 'b'.repeat(64) });
   } finally { store.close(); }
   const plan = await f.preview(), before = await hashFile(f.databasePath);
+  assert.equal(plan.status, 'READY');
   assert.equal(plan.sqlite.strategy, 'REBUILD_SURVIVORS_V1');
   await writeFile(path.join(f.target, 'unapproved.txt'), 'scope drift');
   await assert.rejects(f.apply(plan), /PURGE_FILE_SCOPE_CHANGED/);

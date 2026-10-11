@@ -116,7 +116,7 @@ class BundleTests(unittest.TestCase):
                                 cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("preview", result.stdout)
-        quarantine = subprocess.run([node, str(self.root / "scripts/control-quarantine-import.mjs")],
+        quarantine = subprocess.run([node, "--disable-warning=ExperimentalWarning", str(self.root / "scripts/control-quarantine-import.mjs")],
                                     cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(quarantine.returncode, 2, quarantine.stderr)
         self.assertEqual(B.json.loads(quarantine.stderr)["code"], "CONTROL_RESTORE_ARGUMENTS_REQUIRED")
@@ -396,7 +396,7 @@ class MaintenanceBundleTests(unittest.TestCase):
             cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("preview", result.stdout)
-        quarantine = subprocess.run([node, str(self.root / "scripts/control-quarantine-import.mjs")],
+        quarantine = subprocess.run([node, "--disable-warning=ExperimentalWarning", str(self.root / "scripts/control-quarantine-import.mjs")],
                                     cwd=self.root, capture_output=True, text=True, encoding="utf-8", timeout=30)
         self.assertEqual(quarantine.returncode, 2, quarantine.stderr)
         self.assertEqual(B.json.loads(quarantine.stderr)["code"], "CONTROL_RESTORE_ARGUMENTS_REQUIRED")
