@@ -90,17 +90,27 @@ async function ensureCanonicalDirectory(directory, code, message) {
   return realpath(target);
 }
 
-function validateExecutorRequest({ command, args, cwd }) {
+function validateExecutorRequest({ command, args, cwd, environment }) {
   if (
     command !== "git" ||
     !Array.isArray(args) ||
     args.some((argument) => typeof argument !== "string" || argument.includes("\0")) ||
     typeof cwd !== "string" ||
-    cwd.includes("\0")
+    cwd.includes("\0") ||
+    environment === null ||
+    typeof environment !== "object" ||
+    Array.isArray(environment) ||
+    Object.entries(environment).some(
+      ([key, value]) =>
+        typeof key !== "string" ||
+        key.includes("\0") ||
+        typeof value !== "string" ||
+        value.includes("\0"),
+    )
   ) {
     workspaceFailure(
       "INVALID_GIT_COMMAND",
-      "Git execution requires command='git', argument array, and explicit cwd.",
+      "Git execution requires command='git', argument array, explicit cwd, and a sanitized environment.",
     );
   }
 }
@@ -114,6 +124,8 @@ export async function defaultGitExecutor(request) {
       {
         cwd: request.cwd,
         encoding: "utf8",
+        env: request.environment,
+        shell: false,
         windowsHide: true,
         maxBuffer: 4 * 1024 * 1024,
       },
@@ -227,6 +239,128 @@ function parseNameStatus(output) {
   return changes;
 }
 
+function kindFromGitModes(oldMode, newMode) {
+  const modes = [oldMode, newMode].filter(
+    (mode) => typeof mode === "string" && mode !== "000000",
+  );
+  if (modes.some((mode) => mode === "120000")) {
+    return "link";
+  }
+  if (modes.some((mode) => mode === "160000")) {
+    return "gitlink";
+  }
+  if (modes.length > 0 && modes.every((mode) => /^100\d{3}$/.test(mode))) {
+    return "file";
+  }
+  return "unknown";
+}
+
+function parseRawDiff(output) {
+  if (output.length === 0) {
+    return [];
+  }
+  const tokens = output.split("\0");
+  if (tokens.at(-1) === "") {
+    tokens.pop();
+  }
+  const changes = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const header = tokens[index++];
+    const match =
+      /^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) ([A-Z])(\d*)$/.exec(
+        header,
+      );
+    const firstPath = tokens[index++];
+    if (!match || typeof firstPath !== "string") {
+      workspaceFailure("GIT_STATUS_PARSE_FAILED", "Malformed Git raw diff output.");
+    }
+    const [, oldMode, newMode, , , code, score] = match;
+    let changedPath = firstPath;
+    let fromPath = null;
+    if (code === "R" || code === "C") {
+      changedPath = tokens[index++];
+      fromPath = firstPath;
+      if (typeof changedPath !== "string") {
+        workspaceFailure(
+          "GIT_STATUS_PARSE_FAILED",
+          "Rename/copy destination is missing.",
+        );
+      }
+    }
+    const operation = {
+      A: "create",
+      C: "create",
+      D: "delete",
+      M: "modify",
+      R: "rename",
+      T: "typechange",
+      U: "unmerged",
+    }[code];
+    changes.push({
+      operation: operation ?? "unknown",
+      path: changedPath,
+      from_path: fromPath,
+      git_status: `${code}${score}`,
+      kind: kindFromGitModes(oldMode, newMode),
+      old_mode: oldMode,
+      new_mode: newMode,
+    });
+  }
+  return changes;
+}
+
+async function worktreePathKind(worktreeRoot, repositoryRelativePath) {
+  if (
+    typeof repositoryRelativePath !== "string" ||
+    repositoryRelativePath.length === 0 ||
+    repositoryRelativePath.includes("\0") ||
+    path.posix.isAbsolute(repositoryRelativePath) ||
+    path.win32.isAbsolute(repositoryRelativePath)
+  ) {
+    return "escaped";
+  }
+  const components = repositoryRelativePath
+    .replaceAll("\\", "/")
+    .split("/")
+    .filter((component) => component.length > 0);
+  if (
+    components.length === 0 ||
+    components.some((component) => component === "." || component === "..")
+  ) {
+    return "escaped";
+  }
+  let cursor = worktreeRoot;
+  let finalStat = null;
+  for (const component of components) {
+    cursor = path.join(cursor, component);
+    finalStat = await optionalLstat(cursor);
+    if (!finalStat) {
+      return "missing";
+    }
+    if (finalStat.isSymbolicLink()) {
+      return "link";
+    }
+  }
+  let resolved;
+  try {
+    resolved = await realpath(cursor);
+  } catch {
+    return "unknown";
+  }
+  const worktreeReal = await realpath(worktreeRoot);
+  if (!containedBy(worktreeReal, resolved)) {
+    return "escaped";
+  }
+  if (finalStat.isFile()) {
+    return "file";
+  }
+  if (finalStat.isDirectory()) {
+    return "directory";
+  }
+  return "unknown";
+}
+
 function unownedRepositoryStatus(output) {
   const tokens = output.split("\0").filter(Boolean);
   const dirty = [];
@@ -253,6 +387,7 @@ export class GitWorkspace {
   #worktreeRoot;
   #ownershipDirectory;
   #hooksDirectory;
+  #emptyGitConfigPath;
   #executor;
 
   constructor({
@@ -292,6 +427,10 @@ export class GitWorkspace {
       this.#worktreeRoot,
       ".lattice-hooks-empty",
     );
+    this.#emptyGitConfigPath = path.join(
+      this.#worktreeRoot,
+      ".lattice-empty-gitconfig",
+    );
     this.#executor = executor;
   }
 
@@ -310,18 +449,56 @@ export class GitWorkspace {
         "Git hooks directory must be an empty canonical directory.",
       );
     }
+    const emptyConfigStat = await optionalLstat(this.#emptyGitConfigPath);
+    if (
+      !emptyConfigStat ||
+      !emptyConfigStat.isFile() ||
+      emptyConfigStat.isSymbolicLink() ||
+      emptyConfigStat.size !== 0 ||
+      !samePath(await realpath(this.#emptyGitConfigPath), this.#emptyGitConfigPath)
+    ) {
+      workspaceFailure(
+        "GIT_ENVIRONMENT_UNSAFE",
+        "Git isolation config must be an empty canonical file.",
+      );
+    }
+    const environment = Object.create(null);
+    for (const [key, value] of Object.entries(process.env)) {
+      if (
+        typeof value === "string" &&
+        !key.toUpperCase().startsWith("GIT_") &&
+        key.toUpperCase() !== "GCM_INTERACTIVE"
+      ) {
+        environment[key] = value;
+      }
+    }
+    Object.assign(environment, {
+      GCM_INTERACTIVE: "Never",
+      GIT_ATTR_NOSYSTEM: "1",
+      GIT_CONFIG_GLOBAL: this.#emptyGitConfigPath,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_TERMINAL_PROMPT: "0",
+    });
     const protectedArgs = [
       "-c",
       `core.hooksPath=${this.#hooksDirectory}`,
       "-c",
       "core.fsmonitor=false",
+      "-c",
+      `core.attributesFile=${this.#emptyGitConfigPath}`,
       ...args,
     ];
-    validateExecutorRequest({ command: "git", args: protectedArgs, cwd });
+    validateExecutorRequest({
+      command: "git",
+      args: protectedArgs,
+      cwd,
+      environment,
+    });
     const result = await this.#executor({
       command: "git",
       args: [...protectedArgs],
       cwd,
+      environment: Object.freeze({ ...environment }),
     });
     if (
       result === null ||
@@ -380,39 +557,117 @@ export class GitWorkspace {
         "Git hooks directory must remain empty.",
       );
     }
+    const emptyConfigStat = await optionalLstat(this.#emptyGitConfigPath);
+    if (!emptyConfigStat) {
+      try {
+        await durableCreate(this.#emptyGitConfigPath, "");
+      } catch (error) {
+        if (error?.code !== "EEXIST") {
+          throw error;
+        }
+      }
+    }
+    const verifiedEmptyConfig = await optionalLstat(this.#emptyGitConfigPath);
+    if (
+      !verifiedEmptyConfig ||
+      !verifiedEmptyConfig.isFile() ||
+      verifiedEmptyConfig.isSymbolicLink() ||
+      verifiedEmptyConfig.size !== 0 ||
+      !samePath(await realpath(this.#emptyGitConfigPath), this.#emptyGitConfigPath)
+    ) {
+      workspaceFailure(
+        "GIT_ENVIRONMENT_UNSAFE",
+        "Git isolation config must be an empty canonical file.",
+      );
+    }
   }
 
-  async #assertNoExternalGitDrivers() {
-    const result = await this.#git(
+  async #assertNoExternalGitDrivers(cwd = this.#repositoryRoot) {
+    const pattern =
+      "^(include\\.path|includeif\\..*\\.path|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|diff\\.external|diff\\..*\\.(command|textconv))$";
+    const worktreeConfig = await this.#git(
       [
         "config",
         "--local",
-        "--null",
-        "--get-regexp",
-        "^(filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|diff\\..*\\.(command|textconv))$",
+        "--includes",
+        "--bool",
+        "--get",
+        "extensions.worktreeConfig",
       ],
-      this.#repositoryRoot,
+      cwd,
       { allowFailure: true },
     );
-    if (result.exit_code !== 0 && result.exit_code !== 1) {
+    if (worktreeConfig.exit_code !== 0 && worktreeConfig.exit_code !== 1) {
+      workspaceFailure(
+        "GIT_CONFIG_INSPECTION_FAILED",
+        "Git worktree configuration mode could not be inspected.",
+        { exit_code: worktreeConfig.exit_code },
+      );
+    }
+    const scopes =
+      worktreeConfig.exit_code === 0 &&
+      worktreeConfig.stdout.trim().toLowerCase() === "true"
+        ? ["--local", "--worktree"]
+        : ["--local"];
+    const results = await Promise.all(
+      scopes.map((scope) =>
+        this.#git(
+          ["config", scope, "--includes", "--null", "--get-regexp", pattern],
+          cwd,
+          { allowFailure: true },
+        ),
+      ),
+    );
+    const inspectionFailure = results.find(
+      (result) => result.exit_code !== 0 && result.exit_code !== 1,
+    );
+    if (inspectionFailure) {
       workspaceFailure(
         "GIT_CONFIG_INSPECTION_FAILED",
         "Git execution configuration could not be inspected.",
-        { exit_code: result.exit_code },
+        { exit_code: inspectionFailure.exit_code },
       );
     }
-    if (result.exit_code === 0 && result.stdout.length > 0) {
-      const keys = result.stdout
-        .split("\0")
-        .filter(Boolean)
-        .map((entry) => entry.split("\n", 1)[0])
-        .sort((left, right) => left.localeCompare(right));
+    const keys = [
+      ...new Set(
+        results.flatMap((result) =>
+          result.exit_code === 0
+            ? result.stdout
+                .split("\0")
+                .filter(Boolean)
+                .map((entry) => entry.split("\n", 1)[0])
+            : [],
+        ),
+      ),
+    ].sort((left, right) => left.localeCompare(right));
+    if (keys.length > 0) {
       workspaceFailure(
         "GIT_EXECUTION_CONFIG_UNSAFE",
         "External Git filters, merge drivers, or diff drivers are disabled in Phase 1.",
         { keys },
       );
     }
+  }
+
+  async #driverSafeGit(
+    args,
+    cwd = this.#repositoryRoot,
+    options = undefined,
+  ) {
+    await this.#assertNoExternalGitDrivers(cwd);
+    return this.#git(args, cwd, options);
+  }
+
+  async #ignoredFiles(cwd) {
+    return (
+      await this.#git(
+        ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        cwd,
+      )
+    ).stdout
+      .split("\0")
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right));
   }
 
   #ownershipPath(worktreeId) {
@@ -423,10 +678,11 @@ export class GitWorkspace {
   }
 
   async createWorktree({ task_id, worktree_id, base_commit_sha }) {
-    await this.#ensureRoots();
     const taskId = task_id;
     const worktreeId = safeWorktreeId(worktree_id);
     const baseCommit = safeHash(base_commit_sha, "base_commit_sha");
+    const branch = safeTaskBranch(taskId);
+    await this.#ensureRoots();
     const topLevel = (
       await this.#git(["rev-parse", "--show-toplevel"])
     ).stdout.trim();
@@ -440,7 +696,7 @@ export class GitWorkspace {
       workspaceFailure("BASE_COMMIT_MISMATCH", "Base commit did not resolve exactly.");
     }
     const repositoryStatus = (
-      await this.#git([
+      await this.#driverSafeGit([
         "status",
         "--porcelain=v1",
         "-z",
@@ -453,7 +709,26 @@ export class GitWorkspace {
         status: unownedStatus,
       });
     }
-    await this.#assertNoExternalGitDrivers();
+    const branchRef = `refs/heads/${branch}`;
+    const existingBranch = await this.#git(
+      ["show-ref", "--verify", "--quiet", branchRef],
+      this.#repositoryRoot,
+      { allowFailure: true },
+    );
+    if (existingBranch.exit_code === 0) {
+      workspaceFailure(
+        "WORKTREE_BRANCH_EXISTS",
+        "Task branch already exists and is not owned by this create attempt.",
+        { branch },
+      );
+    }
+    if (existingBranch.exit_code !== 1) {
+      workspaceFailure(
+        "GIT_BRANCH_INSPECTION_FAILED",
+        "Task branch existence could not be verified safely.",
+        { branch, exit_code: existingBranch.exit_code },
+      );
+    }
 
     const target = path.join(this.#worktreeRoot, worktreeId.toLowerCase());
     if (!containedBy(this.#worktreeRoot, target) || (await optionalLstat(target))) {
@@ -462,24 +737,6 @@ export class GitWorkspace {
     const ownershipPath = this.#ownershipPath(worktreeId);
     if (await optionalLstat(ownershipPath)) {
       workspaceFailure("WORKTREE_OWNERSHIP_EXISTS", "Ownership marker already exists.");
-    }
-    const branch = safeTaskBranch(taskId);
-    const created = await this.#git(
-      ["worktree", "add", "-b", branch, target, baseCommit],
-      this.#repositoryRoot,
-      { allowFailure: true },
-    );
-    if (created.exit_code !== 0) {
-      workspaceFailure("GIT_WORKTREE_CREATE_FAILED", "Git worktree creation failed.", {
-        stderr: created.stderr,
-        branch,
-      });
-    }
-    const actualHead = (
-      await this.#git(["rev-parse", "HEAD"], target)
-    ).stdout.trim().toLowerCase();
-    if (actualHead !== baseCommit) {
-      workspaceFailure("WORKTREE_BASE_MISMATCH", "Created worktree has the wrong HEAD.");
     }
     const ownership = {
       version: 1,
@@ -490,41 +747,113 @@ export class GitWorkspace {
       branch,
       base_commit_sha: baseCommit,
     };
-    await this.#verifyOwnedWorktreeIdentity(ownership);
-    const createdStatus = (
-      await this.#git(
-        ["status", "--porcelain=v1", "--untracked-files=all"],
+    let primaryError = null;
+    let worktreeAdded = false;
+    try {
+      const created = await this.#driverSafeGit(
+        ["worktree", "add", "-b", branch, target, baseCommit],
+        this.#repositoryRoot,
+        { allowFailure: true },
+      );
+      if (created.exit_code !== 0) {
+        workspaceFailure(
+          "GIT_WORKTREE_CREATE_FAILED",
+          "Git worktree creation failed.",
+          {
+            stderr: created.stderr,
+            branch,
+          },
+        );
+      }
+      worktreeAdded = true;
+      const actualHead = (
+        await this.#git(["rev-parse", "HEAD"], target)
+      ).stdout.trim().toLowerCase();
+      if (actualHead !== baseCommit) {
+        workspaceFailure(
+          "WORKTREE_BASE_MISMATCH",
+          "Created worktree has the wrong HEAD.",
+        );
+      }
+      await this.#verifyOwnedWorktreeIdentity(ownership);
+      const createdStatus = (
+        await this.#driverSafeGit(
+          ["status", "--porcelain=v1", "--untracked-files=all"],
+          target,
+        )
+      ).stdout;
+      if (createdStatus.trim().length > 0) {
+        workspaceFailure(
+          "WORKTREE_DIRTY",
+          "Created worktree must be clean before ownership is accepted.",
+          { status: createdStatus },
+        );
+      }
+      const createdIgnored = await this.#ignoredFiles(target);
+      if (createdIgnored.length > 0) {
+        workspaceFailure(
+          "WORKTREE_DIRTY",
+          "Created worktree contains ignored files before ownership is accepted.",
+          { ignored: createdIgnored },
+        );
+      }
+      await durableCreate(ownershipPath, `${JSON.stringify(ownership)}\n`);
+      return deepFreeze({
+        ...ownership,
+        path: target,
+      });
+    } catch (error) {
+      primaryError = error;
+    }
+    if (!worktreeAdded) {
+      throw primaryError;
+    }
+    try {
+      await this.#recoverCreatedWorktree({
         target,
-      )
-    ).stdout;
-    if (createdStatus.trim().length > 0) {
-      workspaceFailure(
-        "WORKTREE_DIRTY",
-        "Created worktree must be clean before ownership is accepted.",
-        { status: createdStatus },
+        expectedHead: baseCommit,
+        expectedBranch: branch,
+        deleteBranch: worktreeAdded,
+        markerPath: ownershipPath,
+      });
+    } catch (cleanupError) {
+      throw new WorkspaceError(
+        primaryError.code ?? "GIT_WORKTREE_CREATE_FAILED",
+        primaryError.message ?? "Git worktree creation failed.",
+        {
+          ...(primaryError.details && typeof primaryError.details === "object"
+            ? primaryError.details
+            : {}),
+          cleanup_error: {
+            code: cleanupError.code ?? "WORKTREE_RECOVERY_FAILED",
+            message: cleanupError.message,
+          },
+        },
       );
     }
-    await durableCreate(ownershipPath, `${JSON.stringify(ownership)}\n`);
-    return deepFreeze({
-      ...ownership,
-      path: target,
-    });
+    throw primaryError;
   }
 
   async changedFiles({ worktree_id, worktreePath, base_commit_sha }) {
     const worktreeId = safeWorktreeId(worktree_id);
-    const { marker } = await this.#readOwnership(worktreeId);
     if (
       typeof worktreePath !== "string" ||
-      worktreePath.includes("\0") ||
-      !samePath(worktreePath, marker.worktree_path)
+      worktreePath.trim().length === 0 ||
+      worktreePath.includes("\0")
     ) {
+      workspaceFailure(
+        "WORKTREE_NOT_OWNED",
+        "Changed-file target is invalid.",
+      );
+    }
+    const baseCommit = safeHash(base_commit_sha, "base_commit_sha");
+    const { marker } = await this.#readOwnership(worktreeId);
+    if (!samePath(worktreePath, marker.worktree_path)) {
       workspaceFailure(
         "WORKTREE_NOT_OWNED",
         "Changed-file target does not match an owned task worktree.",
       );
     }
-    const baseCommit = safeHash(base_commit_sha, "base_commit_sha");
     if (baseCommit !== marker.base_commit_sha) {
       workspaceFailure(
         "WORKTREE_BASE_MISMATCH",
@@ -533,47 +862,51 @@ export class GitWorkspace {
     }
     await this.#verifyOwnedWorktreeIdentity(marker);
     const target = marker.worktree_path;
-    const trackedOutput = (
-      await this.#git(
-        ["diff", "--name-status", "-z", "-M", baseCommit, "--"],
+    const stagedOutput = (
+      await this.#driverSafeGit(
+        [
+          "diff",
+          "--no-ext-diff",
+          "--no-textconv",
+          "--cached",
+          "--raw",
+          "-z",
+          "-M",
+          baseCommit,
+          "--",
+        ],
         target,
       )
     ).stdout;
-    const stagedPaths = new Set(
-      (
-        await this.#git(
-          ["diff", "--cached", "--name-only", "-z", "-M", baseCommit, "--"],
-          target,
-        )
-      ).stdout
-        .split("\0")
-        .filter(Boolean),
-    );
-    const unstagedPaths = new Set(
-      (
-        await this.#git(
-          ["diff", "--name-only", "-z", "-M", "--"],
-          target,
-        )
-      ).stdout
-        .split("\0")
-        .filter(Boolean),
-    );
+    const unstagedOutput = (
+      await this.#driverSafeGit(
+        ["diff", "--no-ext-diff", "--no-textconv", "--raw", "-z", "-M", "--"],
+        target,
+      )
+    ).stdout;
     const untrackedOutput = (
       await this.#git(
         ["ls-files", "--others", "--exclude-standard", "-z"],
         target,
       )
     ).stdout;
-    const changes = parseNameStatus(trackedOutput);
+    const ignoredOutput = await this.#ignoredFiles(target);
+    const changes = [
+      ...parseRawDiff(stagedOutput).map((change) => ({
+        ...change,
+        states: ["staged"],
+      })),
+      ...parseRawDiff(unstagedOutput).map((change) => ({
+        ...change,
+        states: ["unstaged"],
+      })),
+    ];
     for (const change of changes) {
-      const paths = [change.path, change.from_path].filter(Boolean);
-      change.states = [];
-      if (paths.some((changedPath) => stagedPaths.has(changedPath))) {
-        change.states.push("staged");
-      }
-      if (paths.some((changedPath) => unstagedPaths.has(changedPath))) {
-        change.states.push("unstaged");
+      if (change.operation !== "delete") {
+        const pathKind = await worktreePathKind(target, change.path);
+        if (change.kind === "file" && pathKind !== "file") {
+          change.kind = pathKind;
+        }
       }
     }
     for (const untracked of untrackedOutput.split("\0").filter(Boolean)) {
@@ -582,14 +915,30 @@ export class GitWorkspace {
         path: untracked,
         from_path: null,
         git_status: "??",
-        kind: "file",
+        kind: await worktreePathKind(target, untracked),
+        old_mode: null,
+        new_mode: null,
         states: ["untracked"],
+      });
+    }
+    for (const ignored of ignoredOutput) {
+      changes.push({
+        operation: "create",
+        path: ignored,
+        from_path: null,
+        git_status: "!!",
+        kind: await worktreePathKind(target, ignored),
+        old_mode: null,
+        new_mode: null,
+        states: ["ignored"],
       });
     }
     changes.sort(
       (left, right) =>
         left.path.localeCompare(right.path) ||
-        (left.from_path ?? "").localeCompare(right.from_path ?? ""),
+        (left.from_path ?? "").localeCompare(right.from_path ?? "") ||
+        left.states[0].localeCompare(right.states[0]) ||
+        left.operation.localeCompare(right.operation),
     );
     return deepFreeze(changes);
   }
@@ -599,10 +948,10 @@ export class GitWorkspace {
     target_commit_sha,
     feature_commit_sha,
   }) {
-    await this.#ensureRoots();
     const integrationId = safeIntegrationId(integration_id);
     const targetCommit = safeHash(target_commit_sha, "target_commit_sha");
     const featureCommit = safeHash(feature_commit_sha, "feature_commit_sha");
+    await this.#ensureRoots();
     const topLevel = (
       await this.#git(["rev-parse", "--show-toplevel"])
     ).stdout.trim();
@@ -610,7 +959,7 @@ export class GitWorkspace {
       workspaceFailure("REPOSITORY_ROOT_MISMATCH", "Git top level is not repositoryRoot.");
     }
     const repositoryStatus = (
-      await this.#git([
+      await this.#driverSafeGit([
         "status",
         "--porcelain=v1",
         "-z",
@@ -634,7 +983,6 @@ export class GitWorkspace {
         workspaceFailure("GIT_COMMIT_MISMATCH", `${field} did not resolve exactly.`);
       }
     }
-    await this.#assertNoExternalGitDrivers();
 
     const verificationName = `integration-${integrationId.toLowerCase()}`;
     const target = path.join(this.#worktreeRoot, verificationName);
@@ -655,49 +1003,6 @@ export class GitWorkspace {
       );
     }
 
-    const created = await this.#git(
-      ["worktree", "add", "--detach", target, targetCommit],
-      this.#repositoryRoot,
-      { allowFailure: true },
-    );
-    if (created.exit_code !== 0) {
-      workspaceFailure(
-        "GIT_INTEGRATION_WORKTREE_FAILED",
-        "Git integration worktree creation failed.",
-        { stderr: created.stderr },
-      );
-    }
-    const [targetStat, targetReal] = await Promise.all([
-      lstat(target),
-      realpath(target),
-    ]);
-    const actualHead = (
-      await this.#git(["rev-parse", "HEAD"], target)
-    ).stdout.trim().toLowerCase();
-    if (
-      !targetStat.isDirectory() ||
-      targetStat.isSymbolicLink() ||
-      !samePath(targetReal, target) ||
-      actualHead !== targetCommit
-    ) {
-      workspaceFailure(
-        "INTEGRATION_WORKTREE_MISMATCH",
-        "Integration worktree identity does not match the requested target.",
-      );
-    }
-    await durableCreate(
-      markerPath,
-      `${JSON.stringify({
-        version: 1,
-        kind: "integration-verification",
-        integration_id: integrationId,
-        repository_root: this.#repositoryRoot,
-        worktree_path: target,
-        target_commit_sha: targetCommit,
-        feature_commit_sha: featureCommit,
-      })}\n`,
-    );
-
     const integrationMarker = deepFreeze({
       version: 1,
       kind: "integration-verification",
@@ -707,17 +1012,94 @@ export class GitWorkspace {
       target_commit_sha: targetCommit,
       feature_commit_sha: featureCommit,
     });
+    let setupError = null;
+    let integrationWorktreeAdded = false;
+    try {
+      const created = await this.#driverSafeGit(
+        ["worktree", "add", "--detach", target, targetCommit],
+        this.#repositoryRoot,
+        { allowFailure: true },
+      );
+      if (created.exit_code !== 0) {
+        workspaceFailure(
+          "GIT_INTEGRATION_WORKTREE_FAILED",
+          "Git integration worktree creation failed.",
+          { stderr: created.stderr },
+        );
+      }
+      integrationWorktreeAdded = true;
+      const [targetStat, targetReal] = await Promise.all([
+        lstat(target),
+        realpath(target),
+      ]);
+      const actualHead = (
+        await this.#git(["rev-parse", "HEAD"], target)
+      ).stdout.trim().toLowerCase();
+      if (
+        !targetStat.isDirectory() ||
+        targetStat.isSymbolicLink() ||
+        !samePath(targetReal, target) ||
+        actualHead !== targetCommit
+      ) {
+        workspaceFailure(
+          "INTEGRATION_WORKTREE_MISMATCH",
+          "Integration worktree identity does not match the requested target.",
+        );
+      }
+      await durableCreate(
+        markerPath,
+        `${JSON.stringify(integrationMarker)}\n`,
+      );
+    } catch (error) {
+      setupError = error;
+    }
+    if (setupError) {
+      if (!integrationWorktreeAdded) {
+        throw setupError;
+      }
+      try {
+        await this.#recoverCreatedWorktree({
+          target,
+          expectedHead: targetCommit,
+          expectedBranch: null,
+          markerPath,
+        });
+      } catch (cleanupError) {
+        throw new WorkspaceError(
+          setupError.code ?? "GIT_INTEGRATION_WORKTREE_FAILED",
+          setupError.message ?? "Git integration worktree creation failed.",
+          {
+            ...(setupError.details && typeof setupError.details === "object"
+              ? setupError.details
+              : {}),
+            cleanup_error: {
+              code: cleanupError.code ?? "WORKTREE_RECOVERY_FAILED",
+              message: cleanupError.message,
+            },
+          },
+        );
+      }
+      throw setupError;
+    }
     let result;
     let primaryError = null;
     try {
-      const mergeResult = await this.#git(
+      const mergeResult = await this.#driverSafeGit(
         ["merge", "--no-commit", "--no-ff", featureCommit],
         target,
         { allowFailure: true },
       );
       const conflicts = (
-        await this.#git(
-          ["diff", "--name-only", "--diff-filter=U", "-z", "--"],
+        await this.#driverSafeGit(
+          [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-only",
+            "--diff-filter=U",
+            "-z",
+            "--",
+          ],
           target,
         )
       ).stdout
@@ -728,8 +1110,17 @@ export class GitWorkspace {
         mergeResult.exit_code === 0
           ? parseNameStatus(
               (
-                await this.#git(
-                  ["diff", "--name-status", "-z", "-M", targetCommit, "--"],
+                await this.#driverSafeGit(
+                  [
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--name-status",
+                    "-z",
+                    "-M",
+                    targetCommit,
+                    "--",
+                  ],
                   target,
                 )
               ).stdout,
@@ -793,6 +1184,189 @@ export class GitWorkspace {
       throw cleanupError;
     }
     return result;
+  }
+
+  async #recoverCreatedWorktree({
+    target,
+    expectedHead,
+    expectedBranch,
+    deleteBranch = false,
+    markerPath,
+  }) {
+    const targetStat = await optionalLstat(target);
+    if (!targetStat) {
+      if (deleteBranch) {
+        await this.#deleteOwnedRecoveryBranch(expectedBranch, expectedHead);
+      }
+      const markerStat = await optionalLstat(markerPath);
+      if (markerStat) {
+        if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+          workspaceFailure(
+            "WORKTREE_RECOVERY_FAILED",
+            "Recovery marker is unsafe.",
+          );
+        }
+        await unlink(markerPath);
+      }
+      return deepFreeze({ cleaned: true, path: target });
+    }
+    if (!targetStat.isDirectory() || targetStat.isSymbolicLink()) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery target is not a canonical worktree directory.",
+      );
+    }
+    const targetReal = await realpath(target);
+    const [topLevel, commonDirectory, repositoryCommonDirectory, actualHead, branch] =
+      await Promise.all([
+        this.#git(
+          ["rev-parse", "--show-toplevel"],
+          target,
+          { allowFailure: true },
+        ),
+        this.#git(
+          ["rev-parse", "--git-common-dir"],
+          target,
+          { allowFailure: true },
+        ),
+        this.#git(
+          ["rev-parse", "--git-common-dir"],
+          this.#repositoryRoot,
+          { allowFailure: true },
+        ),
+        this.#git(
+          ["rev-parse", "HEAD"],
+          target,
+          { allowFailure: true },
+        ),
+        this.#git(
+          ["symbolic-ref", "--quiet", "--short", "HEAD"],
+          target,
+          { allowFailure: true },
+        ),
+      ]);
+    const targetCommonPath = path.resolve(
+      target,
+      commonDirectory.stdout.trim(),
+    );
+    const repositoryCommonPath = path.resolve(
+      this.#repositoryRoot,
+      repositoryCommonDirectory.stdout.trim(),
+    );
+    const branchMatches =
+      expectedBranch === null
+        ? branch.exit_code !== 0 && branch.stdout.trim().length === 0
+        : branch.exit_code === 0 && branch.stdout.trim() === expectedBranch;
+    if (
+      !samePath(targetReal, target) ||
+      topLevel.exit_code !== 0 ||
+      commonDirectory.exit_code !== 0 ||
+      repositoryCommonDirectory.exit_code !== 0 ||
+      actualHead.exit_code !== 0 ||
+      !samePath(topLevel.stdout.trim(), target) ||
+      !samePath(targetCommonPath, repositoryCommonPath) ||
+      actualHead.stdout.trim().toLowerCase() !== expectedHead ||
+      !branchMatches
+    ) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery target Git identity does not match the create attempt.",
+      );
+    }
+    const status = (
+      await this.#driverSafeGit(
+        ["status", "--porcelain=v1", "--untracked-files=all"],
+        target,
+      )
+    ).stdout;
+    if (status.trim().length > 0) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery refuses to remove a dirty worktree.",
+        { status },
+      );
+    }
+    const ignored = await this.#ignoredFiles(target);
+    if (ignored.length > 0) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery refuses to remove a worktree containing ignored files.",
+        { ignored },
+      );
+    }
+    const removed = await this.#driverSafeGit(
+      ["worktree", "remove", target],
+      this.#repositoryRoot,
+      { allowFailure: true },
+    );
+    if (removed.exit_code !== 0 || (await optionalLstat(target))) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Git did not remove the exact recovery worktree.",
+        { stderr: removed.stderr },
+      );
+    }
+    if (deleteBranch) {
+      await this.#deleteOwnedRecoveryBranch(expectedBranch, expectedHead);
+    }
+    const markerStat = await optionalLstat(markerPath);
+    if (markerStat) {
+      if (!markerStat.isFile() || markerStat.isSymbolicLink()) {
+        workspaceFailure(
+          "WORKTREE_RECOVERY_FAILED",
+          "Recovery marker is unsafe.",
+        );
+      }
+      await unlink(markerPath);
+    }
+    return deepFreeze({ cleaned: true, path: target });
+  }
+
+  async #deleteOwnedRecoveryBranch(expectedBranch, expectedHead) {
+    if (expectedBranch === null) {
+      return;
+    }
+    const branchRef = `refs/heads/${expectedBranch}`;
+    const worktreeList = await this.#git(
+      ["worktree", "list", "--porcelain"],
+      this.#repositoryRoot,
+    );
+    if (
+      worktreeList.stdout
+        .split(/\r?\n/)
+        .some((line) => line === `branch ${branchRef}`)
+    ) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery branch is still checked out by a worktree.",
+        { branch: expectedBranch },
+      );
+    }
+    const deleted = await this.#git(
+      ["update-ref", "-d", branchRef, expectedHead],
+      this.#repositoryRoot,
+      { allowFailure: true },
+    );
+    const remaining = await this.#git(
+      ["show-ref", "--verify", "--quiet", branchRef],
+      this.#repositoryRoot,
+      { allowFailure: true },
+    );
+    if (
+      deleted.exit_code !== 0 ||
+      (remaining.exit_code !== 0 && remaining.exit_code !== 1) ||
+      remaining.exit_code === 0
+    ) {
+      workspaceFailure(
+        "WORKTREE_RECOVERY_FAILED",
+        "Recovery could not compare-and-delete the exact task branch.",
+        {
+          branch: expectedBranch,
+          delete_exit_code: deleted.exit_code,
+          remaining_exit_code: remaining.exit_code,
+        },
+      );
+    }
   }
 
   async #cleanupIntegrationVerification({ marker, markerPath }) {
@@ -893,7 +1467,7 @@ export class GitWorkspace {
       { allowFailure: true },
     );
     if (mergeHead.exit_code === 0) {
-      const aborted = await this.#git(
+      const aborted = await this.#driverSafeGit(
         ["merge", "--abort"],
         marker.worktree_path,
         { allowFailure: true },
@@ -907,7 +1481,7 @@ export class GitWorkspace {
       }
     }
     const status = (
-      await this.#git(
+      await this.#driverSafeGit(
         ["status", "--porcelain=v1", "--untracked-files=all"],
         marker.worktree_path,
       )
@@ -919,7 +1493,15 @@ export class GitWorkspace {
         { status },
       );
     }
-    const removed = await this.#git(
+    const ignored = await this.#ignoredFiles(marker.worktree_path);
+    if (ignored.length > 0) {
+      workspaceFailure(
+        "INTEGRATION_WORKTREE_DIRTY",
+        "Integration cleanup refuses a worktree containing ignored files.",
+        { ignored },
+      );
+    }
+    const removed = await this.#driverSafeGit(
       ["worktree", "remove", marker.worktree_path],
       this.#repositoryRoot,
       { allowFailure: true },
@@ -1053,15 +1635,25 @@ export class GitWorkspace {
     const { marker, markerPath } = await this.#readOwnership(worktreeId);
     await this.#verifyOwnedWorktreeIdentity(marker);
     const status = (
-      await this.#git(
+      await this.#driverSafeGit(
         ["status", "--porcelain=v1", "--untracked-files=all"],
         marker.worktree_path,
       )
     ).stdout;
     if (status.trim().length > 0) {
-      workspaceFailure("WORKTREE_DIRTY", "Dirty worktree is not removed.");
+      workspaceFailure("WORKTREE_DIRTY", "Dirty worktree is not removed.", {
+        status,
+      });
     }
-    const removed = await this.#git(
+    const ignored = await this.#ignoredFiles(marker.worktree_path);
+    if (ignored.length > 0) {
+      workspaceFailure(
+        "WORKTREE_DIRTY",
+        "Worktree containing ignored files is not removed.",
+        { ignored },
+      );
+    }
+    const removed = await this.#driverSafeGit(
       ["worktree", "remove", marker.worktree_path],
       this.#repositoryRoot,
       { allowFailure: true },

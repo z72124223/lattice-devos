@@ -3,7 +3,8 @@ ticket_id: TASK-006
 spec_id: SPEC-001
 module_id: orchestrator-runtime
 constitution_version: 1.0
-status: blocked
+status: superseded
+superseded_by: SPEC-002
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -27,6 +28,9 @@ likely_files:
   - test/controlled-swarm.e2e.test.js
 branch: feature/phase1-controlled-swarm
 ---
+
+> Do not execute. The V2 direction replaces the Node.js ticket set; retained as
+> historical characterization scope only.
 
 ## Objective
 
@@ -81,4 +85,3 @@ every module and fixes call ordering.
 ## Human Gate
 
 none for Fake Runtime; Real Runtime is a later approved specification.
-

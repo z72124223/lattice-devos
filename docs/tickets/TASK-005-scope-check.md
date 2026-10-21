@@ -3,7 +3,8 @@ ticket_id: TASK-005
 spec_id: SPEC-001
 module_id: scope-check
 constitution_version: 1.0
-status: ready
+status: superseded
+superseded_by: SPEC-002
 parallel_safe: false
 depends_on:
   - TASK-001
@@ -20,6 +21,9 @@ likely_files:
   - test/scope-check.test.js
 branch: feature/phase1-controlled-swarm
 ---
+
+> Do not execute. The V2 direction replaces the Node.js ticket set; retained as
+> historical characterization scope only.
 
 ## Objective
 

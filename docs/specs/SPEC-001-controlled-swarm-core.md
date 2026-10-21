@@ -1,7 +1,8 @@
 ---
 spec_id: SPEC-001
-status: ready
+status: superseded_for_new_work
 version: 1
+superseded_by: SPEC-002
 modules:
   - module_id: task-domain
     constitution_version: 1.0
@@ -20,6 +21,11 @@ modules:
 ---
 
 # Controlled Swarm Core
+
+> Historical V1 prototype specification. It remains immutable compatibility
+> evidence, but it is not an active implementation specification after the
+> 2026-07-29 direction change. New work follows blocked draft SPEC-002 only
+> after its architecture and module amendments are approved.
 
 ## Problem
 

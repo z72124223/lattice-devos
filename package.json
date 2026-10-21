@@ -2,7 +2,7 @@
   "name": "lattice-devos",
   "version": "1.0.0",
   "private": true,
-  "description": "Offline-first controlled swarm orchestration core.",
+  "description": "Local-first autonomous AI development platform.",
   "type": "module",
   "engines": {
     "node": ">=24.15.0"
@@ -14,4 +14,3 @@
     "verify": "npm run check && npm test"
   }
 }
-

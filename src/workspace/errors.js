@@ -10,4 +10,3 @@ export class WorkspaceError extends Error {
 export function workspaceFailure(code, message, details = undefined) {
   throw new WorkspaceError(code, message, details);
 }
-

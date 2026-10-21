@@ -434,6 +434,30 @@ export class ProjectLock {
     return next;
   }
 
+  async #assertCurrentFencingRecord(record) {
+    const initialized = await this.#validateFencingMarker();
+    if (!initialized) {
+      workspaceFailure(
+        "LOCK_UNKNOWN_STATE",
+        "Fencing initialization evidence is missing.",
+      );
+    }
+    const highWaterMark = await this.#readFencingToken();
+    if (
+      record.fencing_token !== highWaterMark ||
+      record.current_fencing_token !== highWaterMark
+    ) {
+      workspaceFailure(
+        "STALE_FENCING_TOKEN",
+        "Stored writer lease is behind the fencing high-water mark.",
+        {
+          record_fencing_token: record.fencing_token,
+          current_fencing_token: highWaterMark,
+        },
+      );
+    }
+  }
+
   async inspect() {
     const safeLockDirectory = await this.#inspectSafeLockDirectory();
     if (safeLockDirectory === null) {
@@ -452,7 +476,9 @@ export class ProjectLock {
     } catch {
       workspaceFailure("LOCK_UNKNOWN_STATE", "Project lock is not valid JSON.");
     }
-    return validateStoredLock(record);
+    const validated = validateStoredLock(record);
+    await this.#assertCurrentFencingRecord(validated);
+    return validated;
   }
 
   async acquire(request) {

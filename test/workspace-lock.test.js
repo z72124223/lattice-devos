@@ -365,3 +365,48 @@ test("rejects ambiguous project roots before resolving a filesystem path", () =>
     );
   }
 });
+
+test("rejects a rolled-back lock record behind the fencing high-water mark", async (t) => {
+  const { lock } = await projectFixture(t);
+  const first = await lock.acquire(writerRequest());
+  await lock.release({
+    lease_id: first.lease_id,
+    fencing_token: first.fencing_token,
+  });
+  const second = await lock.acquire(
+    writerRequest({
+      task_id: "TASK-2026-0014",
+      attempt_id: "ATTEMPT-0014",
+      worktree_id: "WORKTREE-0014",
+    }),
+  );
+  assert.equal(second.fencing_token, 2);
+  await lock.release({
+    lease_id: second.lease_id,
+    fencing_token: second.fencing_token,
+  });
+  await writeFile(lock.lockPath, `${JSON.stringify(first)}\n`);
+
+  await assert.rejects(
+    lock.inspect(),
+    (error) =>
+      error instanceof WorkspaceError && error.code === "STALE_FENCING_TOKEN",
+  );
+  await assert.rejects(
+    lock.validateWriter({
+      lease_id: first.lease_id,
+      fencing_token: first.fencing_token,
+    }),
+    (error) =>
+      error instanceof WorkspaceError && error.code === "STALE_FENCING_TOKEN",
+  );
+  await assert.rejects(
+    lock.release({
+      lease_id: first.lease_id,
+      fencing_token: first.fencing_token,
+    }),
+    (error) =>
+      error instanceof WorkspaceError && error.code === "STALE_FENCING_TOKEN",
+  );
+  await access(lock.lockPath);
+});
