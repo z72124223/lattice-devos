@@ -1,0 +1,190 @@
+TAP version 13
+# Subtest: valid input: mixed
+ok 1 - valid input: mixed
+  ---
+  duration_ms: 257.682
+  type: 'test'
+  ...
+# Subtest: valid input: empty
+ok 2 - valid input: empty
+  ---
+  duration_ms: 249.8025
+  type: 'test'
+  ...
+# Subtest: valid input: all completed
+ok 3 - valid input: all completed
+  ---
+  duration_ms: 258.4691
+  type: 'test'
+  ...
+# Subtest: valid input: all pending
+ok 4 - valid input: all pending
+  ---
+  duration_ms: 242.4126
+  type: 'test'
+  ...
+# Subtest: valid input: extra fields
+ok 5 - valid input: extra fields
+  ---
+  duration_ms: 253.3471
+  type: 'test'
+  ...
+# Subtest: reject input without success output: missing argument
+ok 6 - reject input without success output: missing argument
+  ---
+  duration_ms: 235.513
+  type: 'test'
+  ...
+# Subtest: reject input without success output: empty argument
+ok 7 - reject input without success output: empty argument
+  ---
+  duration_ms: 236.773
+  type: 'test'
+  ...
+# Subtest: reject input without success output: malformed JSON
+ok 8 - reject input without success output: malformed JSON
+  ---
+  duration_ms: 236.2026
+  type: 'test'
+  ...
+# Subtest: reject input without success output: trailing comma
+ok 9 - reject input without success output: trailing comma
+  ---
+  duration_ms: 248.1864
+  type: 'test'
+  ...
+# Subtest: reject input without success output: trailing garbage
+ok 10 - reject input without success output: trailing garbage
+  ---
+  duration_ms: 252.4782
+  type: 'test'
+  ...
+# Subtest: reject input without success output: object root
+ok 11 - reject input without success output: object root
+  ---
+  duration_ms: 240.8703
+  type: 'test'
+  ...
+# Subtest: reject input without success output: null root
+ok 12 - reject input without success output: null root
+  ---
+  duration_ms: 243.362
+  type: 'test'
+  ...
+# Subtest: reject input without success output: string root
+ok 13 - reject input without success output: string root
+  ---
+  duration_ms: 238.6423
+  type: 'test'
+  ...
+# Subtest: reject input without success output: number root
+ok 14 - reject input without success output: number root
+  ---
+  duration_ms: 232.4959
+  type: 'test'
+  ...
+# Subtest: reject input without success output: boolean root
+ok 15 - reject input without success output: boolean root
+  ---
+  duration_ms: 237.0152
+  type: 'test'
+  ...
+# Subtest: reject input without success output: missing completed
+ok 16 - reject input without success output: missing completed
+  ---
+  duration_ms: 240.797
+  type: 'test'
+  ...
+# Subtest: reject input without success output: null element
+ok 17 - reject input without success output: null element
+  ---
+  duration_ms: 238.6827
+  type: 'test'
+  ...
+# Subtest: reject input without success output: array element
+ok 18 - reject input without success output: array element
+  ---
+  duration_ms: 234.9185
+  type: 'test'
+  ...
+# Subtest: reject input without success output: string element
+ok 19 - reject input without success output: string element
+  ---
+  duration_ms: 226.9433
+  type: 'test'
+  ...
+# Subtest: reject input without success output: number element
+ok 20 - reject input without success output: number element
+  ---
+  duration_ms: 235.2019
+  type: 'test'
+  ...
+# Subtest: reject input without success output: boolean element
+ok 21 - reject input without success output: boolean element
+  ---
+  duration_ms: 231.1652
+  type: 'test'
+  ...
+# Subtest: reject input without success output: string true
+ok 22 - reject input without success output: string true
+  ---
+  duration_ms: 233.8609
+  type: 'test'
+  ...
+# Subtest: reject input without success output: string false
+ok 23 - reject input without success output: string false
+  ---
+  duration_ms: 237.7531
+  type: 'test'
+  ...
+# Subtest: reject input without success output: numeric zero
+ok 24 - reject input without success output: numeric zero
+  ---
+  duration_ms: 237.3285
+  type: 'test'
+  ...
+# Subtest: reject input without success output: numeric one
+ok 25 - reject input without success output: numeric one
+  ---
+  duration_ms: 232.4253
+  type: 'test'
+  ...
+# Subtest: reject input without success output: null completed
+ok 26 - reject input without success output: null completed
+  ---
+  duration_ms: 242.9756
+  type: 'test'
+  ...
+# Subtest: reject input without success output: array completed
+ok 27 - reject input without success output: array completed
+  ---
+  duration_ms: 234.722
+  type: 'test'
+  ...
+# Subtest: reject input without success output: object completed
+ok 28 - reject input without success output: object completed
+  ---
+  duration_ms: 238.1853
+  type: 'test'
+  ...
+# Subtest: reject input without success output: completed only in data named __proto__
+ok 29 - reject input without success output: completed only in data named __proto__
+  ---
+  duration_ms: 240.8502
+  type: 'test'
+  ...
+# Subtest: reject input without success output: invalid after valid prefix
+ok 30 - reject input without success output: invalid after valid prefix
+  ---
+  duration_ms: 236.3803
+  type: 'test'
+  ...
+1..30
+# tests 30
+# suites 0
+# pass 30
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 7425.8973

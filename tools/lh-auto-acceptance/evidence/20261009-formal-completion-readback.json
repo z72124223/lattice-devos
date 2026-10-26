@@ -1,0 +1,72 @@
+{
+  "observed_at": "2026-10-09T04:34:46.609Z",
+  "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+  "title": "Life-Harness 自動診斷受控工程驗收",
+  "status": "verified",
+  "completion_verified": true,
+  "result_digest": "c81a00b7d01e19ee84a246746935c9da3a00c433457f2f7605e862ee0b8465b3",
+  "ledger": {
+    "failure_code": null,
+    "failure_stage": null,
+    "ledger_head_digest": "383095205f3bcdd2e59a5d7e5d85fd61f14d6ddf64d52975c544969ed4a49fce",
+    "objective_digest": "e65325ea5ef1bd1af7d9e5c06c07e35334c49af37c07a5fb045eaaa0225385b1",
+    "objective_summary": "Objective retained; digest only.",
+    "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "project_name": "LATTICE DevOS",
+    "project_snapshot_id": "78cc242a-fd7c-4d77-a895-1e5ade124618:registry:1:23cc1a6f12c5a1190c9a9edc5c89f79d7e1984a7595f0b6b0c0e6cea99702cab",
+    "result_digest": "c81a00b7d01e19ee84a246746935c9da3a00c433457f2f7605e862ee0b8465b3",
+    "schema_version": "lattice.task.status.v6",
+    "status": "COMPLETED",
+    "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+    "task_state": "COMPLETED"
+  },
+  "source": {
+    "authority": "POSTGRESQL_TASK_LEDGER",
+    "kind": "POSTGRESQL_CONTROL_PRODUCT"
+  },
+  "claims": [
+    {
+      "claim_id": "a89ec7a3-3a5a-4f58-aa0a-65a24f197522",
+      "phase": "VERIFICATION",
+      "thread_id": "01a11ed7-e547-79f3-9db4-7d8f95b452e4",
+      "turn_id": "01a11eee-5621-7640-a8cb-f574365bf336",
+      "turn_status": "TURN_COMPLETED",
+      "dispatch_sequence": 19,
+      "execution_sequence": 40,
+      "verification_outcome": {
+        "approval_decision": null,
+        "approval_id": null,
+        "claim_id": "a89ec7a3-3a5a-4f58-aa0a-65a24f197522",
+        "evidence_ref": "evidence:sha256:8a1a3a4fb62d7fa1439679b8750f602b9282fad191f49a71339789d14e01315e",
+        "execution_sequence": null,
+        "input_id": "verify:lh-native-sequence-execution-20261009",
+        "kind": "VERIFICATION_PASSED",
+        "observed_at": "2026-10-09T12:33:08.322933+08:00",
+        "payload": null,
+        "request_digest": "32137ce5078c257dadc5fe85a0ccb9d1227f4df312a69150ba62dc1779498f51",
+        "request_id": "fc8ba7cc-a9a3-474b-8485-e0ff513776a1",
+        "sequence": 24,
+        "summary": "依提供的程式快照與補交原生紀錄，唯讀查核通過。紀錄支持缺失模組失敗、服務提示、三次獨立 prepare／原樣 receipt／readback，以及讀回後才新增模組的順序；先前缺口已補足。程式符合統計與輸入驗證需求，5 項合法及 25 項非法測試有實質覆蓋。\n工作樹根目錄可使用：node tools/lh-auto-acceptance/cli.mjs '[]'；測試：node --test tools/lh-auto-acceptance/acceptance.test.mjs。\n本次僅查閱傳入資料，未讀盤、重算雜湊或執行測試。歷史診斷僅 nativeClaimBindingVerified=true，其餘三項仍為 false，不能宣稱完整診斷成功。Runtime 固定測試、檔案一致性核對與正式保存仍待執行，本判決不代表結案。",
+        "summary_truncated": false,
+        "thread_id": "01a11ed7-e547-79f3-9db4-7d8f95b452e4",
+        "turn_id": "01a11eee-5621-7640-a8cb-f574365bf336"
+      },
+      "pending_questions": []
+    },
+    {
+      "claim_id": "c583f2eb-83bb-4308-b545-1043c492a179",
+      "phase": "EXECUTION",
+      "thread_id": "01a10464-0d6e-7793-aa72-2808f813da41",
+      "turn_id": "01a11eec-811d-72a1-a106-e46fdbdb989b",
+      "turn_status": "TURN_COMPLETED",
+      "dispatch_sequence": 40,
+      "execution_sequence": null,
+      "verification_outcome": null,
+      "pending_questions": []
+    }
+  ],
+  "original_scope": "真實 native shell 初次重現缺失相對模組；若收到自動 Life-Harness 提示，必須分別執行 prepare、原樣 receipt command、readback，保留結果並在 readback 後修復。入口對合法資料輸出正確三項統計，不合法輸入以非零退出且不輸出成功結果。Node 測試通過，獨立 verifier 核對後由既有 Runtime 執行固定测试並正式保存。診斷失敗與工程成果完成必須分開報告，不得聲稱未取得的證據。",
+  "verification_method": "Formal verifier reviewed complete source snapshots and retained native historical sequence; coordinator checked forwarded snapshots against current bytes; existing Runtime independently executed its fixed Node tests and adopted the result.",
+  "remaining_environment_issue": "Windows sandbox file/tool startup failed in the verifier; it was not repaired or disabled. Source snapshot review was used as the bounded alternative.",
+  "historical_diagnostic_limits": "Advisory only; nativeClaimBindingVerified=true, producerVerified=false, inputFileBytesVerified=false, diagnosticSemanticsVerified=false. No full diagnostic success is claimed."
+}

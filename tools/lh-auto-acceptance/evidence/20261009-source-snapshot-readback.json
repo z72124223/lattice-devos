@@ -1,0 +1,25 @@
+{
+  "observed_at": "2026-10-09T04:24:54.003Z",
+  "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+  "formal_execution_turn_id": "01a11ee5-35d9-7551-9b7f-685092640f2d",
+  "packet_deep_equal": true,
+  "current_files_match": true,
+  "checks": [
+    {
+      "path": "tools/lh-auto-acceptance/cli.mjs",
+      "sha256": "5d6a33ef1ea74aa1fdc6377da9543747a57d2941a0179980e9ff25f99ae06fa8",
+      "passed": true
+    },
+    {
+      "path": "tools/lh-auto-acceptance/summary.mjs",
+      "sha256": "cc4a0543619e92be32a5427fb2cd1a80d64e7d6f90b301ce885f49d03d5f0f5c",
+      "passed": true
+    },
+    {
+      "path": "tools/lh-auto-acceptance/acceptance.test.mjs",
+      "sha256": "f384b936247ee97f2bdd1ae24e762178ff81120c910e47cb0b32d457404f4596",
+      "passed": true
+    }
+  ],
+  "scope": "Coordinator compared actual native final output packet with original packet and current file bytes; not a verifier filesystem read."
+}

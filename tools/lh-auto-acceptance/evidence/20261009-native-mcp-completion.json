@@ -1,0 +1,18 @@
+{
+  "tool": "lattice_task_status",
+  "response": {
+    "failure_code": null,
+    "failure_stage": null,
+    "ledger_head_digest": "383095205f3bcdd2e59a5d7e5d85fd61f14d6ddf64d52975c544969ed4a49fce",
+    "objective_digest": "e65325ea5ef1bd1af7d9e5c06c07e35334c49af37c07a5fb045eaaa0225385b1",
+    "objective_summary": "Objective retained; digest only.",
+    "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "project_name": "LATTICE DevOS",
+    "project_snapshot_id": "78cc242a-fd7c-4d77-a895-1e5ade124618:registry:1:23cc1a6f12c5a1190c9a9edc5c89f79d7e1984a7595f0b6b0c0e6cea99702cab",
+    "result_digest": "c81a00b7d01e19ee84a246746935c9da3a00c433457f2f7605e862ee0b8465b3",
+    "schema_version": "lattice.task.status.v6",
+    "status": "COMPLETED",
+    "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+    "task_state": "COMPLETED"
+  }
+}

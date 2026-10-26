@@ -1,0 +1,84 @@
+{
+  "observed_at": "2026-10-09T04:10:52.849Z",
+  "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+  "scope": "Original Life-Harness controlled engineering acceptance",
+  "source": {
+    "authority": "POSTGRESQL_TASK_LEDGER",
+    "kind": "POSTGRESQL_CONTROL_PRODUCT"
+  },
+  "status": "waiting_approval",
+  "completion_verified": false,
+  "result_digest": null,
+  "ledger": {
+    "failure_code": null,
+    "failure_stage": null,
+    "ledger_head_digest": "ac07ca6fcdb3be97fc21ee17ec49745a4c3c79893b80dfba37b98700d71e8308",
+    "objective_digest": "e65325ea5ef1bd1af7d9e5c06c07e35334c49af37c07a5fb045eaaa0225385b1",
+    "objective_summary": "Objective retained; digest only.",
+    "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "project_name": "LATTICE DevOS",
+    "project_snapshot_id": "78cc242a-fd7c-4d77-a895-1e5ade124618:registry:1:23cc1a6f12c5a1190c9a9edc5c89f79d7e1984a7595f0b6b0c0e6cea99702cab",
+    "result_digest": null,
+    "schema_version": "lattice.task.status.v5",
+    "status": "SUBMITTED",
+    "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+    "task_state": "DRAFT"
+  },
+  "repair": {
+    "path": "tools/lh-auto-acceptance/summary.mjs",
+    "sha256": "cc4a0543619e92be32a5427fb2cd1a80d64e7d6f90b301ce885f49d03d5f0f5c",
+    "local_test_totals": {
+      "tests": 30,
+      "pass": 30,
+      "fail": 0
+    },
+    "independent_review": "tools/lh-auto-acceptance/evidence/20261009-independent-035711149-57775f04.json"
+  },
+  "recovery": {
+    "native_writer_conflict_resolved": true,
+    "method": "Native archive, Control reconcile, Control reopen, then resume the same claim and task.",
+    "manual_import_attempts": 2,
+    "manual_import_outcome": "Rejected by CONTROL_PRODUCT_VERIFICATION_STALE; no completion adopted. Existing claimed tasks require the formal verification claim. No more operator import retries.",
+    "database_available": true
+  },
+  "claims": [
+    {
+      "claim_id": "a89ec7a3-3a5a-4f58-aa0a-65a24f197522",
+      "phase": "VERIFICATION",
+      "thread_id": "01a11ed7-e547-79f3-9db4-7d8f95b452e4",
+      "turn_id": "01a11ed8-0e59-7283-9c38-4bc6c6ae6aad",
+      "turn_status": "TURN_BOUND",
+      "archived": false,
+      "pending_questions": [
+        {
+          "approval_id": "q:2573059b1e9e743fb396f6ebaeee561bda2c846cd57af826fe2c642ba16193de",
+          "summary": "Codex 請求一次性執行 lattice_task_status；等待使用者明示接受、拒絕或取消。",
+          "request": {
+            "actions": [
+              "accept",
+              "decline",
+              "cancel"
+            ],
+            "scope": "once",
+            "serverName": "lattice",
+            "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+            "tool": "lattice_task_status"
+          }
+        }
+      ]
+    },
+    {
+      "claim_id": "c583f2eb-83bb-4308-b545-1043c492a179",
+      "phase": "EXECUTION",
+      "thread_id": "01a10464-0d6e-7793-aa72-2808f813da41",
+      "turn_id": "01a11ed6-494b-7c81-8045-b166167b81dd",
+      "turn_status": "TURN_COMPLETED",
+      "archived": false,
+      "pending_questions": []
+    }
+  ],
+  "limitations": [
+    "Historical diagnostics remain advisory; nativeClaimBindingVerified=true does not strengthen the other false trust flags.",
+    "This checkpoint is not a formal completion receipt. Final completion requires Runtime readback."
+  ]
+}

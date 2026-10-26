@@ -1,0 +1,9 @@
+{
+  "source": "tools.exec_command result captured by executor",
+  "command": "node C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\cli.mjs",
+  "chunk_id": "7da148",
+  "wall_time_seconds": 0.2932882,
+  "exit_code": 1,
+  "original_token_count": 368,
+  "output": "node:internal/modules/esm/resolve:271\r\n    throw new ERR_MODULE_NOT_FOUND(\r\n          ^\r\n\r\nError [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\summary.mjs' imported from C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\cli.mjs\r\n    at finalizeResolution (node:internal/modules/esm/resolve:271:11)\r\n    at moduleResolve (node:internal/modules/esm/resolve:865:10)\r\n    at defaultResolve (node:internal/modules/esm/resolve:992:11)\r\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:691:20)\r\n    at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:708:38)\r\n    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:740:52)\r\n    at #resolve (node:internal/modules/esm/loader:673:17)\r\n    at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:593:35)\r\n    at ModuleJob.syncLink (node:internal/modules/esm/module_job:163:33)\r\n    at ModuleJob.link (node:internal/modules/esm/module_job:253:17) {\r\n  code: 'ERR_MODULE_NOT_FOUND',\r\n  url: 'file:///C:/Users/f7212/AppData/Local/LATTICE/runtime-delivery/control-worktrees/77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8/tools/lh-auto-acceptance/summary.mjs'\r\n}\r\n\r\nNode.js v24.16.0\r\n"
+}

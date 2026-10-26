@@ -1,0 +1,129 @@
+{
+  "captured_at": "2026-10-09T04:21:18.524Z",
+  "task_ref": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+  "kind": "Current source snapshot supplied by coordinator; not a direct filesystem read by verifier",
+  "files": [
+    {
+      "path": "tools/lh-auto-acceptance/cli.mjs",
+      "sha256": "5d6a33ef1ea74aa1fdc6377da9543747a57d2941a0179980e9ff25f99ae06fa8",
+      "content": "import { summarize } from './summary.mjs';\n\ntry {\n  if (process.argv[2] === undefined) {\n    throw new TypeError('Expected a JSON task array as argv[2].');\n  }\n  const result = summarize(JSON.parse(process.argv[2]));\n  process.stdout.write(`${JSON.stringify(result)}\\n`);\n} catch (error) {\n  process.stderr.write(`Invalid task input: ${error.message}\\n`);\n  process.exitCode = 1;\n}\n"
+    },
+    {
+      "path": "tools/lh-auto-acceptance/summary.mjs",
+      "sha256": "cc4a0543619e92be32a5427fb2cd1a80d64e7d6f90b301ce885f49d03d5f0f5c",
+      "content": "export function summarize(tasks) {\n  if (!Array.isArray(tasks)) {\n    throw new TypeError('Expected an array of tasks.');\n  }\n\n  let completed = 0;\n  for (let index = 0; index < tasks.length; index += 1) {\n    const task = tasks[index];\n    if (task === null || typeof task !== 'object' || Array.isArray(task)\n        || !Object.hasOwn(task, 'completed') || typeof task.completed !== 'boolean') {\n      throw new TypeError(`Task at index ${index} must have its own boolean completed field.`);\n    }\n    if (task.completed) completed += 1;\n  }\n\n  return { total: tasks.length, completed, pending: tasks.length - completed };\n}\n"
+    },
+    {
+      "path": "tools/lh-auto-acceptance/acceptance.test.mjs",
+      "sha256": "f384b936247ee97f2bdd1ae24e762178ff81120c910e47cb0b32d457404f4596",
+      "content": "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { spawnSync } from 'node:child_process';\nimport { tmpdir } from 'node:os';\nimport { fileURLToPath } from 'node:url';\n\nconst cli = fileURLToPath(new URL('./cli.mjs', import.meta.url));\n\nfunction run(args) {\n  const result = spawnSync(process.execPath, [cli, ...args], {\n    cwd: tmpdir(),\n    encoding: 'utf8',\n    timeout: 10_000,\n    windowsHide: true,\n  });\n  assert.equal(result.error, undefined);\n  assert.equal(result.signal, null);\n  return result;\n}\n\nconst validCases = [\n  ['mixed', [{ completed: true }, { completed: false }, { completed: true }],\n    { total: 3, completed: 2, pending: 1 }],\n  ['empty', [], { total: 0, completed: 0, pending: 0 }],\n  ['all completed', [{ completed: true }, { completed: true }],\n    { total: 2, completed: 2, pending: 0 }],\n  ['all pending', [{ completed: false }, { completed: false }],\n    { total: 2, completed: 0, pending: 2 }],\n  ['extra fields', [{ id: 1, title: '任務', completed: false }],\n    { total: 1, completed: 0, pending: 1 }],\n];\n\nfor (const [name, tasks, expected] of validCases) {\n  test(`valid input: ${name}`, () => {\n    const result = run([JSON.stringify(tasks)]);\n    assert.equal(result.status, 0, result.stderr);\n    assert.equal(result.stderr, '');\n    const actual = JSON.parse(result.stdout);\n    assert.deepEqual(actual, expected);\n    assert.deepEqual(Object.keys(actual).sort(), ['completed', 'pending', 'total']);\n    assert.ok(Object.values(actual).every(Number.isInteger));\n    assert.equal(result.stdout.trim().split('\\n').length, 1);\n  });\n}\n\nconst invalidCases = [\n  ['missing argument', []],\n  ['empty argument', ['']],\n  ['malformed JSON', ['[']],\n  ['trailing comma', ['[{\"completed\":true},]']],\n  ['trailing garbage', ['[]garbage']],\n  ['object root', ['{}']],\n  ['null root', ['null']],\n  ['string root', ['\"tasks\"']],\n  ['number root', ['42']],\n  ['boolean root', ['true']],\n  ['missing completed', ['[{}]']],\n  ['null element', ['[null]']],\n  ['array element', ['[[]]']],\n  ['string element', ['[\"task\"]']],\n  ['number element', ['[1]']],\n  ['boolean element', ['[false]']],\n  ['string true', ['[{\"completed\":\"true\"}]']],\n  ['string false', ['[{\"completed\":\"false\"}]']],\n  ['numeric zero', ['[{\"completed\":0}]']],\n  ['numeric one', ['[{\"completed\":1}]']],\n  ['null completed', ['[{\"completed\":null}]']],\n  ['array completed', ['[{\"completed\":[]}]']],\n  ['object completed', ['[{\"completed\":{}}]']],\n  ['completed only in data named __proto__', ['[{\"__proto__\":{\"completed\":true}}]']],\n  ['invalid after valid prefix', ['[{\"completed\":true},{\"completed\":false},{}]']],\n];\n\nfor (const [name, args] of invalidCases) {\n  test(`reject input without success output: ${name}`, () => {\n    const result = run(args);\n    assert.equal(result.status, 1);\n    assert.equal(result.stdout, '');\n    assert.match(result.stderr, /^Invalid task input: /);\n  });\n}\n"
+    }
+  ],
+  "historical_diagnostic": {
+    "initial_failure": {
+      "sha256": "6e141b36ba0a2ac7196703c81b4d2f01440783b5fe48670d0acffae6c6c5d84b",
+      "source": "tools.exec_command result captured by executor",
+      "command": "node C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\cli.mjs",
+      "chunk_id": "7da148",
+      "wall_time_seconds": 0.2932882,
+      "exit_code": 1,
+      "original_token_count": 368,
+      "output": "node:internal/modules/esm/resolve:271\r\n    throw new ERR_MODULE_NOT_FOUND(\r\n          ^\r\n\r\nError [ERR_MODULE_NOT_FOUND]: Cannot find module 'C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\summary.mjs' imported from C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8\\tools\\lh-auto-acceptance\\cli.mjs\r\n    at finalizeResolution (node:internal/modules/esm/resolve:271:11)\r\n    at moduleResolve (node:internal/modules/esm/resolve:865:10)\r\n    at defaultResolve (node:internal/modules/esm/resolve:992:11)\r\n    at #cachedDefaultResolve (node:internal/modules/esm/loader:691:20)\r\n    at #resolveAndMaybeBlockOnLoaderThread (node:internal/modules/esm/loader:708:38)\r\n    at ModuleLoader.resolveSync (node:internal/modules/esm/loader:740:52)\r\n    at #resolve (node:internal/modules/esm/loader:673:17)\r\n    at ModuleLoader.getOrCreateModuleJob (node:internal/modules/esm/loader:593:35)\r\n    at ModuleJob.syncLink (node:internal/modules/esm/module_job:163:33)\r\n    at ModuleJob.link (node:internal/modules/esm/module_job:253:17) {\r\n  code: 'ERR_MODULE_NOT_FOUND',\r\n  url: 'file:///C:/Users/f7212/AppData/Local/LATTICE/runtime-delivery/control-worktrees/77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8/tools/lh-auto-acceptance/summary.mjs'\r\n}\r\n\r\nNode.js v24.16.0\r\n"
+    },
+    "captures": [
+      {
+        "path": "tools/lh-auto-acceptance/evidence/diagnostic-prepare.json",
+        "sha256": "cd683454157cf7fc7c32ca2a716d91b7c4ebe7377852d67f93aa22c93bbe95e6",
+        "exit_code": 0,
+        "schema": "lattice.relative-module-preparation.v1",
+        "decision": "prepared",
+        "advisoryOnly": true,
+        "adopted": false,
+        "binding": {
+          "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+          "taskRef": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+          "claimId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "threadId": "01a10464-0d6e-7793-aa72-2808f813da41",
+          "turnId": "01a10464-1eea-71b1-a9e5-b5f80159c055",
+          "inputId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "failureItemId": "exec-33171334-8eb9-4d58-b31a-297d94517b25"
+        }
+      },
+      {
+        "path": "tools/lh-auto-acceptance/evidence/diagnostic-receipt.json",
+        "sha256": "c4990cfd0937f8f83a61364b695cf5faae287ccba15cb07ddc05078bf4ca1a79",
+        "exit_code": 0,
+        "schema": "lattice.relative-module-receipt.v1",
+        "binding": {
+          "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+          "taskRef": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+          "claimId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "threadId": "01a10464-0d6e-7793-aa72-2808f813da41",
+          "turnId": "01a10464-1eea-71b1-a9e5-b5f80159c055",
+          "inputId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "failureItemId": "exec-33171334-8eb9-4d58-b31a-297d94517b25"
+        },
+        "requestSha256": "f0d32ae76d32d62086aee0ae6ea9959d9c1f881edd890828694b3263476b986c",
+        "validUntil": "2026-10-04T00:58:22.637Z"
+      },
+      {
+        "path": "tools/lh-auto-acceptance/evidence/diagnostic-readback.json",
+        "sha256": "4f99b01b4f82fbfa0c13e7f0838e8dd245161b12a2058443062471894ec0df22",
+        "exit_code": 0,
+        "schema": "lattice.control.relative-module-diagnostic.v1",
+        "binding": {
+          "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+          "taskRef": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+          "claimId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "threadId": "01a10464-0d6e-7793-aa72-2808f813da41",
+          "turnId": "01a10464-1eea-71b1-a9e5-b5f80159c055",
+          "inputId": "c583f2eb-83bb-4308-b545-1043c492a179",
+          "failureItemId": "exec-33171334-8eb9-4d58-b31a-297d94517b25"
+        },
+        "nativeClaimBindingVerified": true,
+        "producerVerified": false,
+        "inputFileBytesVerified": false,
+        "diagnosticSemanticsVerified": false
+      }
+    ],
+    "history_check": {
+      "archived_chain_consistent": true,
+      "binding": {
+        "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+        "taskRef": "77278601f0c5c295f412c3ff47558fdce93e4203856c866438d7c8e056e29de8",
+        "claimId": "c583f2eb-83bb-4308-b545-1043c492a179",
+        "threadId": "01a10464-0d6e-7793-aa72-2808f813da41",
+        "turnId": "01a10464-1eea-71b1-a9e5-b5f80159c055",
+        "inputId": "c583f2eb-83bb-4308-b545-1043c492a179",
+        "failureItemId": "exec-33171334-8eb9-4d58-b31a-297d94517b25"
+      },
+      "request_sha256": "f0d32ae76d32d62086aee0ae6ea9959d9c1f881edd890828694b3263476b986c",
+      "nativeClaimBindingVerified": true,
+      "producerVerified": false,
+      "inputFileBytesVerified": false,
+      "diagnosticSemanticsVerified": false,
+      "advisoryOnly": true,
+      "adopted": false,
+      "original_valid_until": "2026-10-04T00:58:22.637Z",
+      "current_receipt_claimed": false
+    },
+    "limits": [
+      "Historical diagnostic outputs are preserved executor-captured records; this review does not independently replay original native notifications or strengthen their trust flags.",
+      "The historical receipt is expired and is not represented as a current diagnostic.",
+      "Reviewer is a native subagent; no separate formal VERIFICATION claim or native thread ID is asserted.",
+      "This report does not import a Runtime result or mark the formal task complete. Runtime fixed testing, adoption and durable readback remain the parent task responsibility."
+    ]
+  },
+  "previous_tests": {
+    "formal_executor_turn": "01a11ed6-494b-7c81-8045-b166167b81dd",
+    "independent_totals": {
+      "tests": 30,
+      "pass": 30,
+      "fail": 0,
+      "cancelled": 0,
+      "skipped": 0,
+      "todo": 0
+    },
+    "note": "File hashes still match the independent passing run. This continuation has not itself executed tests."
+  }
+}
