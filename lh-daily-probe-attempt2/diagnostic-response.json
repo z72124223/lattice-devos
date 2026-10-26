@@ -1,0 +1,82 @@
+{
+  "url": "http://127.0.0.1:4317/api/formal-work/720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897/diagnostic?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618&claimId=a402d888-558f-4cb2-b15f-9cc54e008bd9&threadId=01a102ee-b678-7f22-aa2f-b333fd13daa7&turnId=01a102f5-b17f-7471-b19d-198c0124e8b9&failureItemId=exec-d3b9933a-c630-476a-936b-9c7649a5c9df",
+  "method": "GET",
+  "status": 200,
+  "statusText": "OK",
+  "headers": {
+    "cache-control": "no-store",
+    "connection": "keep-alive",
+    "content-length": "3406",
+    "content-type": "application/json; charset=utf-8",
+    "date": "Sat, 03 Oct 2026 18:13:52 GMT",
+    "keep-alive": "timeout=5"
+  },
+  "elapsedMs": 3610.8646000000003,
+  "responseText": "{\"schema\":\"lattice.control.relative-module-diagnostic.v1\",\"binding\":{\"projectId\":\"78cc242a-fd7c-4d77-a895-1e5ade124618\",\"taskRef\":\"720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\",\"claimId\":\"a402d888-558f-4cb2-b15f-9cc54e008bd9\",\"threadId\":\"01a102ee-b678-7f22-aa2f-b333fd13daa7\",\"turnId\":\"01a102f5-b17f-7471-b19d-198c0124e8b9\",\"inputId\":\"LH-DAILY-SOURCE-PROBE-20261004-02\",\"failureItemId\":\"exec-d3b9933a-c630-476a-936b-9c7649a5c9df\"},\"receipt\":{\"schema\":\"lattice.relative-module-receipt.v1\",\"binding\":{\"projectId\":\"78cc242a-fd7c-4d77-a895-1e5ade124618\",\"taskRef\":\"720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\",\"claimId\":\"a402d888-558f-4cb2-b15f-9cc54e008bd9\",\"threadId\":\"01a102ee-b678-7f22-aa2f-b333fd13daa7\",\"turnId\":\"01a102f5-b17f-7471-b19d-198c0124e8b9\",\"inputId\":\"LH-DAILY-SOURCE-PROBE-20261004-02\",\"failureItemId\":\"exec-d3b9933a-c630-476a-936b-9c7649a5c9df\"},\"requestPath\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\\\lh-daily-probe-attempt2\\\\receipt\\\\request.json\",\"requestSha256\":\"f445bbab8a82e4c5e63efdf9e983f2db96b97d4b649eb7af027f443b5eb5afb8\",\"evidenceSha256\":\"ecb03a77fc2cfab4f5fb8fba1a67b27f20d132abbf14e6eb7fabedd587f72cb5\",\"failureEventSha256\":\"504c8c46290f57c6a6fad52a4825d7fa79549348ec4cfa5cca61ee53b0069c78\",\"validUntil\":\"2026-10-03T18:15:58.945Z\",\"subject\":{\"projectRoot\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\",\"importer\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\\\lh-daily-probe-attempt2\\\\entry.mjs\",\"importerSha256\":\"96ee21ee2949c7a833d6f948879820a2b181c88d53036ef092ea85c2cc869abb\"},\"result\":{\"schema\":\"lattice.relative-module-diagnostic.v1\",\"decision\":\"selected\",\"reason\":null,\"advisoryOnly\":true,\"adopted\":false,\"location\":{\"projectRoot\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\",\"importer\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\\\lh-daily-probe-attempt2\\\\entry.mjs\",\"specifier\":\"./message.mjs\",\"target\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\\\lh-daily-probe-attempt2\\\\message.mjs\",\"nearestExistingParent\":\"C:\\\\Users\\\\f7212\\\\AppData\\\\Local\\\\LATTICE\\\\runtime-delivery\\\\control-worktrees\\\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\\\lh-daily-probe-attempt2\",\"targetExistsNow\":false},\"hints\":[\"核對相對模組名稱、大小寫、副檔名及是否漏存或改名。\",\"相對路徑以匯入檔所在目錄解析；命令的工作目錄不能取代此基準。\",\"本結果僅為唯讀檢查提示，未驗證正式授權，不執行安裝、修復或重試。\"],\"trust\":{\"source\":\"caller_supplied_snapshot\",\"context\":\"caller_asserted_current\",\"sourceBytesVerified\":true,\"importerBytesVerified\":true,\"nativeProvenanceVerified\":false,\"authorizationVerified\":false}}},\"nativeClaimBindingVerified\":true,\"producerVerified\":false,\"inputFileBytesVerified\":false,\"diagnosticSemanticsVerified\":false}",
+  "body": {
+    "schema": "lattice.control.relative-module-diagnostic.v1",
+    "binding": {
+      "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "taskRef": "720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+      "claimId": "a402d888-558f-4cb2-b15f-9cc54e008bd9",
+      "threadId": "01a102ee-b678-7f22-aa2f-b333fd13daa7",
+      "turnId": "01a102f5-b17f-7471-b19d-198c0124e8b9",
+      "inputId": "LH-DAILY-SOURCE-PROBE-20261004-02",
+      "failureItemId": "exec-d3b9933a-c630-476a-936b-9c7649a5c9df"
+    },
+    "receipt": {
+      "schema": "lattice.relative-module-receipt.v1",
+      "binding": {
+        "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+        "taskRef": "720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+        "claimId": "a402d888-558f-4cb2-b15f-9cc54e008bd9",
+        "threadId": "01a102ee-b678-7f22-aa2f-b333fd13daa7",
+        "turnId": "01a102f5-b17f-7471-b19d-198c0124e8b9",
+        "inputId": "LH-DAILY-SOURCE-PROBE-20261004-02",
+        "failureItemId": "exec-d3b9933a-c630-476a-936b-9c7649a5c9df"
+      },
+      "requestPath": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\lh-daily-probe-attempt2\\receipt\\request.json",
+      "requestSha256": "f445bbab8a82e4c5e63efdf9e983f2db96b97d4b649eb7af027f443b5eb5afb8",
+      "evidenceSha256": "ecb03a77fc2cfab4f5fb8fba1a67b27f20d132abbf14e6eb7fabedd587f72cb5",
+      "failureEventSha256": "504c8c46290f57c6a6fad52a4825d7fa79549348ec4cfa5cca61ee53b0069c78",
+      "validUntil": "2026-10-03T18:15:58.945Z",
+      "subject": {
+        "projectRoot": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+        "importer": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\lh-daily-probe-attempt2\\entry.mjs",
+        "importerSha256": "96ee21ee2949c7a833d6f948879820a2b181c88d53036ef092ea85c2cc869abb"
+      },
+      "result": {
+        "schema": "lattice.relative-module-diagnostic.v1",
+        "decision": "selected",
+        "reason": null,
+        "advisoryOnly": true,
+        "adopted": false,
+        "location": {
+          "projectRoot": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+          "importer": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\lh-daily-probe-attempt2\\entry.mjs",
+          "specifier": "./message.mjs",
+          "target": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\lh-daily-probe-attempt2\\message.mjs",
+          "nearestExistingParent": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897\\lh-daily-probe-attempt2",
+          "targetExistsNow": false
+        },
+        "hints": [
+          "核對相對模組名稱、大小寫、副檔名及是否漏存或改名。",
+          "相對路徑以匯入檔所在目錄解析；命令的工作目錄不能取代此基準。",
+          "本結果僅為唯讀檢查提示，未驗證正式授權，不執行安裝、修復或重試。"
+        ],
+        "trust": {
+          "source": "caller_supplied_snapshot",
+          "context": "caller_asserted_current",
+          "sourceBytesVerified": true,
+          "importerBytesVerified": true,
+          "nativeProvenanceVerified": false,
+          "authorizationVerified": false
+        }
+      }
+    },
+    "nativeClaimBindingVerified": true,
+    "producerVerified": false,
+    "inputFileBytesVerified": false,
+    "diagnosticSemanticsVerified": false
+  }
+}

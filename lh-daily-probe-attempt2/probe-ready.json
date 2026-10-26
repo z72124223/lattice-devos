@@ -1,0 +1,64 @@
+{
+  "probe": "bounded daily installation diagnostic",
+  "taskRef": "720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+  "installedRoot": "C:/Users/f7212/AppData/Local/Programs/LATTICE/backend/4bd4cd7638431c5e8b18aec92d81dcb830bca137/apps/lattice-control/src",
+  "projectRoot": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+  "source": {
+    "status": 200,
+    "elapsedMs": 4036.8745999999996,
+    "nativeSourceVerified": true,
+    "grantsNewAuthority": false,
+    "repairAuthorized": false,
+    "advisoryOnly": true,
+    "adopted": false
+  },
+  "diagnostic": {
+    "status": 200,
+    "elapsedMs": 3610.8646000000003,
+    "nativeClaimBindingVerified": true,
+    "producerVerified": false,
+    "inputFileBytesVerified": false,
+    "diagnosticSemanticsVerified": false,
+    "decision": "selected",
+    "advisoryOnly": true,
+    "adopted": false,
+    "trust": {
+      "source": "caller_supplied_snapshot",
+      "context": "caller_asserted_current",
+      "sourceBytesVerified": true,
+      "importerBytesVerified": true,
+      "nativeProvenanceVerified": false,
+      "authorizationVerified": false
+    }
+  },
+  "hashes": {
+    "sourceFailureSha256": "d2d49687369431ffa7db1fea4d9a492f2039a49b53b9c30b96ba12d76948526f",
+    "savedFailureSha256": "d2d49687369431ffa7db1fea4d9a492f2039a49b53b9c30b96ba12d76948526f",
+    "requestSha256": "f445bbab8a82e4c5e63efdf9e983f2db96b97d4b649eb7af027f443b5eb5afb8",
+    "evidenceSha256": "ecb03a77fc2cfab4f5fb8fba1a67b27f20d132abbf14e6eb7fabedd587f72cb5",
+    "failureEventSha256": "504c8c46290f57c6a6fad52a4825d7fa79549348ec4cfa5cca61ee53b0069c78",
+    "importerSha256": "96ee21ee2949c7a833d6f948879820a2b181c88d53036ef092ea85c2cc869abb"
+  },
+  "binding": {
+    "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "taskRef": "720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+    "claimId": "a402d888-558f-4cb2-b15f-9cc54e008bd9",
+    "threadId": "01a102ee-b678-7f22-aa2f-b333fd13daa7",
+    "turnId": "01a102f5-b17f-7471-b19d-198c0124e8b9",
+    "inputId": "LH-DAILY-SOURCE-PROBE-20261004-02",
+    "failureItemId": "exec-d3b9933a-c630-476a-936b-9c7649a5c9df"
+  },
+  "diagnosticBinding": {
+    "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "taskRef": "720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897",
+    "claimId": "a402d888-558f-4cb2-b15f-9cc54e008bd9",
+    "threadId": "01a102ee-b678-7f22-aa2f-b333fd13daa7",
+    "turnId": "01a102f5-b17f-7471-b19d-198c0124e8b9",
+    "inputId": "LH-DAILY-SOURCE-PROBE-20261004-02",
+    "failureItemId": "exec-d3b9933a-c630-476a-936b-9c7649a5c9df"
+  },
+  "repairPerformed": false,
+  "messageAbsent": true,
+  "formalCompletion": false,
+  "awaitingInterruption": true
+}

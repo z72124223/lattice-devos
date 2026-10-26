@@ -1,0 +1,26 @@
+{
+  "stage": "diagnosticsource",
+  "url": "http://127.0.0.1:4317/api/formal-work/720ef509ff770671e392c46abf6be763ce893eae07dfdae1957a3649df71b897/diagnosticsource?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618&claimId=a402d888-558f-4cb2-b15f-9cc54e008bd9&threadId=01a102ee-b678-7f22-aa2f-b333fd13daa7&turnId=01a102ee-c7a7-70e3-bd2d-e9b2e67e7ca5",
+  "method": "GET",
+  "status": 409,
+  "statusText": "Conflict",
+  "headers": {
+    "cache-control": "no-store",
+    "connection": "keep-alive",
+    "content-length": "229",
+    "content-type": "application/json; charset=utf-8",
+    "date": "Sat, 03 Oct 2026 18:07:03 GMT",
+    "keep-alive": "timeout=5"
+  },
+  "elapsedMs": 2012.784,
+  "responseText": "{\"error\":\"唯讀診斷結果無法核對：SOURCE_AMBIGUOUS_FAILURE\",\"code\":\"CONTROL_DIAGNOSTIC_SOURCE_AMBIGUOUS_FAILURE\",\"failureItemIds\":[\"exec-6d5df40e-0e30-45d5-9756-7d6768a3b1d4\",\"exec-e1937fac-4807-44b5-9453-9bd41e878a27\"]}",
+  "body": {
+    "error": "唯讀診斷結果無法核對：SOURCE_AMBIGUOUS_FAILURE",
+    "code": "CONTROL_DIAGNOSTIC_SOURCE_AMBIGUOUS_FAILURE",
+    "failureItemIds": [
+      "exec-6d5df40e-0e30-45d5-9756-7d6768a3b1d4",
+      "exec-e1937fac-4807-44b5-9453-9bd41e878a27"
+    ]
+  },
+  "repairPerformed": false
+}
