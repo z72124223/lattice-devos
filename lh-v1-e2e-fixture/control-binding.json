@@ -1,0 +1,72 @@
+{
+  "at": "2026-10-03T13:52:55.332Z",
+  "status": 200,
+  "elapsedMs": 4065,
+  "route": "/api/formal-work/82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227/diagnostic?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618&claimId=559f0d7f-081f-461f-bd57-5ea59fd28dfc&threadId=01a0e3f0-f086-74b1-867b-f04e17148b0b&turnId=01a10208-cdd3-74a3-9705-bf8258e59bdf&failureItemId=exec-6f003e5c-b34a-4cdf-a4b7-65860d6423d2&diagnosticItemId=exec-d068fd59-0380-4797-8ed3-a21c077f8b14",
+  "value": {
+    "schema": "lattice.control.relative-module-diagnostic.v1",
+    "binding": {
+      "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "taskRef": "82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227",
+      "claimId": "559f0d7f-081f-461f-bd57-5ea59fd28dfc",
+      "threadId": "01a0e3f0-f086-74b1-867b-f04e17148b0b",
+      "turnId": "01a10208-cdd3-74a3-9705-bf8258e59bdf",
+      "inputId": "LH-V1-E2E-01-attempt4-20261003",
+      "failureItemId": "exec-6f003e5c-b34a-4cdf-a4b7-65860d6423d2"
+    },
+    "receipt": {
+      "schema": "lattice.relative-module-receipt.v1",
+      "binding": {
+        "projectId": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+        "taskRef": "82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227",
+        "claimId": "559f0d7f-081f-461f-bd57-5ea59fd28dfc",
+        "threadId": "01a0e3f0-f086-74b1-867b-f04e17148b0b",
+        "turnId": "01a10208-cdd3-74a3-9705-bf8258e59bdf",
+        "inputId": "LH-V1-E2E-01-attempt4-20261003",
+        "failureItemId": "exec-6f003e5c-b34a-4cdf-a4b7-65860d6423d2"
+      },
+      "requestPath": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227\\lh-v1-e2e-fixture\\receipt\\request.json",
+      "requestSha256": "220dd76866116346a2026c3bf7aeaee97b70e65c05ea4002e601e246079c8cc2",
+      "evidenceSha256": "27b6c132ceb5331a838dee9e40c0702a943540370d5d5ef1958ec473753a7abb",
+      "failureEventSha256": "5c8edb2f59bf3b39a124cc10b94657b86e5f0a3f0532a60ce29f095f522bc7c9",
+      "validUntil": "2026-10-03T13:56:13.935Z",
+      "subject": {
+        "projectRoot": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227",
+        "importer": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227\\lh-v1-e2e-fixture\\entry.mjs",
+        "importerSha256": "96ee21ee2949c7a833d6f948879820a2b181c88d53036ef092ea85c2cc869abb"
+      },
+      "result": {
+        "schema": "lattice.relative-module-diagnostic.v1",
+        "decision": "selected",
+        "reason": null,
+        "advisoryOnly": true,
+        "adopted": false,
+        "location": {
+          "projectRoot": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227",
+          "importer": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227\\lh-v1-e2e-fixture\\entry.mjs",
+          "specifier": "./message.mjs",
+          "target": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227\\lh-v1-e2e-fixture\\message.mjs",
+          "nearestExistingParent": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\82662fd7a130df6d5e7c1e8569764758248a5f7f94ea8e2f635bd5b1087e1227\\lh-v1-e2e-fixture",
+          "targetExistsNow": false
+        },
+        "hints": [
+          "核對相對模組名稱、大小寫、副檔名及是否漏存或改名。",
+          "相對路徑以匯入檔所在目錄解析；命令的工作目錄不能取代此基準。",
+          "本結果僅為唯讀檢查提示，未驗證正式授權，不執行安裝、修復或重試。"
+        ],
+        "trust": {
+          "source": "caller_supplied_snapshot",
+          "context": "caller_asserted_current",
+          "sourceBytesVerified": true,
+          "importerBytesVerified": true,
+          "nativeProvenanceVerified": false,
+          "authorizationVerified": false
+        }
+      }
+    },
+    "nativeClaimBindingVerified": true,
+    "producerVerified": false,
+    "inputFileBytesVerified": false,
+    "diagnosticSemanticsVerified": false
+  }
+}
