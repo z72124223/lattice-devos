@@ -1,0 +1,380 @@
+{
+  "schema_version": "work-acceptance.report.v1",
+  "checked_at": "2026-09-06T05:06:44.563Z",
+  "scope": "本固定工作之唯讀工作樹／正式詳情資料與已安裝來源驗收",
+  "passed": true,
+  "snapshot_directory": "snapshots/2026-09-06T05-06-31.340Z-02f83786",
+  "acquisition": {
+    "schema_version": "work-acceptance.capture.v1",
+    "started_at": "2026-09-06T05:06:31.342Z",
+    "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+    "task_ref": "b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d",
+    "parent_ref": "29ab1e48bf3ac5dd3ec1ed09dbafc224d67eb45551bc8e64520cbdf6d1dadd9c",
+    "source_version": "4cf44233b423f0234006e15b9b6ee460b3cf2ba9",
+    "responses": {
+      "work": {
+        "url": "http://127.0.0.1:4317/api/work-view?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+        "method": "GET",
+        "requested_at": "2026-09-06T05:06:31.342Z",
+        "received_at": "2026-09-06T05:06:41.393Z",
+        "status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "date": "Sun, 06 Sep 2026 05:06:41 GMT",
+        "file": "work.response.json",
+        "bytes": 12093,
+        "sha256": "224513b037ae6b9bab108e30a919ba806ff69d8b8b309e05371304a488778230"
+      },
+      "detail": {
+        "url": "http://127.0.0.1:4317/api/formal-work/b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+        "method": "GET",
+        "requested_at": "2026-09-06T05:06:41.395Z",
+        "received_at": "2026-09-06T05:06:44.522Z",
+        "status": 200,
+        "content_type": "application/json; charset=utf-8",
+        "date": "Sun, 06 Sep 2026 05:06:44 GMT",
+        "file": "detail.response.json",
+        "bytes": 22511,
+        "sha256": "93b3ad029a03b45dde82a4fd5f20e946ba532bff07a692e2264448fecb91aa40"
+      }
+    },
+    "sources": {
+      "formal": {
+        "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/formal-work-store.mjs",
+        "file": "formal.source.txt",
+        "captured_at": "2026-09-06T05:06:44.525Z",
+        "bytes": 13931,
+        "sha256": "366c9604f0547180a54f324713f96aca40b880859a94d59a6a50a2c3f56a6638"
+      },
+      "view": {
+        "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/public/work-view.mjs",
+        "file": "view.source.txt",
+        "captured_at": "2026-09-06T05:06:44.526Z",
+        "bytes": 27976,
+        "sha256": "5c32baeae27374ab71601d4745cd0abd54457f176efee51554b82bb68d9b6ce1"
+      },
+      "store": {
+        "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/store.mjs",
+        "file": "store.source.txt",
+        "captured_at": "2026-09-06T05:06:44.528Z",
+        "bytes": 187392,
+        "sha256": "16ca704115ec2196d06d3fd4eea656a8972b1dfd4a66e2e67799bef6fca36c98"
+      },
+      "recovery": {
+        "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/execution-recovery.mjs",
+        "file": "recovery.source.txt",
+        "captured_at": "2026-09-06T05:06:44.529Z",
+        "bytes": 2541,
+        "sha256": "8d17b4ff9d7328be7470024ef3156eeb232603d969fcd9014d951f6a09fd655a"
+      },
+      "index": {
+        "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/public/index.html",
+        "file": "index.source.txt",
+        "captured_at": "2026-09-06T05:06:44.531Z",
+        "bytes": 83227,
+        "sha256": "fbf064714455f32f8aad47a43786612d60c708deca819d4eb21f787acc3a7497"
+      }
+    },
+    "boundaries": {
+      "runtime_mcp_status": "NOT_VERIFIED: user rejected MCP tool call; not retried",
+      "runtime_writes": false
+    },
+    "capture_succeeded": true,
+    "finished_at": "2026-09-06T05:06:44.531Z"
+  },
+  "validation": {
+    "passed": true,
+    "checks": [
+      {
+        "code": "SCHEMA",
+        "passed": true,
+        "message": "必須具有正式工作快照與詳情資料結構。"
+      },
+      {
+        "code": "FORMAL_WORK_DISABLED",
+        "passed": true,
+        "message": "正式工作來源啟用且專案已選定。"
+      },
+      {
+        "code": "SOURCE_AUTHORITY",
+        "passed": true,
+        "message": "回應來源為 PostgreSQL 正式 Task Ledger 投影。"
+      },
+      {
+        "code": "PROJECT_MISMATCH",
+        "passed": true,
+        "message": "所有專案欄位均須等於本次固定專案。"
+      },
+      {
+        "code": "TASK_IDENTITY",
+        "passed": true,
+        "message": "詳情、Ledger、metadata 使用相同固定 task_ref。"
+      },
+      {
+        "code": "LEDGER_IDENTITY",
+        "passed": true,
+        "message": "正式 Ledger head digest 與詳情相同；不代表本次重算整條 Ledger。"
+      },
+      {
+        "code": "SNAPSHOT_IDENTITY",
+        "passed": true,
+        "message": "tree/graph 共用相同 revision 與 digest。"
+      },
+      {
+        "code": "DUPLICATE_ID",
+        "passed": true,
+        "message": "tree 與 graph 的工作身份各自唯一。"
+      },
+      {
+        "code": "NODE_SET",
+        "passed": true,
+        "message": "tree 與 graph 涵蓋同一組工作。"
+      },
+      {
+        "code": "TASK_MISSING",
+        "passed": true,
+        "message": "本工作的固定身份存在於 tree 與 graph。"
+      },
+      {
+        "code": "PARENT_MISSING",
+        "passed": true,
+        "message": "指定父工作存在於 tree 與 graph。"
+      },
+      {
+        "code": "WORK_DESCRIPTION",
+        "passed": true,
+        "message": "真實工作標題及需求在列表、詳情與正式 task 之間一致。"
+      },
+      {
+        "code": "EXPECTED_PARENT",
+        "passed": true,
+        "message": "本工作節點及正式 metadata 皆指向指定父工作。"
+      },
+      {
+        "code": "RELATION_BIDIRECTIONAL",
+        "passed": true,
+        "message": "每個可見父子連結雙向一致且不重複。"
+      },
+      {
+        "code": "RELATION_CYCLE",
+        "passed": true,
+        "message": "父子階層沒有循環。"
+      },
+      {
+        "code": "TREE_ROOTS",
+        "passed": true,
+        "message": "roots 與沒有父工作的節點一致。"
+      },
+      {
+        "code": "CROSS_ENDPOINT_STATUS",
+        "passed": true,
+        "message": "列表與詳情狀態相符；若不符需保留非原子讀取／15 秒快取可能性，不能宣稱通過。"
+      },
+      {
+        "code": "COMPLETION_WITHOUT_RESULT",
+        "passed": true,
+        "message": "顯示已完成時，必須存在正式 COMPLETED 與 result_digest，AI 文字或回合完成不足以成立。"
+      },
+      {
+        "code": "COMPLETION_FLAG",
+        "passed": true,
+        "message": "詳情完成旗標與正式 Ledger 條件一致。"
+      },
+      {
+        "code": "RESULT_DIGEST",
+        "passed": true,
+        "message": "正式結果 digest 相同且格式有效；不代表下載／重新執行正式成果。"
+      },
+      {
+        "code": "OBSERVATIONS_COMPLETE",
+        "passed": true,
+        "message": "本次詳情 observations 未截斷。"
+      },
+      {
+        "code": "INSTALLED_STATUS_PROJECTION",
+        "passed": true,
+        "message": "離線執行保存之安裝版純投影函式，與詳情的狀態、進度及更新時間相符。"
+      }
+    ],
+    "failures": [],
+    "observed": {
+      "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "task_ref": "b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d",
+      "parent_ref": "29ab1e48bf3ac5dd3ec1ed09dbafc224d67eb45551bc8e64520cbdf6d1dadd9c",
+      "nodes": 12,
+      "ledger_status": "SUBMITTED",
+      "ledger_task_state": "DRAFT",
+      "projected_status": "running",
+      "work_view_label": "進行中",
+      "formally_completed": false,
+      "result_digest": null,
+      "updated_at": "2026-09-06T13:05:27.818778+08:00",
+      "source": {
+        "kind": "POSTGRESQL_CONTROL_PRODUCT",
+        "authority": "POSTGRESQL_TASK_LEDGER"
+      },
+      "snapshot_revision": "cbb77ab23a1a583bc09667df1039fc8b7789c726336c92679cb439bc1a7e2df8",
+      "snapshot_digest": "e706dfe13946fd31e7373a9bb9bb6e04e69c05696ffa475652320a8f1a78bdee"
+    }
+  },
+  "source_audit": {
+    "passed": true,
+    "version": "4cf44233b423f0234006e15b9b6ee460b3cf2ba9",
+    "checks": [
+      {
+        "id": "postgres_authority",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 7,
+        "meaning": "正式來源宣告為 PostgreSQL Control Product / Task Ledger。"
+      },
+      {
+        "id": "runtime_snapshot_read",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 129,
+        "meaning": "透過既有 Runtime 讀取正式快照。"
+      },
+      {
+        "id": "project_guard",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 135,
+        "meaning": "拒絕錯誤專案。"
+      },
+      {
+        "id": "stable_identity",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 43,
+        "meaning": "節點使用固定 task_ref 與 Ledger project_id。"
+      },
+      {
+        "id": "formal_completion",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 26,
+        "meaning": "正式完成必須同時具備 COMPLETED 與 result_digest。"
+      },
+      {
+        "id": "reply_not_completion",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 39,
+        "meaning": "AI 回合完成僅映射 codex_done。"
+      },
+      {
+        "id": "metadata_parent",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 75,
+        "meaning": "父工作由正式 metadata.parent_ref 投影。"
+      },
+      {
+        "id": "parent_forward",
+        "passed": true,
+        "file": "src/store.mjs",
+        "line": 2262,
+        "meaning": "建立 child 到 parent 關係。"
+      },
+      {
+        "id": "parent_reverse",
+        "passed": true,
+        "file": "src/store.mjs",
+        "line": 2263,
+        "meaning": "同時建立 parent 到 children 反向關係。"
+      },
+      {
+        "id": "orphan_guard",
+        "passed": true,
+        "file": "src/store.mjs",
+        "line": 2089,
+        "meaning": "拒絕缺少父節點。"
+      },
+      {
+        "id": "cycle_guard",
+        "passed": true,
+        "file": "src/store.mjs",
+        "line": 2277,
+        "meaning": "拒絕循環階層。"
+      },
+      {
+        "id": "completion_label",
+        "passed": true,
+        "file": "public/work-view.mjs",
+        "line": 15,
+        "meaning": "正式完成旗標優先顯示已完成。"
+      },
+      {
+        "id": "ai_reply_label",
+        "passed": true,
+        "file": "public/work-view.mjs",
+        "line": 22,
+        "meaning": "codex_done 顯示等待驗收。"
+      },
+      {
+        "id": "cache_15s",
+        "passed": true,
+        "file": "src/formal-work-store.mjs",
+        "line": 90,
+        "meaning": "專案列表快取預設 15 秒；與 detail GET 非同一原子快照。"
+      },
+      {
+        "id": "render_identity",
+        "passed": true,
+        "file": "public/work-view.mjs",
+        "line": 466,
+        "meaning": "專案／revision／digest／訊息變化時重新顯示。"
+      },
+      {
+        "id": "render_on_change",
+        "passed": true,
+        "file": "public/work-view.mjs",
+        "line": 467,
+        "meaning": "相同資料不重繪。"
+      },
+      {
+        "id": "poll_2s_source",
+        "passed": true,
+        "file": "public/index.html",
+        "line": 839,
+        "meaning": "入口來源設定 2 秒輪詢；本次未操作瀏覽器。"
+      }
+    ],
+    "findings": [
+      {
+        "code": "ARCHIVED_COMPLETION_FIELD_OMITTED",
+        "file": "src/store.mjs",
+        "line": 2315,
+        "detail": "tree/graph 輸出省略 completion_verified；完成後封存可能只顯示「已封存」。正式完成仍需查 detail Ledger，本次不修改產品。"
+      }
+    ],
+    "scope": "保存之已安裝來源靜態查核及純函式離線執行；未直接 SQL 查詢或完整 UI 操作。"
+  },
+  "observations_over_time": {
+    "earlier_at": "2026-09-06T04:54:40.792Z",
+    "later_at": "2026-09-06T05:06:44.522Z",
+    "identity_stable": true,
+    "forward_in_time": true,
+    "state_transition_observed": false,
+    "before_status": "running",
+    "after_status": "running",
+    "progress_changed": true,
+    "updated_at_changed": true,
+    "snapshot_revision_changed": true,
+    "note": "兩次唯讀觀測；進度或 revision 更新不能代替正式完成，也未強制觸發狀態轉換。"
+  },
+  "not_verified": [
+    "MCP Runtime health：user rejected MCP tool call，未重試。",
+    "未直接連線 PostgreSQL、重算整條 Ledger 或讀取 result_digest 對應成果內容；只核對 API 正式來源宣告及安裝來源路徑。",
+    "未實際操作瀏覽器／桌面 App，未測量 UI 輪詢延遲、完成後封存或重新開啟。",
+    "未寫入 Runtime、未強制狀態轉換、未手動宣告正式完成；本項通過不代表四核心整體完成。"
+  ],
+  "source_findings": [
+    {
+      "code": "ARCHIVED_COMPLETION_FIELD_OMITTED",
+      "file": "src/store.mjs",
+      "line": 2315,
+      "detail": "tree/graph 輸出省略 completion_verified；完成後封存可能只顯示「已封存」。正式完成仍需查 detail Ledger，本次不修改產品。"
+    }
+  ]
+}

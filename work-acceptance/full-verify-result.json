@@ -1,0 +1,12 @@
+{
+    "started_at":  "2026-09-06T05:04:57.7061536Z",
+    "finished_at":  "2026-09-06T05:05:15.3116336Z",
+    "command":  "npm.cmd run verify",
+    "exit_code":  1,
+    "tracked_file_count":  55,
+    "changed_tracked_files":  [
+
+                              ],
+    "temp_root":  "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d\\work-acceptance\\verification-temp",
+    "npm_cache":  "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d\\work-acceptance\\verification-temp\\npm-cache"
+}

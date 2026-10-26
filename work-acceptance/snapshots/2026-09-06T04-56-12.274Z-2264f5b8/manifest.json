@@ -1,0 +1,77 @@
+{
+  "schema_version": "work-acceptance.capture.v1",
+  "started_at": "2026-09-06T04:56:12.276Z",
+  "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+  "task_ref": "b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d",
+  "parent_ref": "29ab1e48bf3ac5dd3ec1ed09dbafc224d67eb45551bc8e64520cbdf6d1dadd9c",
+  "source_version": "4cf44233b423f0234006e15b9b6ee460b3cf2ba9",
+  "responses": {
+    "work": {
+      "url": "http://127.0.0.1:4317/api/work-view?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "method": "GET",
+      "requested_at": "2026-09-06T04:56:12.276Z",
+      "received_at": "2026-09-06T04:56:26.672Z",
+      "status": 200,
+      "content_type": "application/json; charset=utf-8",
+      "date": "Sun, 06 Sep 2026 04:56:26 GMT",
+      "file": "work.response.json",
+      "bytes": 12081,
+      "sha256": "a32d76591a592bc4d3b4e30eb9730c26647be852e729942d5e7383730e4df78d"
+    },
+    "detail": {
+      "url": "http://127.0.0.1:4317/api/formal-work/b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "method": "GET",
+      "requested_at": "2026-09-06T04:56:26.674Z",
+      "received_at": "2026-09-06T04:56:28.949Z",
+      "status": 200,
+      "content_type": "application/json; charset=utf-8",
+      "date": "Sun, 06 Sep 2026 04:56:28 GMT",
+      "file": "detail.response.json",
+      "bytes": 20783,
+      "sha256": "90d0b42cc8742caad5c9ab815f4f30401814e6b5b9a74e5e167cbfa336b80ad9"
+    }
+  },
+  "sources": {
+    "formal": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/formal-work-store.mjs",
+      "file": "formal.source.txt",
+      "captured_at": "2026-09-06T04:56:28.952Z",
+      "bytes": 13931,
+      "sha256": "366c9604f0547180a54f324713f96aca40b880859a94d59a6a50a2c3f56a6638"
+    },
+    "view": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/public/work-view.mjs",
+      "file": "view.source.txt",
+      "captured_at": "2026-09-06T04:56:28.953Z",
+      "bytes": 27976,
+      "sha256": "5c32baeae27374ab71601d4745cd0abd54457f176efee51554b82bb68d9b6ce1"
+    },
+    "store": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/store.mjs",
+      "file": "store.source.txt",
+      "captured_at": "2026-09-06T04:56:28.955Z",
+      "bytes": 187392,
+      "sha256": "16ca704115ec2196d06d3fd4eea656a8972b1dfd4a66e2e67799bef6fca36c98"
+    },
+    "recovery": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/execution-recovery.mjs",
+      "file": "recovery.source.txt",
+      "captured_at": "2026-09-06T04:56:28.957Z",
+      "bytes": 2541,
+      "sha256": "8d17b4ff9d7328be7470024ef3156eeb232603d969fcd9014d951f6a09fd655a"
+    },
+    "index": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/public/index.html",
+      "file": "index.source.txt",
+      "captured_at": "2026-09-06T04:56:28.960Z",
+      "bytes": 83227,
+      "sha256": "fbf064714455f32f8aad47a43786612d60c708deca819d4eb21f787acc3a7497"
+    }
+  },
+  "boundaries": {
+    "runtime_mcp_status": "NOT_VERIFIED: user rejected MCP tool call; not retried",
+    "runtime_writes": false
+  },
+  "capture_succeeded": true,
+  "finished_at": "2026-09-06T04:56:28.960Z"
+}

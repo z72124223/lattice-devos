@@ -1,0 +1,13 @@
+{
+    "started_at":  "2026-09-06T05:06:03.4494401Z",
+    "finished_at":  "2026-09-06T05:06:23.8531459Z",
+    "command":  "npm.cmd run verify",
+    "exit_code":  1,
+    "tracked_file_count":  55,
+    "changed_tracked_files":  [
+
+                              ],
+    "temp_root":  "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d\\work-acceptance\\t",
+    "npm_cache":  "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\runtime-delivery\\control-worktrees\\b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d\\work-acceptance\\t\\npm-cache",
+    "reason":  "Earlier full run hit Windows Git path length limits; shorter temporary path remains inside the isolated task directory."
+}

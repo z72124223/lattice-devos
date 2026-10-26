@@ -1,0 +1,5 @@
+{
+  "directory": "snapshots/2026-09-06T04-56-12.274Z-2264f5b8",
+  "earlier_directory": "snapshots/2026-09-06T04-54-32.037Z-25b57920",
+  "purpose": "唯讀取得的固定真實快照；測試只在記憶體建立變體，不修改此快照或 Runtime。"
+}

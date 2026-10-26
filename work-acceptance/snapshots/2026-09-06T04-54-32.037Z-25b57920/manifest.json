@@ -1,0 +1,56 @@
+{
+  "schema_version": "work-acceptance.capture.v1",
+  "started_at": "2026-09-06T04:54:32.040Z",
+  "project_id": "78cc242a-fd7c-4d77-a895-1e5ade124618",
+  "task_ref": "b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d",
+  "parent_ref": "29ab1e48bf3ac5dd3ec1ed09dbafc224d67eb45551bc8e64520cbdf6d1dadd9c",
+  "source_version": "4cf44233b423f0234006e15b9b6ee460b3cf2ba9",
+  "responses": {
+    "work": {
+      "url": "http://127.0.0.1:4317/api/work-view?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "method": "GET",
+      "requested_at": "2026-09-06T04:54:32.040Z",
+      "received_at": "2026-09-06T04:54:32.090Z",
+      "status": 200,
+      "content_type": "application/json; charset=utf-8",
+      "date": "Sun, 06 Sep 2026 04:54:32 GMT",
+      "file": "work.response.json",
+      "bytes": 12050,
+      "sha256": "57b04be81a27078f567398061113fa23d1a479af93d612df8c42300e65aa2ea8"
+    },
+    "detail": {
+      "url": "http://127.0.0.1:4317/api/formal-work/b3a5d42c96a94048df6084e150ecc6ed1e354f5eed1b0d1449d6e99942a1335d?projectId=78cc242a-fd7c-4d77-a895-1e5ade124618",
+      "method": "GET",
+      "requested_at": "2026-09-06T04:54:32.093Z",
+      "received_at": "2026-09-06T04:54:40.792Z",
+      "status": 200,
+      "content_type": "application/json; charset=utf-8",
+      "date": "Sun, 06 Sep 2026 04:54:40 GMT",
+      "file": "detail.response.json",
+      "bytes": 19914,
+      "sha256": "e8bb6d626dd1b5b7418c8e7d9529fe5dde07355dc850c78ec42d85e0e251b486"
+    }
+  },
+  "sources": {
+    "formal": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/src/formal-work-store.mjs",
+      "file": "formal.source.txt",
+      "captured_at": "2026-09-06T04:54:40.794Z",
+      "bytes": 13931,
+      "sha256": "366c9604f0547180a54f324713f96aca40b880859a94d59a6a50a2c3f56a6638"
+    },
+    "view": {
+      "path": "C:/Users/f7212/AppData/Local/Programs/LATTICE/versions/4cf44233b423f0234006e15b9b6ee460b3cf2ba9/app/control-runtime/apps/lattice-control/public/work-view.mjs",
+      "file": "view.source.txt",
+      "captured_at": "2026-09-06T04:54:40.796Z",
+      "bytes": 27976,
+      "sha256": "5c32baeae27374ab71601d4745cd0abd54457f176efee51554b82bb68d9b6ce1"
+    }
+  },
+  "boundaries": {
+    "runtime_mcp_status": "NOT_VERIFIED: user rejected MCP tool call; not retried",
+    "runtime_writes": false
+  },
+  "capture_succeeded": true,
+  "finished_at": "2026-09-06T04:54:40.796Z"
+}
