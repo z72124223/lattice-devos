@@ -1,0 +1,95 @@
+{
+  "recorded_at": "2026-09-05T09:55:55.8752278Z",
+  "result": "PASS_WITH_BROWSER_VISUAL_NOT_RUN",
+  "summary": "繁中待辦網頁完成；新增、完成、重開、刷新及程序重啟保存、錯誤輸入皆通過真實 HTTP 測試。",
+  "artifact_path": "todo-web/server.mjs",
+  "test_path": "todo-web/test/todo.test.mjs",
+  "start_command": "node todo-web/server.mjs",
+  "url": "http://127.0.0.1:3000",
+  "node_version": "v24.16.0",
+  "runtime_task_state": "未另建任務或變更狀態；lattice_runtime_status 呼叫遭拒，未取得原生 Runtime 狀態。",
+  "tests": [
+    {
+      "command": "node --test todo-web/test/todo.test.mjs",
+      "stage": "RED before implementation",
+      "exit_code": 1,
+      "log": "todo-web/evidence/red.log"
+    },
+    {
+      "command": "node --test todo-web/test/todo.test.mjs",
+      "stage": "GREEN",
+      "exit_code": 0,
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0,
+      "log": "todo-web/evidence/green.log"
+    },
+    {
+      "command": "npm.cmd run verify",
+      "stage": "repository verification",
+      "exit_code": 0,
+      "passed": 47,
+      "failed": 0,
+      "skipped": 0,
+      "log": "todo-web/evidence/repository-verify.log"
+    }
+  ],
+  "independent_codex_review": {
+    "agent": "/root/independent_review",
+    "result": "PASS",
+    "command": "node --test todo-web/test/todo.test.mjs",
+    "exit_code": 0,
+    "passed": 9,
+    "failed": 0,
+    "skipped": 0,
+    "findings": [],
+    "reviewed_files": [
+      "todo-web/server.mjs",
+      "todo-web/public/style.css",
+      "todo-web/test/todo.test.mjs",
+      "todo-web/README.md",
+      "todo-web/.gitignore"
+    ],
+    "conclusion": "唯讀獨立回合檢查標準函式庫、127.0.0.1 綁定、繁中表單、串行原子保存、303 防重送、HTML 跳脫、主要操作與錯誤情境；未發現阻擋交付的功能缺陷，未修改產品檔案。"
+  },
+  "browser_visual": {
+    "status": "NOT_RUN",
+    "reason": "內建瀏覽器建立頁面回覆 Browser is not available: iab；沒有瀏覽器視覺或點擊成功的宣稱。"
+  },
+  "original_files": {
+    "baseline": "todo-web/evidence/existing-files-before.json",
+    "checked": 55,
+    "changed": 0,
+    "result": "PASS"
+  },
+  "preserved_git_status": [
+    "?? todo-web/"
+  ],
+  "product_sha256": [
+    {
+      "path": "todo-web/server.mjs",
+      "sha256": "166B7224942F1796AF977F41D3AA124869AD6E9989EF67FEEC16502C8D74EC9E"
+    },
+    {
+      "path": "todo-web/public/style.css",
+      "sha256": "7F2470EFD8FFC9999636B318133A7785345646BAFA06FC6925D1636E342814DE"
+    },
+    {
+      "path": "todo-web/test/todo.test.mjs",
+      "sha256": "02A6BC28ED83D54FFB7AFC68F116C55CC2043094CB9DE18B4F0BF6365DA3B40F"
+    },
+    {
+      "path": "todo-web/README.md",
+      "sha256": "908B8BFFF3358A77F218B0A34C3F74B30928A2A186B6E56B82C6FDF707744250"
+    },
+    {
+      "path": "todo-web/.gitignore",
+      "sha256": "A82A1B864EC533E79330EB745F11721DB07DA6BD70EF6D658BFF67489E038F06"
+    }
+  ],
+  "constraints": [
+    "所有新增檔案均在 todo-web/",
+    "單一程序使用同一資料檔",
+    "無新增套件、發布、推送、合併或 LATTICE 狀態修改"
+  ]
+}

@@ -1,0 +1,49 @@
+{
+  "task_ref": "7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89",
+  "task_identity_source": "Provided by caller Runtime in current user request; no task created or state changed",
+  "result": "LOCAL_IMPLEMENTATION_VERIFIED_BROWSER_ACCEPTANCE_PENDING",
+  "artifact_path": "todo-web/server.mjs",
+  "test_path": "todo-web/test/todo.test.mjs",
+  "instructions_path": "todo-web/README.md",
+  "startup": "node todo-web/server.mjs",
+  "url": "http://127.0.0.1:3000",
+  "data_file": "todo-web/data/todos.json",
+  "implementation": {
+    "copied_source": "../c769de9b46d65f75c9edcb79d21a1917a724ba216e378b004a9ef5c3acbe6394/todo-web",
+    "changes": [
+      "Referrer-Policy changed from no-referrer to same-origin on all responses",
+      "POST requires exact Origin and, when present, Sec-Fetch-Site=same-origin",
+      "Origin:null, including with same-origin metadata, remains rejected",
+      "Existing UI, local-only binding, persistence and zero-dependency architecture retained"
+    ],
+    "root_cause_evidence": [
+      "Original server.mjs sends Referrer-Policy:no-referrer",
+      "Caller reports real form Origin:null with Sec-Fetch-Site:same-origin",
+      "WHATWG non-CORS non-GET/HEAD Origin algorithm sets null for no-referrer",
+      "Original Node tests explicitly supplied Origin=base and did not exercise document policy"
+    ],
+    "standard": "https://fetch.spec.whatwg.org/#append-a-request-origin-header"
+  },
+  "verification": {
+    "red": { "command": "node --test --test-reporter=tap todo-web/test/todo.test.mjs", "exit_code": 1, "passed": 10, "failed": 3, "evidence": "node-red.tap" },
+    "green": { "command": "node --test --test-reporter=tap todo-web/test/todo.test.mjs", "exit_code": 0, "passed": 13, "failed": 0, "evidence": "node-green.tap" },
+    "repository": { "command": "npm.cmd run verify", "exit_code": 0, "passed": 51, "failed": 0, "evidence": "project-verify.log" },
+    "independent_review": { "code": "PASS", "architecture": "PASS", "node_tests": "13 passed", "findings": [], "evidence": "independent-review.json" },
+    "covered": ["add", "complete", "reopen", "refresh without duplicate", "real CLI process restart", "blank and oversized input", "invalid fields/id/state/method", "oversized body", "escaped text", "concurrent writes", "corrupt store preservation", "write failure and recovery", "null/missing/foreign origin and cross-site metadata rejected without changing data"],
+    "browser": {
+      "status": "NOT RUN",
+      "attempt": "cua.createBrowserTab('iab', 'http://127.0.0.1:49764', {visible:false})",
+      "error": "Browser is not available: iab",
+      "fallback": "Connected Edge exists; awaiting user's confirmation to depart from previous built-in-browser-only preference",
+      "http_capture": "Not produced; no browser form was submitted",
+      "limitation": "Node HTTP fixtures do not prove actual browser Origin serialization or visual operation"
+    }
+  },
+  "preservation": {
+    "original_source": "PASS: all 11 file hashes unchanged; source-before.json / source-after.json",
+    "preexisting_dirty": "PASS: all 3 file hashes unchanged; existing-dirty-before.json / existing-dirty-after.json",
+    "git_change_scope": "Only new todo-web/ plus the three preexisting dirty files",
+    "commit_push_merge_publish": "NOT PERFORMED"
+  },
+  "evidence_boundary": "Files directly under todo-web/evidence/ were copied from the original delivery; current repair evidence is only in todo-web/evidence/repair/"
+}

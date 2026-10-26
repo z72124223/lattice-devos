@@ -1,0 +1,57 @@
+[
+  {
+    "path": ".gitignore",
+    "sha256": "A82A1B864EC533E79330EB745F11721DB07DA6BD70EF6D658BFF67489E038F06",
+    "unchanged": true
+  },
+  {
+    "path": "README.md",
+    "sha256": "908B8BFFF3358A77F218B0A34C3F74B30928A2A186B6E56B82C6FDF707744250",
+    "unchanged": true
+  },
+  {
+    "path": "server.mjs",
+    "sha256": "166B7224942F1796AF977F41D3AA124869AD6E9989EF67FEEC16502C8D74EC9E",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\acceptance.json",
+    "sha256": "E28752E83791AF1020A86603D67709D9904003D2A4C36F285005A88D14E62F42",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\existing-files-before.json",
+    "sha256": "B9E45CB871B5016C01FFFDC295CC410FDDDF09BEA9A6772E46466AE3A4D501C7",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\first-implementation.log",
+    "sha256": "F23E2566F058638C1B8567E690771DB7CF1D74733B1FE2FA9B3407D60B39DAAF",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\green.log",
+    "sha256": "C325AAA1EE57944EA67F2367102C39A8B136B08D27C92AFCFBC5147D58F3608B",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\red.log",
+    "sha256": "9ABF77AC3D987E9FBACDCEA23B659FE899489E7F1494D3B9F44FE2A085807365",
+    "unchanged": true
+  },
+  {
+    "path": "evidence\\repository-verify.log",
+    "sha256": "0E25C293D849CE28E2AFF40A5F8F42B0941CDD4FAFFA04E15B492F2BDD4414AE",
+    "unchanged": true
+  },
+  {
+    "path": "public\\style.css",
+    "sha256": "7F2470EFD8FFC9999636B318133A7785345646BAFA06FC6925D1636E342814DE",
+    "unchanged": true
+  },
+  {
+    "path": "test\\todo.test.mjs",
+    "sha256": "02A6BC28ED83D54FFB7AFC68F116C55CC2043094CB9DE18B4F0BF6365DA3B40F",
+    "unchanged": true
+  }
+]

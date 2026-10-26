@@ -1,0 +1,88 @@
+TAP version 13
+# Subtest: 同源 Referrer-Policy 適用首頁、錯誤頁與重新導向，避免原生表單 Origin=null
+ok 1 - 同源 Referrer-Policy 適用首頁、錯誤頁與重新導向，避免原生表單 Origin=null
+  ---
+  duration_ms: 93.0525
+  type: 'test'
+  ...
+# Subtest: 正常瀏覽器表單標頭可新增、完成、重開與刷新，資料保存且不重複
+ok 2 - 正常瀏覽器表單標頭可新增、完成、重開與刷新，資料保存且不重複
+  ---
+  duration_ms: 55.8353
+  type: 'test'
+  ...
+# Subtest: null、缺少或不正確 Origin 一律拒絕，不能靠同源 Fetch Metadata 或 Referer 放行
+ok 3 - null、缺少或不正確 Origin 一律拒絕，不能靠同源 Fetch Metadata 或 Referer 放行
+  ---
+  duration_ms: 227.3427
+  type: 'test'
+  ...
+# Subtest: 矛盾或跨站 Fetch Metadata 與錯誤 Host 拒絕寫入，精確 Origin 可相容沒有 metadata 的用戶端
+ok 4 - 矛盾或跨站 Fetch Metadata 與錯誤 Host 拒絕寫入，精確 Origin 可相容沒有 metadata 的用戶端
+  ---
+  duration_ms: 44.8932
+  type: 'test'
+  ...
+# Subtest: 繁中網頁、表單與 CSS 可存取，HTTP 只綁定 127.0.0.1
+ok 5 - 繁中網頁、表單與 CSS 可存取，HTTP 只綁定 127.0.0.1
+  ---
+  duration_ms: 10.8178
+  type: 'test'
+  ...
+# Subtest: 新增、完成、重開及重新整理保留同一筆資料；文字安全呈現
+ok 6 - 新增、完成、重開及重新整理保留同一筆資料；文字安全呈現
+  ---
+  duration_ms: 31.3687
+  type: 'test'
+  ...
+# Subtest: 空字串、各類空白、缺欄位、重複欄位和過長內容皆拒絕，不更動資料
+ok 7 - 空字串、各類空白、缺欄位、重複欄位和過長內容皆拒絕，不更動資料
+  ---
+  duration_ms: 23.878
+  type: 'test'
+  ...
+# Subtest: 無效 ID、非法狀態、未知路徑及 HTTP 方法不會改動資料
+ok 8 - 無效 ID、非法狀態、未知路徑及 HTTP 方法不會改動資料
+  ---
+  duration_ms: 23.3788
+  type: 'test'
+  ...
+# Subtest: 拒絕不支援格式、過大表單及跨來源寫入，伺服器可繼續操作
+ok 9 - 拒絕不支援格式、過大表單及跨來源寫入，伺服器可繼續操作
+  ---
+  duration_ms: 17.2982
+  type: 'test'
+  ...
+# Subtest: 並行新增無遺失，重複完成操作具冪等性
+ok 10 - 並行新增無遺失，重複完成操作具冪等性
+  ---
+  duration_ms: 66.3501
+  type: 'test'
+  ...
+# Subtest: 資料損壞時拒絕啟動，原始檔保留
+ok 11 - 資料損壞時拒絕啟動，原始檔保留
+  ---
+  duration_ms: 12.1458
+  type: 'test'
+  ...
+# Subtest: 保存失敗不回成功、不發布未落盤資料，恢復後仍可新增
+ok 12 - 保存失敗不回成功、不發布未落盤資料，恢復後仍可新增
+  ---
+  duration_ms: 21.5378
+  type: 'test'
+  ...
+# Subtest: 真實 Node CLI 程序終止再啟動後保留文字與完成狀態
+ok 13 - 真實 Node CLI 程序終止再啟動後保留文字與完成狀態
+  ---
+  duration_ms: 330.7472
+  type: 'test'
+  ...
+1..13
+# tests 13
+# suites 0
+# pass 13
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1100.3379

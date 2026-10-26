@@ -1,0 +1,14 @@
+[
+  {
+    "path": "docs/adr/ADR-003-local-runtime-and-openclaw-scaffold.md",
+    "sha256": "67170F1D5FA5A72A92553D0A83A2D5B3D5513B045D17A340216E916425C9A9C7"
+  },
+  {
+    "path": "docs/modules/openclaw-adapter/MODULE_CONSTITUTION.md",
+    "sha256": "9CC7BDB38DA71F5593F3DC49F9830FA6D5F641FD288F6E40B75C2275D788AF42"
+  },
+  {
+    "path": "docs/modules/orchestrator-runtime/MODULE_CONSTITUTION.md",
+    "sha256": "BFD315BA6CFA68249E10E07EE76A1501F2E49E0CF05FCD90308613CA3E30CCCF"
+  }
+]

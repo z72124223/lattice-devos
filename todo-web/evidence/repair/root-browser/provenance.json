@@ -1,0 +1,159 @@
+{
+  "task_ref": "7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89",
+  "checked_at": "2026-09-05T11:04:35.6301537Z",
+  "scope": "Evidence and documentation correction only; no product or test code changed",
+  "sources_and_copies": [
+    {
+      "source": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\formal-browser-acceptance-root.json",
+      "copy": "root-browser/formal-browser-acceptance-root.json",
+      "sha256": "afedead9e478e8ef608b5613f378b5f02f44320db8a9c22e0da6c71a99f6c875"
+    },
+    {
+      "source": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\todo-browser-fixed-origin-evidence.jsonl",
+      "copy": "root-browser/todo-browser-fixed-origin-evidence.jsonl",
+      "sha256": "e8f762187365ef4ec4926e146cdbcba9d01a72892181f265791277fe967e4da7"
+    },
+    {
+      "source": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\todo-browser-fixed-data.json",
+      "copy": "root-browser/todo-browser-fixed-data.json",
+      "sha256": "310977d723dee42159c1c87d3bc4426aeb74933f8ca82407daed43d50711d744"
+    },
+    {
+      "source": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\pg-552e27ef9af24bfea50aa5eec45daa80\\delivery\\control-worktrees\\7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89\\todo-web\\evidence\\repair\\acceptance.json",
+      "copy": "history/acceptance-before-root-browser.json",
+      "sha256": "82bb3d0300f5558378d97fc2298b750afef7114720912d318071156d0c02f894"
+    },
+    {
+      "source": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\pg-552e27ef9af24bfea50aa5eec45daa80\\delivery\\control-worktrees\\7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89\\todo-web\\README.md",
+      "copy": "history/README-before-root-browser.md",
+      "sha256": "2a53db6627e2664a44597a268baf3b57a00dede8f7e2aaf491ecfa168233c0df"
+    }
+  ],
+  "checks": {
+    "task_and_artifact_match": true,
+    "server_sha256": "48a7ffca39e0159e9c11e6db8dd44a649d1b563cd56034fff95b65456ca3519f",
+    "http_sha256_match": true,
+    "data_sha256_match": true,
+    "request_count": 17,
+    "post_count": 4,
+    "post_origins": "http://127.0.0.1:51974",
+    "all_post_fetch_site": "same-origin",
+    "routes_match_saved_id": true,
+    "final_record_count": 1,
+    "final_completed": false,
+    "root_observed_actions": [
+      {
+        "observed": "共1件，待完成1，已完成0",
+        "action": "新增 完成 LATTICE 端到端驗收",
+        "result": "PASS"
+      },
+      {
+        "observed": "共1件，待完成0，已完成1",
+        "action": "標記完成並重新整理",
+        "result": "PASS"
+      },
+      {
+        "observed": "共1件，待完成1，已完成0",
+        "action": "重新開啟並重新整理",
+        "result": "PASS"
+      },
+      {
+        "observed": "請輸入待辦內容，不能只有空白，最多200字；共1件",
+        "action": "送出3個空白",
+        "result": "PASS"
+      }
+    ]
+  },
+  "evidence_limits": [
+    "ROOT receipt supplies visual action outcomes; this correction verifies its task, artifact and raw evidence consistency.",
+    "HTTP log contains requests only, without response status or response headers.",
+    "Screenshot is referenced inline in ROOT Codex task 01a07047-650b-7572-9437-ac20bbd48bfb; no standalone screenshot file was supplied or copied.",
+    "No new browser session or Node test run is claimed by this correction."
+  ],
+  "pre_correction_files": [
+    {
+      "path": "todo-web\\.gitignore",
+      "sha256": "a82a1b864ec533e79330eb745f11721db07da6bd70ef6d658bff67489e038f06"
+    },
+    {
+      "path": "todo-web\\README.md",
+      "sha256": "2a53db6627e2664a44597a268baf3b57a00dede8f7e2aaf491ecfa168233c0df"
+    },
+    {
+      "path": "todo-web\\server.mjs",
+      "sha256": "48a7ffca39e0159e9c11e6db8dd44a649d1b563cd56034fff95b65456ca3519f"
+    },
+    {
+      "path": "todo-web\\evidence\\acceptance.json",
+      "sha256": "e28752e83791af1020a86603d67709d9904003d2a4c36f285005a88d14e62f42"
+    },
+    {
+      "path": "todo-web\\evidence\\existing-files-before.json",
+      "sha256": "b9e45cb871b5016c01fffdc295cc410fdddf09bea9a6772e46466ae3a4d501c7"
+    },
+    {
+      "path": "todo-web\\evidence\\first-implementation.log",
+      "sha256": "f23e2566f058638c1b8567e690771db7cf1d74733b1fe2fa9b3407d60b39daaf"
+    },
+    {
+      "path": "todo-web\\evidence\\green.log",
+      "sha256": "c325aaa1ee57944ea67f2367102c39a8b136b08d27c92afcfbc5147d58f3608b"
+    },
+    {
+      "path": "todo-web\\evidence\\red.log",
+      "sha256": "9abf77ac3d987e9fbacdcea23b659fe899489e7f1494d3b9f44fe2a085807365"
+    },
+    {
+      "path": "todo-web\\evidence\\repository-verify.log",
+      "sha256": "0e25c293d849ce28e2aff40a5f8f42b0941cdd4faffa04e15b492f2bdd4414ae"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\acceptance.json",
+      "sha256": "82bb3d0300f5558378d97fc2298b750afef7114720912d318071156d0c02f894"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\browser-harness.mjs",
+      "sha256": "506a09f90e4b8abc2290e8feff85de1cdada090659a4136477c33904b9e3d27c"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\existing-dirty-after.json",
+      "sha256": "1273eeb6bdba0a0ea74ab435f2bce6b70e4a448c3c501fb601892c3e27eeedf0"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\existing-dirty-before.json",
+      "sha256": "a0f3969e7c9019d9bd0597ecb4d63f1aa2a472eeaabfa92113a0cd215189a0bb"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\independent-review.json",
+      "sha256": "e482cc06565a6e0baf66eeb390a5f749ed59334d411ccbcd56453fa1fe2d690e"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\node-green.tap",
+      "sha256": "9a74d0beae06adf27ab89b9d70895c7850230cbfd23ddf0d520297c26a94e674"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\node-red.tap",
+      "sha256": "fc355836944be5c55d0c9aef3adb8af61b06483dd71dd2f4806cee04b881c393"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\project-verify.log",
+      "sha256": "b0c58fbc3ee5237e8927e6651f2371a67d8cdf424d3ed0b57f0e073049a21d8f"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\source-after.json",
+      "sha256": "bd31eacd78f9c48df6e0e8ca06b906cbd705e8f0369e8c8fed7ceee5f0cebccb"
+    },
+    {
+      "path": "todo-web\\evidence\\repair\\source-before.json",
+      "sha256": "9b365d1c914c81def7376779fcbb83794d8c42dc3fadd05a859f381b170a1a88"
+    },
+    {
+      "path": "todo-web\\public\\style.css",
+      "sha256": "7f2470efd8ffc9999636b318133a7785345646bafa06fc6925d1636e342814de"
+    },
+    {
+      "path": "todo-web\\test\\todo.test.mjs",
+      "sha256": "a82283cbe6cbdc0794a327e0739781c5d1dc4a2d1577682bace9a5fd0eafd8cd"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{"method":"GET","path":"/","host":"127.0.0.1:51974","site":"none"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"POST","path":"/todos","host":"127.0.0.1:51974","origin":"http://127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"POST","path":"/todos/912e9e01-f530-4550-9516-1949bf94bdfd/state","host":"127.0.0.1:51974","origin":"http://127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"POST","path":"/todos/912e9e01-f530-4550-9516-1949bf94bdfd/state","host":"127.0.0.1:51974","origin":"http://127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"POST","path":"/todos","host":"127.0.0.1:51974","origin":"http://127.0.0.1:51974","referer":"http://127.0.0.1:51974/","site":"same-origin"}
+{"method":"GET","path":"/style.css","host":"127.0.0.1:51974","referer":"http://127.0.0.1:51974/todos","site":"same-origin"}

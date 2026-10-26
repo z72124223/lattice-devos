@@ -1,0 +1,39 @@
+{
+  "schema": "lattice.local-browser-acceptance.v1",
+  "task_ref": "7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89",
+  "observed_at": "2026-09-05T10:55:55.9595497Z",
+  "actor": "ROOT",
+  "codex_task": "01a07047-650b-7572-9437-ac20bbd48bfb",
+  "surface": "Codex In-app Browser",
+  "url": "http://127.0.0.1:51974/",
+  "artifact_path": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\pg-552e27ef9af24bfea50aa5eec45daa80\\delivery\\control-worktrees\\7e3aa4feb356fec6ecfa9457ddd2385c467ae7c3e566af461ad8ff1f6147db89\\todo-web\\server.mjs",
+  "artifact_sha256": "48a7ffca39e0159e9c11e6db8dd44a649d1b563cd56034fff95b65456ca3519f",
+  "results": [
+    {
+      "observed": "共1件，待完成1，已完成0",
+      "action": "新增 完成 LATTICE 端到端驗收",
+      "result": "PASS"
+    },
+    {
+      "observed": "共1件，待完成0，已完成1",
+      "action": "標記完成並重新整理",
+      "result": "PASS"
+    },
+    {
+      "observed": "共1件，待完成1，已完成0",
+      "action": "重新開啟並重新整理",
+      "result": "PASS"
+    },
+    {
+      "observed": "請輸入待辦內容，不能只有空白，最多200字；共1件",
+      "action": "送出3個空白",
+      "result": "PASS"
+    }
+  ],
+  "http_log_path": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\todo-browser-fixed-origin-evidence.jsonl",
+  "http_log_sha256": "e8f762187365ef4ec4926e146cdbcba9d01a72892181f265791277fe967e4da7",
+  "data_path": "C:\\Users\\f7212\\AppData\\Local\\LATTICE\\control\\repair-evidence\\functional-20260905\\todo-browser-fixed-data.json",
+  "data_sha256": "310977d723dee42159c1c87d3bc4426aeb74933f8ca82407daed43d50711d744",
+  "visual_evidence": "CUA screenshot emitted inline in this Codex task after reopen and refresh",
+  "limitations": "This receipt records ROOT observed browser operations; Node test execution is verified separately."
+}
